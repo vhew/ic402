@@ -1,0 +1,30 @@
+{
+  "name": "@agentflow/client",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for agentflow-enabled ICP canisters",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@canister-software/x402-icp": "^0.1.0",
+    "@icp-sdk/core": "^5.0.0",
+    "@x402/core": "^2.4.0",
+    "@x402/fetch": "^2.0.0",
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.0"
+  }
+}

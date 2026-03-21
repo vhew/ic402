@@ -1,0 +1,20 @@
+[package]
+name = "agentflow"
+version = "0.1.0"
+description = "Drop-in payment library for ICP canisters. x402 charges, MPP-style sessions, ERC-8004 agent identity."
+repository = "https://github.com/vhew/agentflow"
+license = "Apache-2.0"
+
+[dependencies]
+base = "0.16.0"
+ic = "2.1.0"
+cbor = "1.0.1"
+ed25519 = "0.1.0"
+sha2 = "0.1.0"
+
+[dev-dependencies]
+# test runner
+test = "2.0.0"
+
+[toolchain]
+moc = "1.2.0"

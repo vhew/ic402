@@ -1,0 +1,28 @@
+node_modules/
+dist/
+.icp/cache/
+.mops/
+.pnpm-store/
+*.wasm
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Identity / keys
+*.pem
+*.key
+
+# Claude Code
+.claude/

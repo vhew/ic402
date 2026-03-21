@@ -1,0 +1,177 @@
+/// agentflow — Core types for payment, sessions, and policy.
+module {
+
+  // ── Token & Pricing ──
+
+  public type TokenConfig = {
+    ledger : Principal;
+    symbol : Text;
+    decimals : Nat8;
+  };
+
+  public type Price = {
+    token : Principal;
+    amount : Nat;
+    network : Text; // CAIP-2: "icp:1" or "eip155:43114"
+  };
+
+  // ── Charge (x402 "exact") ──
+
+  public type PaymentRequirement = {
+    scheme : Text;
+    network : Text;
+    token : Text;
+    amount : Nat;
+    recipient : Text;
+    nonce : Blob;
+    expiry : Int;
+  };
+
+  public type PaymentSignature = {
+    scheme : Text;
+    network : Text;
+    signature : Blob;
+    sender : Text;
+    nonce : Blob;
+  };
+
+  public type PaymentReceipt = {
+    id : Text;
+    amount : Nat;
+    token : Text;
+    sender : Text;
+    recipient : Text;
+    network : Text;
+    timestamp : Int;
+    txHash : ?Text;
+    sessionId : ?Text;
+    refunded : ?Nat;
+  };
+
+  public type PaymentResult = {
+    #ok : PaymentReceipt;
+    #insufficientFunds;
+    #invalidSignature;
+    #expired;
+    #policyDenied : Text;
+    #tokenNotAccepted;
+    #networkNotSupported;
+    #settlementFailed : Text;
+    #reputationTooLow : Nat;
+    #depositBelowMinimum : Nat;
+  };
+
+  // ── Session (escrow + cumulative vouchers) ──
+
+  public type SessionIntent = {
+    network : Text;
+    token : Text;
+    recipient : Text;
+    suggestedDeposit : Nat;
+    minDeposit : ?Nat;
+    expiry : Int;
+    costPerCall : ?Nat;
+    description : ?Text;
+  };
+
+  public type SessionConfig = {
+    maxDeposit : Nat;
+    autoClose : Bool;
+    idleTimeout : ?Int;
+  };
+
+  public type SessionStatus = {
+    #open;
+    #closing;
+    #closed;
+    #expired;
+  };
+
+  public type SessionState = {
+    id : Text;
+    payer : Principal;
+    deposited : Nat;
+    consumed : Nat;
+    remaining : Nat;
+    voucherCount : Nat;
+    status : SessionStatus;
+    openedAt : Int;
+    lastActivityAt : Int;
+  };
+
+  public type Voucher = {
+    sessionId : Text;
+    cumulativeAmount : Nat;
+    sequence : Nat;
+    signature : Blob;
+  };
+
+  public type VoucherResult = {
+    #ok : Nat; // delta
+    #insufficientDeposit;
+    #invalidSignature;
+    #invalidSequence;
+    #sessionNotOpen;
+    #policyDenied : Text;
+  };
+
+  // ── Policy ──
+
+  public type SpendingPolicy = {
+    maxPerTransaction : ?Nat;
+    maxPerDay : ?Nat;
+    rateLimitPerMinute : ?Nat;
+    maxSessionDeposit : ?Nat;
+    maxConcurrentSessions : ?Nat;
+    maxSessionDuration : ?Int;
+    sessionIdleTimeout : ?Int;
+    allowedCallers : ?[Principal];
+    blockedCallers : ?[Principal];
+  };
+
+  public type TrustRequirements = {
+    minReputation : Nat;
+    requiredTags : [Text];
+  };
+
+  // ── Configuration ──
+
+  public type AvaxTokenConfig = {
+    address : Text;
+    symbol : Text;
+    decimals : Nat8;
+  };
+
+  public type AvaxConfig = {
+    chainId : Nat;
+    recipient : Text;
+    tokens : [AvaxTokenConfig];
+  };
+
+  public type ERC8004Config = {
+    chain : { #avalanche; #base; #ethereum; #polygon };
+    card : AgentCard;
+  };
+
+  public type AgentCard = {
+    name : Text;
+    description : Text;
+    services : [ServiceEntry];
+    x402Support : Bool;
+  };
+
+  public type ServiceEntry = {
+    name : Text;
+    endpoint : Text;
+    version : Text;
+    skills : [Text];
+    domains : [Text];
+  };
+
+  public type Config = {
+    recipient : { owner : Principal; subaccount : ?Blob };
+    tokens : [TokenConfig];
+    erc8004 : ?ERC8004Config;
+    avalanche : ?AvaxConfig;
+  };
+};

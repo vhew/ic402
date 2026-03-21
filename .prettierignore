@@ -1,0 +1,7 @@
+dist/
+.icp/
+.mops/
+node_modules/
+*.wasm
+.pnpm-store/
+pnpm-lock.yaml

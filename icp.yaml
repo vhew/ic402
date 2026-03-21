@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v0.1.0/docs/schemas/icp-yaml-schema.json
+#
+# agentflow — example canister + local dev ledgers.
+
+canisters:
+  - name: example
+    recipe:
+      type: '@dfinity/motoko@v4.1.0'
+      configuration:
+        main: src/example/main.mo
+        args: ''
+
+  - name: ckusdc_ledger
+    recipe:
+      type: '@dfinity/prebuilt@v2.0.0'
+      configuration:
+        path: .icp/icrc1-ledger.wasm.gz
+        candid: .icp/icrc1-ledger.did
+    init_args: .icp/ckusdc-ledger-init.candid
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 4944
+
+  - name: mainnet
+    mode: connected
+    url: https://icp-api.io
+
+environments:
+  - name: local
+    network: local
+    canisters: [example, ckusdc_ledger]
+
+  - name: ic
+    network: mainnet
+    canisters: [example]
