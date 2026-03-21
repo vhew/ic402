@@ -29,3 +29,6 @@ deploy/
 
 # Claude Code
 .claude/
+python/.venv/
+python/__pycache__/
+**/__pycache__/
