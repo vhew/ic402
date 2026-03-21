@@ -198,12 +198,6 @@ persistent actor KnowledgeBase {
     #ok : Ic402.ContentDelivery;
     #error : Text;
   } {
-    // Check content exists
-    let metadata = switch (store.getMetadata(contentId)) {
-      case (null) { return #error("Content not found: " # contentId) };
-      case (?m) { m };
-    };
-
     let price : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
       amount = 100_000;
@@ -215,6 +209,11 @@ persistent actor KnowledgeBase {
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
+            // Check content exists (after payment — don't leak existence for free)
+            let metadata = switch (store.getMetadata(contentId)) {
+              case (null) { return #error("Content not found: " # contentId) };
+              case (?m) { m };
+            };
             let contentRef = switch (store.toContentRef(contentId)) {
               case (?ref) { ref };
               case (null) { return #error("Content disappeared") };
