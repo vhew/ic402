@@ -27,6 +27,9 @@
 
 ## 1. Overview
 
+**agent** — autonomous AI agents that discover, pay, and transact without human intervention.
+**flow** — the continuous stream of micropayments between them, settled via sessions, not individual transactions.
+
 agentflow is a Motoko library that any ICP canister can import to accept and send payments via x402, with a streaming session model for micropayments, and ERC-8004 agent identity on Avalanche.
 
 **What it does:**
