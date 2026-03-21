@@ -17,7 +17,8 @@ canisters:
       configuration:
         path: .icp/icrc1-ledger.wasm.gz
         candid: .icp/icrc1-ledger.did
-    init_args: .icp/ckusdc-ledger-init.candid
+    init_args:
+      path: .icp/ckusdc-ledger-init.candid
 
 networks:
   - name: local

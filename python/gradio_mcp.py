@@ -7,7 +7,7 @@ Connect to Claude Desktop by adding to claude_desktop_config.json:
   {
     "mcpServers": {
       "ic402": {
-        "url": "http://localhost:7860/gradio_api/mcp/sse"
+        "url": "http://localhost:7861/gradio_api/mcp/sse"
       }
     }
   }
@@ -313,7 +313,7 @@ with gr.Blocks(title="ic402 — ICP Payment Tools") as demo:
     gr.Markdown("# ic402 — Autonomous Payments for ICP Canisters")
     gr.Markdown(
         "MCP server for x402 charges and streaming micropayment sessions. "
-        "Connect to Claude Desktop at `http://localhost:7860/gradio_api/mcp/sse`"
+        "Connect to Claude Desktop at `http://localhost:7861/gradio_api/mcp/sse`"
     )
 
     with gr.Tab("Setup"):
@@ -396,5 +396,5 @@ if __name__ == "__main__":
         _client = client_from_hex(demo_key, "demo-canister", simulation=True)
         print(f"Simulation mode — principal: {_client.principal()}")
 
-    print("MCP endpoint: http://localhost:7860/gradio_api/mcp/sse")
-    demo.launch(mcp_server=True)
+    print("MCP endpoint: http://localhost:7861/gradio_api/mcp/sse")
+    demo.launch(mcp_server=True, server_port=7861)

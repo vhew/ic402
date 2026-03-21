@@ -27,7 +27,7 @@ persistent actor KnowledgeBase {
     {
       recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
       tokens = [{
-        ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+        ledger = Principal.fromText("t63gs-up777-77776-aaaba-cai");
         symbol = "ckUSDC";
         decimals = 6;
       }];
@@ -167,7 +167,7 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let price : Ic402.Price = {
-      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+      token = Principal.fromText("t63gs-up777-77776-aaaba-cai");
       amount = 50_000;
       network = "icp:1";
     };
@@ -191,7 +191,7 @@ persistent actor KnowledgeBase {
   public shared func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
-      token = Principal.toText(Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"));
+      token = Principal.toText(Principal.fromText("t63gs-up777-77776-aaaba-cai"));
       recipient = Principal.toText(Principal.fromActor(KnowledgeBase));
       suggestedDeposit = 1_000_000;
       minDeposit = ?100_000;
@@ -275,7 +275,7 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let price : Ic402.Price = {
-      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+      token = Principal.fromText("t63gs-up777-77776-aaaba-cai");
       amount = 100_000;
       network = "icp:1";
     };
@@ -378,7 +378,7 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let price : Ic402.Price = {
-      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+      token = Principal.fromText("t63gs-up777-77776-aaaba-cai");
       amount = 100_000;
       network = "icp:1";
     };
@@ -470,7 +470,7 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let price : Ic402.Price = {
-      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+      token = Principal.fromText("t63gs-up777-77776-aaaba-cai");
       amount = 100_000;
       network = "icp:1";
     };

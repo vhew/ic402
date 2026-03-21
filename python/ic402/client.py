@@ -36,6 +36,47 @@ from .types import (
 from .voucher import sign_voucher
 
 
+# ── Candid field hash helpers ─────────────────────────────────────────────────
+
+def _candid_field_hash(name: str) -> int:
+    """Compute the Candid field name hash (hash32)."""
+    h = 0
+    for c in name:
+        h = (h * 223 + ord(c)) & 0xFFFFFFFF
+    return h
+
+
+# Pre-computed hash → field name mapping for ic402 Candid types
+_FIELD_NAMES = [
+    "network", "token", "recipient", "suggestedDeposit", "expiry",
+    "minDeposit", "costPerCall", "description",
+    "id", "payer", "deposited", "consumed", "remaining",
+    "voucherCount", "status", "openedAt", "lastActivityAt",
+    "amount", "sender", "timestamp", "txHash", "sessionId", "refunded",
+    "scheme", "nonce", "signature",
+    "paymentRequired", "ok", "err", "error", "open", "closed",
+]
+_HASH_TO_NAME: dict[int, str] = {_candid_field_hash(n): n for n in _FIELD_NAMES}
+
+
+def _remap_fields(raw: Any) -> Any:
+    """Recursively replace hashed Candid field keys (_123456) with readable names."""
+    if isinstance(raw, dict):
+        out: dict[str, Any] = {}
+        for k, v in raw.items():
+            clean = k.lstrip("_")
+            try:
+                num = int(clean)
+                readable = _HASH_TO_NAME.get(num, k)
+            except ValueError:
+                readable = k
+            out[readable] = _remap_fields(v)
+        return out
+    if isinstance(raw, list):
+        return [_remap_fields(i) for i in raw]
+    return raw
+
+
 # ── ICP canister interaction ──────────────────────────────────────────────────
 
 def _make_ic_agent(canister_id: str, private_key: Ed25519PrivateKey, network: str) -> Any:
@@ -43,10 +84,10 @@ def _make_ic_agent(canister_id: str, private_key: Ed25519PrivateKey, network: st
     try:
         from ic.agent import Agent
         from ic.client import Client
-        from ic.identity import BasicIdentity
+        from ic.identity import Identity
 
         raw = private_key.private_bytes_raw()
-        identity = BasicIdentity.from_seed(raw)
+        identity = Identity(privkey=raw.hex(), type="ed25519")
 
         ic_url = "https://icp-api.io" if "mainnet" in network or network == "icp:1" else "http://127.0.0.1:4944"
         client = Client(url=ic_url)
@@ -242,9 +283,12 @@ class SessionHandle:
             sequence=self._sequence,
             signature=sig,
         )
-        voucher_dict = _candid_encode_voucher(voucher)
-
-        raw = self._raw_call(method, [voucher_dict, *args])
+        # Use typed Candid encoding for sessionQuery (ic-py needs explicit types)
+        if method == "sessionQuery" and len(args) == 1 and isinstance(args[0], str):
+            raw = self._candid_session_query(method, voucher, args[0])
+        else:
+            voucher_dict = _candid_encode_voucher(voucher)
+            raw = self._raw_call(method, [voucher_dict, *args])
 
         if "ok" in raw:
             self._consumed = new_cumulative
@@ -259,21 +303,78 @@ class SessionHandle:
             raise SessionClosedError(self.id)
         self._closed = True
 
-        raw = self._raw_call("endSession", [self.id])
+        raw = self._candid_text_call("endSession", self.id)
 
         if "ok" in raw:
             return _parse_receipt(raw["ok"])
         raise CanisterError(f"Failed to close session: {raw}")
 
+    def _candid_text_call(self, method: str, text_arg: str) -> dict:
+        """Call a canister method that takes a single Text argument."""
+        if self._simulation:
+            return _sim_call(method, [text_arg])
+        if self._ic_agent is None:
+            raise CanisterError("ic-py not available and simulation=False")
+        try:
+            from ic.candid import encode, Types
+            params = [{"type": Types.Text, "value": text_arg}]
+            result = self._ic_agent.update_raw(self._canister_id, method, encode(params))
+            if isinstance(result, list) and result:
+                item = result[0]
+                if isinstance(item, dict) and "value" in item:
+                    return _remap_fields(item["value"])
+                return _remap_fields(item)
+            return _remap_fields(result) if isinstance(result, dict) else {}
+        except Exception as e:
+            raise CanisterError(str(e), e) from e
+
+    def _candid_session_query(self, method: str, voucher: "Voucher", question: str) -> dict:
+        """Call sessionQuery with properly typed Candid Voucher record."""
+        if self._simulation:
+            return _sim_call(method, [_candid_encode_voucher(voucher), question])
+        if self._ic_agent is None:
+            raise CanisterError("ic-py not available and simulation=False")
+        try:
+            from ic.candid import encode, Types
+            VoucherType = Types.Record({
+                "sessionId":        Types.Text,
+                "cumulativeAmount": Types.Nat,
+                "sequence":         Types.Nat,
+                "signature":        Types.Vec(Types.Nat8),
+            })
+            params = [
+                {"type": VoucherType, "value": {
+                    "sessionId":        voucher.session_id,
+                    "cumulativeAmount": voucher.cumulative_amount,
+                    "sequence":         voucher.sequence,
+                    "signature":        list(voucher.signature),
+                }},
+                {"type": Types.Text, "value": question},
+            ]
+            result = self._ic_agent.update_raw(self._canister_id, method, encode(params))
+            if isinstance(result, list) and result:
+                item = result[0]
+                if isinstance(item, dict) and "value" in item:
+                    return _remap_fields(item["value"])
+                return _remap_fields(item)
+            return _remap_fields(result) if isinstance(result, dict) else {}
+        except Exception as e:
+            raise CanisterError(str(e), e) from e
+
     def _raw_call(self, method: str, args: list) -> dict:
         if self._simulation:
             return _sim_call(method, args)
         try:
-            from ic.candid import encode, decode
+            from ic.candid import encode
             result = self._ic_agent.update_raw(
                 self._canister_id, method, encode(args)
             )
-            return decode(result)[0]["value"]
+            if isinstance(result, list) and result:
+                item = result[0]
+                if isinstance(item, dict) and "value" in item:
+                    return _remap_fields(item["value"])
+                return _remap_fields(item)
+            return _remap_fields(result) if isinstance(result, dict) else {}
         except Exception as e:
             raise CanisterError(str(e), e) from e
 
@@ -406,14 +507,7 @@ class AgentflowClient:
             nonce=bytes(32),
         )
 
-        config_dict = {
-            "maxDeposit": deposit,
-            "autoClose": True,
-            "idleTimeout": [],
-        }
-        sig_dict = _candid_encode_sig(stub_sig)
-
-        raw = self._raw_call("openSession", [config_dict, sig_dict], cid)
+        raw = self._candid_open_session(cid, deposit, stub_sig)
 
         if "err" in raw:
             raise CanisterError(f"Failed to open session: {raw['err']}")
@@ -433,9 +527,9 @@ class AgentflowClient:
         if self._simulation:
             return "sim-principal-aaa-bbb"
         try:
-            from ic.identity import BasicIdentity
+            from ic.identity import Identity
             raw = self._key.private_bytes_raw()
-            identity = BasicIdentity.from_seed(raw)
+            identity = Identity(privkey=raw.hex(), type="ed25519")
             return str(identity.sender())
         except Exception:
             return "unknown-principal"
@@ -446,6 +540,49 @@ class AgentflowClient:
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
+    def _candid_open_session(self, cid: str, deposit: int, sig: "PaymentSignature") -> dict:
+        """Call openSession with properly typed Candid records (ic-py requires typed args)."""
+        if self._simulation:
+            return _sim_call("openSession", [{"maxDeposit": deposit}])
+        if self._ic_agent is None:
+            raise CanisterError("ic-py not available and simulation=False")
+        try:
+            from ic.candid import encode, Types
+
+            SessionConfigType = Types.Record({
+                "maxDeposit": Types.Nat,
+                "autoClose": Types.Bool,
+                "idleTimeout": Types.Opt(Types.Int),
+            })
+            PaymentSigType = Types.Record({
+                "scheme": Types.Text,
+                "network": Types.Text,
+                "signature": Types.Vec(Types.Nat8),
+                "sender": Types.Text,
+                "nonce": Types.Vec(Types.Nat8),
+            })
+            params = [
+                {"type": SessionConfigType, "value": {
+                    "maxDeposit": deposit, "autoClose": True, "idleTimeout": [],
+                }},
+                {"type": PaymentSigType, "value": {
+                    "scheme": sig.scheme,
+                    "network": sig.network,
+                    "signature": list(sig.signature),
+                    "sender": sig.sender,
+                    "nonce": list(sig.nonce),
+                }},
+            ]
+            result = self._ic_agent.update_raw(cid, "openSession", encode(params))
+            if isinstance(result, list) and result:
+                item = result[0]
+                if isinstance(item, dict) and "value" in item:
+                    return _remap_fields(item["value"])
+                return _remap_fields(item)
+            return _remap_fields(result) if isinstance(result, dict) else {}
+        except Exception as e:
+            raise CanisterError(str(e), e) from e
+
     def _raw_call(self, method: str, args: list, canister_id: Optional[str] = None) -> dict:
         cid = canister_id or self._canister_id
         if self._simulation:
@@ -453,9 +590,15 @@ class AgentflowClient:
         if self._ic_agent is None:
             raise CanisterError("ic-py not available and simulation=False")
         try:
-            from ic.candid import encode, decode
+            from ic.candid import encode
+            # ic-py update_raw returns already-decoded list of {type, value} dicts
             result = self._ic_agent.update_raw(cid, method, encode(args))
-            return decode(result)[0]["value"]
+            if isinstance(result, list) and result:
+                item = result[0]
+                if isinstance(item, dict) and "value" in item:
+                    return _remap_fields(item["value"])
+                return _remap_fields(item)
+            return _remap_fields(result) if isinstance(result, dict) else {}
         except Exception as e:
             raise CanisterError(str(e), e) from e
 
