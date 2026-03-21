@@ -1,4 +1,4 @@
-"""agentflow Python SDK — typed exception hierarchy."""
+"""ic402 Python SDK — typed exception hierarchy."""
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 
 class AgentflowError(Exception):
-    """Base exception for all agentflow errors."""
+    """Base exception for all ic402 errors."""
 
 
 class PaymentRequiredError(AgentflowError):

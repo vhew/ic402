@@ -1,5 +1,5 @@
 """
-agentflow Python SDK — end-to-end demo (simulation mode).
+ic402 Python SDK — end-to-end demo (simulation mode).
 
 Demonstrates the full payment flow without a live ICP canister.
 
@@ -9,7 +9,7 @@ Run:
 """
 
 import asyncio
-from agentflow import client_from_hex, PaymentRequiredError
+from ic402 import client_from_hex, PaymentRequiredError
 
 # Generate a random key for the demo (in production, load from secure storage)
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -61,7 +61,7 @@ async def demo_session_flow(client):
 
 
 async def main():
-    print("agentflow Python SDK — demo")
+    print("ic402 Python SDK — demo")
     print(f"Identity: using generated key (sim mode)")
 
     client = client_from_hex(

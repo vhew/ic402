@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agentflow"
+name = "ic402"
 version = "0.1.0"
-description = "Python SDK and MCP server for agentflow — autonomous payments for ICP canisters"
+description = "Python SDK and MCP server for ic402 — autonomous payments for ICP canisters"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 
@@ -26,10 +26,10 @@ dev = [
 ]
 
 [project.scripts]
-agentflow-mcp = "mcp_server.server:main"
+ic402-mcp = "mcp_server.server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agentflow", "mcp_server"]
+packages = ["ic402", "mcp_server"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

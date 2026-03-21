@@ -1,5 +1,5 @@
 """
-agentflow Python SDK — Ed25519 voucher signing.
+ic402 Python SDK — Ed25519 voucher signing.
 
 The CBOR encoding matches packages/client/src/voucher.ts exactly:
   encodeVoucherPayload(sessionId, cumulativeAmount, sequence)

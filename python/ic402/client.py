@@ -1,9 +1,9 @@
 """
-agentflow Python SDK — AgentflowClient.
+ic402 Python SDK — AgentflowClient.
 
 Python parallel of packages/client/src/client.ts.
 Handles x402 charge payments and streaming sessions against
-agentflow-enabled ICP canisters.
+ic402-enabled ICP canisters.
 """
 
 from __future__ import annotations
@@ -282,10 +282,10 @@ class SessionHandle:
 
 class AgentflowClient:
     """
-    agentflow Python client SDK.
+    ic402 Python client SDK.
 
     Handles x402 charge payments and streaming sessions against
-    agentflow-enabled ICP canisters.
+    ic402-enabled ICP canisters.
 
     Args:
         private_key: Ed25519PrivateKey for signing payments and vouchers.
@@ -478,11 +478,11 @@ def client_from_hex(
 def client_from_env(simulation: bool = False) -> AgentflowClient:
     """
     Construct an AgentflowClient from environment variables:
-      AGENTFLOW_PRIVATE_KEY_HEX  — 32-byte Ed25519 seed as hex
-      AGENTFLOW_CANISTER_ID      — target canister principal
-      AGENTFLOW_NETWORK          — CAIP-2 network (default: icp:1)
+      IC402_PRIVATE_KEY_HEX  — 32-byte Ed25519 seed as hex
+      IC402_CANISTER_ID      — target canister principal
+      IC402_NETWORK          — CAIP-2 network (default: icp:1)
     """
-    key_hex = os.environ["AGENTFLOW_PRIVATE_KEY_HEX"]
-    canister_id = os.environ["AGENTFLOW_CANISTER_ID"]
-    network = os.environ.get("AGENTFLOW_NETWORK", "icp:1")
+    key_hex = os.environ["IC402_PRIVATE_KEY_HEX"]
+    canister_id = os.environ["IC402_CANISTER_ID"]
+    network = os.environ.get("IC402_NETWORK", "icp:1")
     return client_from_hex(key_hex, canister_id, network=network, simulation=simulation)

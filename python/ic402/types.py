@@ -1,12 +1,12 @@
 """
-agentflow Python SDK — type definitions.
-Mirrors src/agentflow/Types.mo and packages/client/src/types.ts exactly.
+ic402 Python SDK — type definitions.
+Mirrors src/ic402/Types.mo and packages/client/src/types.ts exactly.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 
 # ── Token & Pricing ──────────────────────────────────────────────────────────
@@ -137,3 +137,69 @@ class SessionPreferences:
     max_deposit: Optional[int] = None
     auto_close: bool = True
     idle_timeout: Optional[int] = None
+
+
+# ── Content Delivery ──────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ContentRef:
+    id: str
+    mime_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+    metadata: Optional[list[tuple[str, str]]] = None
+
+
+@dataclass(frozen=True)
+class AccessGrant:
+    grant_id: str
+    content_ref: ContentRef
+    grantee: str
+    receipt_id: str
+    issued_at: int
+    expires_at: int
+    hmac: bytes
+
+
+AccessGrantResult = Literal["ok", "expired", "invalidGrant", "revoked"]
+
+
+@dataclass(frozen=True)
+class DeliveryInline:
+    data: bytes
+
+
+@dataclass(frozen=True)
+class DeliveryCanisterQuery:
+    method: str
+    chunk_count: int
+
+
+@dataclass(frozen=True)
+class DeliveryHttpUrl:
+    url: str
+
+
+@dataclass(frozen=True)
+class DeliveryAssetCanister:
+    canister_id: str
+    path: str
+
+
+DeliveryMethod = Union[DeliveryInline, DeliveryCanisterQuery, DeliveryHttpUrl, DeliveryAssetCanister]
+
+
+@dataclass(frozen=True)
+class ContentDelivery:
+    grant: AccessGrant
+    delivery: DeliveryMethod
+
+
+# ── Content Store ─────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ContentEntry:
+    id: str
+    mime_type: str
+    total_size: int
+    chunk_count: int
+    created_at: int

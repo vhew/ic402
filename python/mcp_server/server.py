@@ -1,19 +1,19 @@
 """
-agentflow MCP Server
+ic402 MCP Server
 
-Exposes agentflow-enabled ICP canisters as MCP tools.
+Exposes ic402-enabled ICP canisters as MCP tools.
 Any MCP-compatible client (Claude Desktop, Cursor, etc.) can call
 paid ICP services — payment is handled transparently at this layer.
 
 Usage:
-    agentflow-mcp                          # reads from env vars
+    ic402-mcp                          # reads from env vars
     mcp dev python/mcp_server/server.py    # dev mode with inspector
 
 Environment variables:
-    AGENTFLOW_PRIVATE_KEY_HEX   32-byte Ed25519 seed as hex (required)
-    AGENTFLOW_CANISTER_ID       default canister principal (required)
-    AGENTFLOW_NETWORK           CAIP-2 network, default "icp:1"
-    AGENTFLOW_SIMULATION        "true" to use mock responses (default false)
+    IC402_PRIVATE_KEY_HEX   32-byte Ed25519 seed as hex (required)
+    IC402_CANISTER_ID       default canister principal (required)
+    IC402_NETWORK           CAIP-2 network, default "icp:1"
+    IC402_SIMULATION        "true" to use mock responses (default false)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
-from agentflow import (
+from ic402 import (
     AgentflowClient,
     BudgetConfig,
     PaymentRequiredError,
@@ -39,14 +39,14 @@ from agentflow import (
     client_from_env,
     client_from_hex,
 )
-from agentflow.exceptions import AgentflowError, CanisterError
+from ic402.exceptions import AgentflowError, CanisterError
 
 # ── Server state ──────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
-    "agentflow",
+    "ic402",
     instructions=(
-        "agentflow gives you access to ICP canisters that charge micropayments. "
+        "ic402 gives you access to ICP canisters that charge micropayments. "
         "Start with setup_identity, then call_canister or open_session. "
         "Sessions are cheaper for repeated calls — use them when making >5 queries."
     ),
@@ -60,7 +60,7 @@ def _get_client() -> AgentflowClient:
     if _client is None:
         raise RuntimeError(
             "Client not initialised. Call setup_identity first, "
-            "or set AGENTFLOW_PRIVATE_KEY_HEX and AGENTFLOW_CANISTER_ID env vars."
+            "or set IC402_PRIVATE_KEY_HEX and IC402_CANISTER_ID env vars."
         )
     return _client
 
@@ -75,7 +75,7 @@ def setup_identity(
     simulation: bool = False,
 ) -> dict:
     """
-    Initialise the agentflow client with an Ed25519 identity.
+    Initialise the ic402 client with an Ed25519 identity.
 
     Args:
         private_key_hex: 32-byte Ed25519 private key seed as a hex string.
@@ -273,6 +273,85 @@ async def close_session(session_id: str) -> dict:
 
 
 @mcp.tool()
+async def fetch_content(
+    delivery: str,
+    canister_id: Optional[str] = None,
+) -> dict:
+    """
+    Fetch content from a ContentDelivery response.
+
+    Supports all four delivery methods:
+    - inline: content is embedded directly in the response
+    - httpUrl: fetch from a regular HTTP URL
+    - assetCanister: fetch from an ICP asset canister via HTTPS
+    - canisterQuery: stream chunks from a canister method
+
+    Args:
+        delivery:    ContentDelivery as a JSON string (returned by content endpoints).
+        canister_id: Required for canisterQuery delivery; overrides default canister.
+    """
+    import json
+    import httpx
+
+    try:
+        parsed = json.loads(delivery)
+    except Exception:
+        return {"status": "error", "error": "Invalid JSON in delivery argument"}
+
+    grant = parsed.get("grant", {})
+    del_ = parsed.get("delivery", {})
+
+    try:
+        if "inline" in del_:
+            raw = del_["inline"]
+            data = bytes.fromhex(raw) if isinstance(raw, str) else bytes(raw)
+            text = data.decode("utf-8", errors="replace")
+
+        elif "httpUrl" in del_:
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(del_["httpUrl"])
+                resp.raise_for_status()
+                text = resp.text
+
+        elif "assetCanister" in del_:
+            ac = del_["assetCanister"]
+            url = f"https://{ac['canisterId']}.icp0.io{ac['path']}"
+            async with httpx.AsyncClient() as http:
+                resp = await http.get(url)
+                resp.raise_for_status()
+                text = resp.text
+
+        elif "canisterQuery" in del_:
+            client = _get_client()
+            cid = canister_id or (client._canister_id if _client else None)
+            if not cid:
+                return {"status": "error", "error": "canister_id required for canisterQuery delivery"}
+            method = del_["canisterQuery"]["method"]
+            chunk_count = int(del_["canisterQuery"]["chunkCount"])
+            chunks = []
+            for i in range(chunk_count):
+                raw = client._raw_call(method, [grant, i], cid)
+                chunk = raw if isinstance(raw, (bytes, bytearray)) else str(raw)
+                chunks.append(chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace"))
+            text = "".join(chunks)
+
+        else:
+            return {"status": "error", "error": f"Unknown delivery method: {list(del_.keys())}"}
+
+        return {
+            "status": "ok",
+            "content_id": grant.get("contentRef", {}).get("id"),
+            "mime_type": grant.get("contentRef", {}).get("mimeType"),
+            "content": text,
+        }
+
+    except httpx.HTTPError as e:
+        return {"status": "error", "error": f"HTTP error: {e}"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@mcp.tool()
 def get_session_status(session_id: Optional[str] = None) -> dict:
     """
     Check the status of one or all open sessions.
@@ -342,14 +421,14 @@ def approve_icrc2(spender_principal: str, amount: int, token_ledger: str) -> dic
 def _try_init_from_env() -> None:
     """If env vars are set, initialise the client at startup."""
     global _client
-    key_hex = os.getenv("AGENTFLOW_PRIVATE_KEY_HEX")
-    canister_id = os.getenv("AGENTFLOW_CANISTER_ID")
+    key_hex = os.getenv("IC402_PRIVATE_KEY_HEX")
+    canister_id = os.getenv("IC402_CANISTER_ID")
     if key_hex and canister_id:
-        simulation = os.getenv("AGENTFLOW_SIMULATION", "false").lower() == "true"
+        simulation = os.getenv("IC402_SIMULATION", "false").lower() == "true"
         _client = client_from_hex(
             key_hex,
             canister_id,
-            network=os.getenv("AGENTFLOW_NETWORK", "icp:1"),
+            network=os.getenv("IC402_NETWORK", "icp:1"),
             simulation=simulation,
         )
 

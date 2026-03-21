@@ -1,11 +1,11 @@
 """
-agentflow Python SDK
+ic402 Python SDK
 
 Drop-in payment client for ICP canisters.
 x402 charges, streaming sessions, Ed25519 vouchers.
 
 Quick start:
-    from agentflow import AgentflowClient, client_from_env
+    from ic402 import AgentflowClient, client_from_env
 
     client = client_from_env(simulation=True)
     intent = await client.request_session()
@@ -26,7 +26,17 @@ from .exceptions import (
     SessionError,
 )
 from .types import (
+    AccessGrant,
+    AccessGrantResult,
     BudgetConfig,
+    ContentDelivery,
+    ContentEntry,
+    ContentRef,
+    DeliveryAssetCanister,
+    DeliveryCanisterQuery,
+    DeliveryHttpUrl,
+    DeliveryInline,
+    DeliveryMethod,
     PaymentReceipt,
     PaymentRequirement,
     PaymentSignature,
@@ -47,7 +57,17 @@ __all__ = [
     "client_from_env",
     "client_from_hex",
     # Types
+    "AccessGrant",
+    "AccessGrantResult",
     "BudgetConfig",
+    "ContentDelivery",
+    "ContentEntry",
+    "ContentRef",
+    "DeliveryAssetCanister",
+    "DeliveryCanisterQuery",
+    "DeliveryHttpUrl",
+    "DeliveryInline",
+    "DeliveryMethod",
     "PaymentReceipt",
     "PaymentRequirement",
     "PaymentSignature",
