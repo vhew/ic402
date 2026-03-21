@@ -1,4 +1,4 @@
-/// agentflow — Main gateway class. Handles charges, sessions, and policy.
+/// ic402 — Main gateway class. Handles charges, sessions, and policy.
 import Types "Types";
 import Policy "Policy";
 import Nonce "Nonce";
@@ -12,8 +12,51 @@ import Array "mo:base/Array";
 import Principal "mo:base/Principal";
 import Timer "mo:base/Timer";
 import Error "mo:base/Error";
+import Int "mo:base/Int";
+import Blob "mo:base/Blob";
+import Nat8 "mo:base/Nat8";
+import SHA256 "mo:sha2/Sha256";
 
 module {
+
+  // HMAC-SHA256(key, message) → Blob
+  func hmacSha256(key : [Nat8], message : [Nat8]) : Blob {
+    let blockSize = 64;
+
+    let effectiveKey : [Nat8] = if (key.size() > blockSize) {
+      Blob.toArray(SHA256.fromArray(#sha256, key));
+    } else {
+      key;
+    };
+
+    let paddedKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
+      if (i < effectiveKey.size()) { effectiveKey[i] } else { 0 : Nat8 };
+    });
+
+    let ipadKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
+      paddedKey[i] ^ (0x36 : Nat8);
+    });
+
+    let opadKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
+      paddedKey[i] ^ (0x5c : Nat8);
+    });
+
+    let inner = SHA256.fromArray(#sha256, Array.append(ipadKey, message));
+    SHA256.fromArray(#sha256, Array.append(opadKey, Blob.toArray(inner)));
+  };
+
+  func natToBytes8(n : Nat) : [Nat8] {
+    var value = n;
+    let bytes = Array.init<Nat8>(8, 0);
+    var i = 7 : Nat;
+    while (i > 0) {
+      bytes[i] := Nat8.fromNat(value % 256);
+      value := value / 256;
+      i -= 1;
+    };
+    bytes[0] := Nat8.fromNat(value % 256);
+    Array.freeze(bytes);
+  };
 
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
 
@@ -23,6 +66,20 @@ module {
 
     var sessions = HashMap.HashMap<Text, Types.InternalSessionState>(16, Text.equal, Text.hash);
     var receiptCounter : Nat = 0;
+    var grantCounter : Nat = 0;
+    var hmacSeed : Nat = 0;
+    var revokedGrants = HashMap.HashMap<Text, Bool>(16, Text.equal, Text.hash);
+
+    func hmacSecret() : [Nat8] {
+      let principalBytes = Blob.toArray(Principal.toBlob(selfPrincipal));
+      let seedBytes = natToBytes8(hmacSeed);
+      Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, seedBytes)));
+    };
+
+    func computeGrantHmac(grantId : Text, grantee : Principal, expiresAt : Int) : Blob {
+      let message = grantId # "|" # Principal.toText(grantee) # "|" # Int.toText(expiresAt);
+      hmacSha256(hmacSecret(), Blob.toArray(Text.encodeUtf8(message)));
+    };
 
     func nextReceiptId() : Text {
       receiptCounter += 1;
@@ -477,12 +534,60 @@ module {
       policy.getDailySpendAmount(caller);
     };
 
-    // ── ERC-8004 ──
+    // ── Content Delivery ──
 
-    /// Register as an agent on ERC-8004 (stub — tECDSA post-hackathon).
-    public func registerAgent() : async Nat {
-      // TODO: tECDSA sign EVM transaction to mint ERC-721 on IdentityRegistry
-      0; // Placeholder agent ID
+    /// Issue an access grant after successful payment.
+    public func issueGrant(
+      contentRef : Types.ContentRef,
+      grantee : Principal,
+      receiptId : Text,
+      ttlNanos : Int,
+    ) : Types.AccessGrant {
+      grantCounter += 1;
+      let grantId = "grant-" # Nat.toText(grantCounter);
+      let now = Time.now();
+      let expiresAt = now + ttlNanos;
+      let hmac = computeGrantHmac(grantId, grantee, expiresAt);
+
+      {
+        grantId;
+        contentRef;
+        grantee;
+        receiptId;
+        issuedAt = now;
+        expiresAt;
+        hmac;
+      };
+    };
+
+    /// Verify an access grant (stateless HMAC check + expiry + revocation).
+    public func verifyGrant(grant : Types.AccessGrant) : Types.AccessGrantResult {
+      switch (revokedGrants.get(grant.grantId)) {
+        case (?_) { return #revoked };
+        case (null) {};
+      };
+
+      if (Time.now() > grant.expiresAt) {
+        return #expired;
+      };
+
+      let expected = computeGrantHmac(grant.grantId, grant.grantee, grant.expiresAt);
+      if (expected != grant.hmac) {
+        return #invalidGrant;
+      };
+
+      #ok;
+    };
+
+    /// Revoke a grant (e.g., after refund).
+    public func revokeGrant(grantId : Text) : Bool {
+      switch (revokedGrants.get(grantId)) {
+        case (?_) { false };
+        case (null) {
+          revokedGrants.put(grantId, true);
+          true;
+        };
+      };
     };
 
     // ── Stable state ──
@@ -521,6 +626,16 @@ module {
         nonces = nonceManager.toStable();
         policy = policy.toStable();
         receiptCounter;
+        accessGrants = ?{
+          revokedGrantIds = Iter.toArray(
+            Iter.map<(Text, Bool), Text>(
+              revokedGrants.entries(),
+              func((id, _)) { id },
+            )
+          );
+          grantCounter;
+          hmacSeed;
+        };
       };
     };
 
@@ -555,6 +670,20 @@ module {
           idleTimeout = ss.idleTimeout;
         };
         sessions.put(ss.id, session);
+      };
+
+      switch (data.accessGrants) {
+        case (?grants) {
+          grantCounter := grants.grantCounter;
+          hmacSeed := grants.hmacSeed;
+          revokedGrants := HashMap.HashMap<Text, Bool>(
+            grants.revokedGrantIds.size(), Text.equal, Text.hash,
+          );
+          for (id in grants.revokedGrantIds.vals()) {
+            revokedGrants.put(id, true);
+          };
+        };
+        case (null) {};
       };
     };
   };

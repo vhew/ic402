@@ -1,18 +1,21 @@
-/// agentflow — Drop-in payment library for ICP canisters.
+/// ic402 — Drop-in payment library for ICP canisters.
 ///
 /// ```motoko
-/// import Agentflow "mo:agentflow";
-/// let gate = Agentflow.Gateway({ ... }, Principal.fromActor(self));
+/// import Ic402 "mo:ic402";
+/// let gate = Ic402.Gateway({ ... }, Principal.fromActor(self));
 /// ```
 
 import Types "Types";
 import GatewayModule "Gateway";
 import NonceMod "Nonce";
 import EscrowMod "Escrow";
+import ContentStoreMod "ContentStore";
+import IdentityMod "Identity";
 
 module {
 
-  // Re-export types
+  // ── Core types ──
+
   public type Config = Types.Config;
   public type TokenConfig = Types.TokenConfig;
   public type Price = Types.Price;
@@ -28,17 +31,36 @@ module {
   public type VoucherResult = Types.VoucherResult;
   public type SpendingPolicy = Types.SpendingPolicy;
   public type TrustRequirements = Types.TrustRequirements;
-  public type ERC8004Config = Types.ERC8004Config;
-  public type AgentCard = Types.AgentCard;
-  public type ServiceEntry = Types.ServiceEntry;
   public type AvaxConfig = Types.AvaxConfig;
   public type AvaxTokenConfig = Types.AvaxTokenConfig;
   public type StableGatewayState = Types.StableGatewayState;
   public type Account = Types.Account;
   public type TransferResult = Types.TransferResult;
+  public type ContentRef = Types.ContentRef;
+  public type AccessGrant = Types.AccessGrant;
+  public type AccessGrantResult = Types.AccessGrantResult;
+  public type DeliveryMethod = Types.DeliveryMethod;
+  public type ContentDelivery = Types.ContentDelivery;
 
-  // Re-export classes
+  // ── Content Store (optional) ──
+
+  public type ContentEntry = Types.ContentEntry;
+  public type ContentStoreResult = Types.ContentStoreResult;
+  public type StableContentStoreState = Types.StableContentStoreState;
+  public type StableContentEntry = Types.StableContentEntry;
+
+  // ── Identity (optional) ──
+
+  public type ERC8004Config = Types.ERC8004Config;
+  public type AgentCard = Types.AgentCard;
+  public type ServiceEntry = Types.ServiceEntry;
+  public type StableIdentityState = Types.StableIdentityState;
+
+  // ── Classes ──
+
   public let Gateway = GatewayModule.Gateway;
   public let NonceManager = NonceMod.NonceManager;
   public let EscrowManager = EscrowMod.EscrowManager;
+  public let ContentStore = ContentStoreMod.ContentStore;
+  public let Identity = IdentityMod.Identity;
 };
