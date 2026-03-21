@@ -15,7 +15,10 @@ import Error "mo:base/Error";
 import Int "mo:base/Int";
 import Blob "mo:base/Blob";
 import Nat8 "mo:base/Nat8";
+import Nat32 "mo:base/Nat32";
+import Char "mo:base/Char";
 import SHA256 "mo:sha2/Sha256";
+import EvmVerify "EvmVerify";
 
 module {
 
@@ -151,12 +154,40 @@ module {
       };
     };
 
-    /// Verify and settle a charge payment via ICRC-2 transfer_from.
+    /// Check if a network identifier is an EVM chain (eip155:*).
+    func isEvmNetwork(network : Text) : Bool {
+      Text.startsWith(network, #text "eip155:");
+    };
+
+    /// Extract chain ID from CAIP-2 network string (e.g. "eip155:43113" → 43113).
+    func extractChainId(network : Text) : ?Nat {
+      let parts = Text.split(network, #char ':');
+      let arr = Iter.toArray(parts);
+      if (arr.size() != 2) return null;
+      // Simple decimal parse
+      var result : Nat = 0;
+      for (c in arr[1].chars()) {
+        let d = Nat32.toNat(Char.toNat32(c));
+        if (d < 48 or d > 57) return null;
+        result := result * 10 + (d - 48);
+      };
+      ?result;
+    };
+
+    /// Verify and settle a charge payment.
+    /// Dispatches to ICRC-2 (ICP) or HTTPS outcall verification (Avalanche/EVM).
     public func settle(signature : Types.PaymentSignature) : async Types.PaymentResult {
       // Verify nonce
       if (not nonceManager.consume(signature.nonce)) {
         return #expired;
       };
+
+      // Check if this is an EVM payment (Avalanche, etc.)
+      if (isEvmNetwork(signature.network)) {
+        return await settleEvm(signature);
+      };
+
+      // ── ICP settlement via ICRC-2 ──
 
       // Find the token config
       let tokenConfig = switch (findLedger(signature.network)) {
@@ -174,10 +205,7 @@ module {
       let senderPrincipal = Principal.fromText(signature.sender);
 
       // Check policy
-      // We need the amount — retrieve from the nonce's associated requirement
-      // For MVP, we look up the amount from the signature context
-      // The nonce was already consumed, so we trust the flow
-      let amount = 0 : Nat; // Will be set by the actual transfer result
+      let amount = 0 : Nat;
 
       switch (policy.checkCharge(senderPrincipal, amount)) {
         case (#denied(r)) { return #policyDenied(r) };
@@ -192,7 +220,7 @@ module {
           spender_subaccount = null;
           from = { owner = senderPrincipal; subaccount = null };
           to = recipientAccount();
-          amount = 0; // The approved amount via ICRC-2 allowance
+          amount = 0;
           fee = null;
           memo = null;
           created_at_time = null;
@@ -202,7 +230,7 @@ module {
           case (#Ok(blockIndex)) {
             let receipt : Types.PaymentReceipt = {
               id = nextReceiptId();
-              amount = 0; // from actual transfer
+              amount = 0;
               token = Principal.toText(tokenConfig.ledger);
               sender = signature.sender;
               recipient = recipientText();
@@ -221,6 +249,72 @@ module {
         };
       } catch (e) {
         #settlementFailed("Ledger call failed: " # Error.message(e));
+      };
+    };
+
+    /// Settle an EVM payment by verifying the transaction on-chain via HTTPS outcall.
+    func settleEvm(signature : Types.PaymentSignature) : async Types.PaymentResult {
+      // Extract chain ID from network (e.g. "eip155:43113" → 43113)
+      let chainId = switch (extractChainId(signature.network)) {
+        case (?id) { id };
+        case (null) { return #networkNotSupported };
+      };
+
+      // Get the Avalanche config
+      let avaxConfig = switch (config.avalanche) {
+        case (?ac) { ac };
+        case (null) { return #networkNotSupported };
+      };
+
+      // Verify chain ID matches config
+      if (avaxConfig.chainId != chainId) {
+        return #networkNotSupported;
+      };
+
+      // The signature blob contains the tx hash as UTF-8 text
+      let txHash = switch (Text.decodeUtf8(signature.signature)) {
+        case (?h) { h };
+        case (null) { return #invalidSignature };
+      };
+
+      // Find the expected token address (first configured Avalanche token)
+      let expectedToken = if (avaxConfig.tokens.size() > 0) {
+        avaxConfig.tokens[0].address;
+      } else {
+        return #tokenNotAccepted;
+      };
+
+      // Verify the transaction on-chain
+      try {
+        let result = await EvmVerify.verifyTransaction(
+          txHash,
+          chainId,
+          expectedToken,
+          avaxConfig.recipient,
+        );
+
+        switch (result) {
+          case (#ok(_verified)) {
+            let receipt : Types.PaymentReceipt = {
+              id = nextReceiptId();
+              amount = 0; // amount verified on-chain
+              token = expectedToken;
+              sender = signature.sender;
+              recipient = avaxConfig.recipient;
+              network = signature.network;
+              timestamp = Time.now();
+              txHash = ?txHash;
+              sessionId = null;
+              refunded = null;
+            };
+            #ok(receipt);
+          };
+          case (#failed(reason)) {
+            #settlementFailed("EVM verification failed: " # reason);
+          };
+        };
+      } catch (e) {
+        #settlementFailed("EVM verification error: " # Error.message(e));
       };
     };
 

@@ -1,0 +1,102 @@
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+
+/** Call an MCP tool and return the parsed JSON result (or raw text). */
+export async function mcpCall(
+  client: Client,
+  tool: string,
+  args: Record<string, unknown> = {},
+): Promise<unknown> {
+  const res = await client.callTool({ name: tool, arguments: args });
+  const text =
+    res.content && Array.isArray(res.content) && res.content.length > 0
+      ? (res.content[0] as { text?: string }).text ?? ''
+      : '';
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+/** Pretty-print a JSON value with 2-space indent. */
+export function formatJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+const CYAN = '\x1b[36m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const RED = '\x1b[31m';
+const DIM = '\x1b[2m';
+const BOLD = '\x1b[1m';
+const RESET = '\x1b[0m';
+
+export function header(text: string): void {
+  console.log(`\n${BOLD}${CYAN}${'═'.repeat(60)}${RESET}`);
+  console.log(`${BOLD}${CYAN}  ${text}${RESET}`);
+  console.log(`${BOLD}${CYAN}${'═'.repeat(60)}${RESET}\n`);
+}
+
+export function info(text: string): void {
+  console.log(`${DIM}  ${text}${RESET}`);
+}
+
+export function success(text: string): void {
+  console.log(`${GREEN}  ✓ ${text}${RESET}`);
+}
+
+export function warn(text: string): void {
+  console.log(`${YELLOW}  ⚠ ${text}${RESET}`);
+}
+
+export function error(text: string): void {
+  console.log(`${RED}  ✗ ${text}${RESET}`);
+}
+
+export function result(value: unknown): void {
+  const json = formatJson(value);
+  for (const line of json.split('\n')) {
+    console.log(`  ${line}`);
+  }
+}
+
+/** Bold highlighted text for innovation callouts visible to judges. */
+export function highlight(text: string): void {
+  console.log(`${BOLD}${YELLOW}  → ${text}${RESET}`);
+}
+
+/** Show a key-value state line (cyan key, white value). */
+export function state(key: string, value: string): void {
+  console.log(`  ${CYAN}${key}:${RESET} ${value}`);
+}
+
+/** Horizontal divider. */
+export function divider(): void {
+  console.log(`${DIM}  ${'─'.repeat(56)}${RESET}`);
+}
+
+/**
+ * Display an image inline in the terminal.
+ * Uses the iTerm2 inline image protocol (also supported by WezTerm, Hyper, etc).
+ * Falls back to a text description on unsupported terminals.
+ */
+export function showImage(data: Buffer, name: string): void {
+  // Check if running in a terminal that supports inline images.
+  // TERM_PROGRAM may not be inherited through pnpm, so also check
+  // common indicators and fall back to trying anyway on macOS iTerm.
+  const term = process.env.TERM_PROGRAM ?? process.env.LC_TERMINAL ?? '';
+  const supported = term.includes('iTerm')
+    || term === 'WezTerm'
+    || process.env.ITERM_SESSION_ID != null;
+
+  if (supported && process.stdout.isTTY) {
+    const b64 = data.toString('base64');
+    const nameB64 = Buffer.from(name).toString('base64');
+    // Use \x1b\\ (ST) terminator — more compatible than \x07 (BEL)
+    process.stdout.write(
+      `  \x1b]1337;File=name=${nameB64};size=${data.length};inline=1;width=30:${b64}\x1b\\\n`,
+    );
+  } else {
+    info(`[Image: ${name}, ${data.length} bytes]`);
+  }
+}

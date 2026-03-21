@@ -13,6 +13,18 @@ import Types "Types";
 
 module {
 
+  // Management canister for tECDSA
+  let management_canister : actor {
+    ecdsa_public_key : shared {
+      key_id : { name : Text; curve : { #secp256k1 } };
+      canister_id : ?Principal;
+      derivation_path : [Blob];
+    } -> async {
+      public_key : Blob;
+      chain_code : Blob;
+    };
+  } = actor "aaaaa-aa";
+
   /// Agent identity with ERC-8004 registration support.
   public class Identity(config : Types.ERC8004Config) {
 
@@ -33,13 +45,38 @@ module {
       agentId;
     };
 
-    /// Register as an agent on ERC-8004 (stub — tECDSA post-hackathon).
-    /// Mints an ERC-721 on the IdentityRegistry contract.
-    public func registerAgent() : async Nat {
-      // TODO: tECDSA sign EVM transaction to mint ERC-721 on IdentityRegistry
-      let id = 0; // Placeholder agent ID
+    /// Get the canister's secp256k1 public key from ICP's threshold ECDSA service.
+    /// Returns SEC1 compressed format (33 bytes).
+    ///
+    /// To derive the Ethereum/Avalanche address from this key:
+    ///   1. Decompress to uncompressed format (65 bytes: 0x04 + X + Y)
+    ///   2. Keccak-256 hash the 64 bytes after the 0x04 prefix
+    ///   3. Take the last 20 bytes as the address
+    ///
+    /// keyName: "dfx_test_key" for local replica, "key_1" for mainnet IC.
+    public func getPublicKey(keyName : Text) : async Blob {
+      let result = await management_canister.ecdsa_public_key({
+        key_id = { name = keyName; curve = #secp256k1 };
+        canister_id = null;
+        derivation_path = [];
+      });
+      result.public_key;
+    };
+
+    /// Set the registered agent ID (called by admin after external registration).
+    public func setAgentId(id : Nat) {
       agentId := ?id;
-      id;
+    };
+
+    /// Register as an agent on ERC-8004.
+    /// Currently delegates to external registration script
+    /// (scripts/register-agent.ts). Full on-canister EVM transaction
+    /// signing (Keccak-256 + RLP + tECDSA) is a future milestone.
+    public func registerAgent() : async Nat {
+      switch (agentId) {
+        case (?id) { id };
+        case (null) { 0 };
+      };
     };
 
     /// Serialize for canister upgrades.

@@ -11,6 +11,8 @@
   "scripts": {
     "build:client": "pnpm --filter @ic402/client build",
     "build:mcp": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build",
+    "build:mcp-client": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build && pnpm --filter @ic402/mcp-client build",
+    "demo": "[ -f deploy/.env.development ] && . deploy/.env.development; node integration/mcp-client/dist/index.js $(icp canister status example -e local --id-only 2>/dev/null) http://localhost:4944",
     "build:integrations": "pnpm --filter @ic402/client build && pnpm --filter './integration/*' build",
     "build": "icp build",
     "test:client": "pnpm --filter @ic402/client test",
@@ -22,6 +24,8 @@
     "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/mcp/node_modules integration/mcp/dist .pnpm-store .mops .icp/cache *.wasm",
     "local:start": "./scripts/local-start.sh",
     "local:stop": "icp network stop",
+    "version:bump": "./scripts/version.sh",
+    "register-agent": "tsx scripts/register-agent.ts",
     "prepare": "husky"
   },
   "devDependencies": {
@@ -32,6 +36,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "prettier": "^3.0.0",
+    "tsx": "^4.21.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^4.0.0"
   },

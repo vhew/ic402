@@ -161,6 +161,23 @@ const SessionQueryResult = IDL.Variant({
   error: IDL.Text,
 });
 
+// ── Identity (ERC-8004) ──
+
+const ServiceEntry = IDL.Record({
+  name: IDL.Text,
+  endpoint: IDL.Text,
+  version: IDL.Text,
+  skills: IDL.Vec(IDL.Text),
+  domains: IDL.Vec(IDL.Text),
+});
+
+const AgentCard = IDL.Record({
+  name: IDL.Text,
+  description: IDL.Text,
+  services: IDL.Vec(ServiceEntry),
+  x402Support: IDL.Bool,
+});
+
 // ── Content Store ──
 
 const ContentEntry = IDL.Record({
@@ -248,6 +265,12 @@ export const exampleIdlFactory = () =>
       [GetContentResult],
       [],
     ),
+    // Identity (ERC-8004)
+    getAgentCard: IDL.Func([], [AgentCard], ['query']),
+    getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
+    getAvalanchePublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
+    setAgentRegistration: IDL.Func([IDL.Nat], [], []),
+    registerAgent: IDL.Func([], [IDL.Nat], []),
     // Admin
     verifyGrant: IDL.Func(
       [AccessGrant],
@@ -276,4 +299,6 @@ export {
   GetContentResult,
   ContentEntry,
   ContentStoreResult,
+  ServiceEntry,
+  AgentCard,
 };

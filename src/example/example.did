@@ -197,6 +197,10 @@ service : {
       ok: ContentDelivery;
       paymentRequired: PaymentRequirement;
     });
+  /// Get the canister's tECDSA public key for Avalanche.
+  /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
+  /// Use scripts/register-agent.ts to derive the AVAX address and register.
+  getAvalanchePublicKey: () -> (blob);
   /// Chunk query — verifies AccessGrant HMAC, decrypts + returns chunk.
   /// Called by the client SDK when delivery is #canisterQuery.
   getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
@@ -219,20 +223,18 @@ service : {
       ok: SessionState;
     });
   /// Register this canister as an agent on Avalanche's IdentityRegistry.
-  /// Controller-only. Mints an ERC-721 via tECDSA (stub — post-hackathon).
+  /// Controller-only.
   /// 
-  /// In production, this will:
-  ///   1. Derive an ECDSA public key via ICP's tECDSA service
-  ///   2. Compute the canister's Avalanche C-Chain address
-  ///   3. Encode an EVM transaction calling IdentityRegistry.register(card)
-  ///   4. Sign the transaction via tECDSA
-  ///   5. Submit to Avalanche via an HTTPS outcall to a C-Chain RPC endpoint
-  ///   6. Return the minted agent ID (ERC-721 token ID)
+  /// Current flow (hackathon):
+  ///   1. Call getAvalanchePublicKey() to get the canister's secp256k1 key
+  ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
+  ///   3. Script calls setAgentRegistration() to store the token ID
   /// 
-  /// Pre-requisites:
-  ///   - The canister's Avalanche address must hold AVAX for gas
-  ///   - The IdentityRegistry contract must be deployed on C-Chain
-  ///   - tECDSA key must be available (subnet-level configuration)
+  /// Future flow (on-canister EVM signing):
+  ///   1. Canister encodes EVM tx calling IdentityRegistry.register(card)
+  ///   2. Signs via tECDSA (Keccak-256 + RLP encoding in Motoko)
+  ///   3. Submits to Avalanche via HTTPS outcall
+  ///   4. Returns the minted ERC-721 token ID
   registerAgent: () -> (nat);
   requestSession: () -> (SessionIntent);
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
@@ -246,6 +248,9 @@ service : {
       error: text;
       ok: text;
     });
+  /// Set the agent registration after external registration via
+  /// scripts/register-agent.ts. Controller-only.
+  setAgentRegistration: (agentTokenId: nat) -> ();
   setPolicy: (p: SpendingPolicy) -> ();
   uploadContent: (id: text, mimeType: text, data: blob) ->
    (ContentStoreResult);

@@ -32,29 +32,28 @@ persistent actor KnowledgeBase {
         decimals = 6;
       }];
 
-      // ── Avalanche cross-chain payments (optional) ──
+      // ── Avalanche cross-chain payments ──
       //
       // Accept USDC on Avalanche C-Chain in addition to ICP ckUSDC.
       // Requires tECDSA for cross-chain settlement verification.
       //
-      // When enabled, clients can pay via Avalanche and the canister
-      // verifies the transaction on-chain using tECDSA signatures.
-      // The settlement flow:
-      //   1. Client gets PaymentRequirement with network = "eip155:43114"
+      // Settlement flow:
+      //   1. Client gets PaymentRequirement with network = "eip155:43113"
       //   2. Client sends USDC on Avalanche to the recipient address
       //   3. Client retries with PaymentSignature containing the tx hash
       //   4. Canister verifies the Avalanche tx via tECDSA + RPC
       //
-      // avalanche = ?{
-      //   chainId = 43114;  // Avalanche C-Chain mainnet
-      //   recipient = "0xYOUR_AVALANCHE_ADDRESS";
-      //   tokens = [{
-      //     address = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"; // USDC on Avalanche
-      //     symbol = "USDC";
-      //     decimals = 6 : Nat8;
-      //   }];
-      // };
-      avalanche = null;
+      // Fuji testnet (chainId 43113, USDC 0x5425890298aed601595a70AB815c96711a31Bc65)
+      // Mainnet values: chainId 43114, USDC 0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
+      avalanche = ?{
+        chainId = 43113;  // Avalanche Fuji testnet
+        recipient = "0x0000000000000000000000000000000000000000"; // placeholder — replace with your address
+        tokens = [{
+          address = "0x5425890298aed601595a70AB815c96711a31Bc65"; // USDC on Fuji
+          symbol = "USDC";
+          decimals = 6 : Nat8;
+        }];
+      };
     },
     Principal.fromActor(KnowledgeBase),
   );
@@ -127,10 +126,10 @@ persistent actor KnowledgeBase {
   // Set default policy
   do {
     gate.setPolicy(null, {
-      maxPerTransaction = ?1_000_000;
-      maxPerDay = ?10_000_000;
+      maxPerTransaction = ?50_000;      // 0.05 USDC
+      maxPerDay = ?500_000;             // 0.50 USDC
       rateLimitPerMinute = ?120;
-      maxSessionDeposit = ?5_000_000;
+      maxSessionDeposit = ?100_000;     // 0.10 USDC
       maxConcurrentSessions = ?1;
       maxSessionDuration = ?(24 * 60 * 60 * 1_000_000_000);
       sessionIdleTimeout = ?(60 * 60 * 1_000_000_000);
@@ -168,7 +167,7 @@ persistent actor KnowledgeBase {
   } {
     let price : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 50_000;
+      amount = 1_000;  // 0.001 USDC per search query
       network = "icp:1";
     };
 
@@ -193,10 +192,10 @@ persistent actor KnowledgeBase {
       network = "icp:1";
       token = Principal.toText(Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"));
       recipient = Principal.toText(Principal.fromActor(KnowledgeBase));
-      suggestedDeposit = 1_000_000;
-      minDeposit = ?100_000;
+      suggestedDeposit = 50_000;   // 0.05 USDC — enough for 100 queries
+      minDeposit = ?5_000;         // 0.005 USDC — enough for 10 queries
       expiry = Time.now() + 300_000_000_000;
-      costPerCall = ?1_000;
+      costPerCall = ?500;          // 0.0005 USDC per query
       description = ?"Knowledge base session — pay per query";
     });
   };
@@ -276,7 +275,7 @@ persistent actor KnowledgeBase {
   } {
     let price : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 100_000;
+      amount = 5_000;  // 0.005 USDC per content access
       network = "icp:1";
     };
 
@@ -379,7 +378,7 @@ persistent actor KnowledgeBase {
   } {
     let price : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 100_000;
+      amount = 5_000;  // 0.005 USDC per content access
       network = "icp:1";
     };
 
@@ -471,7 +470,7 @@ persistent actor KnowledgeBase {
   } {
     let price : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 100_000;
+      amount = 5_000;  // 0.005 USDC per content access
       network = "icp:1";
     };
 
@@ -490,16 +489,12 @@ persistent actor KnowledgeBase {
               contentRef, msg.caller, receipt.id, 5 * 60 * 1_000_000_000,
             );
 
-            // S3 example — in production, generate via tECDSA:
-            //   let presignedUrl = await generatePresignedUrl(contentId, 300);
-            let presignedUrl = "https://my-bucket.s3.amazonaws.com/" # contentId
-              # "?X-Amz-Expires=300&X-Amz-Signature=TODO";
-            let delivery = #httpUrl(presignedUrl);
-
-            // IPFS example (encrypted):
-            // let cid = lookupCid(contentId);
-            // let decryptionKey = deriveKey(contentId);
-            // let delivery = #httpUrl("https://ipfs.io/ipfs/" # cid);
+            // In production, use tECDSA to sign a pre-signed S3 URL or
+            // return a decryption key for IPFS-hosted encrypted content.
+            // For this demo, we return a real public URL as an example.
+            let delivery = #httpUrl(
+              "https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46"
+            );
 
             #ok({ grant; delivery });
           };
@@ -569,21 +564,33 @@ persistent actor KnowledgeBase {
     identity.getAgentId();
   };
 
+  /// Get the canister's tECDSA public key for Avalanche.
+  /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
+  /// Use scripts/register-agent.ts to derive the AVAX address and register.
+  public func getAvalanchePublicKey() : async Blob {
+    await identity.getPublicKey("dfx_test_key"); // "key_1" on mainnet IC
+  };
+
+  /// Set the agent registration after external registration via
+  /// scripts/register-agent.ts. Controller-only.
+  public shared(msg) func setAgentRegistration(agentTokenId : Nat) : async () {
+    assert(Principal.isController(msg.caller));
+    identity.setAgentId(agentTokenId);
+  };
+
   /// Register this canister as an agent on Avalanche's IdentityRegistry.
-  /// Controller-only. Mints an ERC-721 via tECDSA (stub — post-hackathon).
+  /// Controller-only.
   ///
-  /// In production, this will:
-  ///   1. Derive an ECDSA public key via ICP's tECDSA service
-  ///   2. Compute the canister's Avalanche C-Chain address
-  ///   3. Encode an EVM transaction calling IdentityRegistry.register(card)
-  ///   4. Sign the transaction via tECDSA
-  ///   5. Submit to Avalanche via an HTTPS outcall to a C-Chain RPC endpoint
-  ///   6. Return the minted agent ID (ERC-721 token ID)
+  /// Current flow (hackathon):
+  ///   1. Call getAvalanchePublicKey() to get the canister's secp256k1 key
+  ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
+  ///   3. Script calls setAgentRegistration() to store the token ID
   ///
-  /// Pre-requisites:
-  ///   - The canister's Avalanche address must hold AVAX for gas
-  ///   - The IdentityRegistry contract must be deployed on C-Chain
-  ///   - tECDSA key must be available (subnet-level configuration)
+  /// Future flow (on-canister EVM signing):
+  ///   1. Canister encodes EVM tx calling IdentityRegistry.register(card)
+  ///   2. Signs via tECDSA (Keccak-256 + RLP encoding in Motoko)
+  ///   3. Submits to Avalanche via HTTPS outcall
+  ///   4. Returns the minted ERC-721 token ID
   public shared(msg) func registerAgent() : async Nat {
     assert(Principal.isController(msg.caller));
     await identity.registerAgent();
@@ -591,6 +598,13 @@ persistent actor KnowledgeBase {
 
   // ── Internal ──
 
-  func doSearch(_q : Text) : [Text] { ["result 1", "result 2"] };
+  func doSearch(q : Text) : [Text] {
+    [
+      "ic402: drop-in payment library for ICP canisters — x402 charges, streaming sessions, encrypted content.",
+      "Supports ckUSDC (ICRC-2) on ICP and USDC on Avalanche C-Chain via tECDSA cross-chain settlement.",
+      "Sessions reduce settlement overhead 5,000x: deposit once, stream vouchers, settle on close.",
+      "Query: " # q,
+    ]
+  };
   func doQuery(question : Text) : Text { "Answer to: " # question };
 };
