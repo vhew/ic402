@@ -1,6 +1,6 @@
 # agentflow — Specification
 
-> Drop-in payment library for ICP canisters. x402 charges, MPP-style sessions, ERC-8004 agent identity.
+> Drop-in payment library for ICP canisters. x402 charges, streaming sessions, ERC-8004 agent identity.
 
 **Version:** 1.0.0-draft
 **Date:** 2026-03-20
@@ -27,7 +27,7 @@
 
 ## 1. Overview
 
-agentflow is a Motoko library that any ICP canister can import to accept and send payments via x402, with an MPP-style session model for micropayments, and ERC-8004 agent identity on Avalanche.
+agentflow is a Motoko library that any ICP canister can import to accept and send payments via x402, with a streaming session model for micropayments, and ERC-8004 agent identity on Avalanche.
 
 **What it does:**
 
@@ -39,7 +39,7 @@ let gate = Agentflow.Gateway({ /* config */ });
 // One-time payment (x402 charge)
 switch (await gate.settle(sig)) { case (#ok(receipt)) { /* serve resource */ } };
 
-// Streaming session (MPP-style)
+// Streaming session (escrow + vouchers)
 let session = await gate.openSession(caller, intent, config, sig);
 switch (gate.consumeVoucher(voucher)) { case (#ok(delta)) { /* serve resource */ } };
 await gate.closeSession(sessionId);  // settles on-chain, refunds remainder
@@ -146,7 +146,16 @@ Client                   Canister (agentflow)             ICRC-2 Ledger
 
 ### 4.2 Session (Escrow + Cumulative Vouchers)
 
-MPP-style streaming payments. Client deposits funds into ICRC-2 escrow, then signs lightweight vouchers per call. No on-chain transaction until session close.
+Streaming payments via ICRC-2 escrow and cumulative vouchers. Client deposits funds once, then signs lightweight vouchers per call. No on-chain transaction until session close. This is agentflow's core innovation — it solves the micropayment problem that makes per-request x402 charges uneconomical for high-frequency agent interactions.
+
+**Why sessions matter:** A pure x402 charge model requires one on-chain transaction per API call. Even on ICP (~$0.0001/tx), an agent making 10,000 calls/day would pay $1 in settlement overhead alone. With sessions, those 10,000 calls settle in exactly 2 transactions (deposit + close), costing ~$0.0002 total — a 5,000x reduction.
+
+**Why ICP is uniquely suited for sessions:**
+
+- **Canister-as-escrow.** The escrow is a subaccount of the canister itself — no external smart contract, no bridge, no intermediary. The canister holds the funds, verifies vouchers, and settles atomically. On EVM chains, this requires deploying a separate escrow contract and paying gas for every interaction with it.
+- **Reverse gas model.** The payer never pays gas. The canister pays cycles for computation, and ICRC-2 transfer fees are fixed (~0.0001 ckUSDC). On Avalanche C-Chain, the payer pays gas for the deposit approval (~$0.02) and the server pays gas for settlement (~$0.02). These fees can exceed the value of micropayments.
+- **Threshold signatures for cross-chain.** If a session needs to settle on Avalanche, the canister signs the EVM transaction via tECDSA — once, on close. No hot wallet, no relayer, no bridge. The session absorbs the ~$0.03 tECDSA cost across thousands of calls instead of paying it per-call.
+- **Stable memory survives upgrades.** Session state (deposits, voucher counters, escrow subaccount balances) persists across canister upgrades. On-ledger ICRC-2 balances are independent of canister state entirely — even if the canister crashes, the escrowed funds are safe on the ledger.
 
 ```
 Client                   Canister (agentflow)             ICRC-2 Ledger
@@ -215,7 +224,7 @@ Verification rules:
 - `cumulativeAmount` must be >= previous and <= deposited amount
 - `cumulativeAmount - lastCumulativeAmount` = delta (amount consumed by this voucher)
 
-**Latency consideration:** Voucher verification in the canister is an **update call** (~2s consensus). This is slower than MPP's sub-millisecond EIP-712 verification. For most AI agent use cases (API calls that themselves take 100ms-10s), 2s overhead is acceptable. For latency-critical use cases, a future optimization could use **query calls** for stateless verification with batched state updates via timer — noted in [Future Work](#12-future-work).
+**Latency consideration:** Voucher verification in the canister is an **update call** (~2s consensus). For most AI agent use cases (API calls that themselves take 100ms-10s), 2s overhead is acceptable. For latency-critical use cases, a future optimization could use **query calls** for stateless verification with batched state updates via timer — noted in [Future Work](#12-future-work).
 
 ### 4.5 Escrow Subaccounts
 
@@ -231,7 +240,7 @@ This isolates funds per session. On close, the canister transfers consumed amoun
 
 ## 5. Policy Engine
 
-The policy engine enforces spending limits that MPP and x402 leave to the application layer. Policies are stored in stable memory.
+The policy engine enforces spending limits that x402 leaves to the application layer. Policies are stored in stable memory and apply across both charges and sessions.
 
 ### 5.1 Policy Fields
 
@@ -598,7 +607,7 @@ const session = await client.openSession(canisterId, {
 
 // Each call auto-signs a cumulative voucher
 const a1 = await session.call("query", ["What is x402?"]);
-const a2 = await session.call("query", ["How does MPP work?"]);
+const a2 = await session.call("query", ["How do sessions work?"]);
 // ... 1000 more calls, 0 on-chain txs ...
 
 console.log(`${session.consumed} of ${session.deposited} consumed`);
@@ -836,11 +845,7 @@ Items cut from MVP, to be pursued post-hackathon:
 
 ### 12.2 Query-Call Voucher Verification
 
-Use ICP query calls (no consensus, ~200ms) for stateless voucher verification, with batched state updates via canister timers. This would bring voucher latency from ~2s to ~200ms, closer to MPP's sub-millisecond target. Trade-off: introduces a trust gap where the server accepts vouchers before recording them on-chain.
-
-### 12.3 MPP Session Compatibility
-
-Full MPP `draft-tempo-session` wire format support, so agentflow sessions can interoperate with MPP clients/servers on Tempo and other chains.
+Use ICP query calls (no consensus, ~200ms) for stateless voucher verification, with batched state updates via canister timers. This would bring voucher latency from ~2s to ~200ms. Trade-off: introduces a trust gap where the server accepts vouchers before recording them on-chain. Acceptable for low-value micropayments; configurable threshold for when to require update calls.
 
 ### 12.4 Avalanche L1
 
@@ -875,8 +880,6 @@ Standalone canister that settles payments on behalf of resource servers that don
 ## Appendix B: Related Standards
 
 - [x402 Protocol](https://www.x402.org)
-- [MPP (Machine Payments Protocol)](https://mpp.dev)
-- [MPP Session Spec](https://mpp.dev/payment-methods/tempo/session)
 - [IETF Payment HTTP Auth Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/)
 - [ERC-8004: Trustless Agents](https://eips.ethereum.org/EIPS/eip-8004)
 - [ERC-8004 Contracts](https://github.com/erc-8004/erc-8004-contracts)
