@@ -1,4 +1,4 @@
-# agentflow — Specification
+# ic402 — Specification
 
 > Drop-in payment library for ICP canisters. x402 charges, streaming sessions, ERC-8004 agent identity.
 
@@ -30,14 +30,14 @@
 **agent** — autonomous AI agents that discover, pay, and transact without human intervention.
 **flow** — the continuous stream of micropayments between them, settled via sessions, not individual transactions.
 
-agentflow is a Motoko library that any ICP canister can import to accept and send payments via x402, with a streaming session model for micropayments, and ERC-8004 agent identity on Avalanche.
+ic402 is a Motoko library that any ICP canister can import to accept and send payments via x402, with a streaming session model for micropayments, and ERC-8004 agent identity on Avalanche.
 
 **What it does:**
 
 ```motoko
-import Agentflow "mo:agentflow";
+import Ic402 "mo:ic402";
 
-let gate = Agentflow.Gateway({ /* config */ });
+let gate = Ic402.Gateway({ /* config */ });
 
 // One-time payment (x402 charge)
 switch (await gate.settle(sig)) { case (#ok(receipt)) { /* serve resource */ } };
@@ -50,7 +50,7 @@ await gate.closeSession(sessionId);  // settles on-chain, refunds remainder
 
 **What makes it different from existing x402-icp implementations:**
 
-| Feature                                 | x402-icp              | Anda Facilitator       | agentflow |
+| Feature                                 | x402-icp              | Anda Facilitator       | ic402 |
 |-----------------------------------------|-----------------------|------------------------|-----------|
 | Charge (one-time)                       | Yes                   | Yes                    | Yes       |
 | Session (streaming micropayments)       | No                    | No                     | **Yes**   |
@@ -90,7 +90,7 @@ The latency and tECDSA cost matter. That's why the session model is critical: de
 ┌──────────────────────────────────────────────────────────┐
 │                    Your Canister                         │
 │                                                          │
-│   import Agentflow "mo:agentflow"                        │
+│   import Ic402 "mo:ic402"                        │
 │                                                          │
 │   ┌────────────┐  ┌────────────┐  ┌──────────────────┐   │
 │   │  Charge    │  │  Session   │  │  Policy Engine   │   │
@@ -129,7 +129,7 @@ Plus two optional integrations:
 One-time atomic payment per request. Matches the existing x402 protocol exactly.
 
 ```
-Client                   Canister (agentflow)             ICRC-2 Ledger
+Client                   Canister (ic402)             ICRC-2 Ledger
   │                            │                               │
   │── request ────────────────>│                               │
   │<── 402 + PaymentRequired ──│                               │
@@ -149,7 +149,7 @@ Client                   Canister (agentflow)             ICRC-2 Ledger
 
 ### 4.2 Session (Escrow + Cumulative Vouchers)
 
-Streaming payments via ICRC-2 escrow and cumulative vouchers. Client deposits funds once, then signs lightweight vouchers per call. No on-chain transaction until session close. This is agentflow's core innovation — it solves the micropayment problem that makes per-request x402 charges uneconomical for high-frequency agent interactions.
+Streaming payments via ICRC-2 escrow and cumulative vouchers. Client deposits funds once, then signs lightweight vouchers per call. No on-chain transaction until session close. This is ic402's core innovation — it solves the micropayment problem that makes per-request x402 charges uneconomical for high-frequency agent interactions.
 
 **Why sessions matter:** A pure x402 charge model requires one on-chain transaction per API call. Even on ICP (~$0.0001/tx), an agent making 10,000 calls/day would pay $1 in settlement overhead alone. With sessions, those 10,000 calls settle in exactly 2 transactions (deposit + close), costing ~$0.0002 total — a 5,000x reduction.
 
@@ -161,7 +161,7 @@ Streaming payments via ICRC-2 escrow and cumulative vouchers. Client deposits fu
 - **Stable memory survives upgrades.** Session state (deposits, voucher counters, escrow subaccount balances) persists across canister upgrades. On-ledger ICRC-2 balances are independent of canister state entirely — even if the canister crashes, the escrowed funds are safe on the ledger.
 
 ```
-Client                   Canister (agentflow)             ICRC-2 Ledger
+Client                   Canister (ic402)             ICRC-2 Ledger
   │                            │                               │
   │── requestAccess ──────────>│                               │
   │<── 402 + SessionOffer ─────│                               │
@@ -234,7 +234,7 @@ Verification rules:
 Session deposits are held in deterministic subaccounts of the canister:
 
 ```
-escrow_subaccount = sha256("agentflow-escrow" ++ sessionId)
+escrow_subaccount = sha256("ic402-escrow" ++ sessionId)
 ```
 
 This isolates funds per session. On close, the canister transfers consumed amount to the recipient and refunds the remainder to the payer. If the canister crashes or upgrades mid-session, the subaccount balance is intact in stable memory and can be settled on recovery.
@@ -322,7 +322,7 @@ public shared(msg) func forceCloseSession(sessionId : Text) : async PaymentResul
 
 ## 6. ERC-8004 Agent Identity
 
-ERC-8004 ("Trustless Agents") defines on-chain registries for agent identity and reputation. agentflow registers canisters as agents on Avalanche (via tECDSA) so they can be discovered and trusted by other agents.
+ERC-8004 ("Trustless Agents") defines on-chain registries for agent identity and reputation. ic402 registers canisters as agents on Avalanche (via tECDSA) so they can be discovered and trusted by other agents.
 
 ### 6.1 Registration
 
@@ -381,7 +381,7 @@ let agents = await gate.discoverAgents({
 Optional: reject payments from agents below a reputation threshold.
 
 ```motoko
-let gate = Agentflow.Gateway({
+let gate = Ic402.Gateway({
   // ...
   trustRequirements = ?{ minReputation = 60; requiredTags = ["starred"] };
 });
@@ -405,9 +405,9 @@ Deterministic on all EVM chains:
 ### 7.1 Configuration
 
 ```motoko
-import Agentflow "mo:agentflow";
+import Ic402 "mo:ic402";
 
-let gate = Agentflow.Gateway({
+let gate = Ic402.Gateway({
   recipient = { owner = Principal.fromActor(this); subaccount = null };
 
   tokens = [{
@@ -439,7 +439,7 @@ let gate = Agentflow.Gateway({
 ### 7.2 Types
 
 ```motoko
-module Agentflow {
+module Ic402 {
 
   // --- Charge ---
 
@@ -580,15 +580,15 @@ public class Gateway(config : Config) {
 ### 8.1 Install
 
 ```
-npm install @agentflow/client
+npm install @ic402/client
 ```
 
 ### 8.2 Charge (one-time)
 
 ```typescript
-import { AgentflowClient } from "@agentflow/client";
+import { Ic402Client } from "@ic402/client";
 
-const client = new AgentflowClient({
+const client = new Ic402Client({
   identity: myIdentity,
   network: "icp:1",
   autoPayment: true,
@@ -622,7 +622,7 @@ console.log(`Refunded: ${receipt.refunded}`);
 ### 8.4 Wrapped Fetch (HTTP endpoints)
 
 ```typescript
-import { wrapFetch } from "@agentflow/client";
+import { wrapFetch } from "@ic402/client";
 
 const paidFetch = wrapFetch(fetch, {
   identity: myIdentity,
@@ -652,13 +652,13 @@ const data = await client.call(best.canisterId, "getPrice", ["BTC"]);
 A paid knowledge base with both charge and session endpoints.
 
 ```motoko
-import Agentflow "mo:agentflow";
+import Ic402 "mo:ic402";
 import Principal "mo:base/Principal";
 import Time "mo:base/Time";
 
 actor KnowledgeBase {
 
-  let gate = Agentflow.Gateway({
+  let gate = Ic402.Gateway({
     recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
     tokens = [{
       ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
@@ -703,9 +703,9 @@ actor KnowledgeBase {
 
   public shared(msg) func search(
     query : Text,
-    paymentSig : ?Agentflow.PaymentSignature,
+    paymentSig : ?Ic402.PaymentSignature,
   ) : async {
-    #paymentRequired : Agentflow.PaymentRequirement;
+    #paymentRequired : Ic402.PaymentRequirement;
     #ok : [Text];
     #error : Text;
   } {
@@ -725,7 +725,7 @@ actor KnowledgeBase {
 
   // ── Session endpoint: open a streaming session ──
 
-  public shared(msg) func requestSession() : async Agentflow.SessionIntent {
+  public shared(msg) func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
       token = Principal.toText(Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"));
@@ -739,9 +739,9 @@ actor KnowledgeBase {
   };
 
   public shared(msg) func openSession(
-    config : Agentflow.SessionConfig,
-    sig : Agentflow.PaymentSignature,
-  ) : async Result<Agentflow.SessionState, Text> {
+    config : Ic402.SessionConfig,
+    sig : Ic402.PaymentSignature,
+  ) : async Result<Ic402.SessionState, Text> {
     let intent = await requestSession();
     switch (await gate.openSession(msg.caller, intent, config, sig)) {
       case (#ok(state)) { #ok(state) };
@@ -750,7 +750,7 @@ actor KnowledgeBase {
   };
 
   public shared(msg) func sessionQuery(
-    voucher : Agentflow.Voucher,
+    voucher : Ic402.Voucher,
     question : Text,
   ) : async { #ok : Text; #error : Text } {
     switch (gate.consumeVoucher(voucher)) {
@@ -761,13 +761,13 @@ actor KnowledgeBase {
     };
   };
 
-  public shared(msg) func endSession(sessionId : Text) : async Agentflow.PaymentResult {
+  public shared(msg) func endSession(sessionId : Text) : async Ic402.PaymentResult {
     await gate.closeSession(sessionId);
   };
 
   // ── Admin ──
 
-  public shared(msg) func withdraw(to : Agentflow.ICRC1.Account, amount : Nat) : async Agentflow.ICRC1.TransferResult {
+  public shared(msg) func withdraw(to : Ic402.ICRC1.Account, amount : Nat) : async Ic402.ICRC1.TransferResult {
     assert(Principal.isController(msg.caller));
     // transfer from canister to destination
   };
@@ -860,7 +860,7 @@ Standalone canister that settles payments on behalf of resource servers that don
 
 ### 12.6 CLI Tool
 
-`agentflow init`, `agentflow pay`, `agentflow discover` — developer tooling for testing and managing agentflow-enabled canisters.
+`ic402 init`, `ic402 pay`, `ic402 discover` — developer tooling for testing and managing ic402-enabled canisters.
 
 ---
 

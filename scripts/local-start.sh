@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "=== agentflow local development ==="
+echo "=== ic402 local development ==="
 
 # ── Prerequisites ──
 for cmd in icp pnpm mops; do

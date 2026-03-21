@@ -1,5 +1,5 @@
 /// Motoko unit tests for NonceManager.
-import Nonce "../src/agentflow/Nonce";
+import Nonce "../src/ic402/Nonce";
 import Principal "mo:base/Principal";
 import Time "mo:base/Time";
 import { test; suite } "mo:test";

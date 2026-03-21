@@ -1,4 +1,4 @@
-/// Voucher signing for agentflow sessions.
+/// Voucher signing for ic402 sessions.
 /// Signs cumulative voucher payloads using Ed25519.
 
 /**

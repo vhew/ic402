@@ -1,5 +1,5 @@
 {
-  "name": "agentflow",
+  "name": "ic402",
   "version": "0.1.0",
   "private": true,
   "author": "vhew",
@@ -9,16 +9,17 @@
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "build:client": "pnpm --filter @agentflow/client build",
-    "build:mcp": "pnpm --filter @agentflow/client build && pnpm --filter @agentflow/mcp build",
+    "build:client": "pnpm --filter @ic402/client build",
+    "build:mcp": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build",
+    "build:integrations": "pnpm --filter @ic402/client build && pnpm --filter './integration/*' build",
     "build": "icp build",
-    "test:client": "pnpm --filter @agentflow/client test",
+    "test:client": "pnpm --filter @ic402/client test",
     "test:integration": "pnpm exec vitest run test/integration.test.ts",
     "lint": "eslint packages/client",
     "lint:fix": "eslint --fix packages/client",
     "format": "prettier --write \"**/*.{ts,js,mjs,json,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,js,mjs,json,yaml}\"",
-    "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/node_modules integration/dist .pnpm-store .mops .icp/cache *.wasm",
+    "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/mcp/node_modules integration/mcp/dist .pnpm-store .mops .icp/cache *.wasm",
     "local:start": "./scripts/local-start.sh",
     "local:stop": "icp network stop",
     "prepare": "husky"

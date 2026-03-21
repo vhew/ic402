@@ -3,7 +3,7 @@ import { createLocalAgent, createExampleActor, getCanisterId } from './helpers.j
 import type { HttpAgent } from '@icp-sdk/core/agent';
 
 /**
- * Integration tests for agentflow example canister.
+ * Integration tests for ic402 example canister.
  *
  * These tests require a running local replica with deployed canisters:
  *   ./scripts/local-start.sh
@@ -12,7 +12,7 @@ import type { HttpAgent } from '@icp-sdk/core/agent';
  *   pnpm test:integration
  */
 
-describe('agentflow integration', () => {
+describe('ic402 integration', () => {
   let agent: HttpAgent;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let actor: any;

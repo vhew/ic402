@@ -1,4 +1,4 @@
-name: agentflow
+name: ic402
 channels:
   - conda-forge
 dependencies:

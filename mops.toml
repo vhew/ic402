@@ -1,8 +1,8 @@
 [package]
-name = "agentflow"
+name = "ic402"
 version = "0.1.0"
 description = "Drop-in payment library for ICP canisters. x402 charges, MPP-style sessions, ERC-8004 agent identity."
-repository = "https://github.com/vhew/agentflow"
+repository = "https://github.com/vhew/ic402"
 license = "Apache-2.0"
 
 [dependencies]

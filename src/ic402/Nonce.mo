@@ -1,4 +1,4 @@
-/// agentflow — Deterministic nonce generation and replay protection.
+/// ic402 — Deterministic nonce generation and replay protection.
 import Types "Types";
 import HashMap "mo:base/HashMap";
 import Blob "mo:base/Blob";

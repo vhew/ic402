@@ -1,4 +1,4 @@
-/// Test helpers for agentflow integration tests.
+/// Test helpers for ic402 integration tests.
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { exampleIdlFactory } from '../packages/client/src/idl.js';
 

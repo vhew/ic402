@@ -39,14 +39,14 @@ importers:
         specifier: ^4.0.0
         version: 4.1.0(@types/node@22.19.15)(vite@8.0.1(@types/node@22.19.15)(yaml@2.8.2))
 
-  integration:
+  integration/mcp:
     dependencies:
-      '@agentflow/client':
-        specifier: workspace:*
-        version: link:../packages/client
       '@icp-sdk/core':
         specifier: ^5.0.0
         version: 5.1.0
+      '@ic402/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.1
         version: 1.27.1(zod@3.25.76)

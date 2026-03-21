@@ -1,4 +1,4 @@
-/// agentflow — Policy engine for spending limits, rate limiting, and access control.
+/// ic402 — Policy engine for spending limits, rate limiting, and access control.
 import Types "Types";
 import Time "mo:base/Time";
 import HashMap "mo:base/HashMap";

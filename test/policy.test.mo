@@ -1,5 +1,5 @@
 /// Motoko unit tests for Policy engine.
-import Policy "../src/agentflow/Policy";
+import Policy "../src/ic402/Policy";
 import Principal "mo:base/Principal";
 import { test; suite } "mo:test";
 

@@ -1,4 +1,4 @@
-/// agentflow — Escrow manager for session deposits using ICRC-2 subaccounts.
+/// ic402 — Escrow manager for session deposits using ICRC-2 subaccounts.
 import Types "Types";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
@@ -10,9 +10,9 @@ module {
   public class EscrowManager(canisterPrincipal : Principal) {
 
     /// Derive a deterministic 32-byte subaccount for a session.
-    /// subaccount = sha256("agentflow-escrow" ++ sessionId)
+    /// subaccount = sha256("ic402-escrow" ++ sessionId)
     public func deriveSubaccount(sessionId : Text) : Blob {
-      let prefix = Blob.toArray(Text.encodeUtf8("agentflow-escrow"));
+      let prefix = Blob.toArray(Text.encodeUtf8("ic402-escrow"));
       let idBytes = Blob.toArray(Text.encodeUtf8(sessionId));
       let input = Array.append(prefix, idBytes);
       SHA256.fromArray(#sha256, input);
