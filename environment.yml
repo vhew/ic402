@@ -1,0 +1,5 @@
+name: agentflow
+channels:
+  - conda-forge
+dependencies:
+  - nodejs=22

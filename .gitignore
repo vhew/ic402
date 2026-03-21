@@ -24,5 +24,8 @@ Thumbs.db
 *.pem
 *.key
 
+# Deploy (local-only tooling, not part of the library)
+deploy/
+
 # Claude Code
 .claude/

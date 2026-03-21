@@ -134,6 +134,139 @@ module {
     requiredTags : [Text];
   };
 
+  // ── ICRC-1/2 ──
+
+  public type Account = {
+    owner : Principal;
+    subaccount : ?Blob;
+  };
+
+  public type TransferArg = {
+    from_subaccount : ?Blob;
+    to : Account;
+    amount : Nat;
+    fee : ?Nat;
+    memo : ?Blob;
+    created_at_time : ?Nat64;
+  };
+
+  public type TransferError = {
+    #BadFee : { expected_fee : Nat };
+    #BadBurn : { min_burn_amount : Nat };
+    #InsufficientFunds : { balance : Nat };
+    #TooOld;
+    #CreatedInFuture : { ledger_time : Nat64 };
+    #Duplicate : { duplicate_of : Nat };
+    #TemporarilyUnavailable;
+    #GenericError : { error_code : Nat; message : Text };
+  };
+
+  public type TransferResult = {
+    #Ok : Nat;
+    #Err : TransferError;
+  };
+
+  public type TransferFromArg = {
+    spender_subaccount : ?Blob;
+    from : Account;
+    to : Account;
+    amount : Nat;
+    fee : ?Nat;
+    memo : ?Blob;
+    created_at_time : ?Nat64;
+  };
+
+  public type TransferFromError = {
+    #BadFee : { expected_fee : Nat };
+    #BadBurn : { min_burn_amount : Nat };
+    #InsufficientFunds : { balance : Nat };
+    #InsufficientAllowance : { allowance : Nat };
+    #TooOld;
+    #CreatedInFuture : { ledger_time : Nat64 };
+    #Duplicate : { duplicate_of : Nat };
+    #TemporarilyUnavailable;
+    #GenericError : { error_code : Nat; message : Text };
+  };
+
+  public type TransferFromResult = {
+    #Ok : Nat;
+    #Err : TransferFromError;
+  };
+
+  // ── Internal session state (extends public SessionState) ──
+
+  public type InternalSessionState = {
+    id : Text;
+    payer : Principal;
+    payerPublicKey : Blob;
+    deposited : Nat;
+    var consumed : Nat;
+    var remaining : Nat;
+    var voucherCount : Nat;
+    var status : SessionStatus;
+    openedAt : Int;
+    var lastActivityAt : Int;
+    var lastSequence : Nat;
+    var lastCumulativeAmount : Nat;
+    subaccount : Blob;
+    network : Text;
+    token : Text;
+    recipient : Text;
+    autoClose : Bool;
+    maxDuration : ?Int;
+    idleTimeout : ?Int;
+  };
+
+  // ── Stable state types ──
+
+  public type StableSession = {
+    id : Text;
+    payer : Principal;
+    payerPublicKey : Blob;
+    deposited : Nat;
+    consumed : Nat;
+    remaining : Nat;
+    voucherCount : Nat;
+    status : SessionStatus;
+    openedAt : Int;
+    lastActivityAt : Int;
+    lastSequence : Nat;
+    lastCumulativeAmount : Nat;
+    subaccount : Blob;
+    network : Text;
+    token : Text;
+    recipient : Text;
+    autoClose : Bool;
+    maxDuration : ?Int;
+    idleTimeout : ?Int;
+  };
+
+  public type StableNonceState = {
+    nonces : [(Blob, Int)];
+    counter : Nat;
+  };
+
+  public type StablePolicyState = {
+    globalPolicy : SpendingPolicy;
+    callerPolicies : [(Principal, SpendingPolicy)];
+    dailySpendEntries : [(Text, Nat)];
+    rateLimitEntries : [(Text, [Int])];
+  };
+
+  public type StableGatewayState = {
+    sessions : [StableSession];
+    nonces : StableNonceState;
+    policy : StablePolicyState;
+    receiptCounter : Nat;
+  };
+
+  // ── Ledger actor type ──
+
+  public type LedgerActor = actor {
+    icrc1_transfer : (TransferArg) -> async TransferResult;
+    icrc2_transfer_from : (TransferFromArg) -> async TransferFromResult;
+  };
+
   // ── Configuration ──
 
   public type AvaxTokenConfig = {

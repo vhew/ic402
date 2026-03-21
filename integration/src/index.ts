@@ -1,0 +1,363 @@
+#!/usr/bin/env node
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Actor, HttpAgent } from '@icp-sdk/core/agent';
+import { AgentflowClient, exampleIdlFactory } from '@agentflow/client';
+import type { SessionHandle, PaymentReceipt } from '@agentflow/client';
+import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+let client: AgentflowClient | null = null;
+let agent: HttpAgent | null = null;
+let defaultCanisterId: string | null = null;
+const activeSessions = new Map<string, SessionHandle>();
+
+function requireClient(): AgentflowClient {
+  if (!client) throw new Error('Not configured. Call the "configure" tool first.');
+  return client;
+}
+
+function requireAgent(): HttpAgent {
+  if (!agent) throw new Error('Not configured. Call the "configure" tool first.');
+  return agent;
+}
+
+function actorFactory(canisterId: string) {
+  return Actor.createActor(exampleIdlFactory, {
+    agent: requireAgent(),
+    canisterId,
+  });
+}
+
+/** Serialize a value for JSON, handling bigint and Uint8Array. */
+function serialize(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
+  if (Array.isArray(value)) return value.map(serialize);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = serialize(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+const server = new McpServer({
+  name: 'agentflow',
+  version: '0.1.0',
+});
+
+// ---------------------------------------------------------------------------
+// Tool: configure
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'configure',
+  'Connect to an agentflow-enabled ICP canister. Must be called before any other tool.',
+  {
+    canisterId: z.string().describe('Principal of the canister to interact with'),
+    host: z.string().default('http://localhost:4944').describe('ICP replica URL'),
+    network: z.string().default('icp:1').describe('CAIP-2 network identifier'),
+    maxPerRequest: z.string().optional().describe('Max tokens per charge (e.g. "100000")'),
+    maxPerDay: z.string().optional().describe('Max tokens per day'),
+    maxTotal: z.string().optional().describe('Max tokens total across all calls'),
+    maxSessionDeposit: z.string().optional().describe('Max session escrow deposit'),
+  },
+  async ({ canisterId, host, network, maxPerRequest, maxPerDay, maxTotal, maxSessionDeposit }) => {
+    agent = await HttpAgent.create({ host, shouldFetchRootKey: host.includes('localhost') });
+
+    client = new AgentflowClient({
+      identity: null,
+      network,
+      autoPayment: true,
+      budget: {
+        maxPerRequest: maxPerRequest ? BigInt(maxPerRequest) : undefined,
+        maxPerDay: maxPerDay ? BigInt(maxPerDay) : undefined,
+        maxTotal: maxTotal ? BigInt(maxTotal) : undefined,
+        maxSessionDeposit: maxSessionDeposit ? BigInt(maxSessionDeposit) : undefined,
+      },
+    });
+
+    defaultCanisterId = canisterId;
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Connected to ${canisterId} at ${host} (network: ${network})`,
+        },
+      ],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: search
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'search',
+  'Call the search endpoint on an agentflow canister (x402 charge flow). Returns results or a payment requirement.',
+  {
+    query: z.string().describe('Search query text'),
+    canisterId: z.string().optional().describe('Canister to call (defaults to configured canister)'),
+  },
+  async ({ query, canisterId }) => {
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID. Configure first or pass canisterId.');
+    requireAgent();
+
+    const actor = actorFactory(cid);
+    const result = await actor.search(query, []) as Record<string, unknown>;
+
+    if ('paymentRequired' in result) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              { status: 'payment_required', requirement: serialize(result.paymentRequired) },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+
+    if ('ok' in result) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok', results: result.ok }) }],
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({ status: 'error', detail: serialize(result) }) }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: request_session
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'request_session',
+  'Request a session intent from a canister — returns pricing (suggestedDeposit, costPerCall) without opening a session.',
+  {
+    canisterId: z.string().optional().describe('Canister to query (defaults to configured canister)'),
+  },
+  async ({ canisterId }) => {
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID.');
+    requireAgent();
+
+    const actor = actorFactory(cid);
+    const intent = await actor.requestSession();
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(serialize(intent), null, 2) }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: open_session
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'open_session',
+  'Open a streaming micropayment session with escrow deposit. Returns a session ID for subsequent calls.',
+  {
+    canisterId: z.string().optional().describe('Canister to open session on'),
+    maxDeposit: z.string().optional().describe('Max deposit in token units (defaults to canister suggestion)'),
+  },
+  async ({ canisterId, maxDeposit }) => {
+    const c = requireClient();
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID.');
+
+    const session = await c.openSession(
+      cid,
+      maxDeposit ? { maxDeposit: BigInt(maxDeposit) } : {},
+      actorFactory,
+    );
+
+    activeSessions.set(session.id, session);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(
+            {
+              sessionId: session.id,
+              deposited: session.deposited.toString(),
+              remaining: session.remaining.toString(),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: session_query
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'session_query',
+  'Send a query through an open session (auto-signs a voucher). Each call consumes costPerCall from the deposit.',
+  {
+    sessionId: z.string().describe('Session ID from open_session'),
+    question: z.string().describe('Question or query text'),
+  },
+  async ({ sessionId, question }) => {
+    const session = activeSessions.get(sessionId);
+    if (!session) throw new Error(`No active session: ${sessionId}`);
+
+    const answer = await session.call('sessionQuery', [question]);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({
+            answer,
+            consumed: session.consumed.toString(),
+            remaining: session.remaining.toString(),
+          }),
+        },
+      ],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: get_session
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'get_session',
+  'Get the current state of an active session (consumed, remaining, voucher count).',
+  {
+    sessionId: z.string().describe('Session ID'),
+  },
+  async ({ sessionId }) => {
+    const session = activeSessions.get(sessionId);
+    if (!session) throw new Error(`No active session: ${sessionId}`);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({
+            sessionId: session.id,
+            deposited: session.deposited.toString(),
+            consumed: session.consumed.toString(),
+            remaining: session.remaining.toString(),
+          }),
+        },
+      ],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: close_session
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'close_session',
+  'Close a session — settles consumed amount on-chain and refunds the remainder. Returns a payment receipt.',
+  {
+    sessionId: z.string().describe('Session ID to close'),
+  },
+  async ({ sessionId }) => {
+    const session = activeSessions.get(sessionId);
+    if (!session) throw new Error(`No active session: ${sessionId}`);
+
+    const receipt: PaymentReceipt = await session.close();
+    activeSessions.delete(sessionId);
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(serialize(receipt), null, 2) }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: list_sessions
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'list_sessions',
+  'List all active sessions managed by this MCP server.',
+  {},
+  async () => {
+    const sessions = Array.from(activeSessions.entries()).map(([id, s]) => ({
+      sessionId: id,
+      deposited: s.deposited.toString(),
+      consumed: s.consumed.toString(),
+      remaining: s.remaining.toString(),
+    }));
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(sessions, null, 2) }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: call
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'call',
+  'Call any method on the configured canister. For paid endpoints, returns the payment requirement.',
+  {
+    method: z.string().describe('Canister method name'),
+    args: z.string().default('[]').describe('JSON array of arguments'),
+    canisterId: z.string().optional().describe('Canister to call (defaults to configured canister)'),
+  },
+  async ({ method, args, canisterId }) => {
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID.');
+    requireAgent();
+
+    const actor = actorFactory(cid);
+    const parsedArgs = JSON.parse(args);
+    const result = await actor[method](...(Array.isArray(parsedArgs) ? parsedArgs : [parsedArgs]));
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(serialize(result), null, 2) }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((err) => {
+  console.error('agentflow MCP server failed:', err);
+  process.exit(1);
+});

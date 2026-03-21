@@ -2,12 +2,13 @@
 ///
 /// ```motoko
 /// import Agentflow "mo:agentflow";
-/// let gate = Agentflow.Gateway({ ... });
+/// let gate = Agentflow.Gateway({ ... }, Principal.fromActor(self));
 /// ```
 
 import Types "Types";
-import Gateway "Gateway";
-import Policy "Policy";
+import GatewayModule "Gateway";
+import NonceMod "Nonce";
+import EscrowMod "Escrow";
 
 module {
 
@@ -32,7 +33,12 @@ module {
   public type ServiceEntry = Types.ServiceEntry;
   public type AvaxConfig = Types.AvaxConfig;
   public type AvaxTokenConfig = Types.AvaxTokenConfig;
+  public type StableGatewayState = Types.StableGatewayState;
+  public type Account = Types.Account;
+  public type TransferResult = Types.TransferResult;
 
-  // Re-export gateway
-  public let Gateway = Gateway.Gateway;
+  // Re-export classes
+  public let Gateway = GatewayModule.Gateway;
+  public let NonceManager = NonceMod.NonceManager;
+  public let EscrowManager = EscrowMod.EscrowManager;
 };

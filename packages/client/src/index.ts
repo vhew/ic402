@@ -12,3 +12,6 @@ export type {
   SessionState,
   Voucher,
 } from './types.js';
+export { signVoucher, encodeVoucherPayload } from './voucher.js';
+export type { VoucherSigner } from './voucher.js';
+export { exampleIdlFactory } from './idl.js';
