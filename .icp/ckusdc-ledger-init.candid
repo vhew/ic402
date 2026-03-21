@@ -1,0 +1,15 @@
+(variant { Init = record {
+  token_symbol = "ckUSDC";
+  token_name = "Chain-key USDC (Local)";
+  minting_account = record { owner = principal "m63nb-rp27w-qtxrj-d7gft-53iww-dlxgc-rlzqu-4i5yr-uf6aj-gzlaj-zae" };
+  transfer_fee = 10_000 : nat;
+  decimals = opt (6 : nat8);
+  metadata = vec {};
+  initial_balances = vec {};
+  archive_options = record {
+    num_blocks_to_archive = 1000 : nat64;
+    trigger_threshold = 2000 : nat64;
+    controller_id = principal "m63nb-rp27w-qtxrj-d7gft-53iww-dlxgc-rlzqu-4i5yr-uf6aj-gzlaj-zae";
+  };
+  feature_flags = opt record { icrc2 = true };
+} })
