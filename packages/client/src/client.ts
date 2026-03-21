@@ -1,4 +1,4 @@
-import type { PaymentReceipt, SessionIntent, SessionState, Voucher } from './types.js';
+import type { ContentDelivery, PaymentReceipt, SessionIntent, SessionState, Voucher } from './types.js';
 import { signVoucher, type VoucherSigner } from './voucher.js';
 
 export interface BudgetConfig {
@@ -16,7 +16,7 @@ export interface SessionPreferences {
   idleTimeout?: bigint;
 }
 
-export interface AgentflowClientConfig {
+export interface Ic402ClientConfig {
   /** ICP identity for signing payments */
   identity: unknown; // @icp-sdk/core Ed25519KeyIdentity
   /** CAIP-2 network identifier */
@@ -37,20 +37,21 @@ export interface SessionHandle {
   consumed: bigint;
   remaining: bigint;
   call(method: string, args: unknown[]): Promise<unknown>;
+  callForContent(method: string, args: unknown[]): Promise<ContentDelivery>;
   close(): Promise<PaymentReceipt>;
 }
 
 /**
- * agentflow TypeScript client SDK.
+ * ic402 TypeScript client SDK.
  *
  * Handles x402 charge payments and streaming sessions against
- * agentflow-enabled ICP canisters.
+ * ic402-enabled ICP canisters.
  */
-export class AgentflowClient {
-  private config: AgentflowClientConfig;
+export class Ic402Client {
+  private config: Ic402ClientConfig;
   private totalSpent = 0n;
 
-  constructor(config: AgentflowClientConfig) {
+  constructor(config: Ic402ClientConfig) {
     this.config = config;
   }
 
@@ -193,6 +194,33 @@ export class AgentflowClient {
         return callResult;
       },
 
+      async callForContent(method: string, callArgs: unknown[]): Promise<ContentDelivery> {
+        const cost = intent.costPerCall ?? 1n;
+        consumed += cost;
+        sequence += 1n;
+
+        let sig: Uint8Array = new Uint8Array(64);
+        if (signer) {
+          sig = new Uint8Array(await signVoucher(signer, state.id, consumed, sequence));
+        }
+
+        const v: Voucher = {
+          sessionId: state.id,
+          cumulativeAmount: consumed,
+          sequence,
+          signature: sig,
+        };
+
+        const callResult = await actor[method](v, ...callArgs);
+        if (callResult && typeof callResult === 'object' && 'ok' in callResult) {
+          return callResult.ok as ContentDelivery;
+        }
+        if (callResult && typeof callResult === 'object' && 'error' in callResult) {
+          throw new Error(callResult.error as string);
+        }
+        return callResult as ContentDelivery;
+      },
+
       async close(): Promise<PaymentReceipt> {
         const closeResult = await actor.endSession(state.id);
         if ('ok' in closeResult) {
@@ -203,6 +231,63 @@ export class AgentflowClient {
     };
 
     return handle;
+  }
+
+  /**
+   * Fetch content from a ContentDelivery response.
+   * Handles all delivery methods: inline, httpUrl, canisterQuery, assetCanister.
+   */
+  async fetchContent(
+    delivery: ContentDelivery,
+    options?: {
+      canisterId?: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      actorFactory?: (canisterId: string) => any;
+    },
+  ): Promise<Uint8Array> {
+    const method = delivery.delivery;
+
+    if ('inline' in method) {
+      return method.inline;
+    }
+
+    if ('httpUrl' in method) {
+      const response = await fetch(method.httpUrl);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      return new Uint8Array(await response.arrayBuffer());
+    }
+
+    if ('assetCanister' in method) {
+      const { canisterId, path } = method.assetCanister;
+      const url = `https://${canisterId}.icp0.io${path}`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Asset canister ${response.status}: ${response.statusText}`);
+      return new Uint8Array(await response.arrayBuffer());
+    }
+
+    if ('canisterQuery' in method) {
+      const { method: queryMethod, chunkCount } = method.canisterQuery;
+      const cid = options?.canisterId;
+      if (!cid || !options?.actorFactory) {
+        throw new Error('canisterId and actorFactory required for canisterQuery delivery');
+      }
+      const actor = options.actorFactory(cid);
+      const chunks: Uint8Array[] = [];
+      for (let i = 0n; i < chunkCount; i++) {
+        const chunk = await actor[queryMethod](delivery.grant, Number(i));
+        chunks.push(new Uint8Array(chunk as ArrayBuffer));
+      }
+      const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
+      const result = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return result;
+    }
+
+    throw new Error('Unknown delivery method');
   }
 
   /**

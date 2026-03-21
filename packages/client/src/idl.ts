@@ -1,4 +1,4 @@
-/// Candid IDL factory for agentflow example canister.
+/// Candid IDL factory for ic402 example canister.
 /// Embedded following engramx pattern — no .did file dependency.
 import { IDL } from '@icp-sdk/core/candid';
 
@@ -101,6 +101,50 @@ const SpendingPolicy = IDL.Record({
   blockedCallers: IDL.Opt(IDL.Vec(IDL.Principal)),
 });
 
+// ── Content Delivery ──
+
+const ContentRef = IDL.Record({
+  id: IDL.Text,
+  mimeType: IDL.Opt(IDL.Text),
+  sizeBytes: IDL.Opt(IDL.Nat),
+  metadata: IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text))),
+});
+
+const AccessGrant = IDL.Record({
+  grantId: IDL.Text,
+  contentRef: ContentRef,
+  grantee: IDL.Principal,
+  receiptId: IDL.Text,
+  issuedAt: IDL.Int,
+  expiresAt: IDL.Int,
+  hmac: IDL.Vec(IDL.Nat8),
+});
+
+const AccessGrantResult = IDL.Variant({
+  ok: IDL.Null,
+  expired: IDL.Null,
+  invalidGrant: IDL.Null,
+  revoked: IDL.Null,
+});
+
+const DeliveryMethod = IDL.Variant({
+  inline: IDL.Vec(IDL.Nat8),
+  canisterQuery: IDL.Record({ method: IDL.Text, chunkCount: IDL.Nat }),
+  httpUrl: IDL.Text,
+  assetCanister: IDL.Record({ canisterId: IDL.Principal, path: IDL.Text }),
+});
+
+const ContentDelivery = IDL.Record({
+  grant: AccessGrant,
+  delivery: DeliveryMethod,
+});
+
+const GetContentResult = IDL.Variant({
+  paymentRequired: PaymentRequirement,
+  ok: ContentDelivery,
+  error: IDL.Text,
+});
+
 const SearchResult = IDL.Variant({
   paymentRequired: PaymentRequirement,
   ok: IDL.Vec(IDL.Text),
@@ -117,13 +161,33 @@ const SessionQueryResult = IDL.Variant({
   error: IDL.Text,
 });
 
+// ── Content Store ──
+
+const ContentEntry = IDL.Record({
+  id: IDL.Text,
+  mimeType: IDL.Text,
+  totalSize: IDL.Nat,
+  chunkCount: IDL.Nat,
+  createdAt: IDL.Int,
+});
+
+const ContentStoreResult = IDL.Variant({
+  ok: IDL.Null,
+  contentNotFound: IDL.Null,
+  chunkNotFound: IDL.Nat,
+  contentAlreadyExists: IDL.Null,
+  chunkTooLarge: IDL.Nat,
+});
+
 export const exampleIdlFactory = () =>
   IDL.Service({
+    // Paid service
     search: IDL.Func(
       [IDL.Text, IDL.Opt(PaymentSignature)],
       [SearchResult],
       [],
     ),
+    // Sessions
     requestSession: IDL.Func([], [SessionIntent], []),
     openSession: IDL.Func(
       [SessionConfig, PaymentSignature],
@@ -136,6 +200,60 @@ export const exampleIdlFactory = () =>
       [],
     ),
     endSession: IDL.Func([IDL.Text], [PaymentResult], []),
+    // Pattern 1: In-canister content (ContentStore)
+    uploadContent: IDL.Func(
+      [IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)],
+      [ContentStoreResult],
+      [],
+    ),
+    uploadContentInit: IDL.Func(
+      [IDL.Text, IDL.Text, IDL.Nat, IDL.Nat],
+      [ContentStoreResult],
+      [],
+    ),
+    uploadContentChunk: IDL.Func(
+      [IDL.Text, IDL.Nat, IDL.Vec(IDL.Nat8)],
+      [ContentStoreResult],
+      [],
+    ),
+    deleteContent: IDL.Func(
+      [IDL.Text],
+      [ContentStoreResult],
+      [],
+    ),
+    listContent: IDL.Func(
+      [],
+      [IDL.Vec(ContentEntry)],
+      ['query'],
+    ),
+    getContent: IDL.Func(
+      [IDL.Text, IDL.Opt(PaymentSignature)],
+      [GetContentResult],
+      [],
+    ),
+    getChunk: IDL.Func(
+      [AccessGrant, IDL.Nat],
+      [IDL.Opt(IDL.Vec(IDL.Nat8))],
+      ['query'],
+    ),
+    // Pattern 2: Asset canister
+    getAssetContent: IDL.Func(
+      [IDL.Text, IDL.Opt(PaymentSignature)],
+      [GetContentResult],
+      [],
+    ),
+    // Pattern 3: External (S3/IPFS/Arweave)
+    getExternalContent: IDL.Func(
+      [IDL.Text, IDL.Opt(PaymentSignature)],
+      [GetContentResult],
+      [],
+    ),
+    // Admin
+    verifyGrant: IDL.Func(
+      [AccessGrant],
+      [AccessGrantResult],
+      ['query'],
+    ),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
   });
@@ -150,4 +268,12 @@ export {
   SessionConfig,
   Voucher,
   SpendingPolicy,
+  ContentRef,
+  AccessGrant,
+  AccessGrantResult,
+  DeliveryMethod,
+  ContentDelivery,
+  GetContentResult,
+  ContentEntry,
+  ContentStoreResult,
 };
