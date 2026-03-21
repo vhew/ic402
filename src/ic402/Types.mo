@@ -1,4 +1,4 @@
-/// agentflow — Core types for payment, sessions, and policy.
+/// ic402 — Core types for payment, sessions, and policy.
 module {
 
   // ── Token & Pricing ──
@@ -258,6 +258,7 @@ module {
     nonces : StableNonceState;
     policy : StablePolicyState;
     receiptCounter : Nat;
+    accessGrants : ?StableAccessGrantState;
   };
 
   // ── Ledger actor type ──
@@ -304,7 +305,86 @@ module {
   public type Config = {
     recipient : { owner : Principal; subaccount : ?Blob };
     tokens : [TokenConfig];
-    erc8004 : ?ERC8004Config;
     avalanche : ?AvaxConfig;
+  };
+
+  // ── Content Delivery ──
+
+  public type ContentRef = {
+    id : Text;
+    mimeType : ?Text;
+    sizeBytes : ?Nat;
+    metadata : ?[(Text, Text)];
+  };
+
+  public type AccessGrant = {
+    grantId : Text;
+    contentRef : ContentRef;
+    grantee : Principal;
+    receiptId : Text;
+    issuedAt : Int;
+    expiresAt : Int;
+    hmac : Blob;
+  };
+
+  public type AccessGrantResult = {
+    #ok;
+    #expired;
+    #invalidGrant;
+    #revoked;
+  };
+
+  public type DeliveryMethod = {
+    #inline : Blob;
+    #canisterQuery : { method : Text; chunkCount : Nat };
+    #httpUrl : Text;
+    #assetCanister : { canisterId : Principal; path : Text };
+  };
+
+  public type ContentDelivery = {
+    grant : AccessGrant;
+    delivery : DeliveryMethod;
+  };
+
+  public type StableAccessGrantState = {
+    revokedGrantIds : [Text];
+    grantCounter : Nat;
+    hmacSeed : Nat;
+  };
+
+  // ── Content Store ──
+
+  public type ContentEntry = {
+    id : Text;
+    mimeType : Text;
+    totalSize : Nat;
+    chunkCount : Nat;
+    createdAt : Int;
+  };
+
+  public type ContentStoreResult = {
+    #ok;
+    #contentNotFound;
+    #chunkNotFound : Nat;
+    #contentAlreadyExists;
+    #chunkTooLarge : Nat;
+  };
+
+  public type StableContentEntry = {
+    id : Text;
+    mimeType : Text;
+    chunks : [Blob];
+    totalSize : Nat;
+    createdAt : Int;
+  };
+
+  public type StableContentStoreState = {
+    entries : [StableContentEntry];
+  };
+
+  // ── Identity ──
+
+  public type StableIdentityState = {
+    agentId : ?Nat;
   };
 };
