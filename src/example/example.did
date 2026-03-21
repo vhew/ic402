@@ -53,6 +53,14 @@ type SessionConfig =
    idleTimeout: opt int;
    maxDeposit: nat;
  };
+type ServiceEntry = 
+ record {
+   domains: vec text;
+   endpoint: text;
+   name: text;
+   skills: vec text;
+   version: text;
+ };
 type PaymentSignature = 
  record {
    network: text;
@@ -141,6 +149,13 @@ type ContentDelivery =
    delivery: DeliveryMethod;
    grant: AccessGrant;
  };
+type AgentCard = 
+ record {
+   description: text;
+   name: text;
+   services: vec ServiceEntry;
+   x402Support: bool;
+ };
 type AccessGrantResult = 
  variant {
    expired;
@@ -165,11 +180,17 @@ type AccessGrant =
 ///   2. Asset canister — separate ICP canister via HTTP gateway
 ///   3. External (S3/IPFS/Arweave) — off-chain hosting
 /// 
-/// Plus a paid service endpoint (search) and streaming sessions.
+/// Plus a paid service endpoint (search), streaming sessions, and
+/// ERC-8004 agent identity on Avalanche for cross-chain discovery.
 service : {
   deleteContent: (id: text) -> (ContentStoreResult);
   endSession: (sessionId: text) -> (PaymentResult);
   forceCloseSession: (sessionId: text) -> (PaymentResult);
+  /// Get the agent card (public, no auth required).
+  /// Other agents and indexers call this to discover capabilities.
+  getAgentCard: () -> (AgentCard) query;
+  /// Get the registered agent ID on Avalanche (null if not yet registered).
+  getAgentId: () -> (opt nat) query;
   getAssetContent: (assetPath: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;
@@ -197,6 +218,22 @@ service : {
       err: text;
       ok: SessionState;
     });
+  /// Register this canister as an agent on Avalanche's IdentityRegistry.
+  /// Controller-only. Mints an ERC-721 via tECDSA (stub — post-hackathon).
+  /// 
+  /// In production, this will:
+  ///   1. Derive an ECDSA public key via ICP's tECDSA service
+  ///   2. Compute the canister's Avalanche C-Chain address
+  ///   3. Encode an EVM transaction calling IdentityRegistry.register(card)
+  ///   4. Sign the transaction via tECDSA
+  ///   5. Submit to Avalanche via an HTTPS outcall to a C-Chain RPC endpoint
+  ///   6. Return the minted agent ID (ERC-721 token ID)
+  /// 
+  /// Pre-requisites:
+  ///   - The canister's Avalanche address must hold AVAX for gas
+  ///   - The IdentityRegistry contract must be deployed on C-Chain
+  ///   - tECDSA key must be available (subnet-level configuration)
+  registerAgent: () -> (nat);
   requestSession: () -> (SessionIntent);
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
    (variant {

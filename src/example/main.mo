@@ -5,7 +5,8 @@
 ///   2. Asset canister — separate ICP canister via HTTP gateway
 ///   3. External (S3/IPFS/Arweave) — off-chain hosting
 ///
-/// Plus a paid service endpoint (search) and streaming sessions.
+/// Plus a paid service endpoint (search), streaming sessions, and
+/// ERC-8004 agent identity on Avalanche for cross-chain discovery.
 import Ic402 "../ic402/lib";
 import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
@@ -18,6 +19,7 @@ persistent actor KnowledgeBase {
 
   var stableGateway : ?Ic402.StableGatewayState = null;
   var stableContent : ?Ic402.StableContentStoreState = null;
+  var stableIdentity : ?Ic402.StableIdentityState = null;
 
   // ── Gateway — handles payment for ALL patterns ──
 
@@ -29,6 +31,29 @@ persistent actor KnowledgeBase {
         symbol = "ckUSDC";
         decimals = 6;
       }];
+
+      // ── Avalanche cross-chain payments (optional) ──
+      //
+      // Accept USDC on Avalanche C-Chain in addition to ICP ckUSDC.
+      // Requires tECDSA for cross-chain settlement verification.
+      //
+      // When enabled, clients can pay via Avalanche and the canister
+      // verifies the transaction on-chain using tECDSA signatures.
+      // The settlement flow:
+      //   1. Client gets PaymentRequirement with network = "eip155:43114"
+      //   2. Client sends USDC on Avalanche to the recipient address
+      //   3. Client retries with PaymentSignature containing the tx hash
+      //   4. Canister verifies the Avalanche tx via tECDSA + RPC
+      //
+      // avalanche = ?{
+      //   chainId = 43114;  // Avalanche C-Chain mainnet
+      //   recipient = "0xYOUR_AVALANCHE_ADDRESS";
+      //   tokens = [{
+      //     address = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"; // USDC on Avalanche
+      //     symbol = "USDC";
+      //     decimals = 6 : Nat8;
+      //   }];
+      // };
       avalanche = null;
     },
     Principal.fromActor(KnowledgeBase),
@@ -38,6 +63,51 @@ persistent actor KnowledgeBase {
 
   transient let store = Ic402.ContentStore(Principal.fromActor(KnowledgeBase));
 
+  // ── Identity — OPTIONAL, for ERC-8004 agent discovery on Avalanche ──
+  //
+  // Registers this canister as a discoverable agent on ERC-8004's
+  // IdentityRegistry contract on Avalanche. Other agents and clients
+  // can find this service by querying the registry for skills, domains,
+  // or x402 support.
+  //
+  // The registration mints an ERC-721 on Avalanche using tECDSA — the
+  // canister signs the EVM transaction directly, no external wallet needed.
+  //
+  // Discovery flow:
+  //   1. This canister calls registerAgent() → mints ERC-721 on Avalanche
+  //   2. The agent card (name, services, skills) is stored on-chain
+  //   3. Other agents query IdentityRegistry.getAgent(agentId)
+  //   4. They find this canister's endpoint and know it supports x402
+  //   5. They call the endpoint, get a 402, pay, and receive the service
+  //
+  // Trust & Reputation:
+  //   Agents accumulate on-chain reputation scores via the ERC-8004
+  //   ReputationRegistry contract. The Gateway can enforce minimum
+  //   reputation requirements via trustRequirements in the config:
+  //
+  //   gate.setTrustRequirements(?{
+  //     minReputation = 60;
+  //     requiredTags = ["verified"];
+  //   });
+  //
+  //   This lets you restrict high-value endpoints to trusted agents only.
+
+  transient let identity = Ic402.Identity({
+    chain = #avalanche;
+    card = {
+      name = "KnowledgeBase";
+      description = "Paid knowledge base — search, Q&A, and encrypted content delivery via ic402";
+      services = [{
+        name = "search";
+        endpoint = "https://" # Principal.toText(Principal.fromActor(KnowledgeBase)) # ".icp0.io";
+        version = "1.0";
+        skills = ["search", "qa", "content-delivery"];
+        domains = ["knowledge", "research"];
+      }];
+      x402Support = true;
+    };
+  });
+
   // Load stable state on init
   do {
     switch (stableGateway) {
@@ -46,6 +116,10 @@ persistent actor KnowledgeBase {
     };
     switch (stableContent) {
       case (?data) { store.loadStable(data) };
+      case (null) {};
+    };
+    switch (stableIdentity) {
+      case (?data) { identity.loadStable(data) };
       case (null) {};
     };
   };
@@ -71,11 +145,13 @@ persistent actor KnowledgeBase {
   system func preupgrade() {
     stableGateway := ?gate.toStable();
     stableContent := ?store.toStable();
+    stableIdentity := ?identity.toStable();
   };
 
   system func postupgrade() {
     stableGateway := null;
     stableContent := null;
+    stableIdentity := null;
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -451,6 +527,66 @@ persistent actor KnowledgeBase {
   /// Verify a grant (usable from query calls or http_request handlers).
   public query func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {
     gate.verifyGrant(grant);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Identity: ERC-8004 Agent Discovery on Avalanche
+  //
+  // These endpoints expose the agent card for discovery and provide
+  // on-chain registration. The agent card tells other agents:
+  //   - What services this canister offers (search, Q&A, content)
+  //   - The endpoint URL for making x402 payments
+  //   - Skills and domains for capability-based discovery
+  //
+  // Registration (registerAgent) is an admin action that mints an
+  // ERC-721 on Avalanche's IdentityRegistry contract via tECDSA.
+  // Once registered, other agents can find this canister by querying
+  // the Avalanche contract — no centralized directory needed.
+  //
+  // Cross-chain flow:
+  //   1. Agent A queries IdentityRegistry on Avalanche for skill="search"
+  //   2. Registry returns this canister's agent card with ICP endpoint
+  //   3. Agent A calls the ICP endpoint, receives 402 + PaymentRequirement
+  //   4. Agent A pays (ICP ckUSDC or Avalanche USDC) and gets the service
+  //
+  // Avalanche-specific considerations:
+  //   - tECDSA key: the canister derives an ECDSA key via ICP's threshold
+  //     ECDSA service, giving it a native Avalanche address
+  //   - Gas: the canister's Avalanche address needs AVAX for registration tx
+  //   - Contract addresses (Avalanche C-Chain mainnet):
+  //     IdentityRegistry: 0x... (TBD — deploy post-hackathon)
+  //     ReputationRegistry: 0x... (TBD)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// Get the agent card (public, no auth required).
+  /// Other agents and indexers call this to discover capabilities.
+  public query func getAgentCard() : async Ic402.AgentCard {
+    identity.getCard();
+  };
+
+  /// Get the registered agent ID on Avalanche (null if not yet registered).
+  public query func getAgentId() : async ?Nat {
+    identity.getAgentId();
+  };
+
+  /// Register this canister as an agent on Avalanche's IdentityRegistry.
+  /// Controller-only. Mints an ERC-721 via tECDSA (stub — post-hackathon).
+  ///
+  /// In production, this will:
+  ///   1. Derive an ECDSA public key via ICP's tECDSA service
+  ///   2. Compute the canister's Avalanche C-Chain address
+  ///   3. Encode an EVM transaction calling IdentityRegistry.register(card)
+  ///   4. Sign the transaction via tECDSA
+  ///   5. Submit to Avalanche via an HTTPS outcall to a C-Chain RPC endpoint
+  ///   6. Return the minted agent ID (ERC-721 token ID)
+  ///
+  /// Pre-requisites:
+  ///   - The canister's Avalanche address must hold AVAX for gas
+  ///   - The IdentityRegistry contract must be deployed on C-Chain
+  ///   - tECDSA key must be available (subnet-level configuration)
+  public shared(msg) func registerAgent() : async Nat {
+    assert(Principal.isController(msg.caller));
+    await identity.registerAgent();
   };
 
   // ── Internal ──
