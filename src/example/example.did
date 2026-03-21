@@ -1,0 +1,221 @@
+type Voucher = 
+ record {
+   cumulativeAmount: nat;
+   sequence: nat;
+   sessionId: text;
+   signature: blob;
+ };
+type SpendingPolicy = 
+ record {
+   allowedCallers: opt vec principal;
+   blockedCallers: opt vec principal;
+   maxConcurrentSessions: opt nat;
+   maxPerDay: opt nat;
+   maxPerTransaction: opt nat;
+   maxSessionDeposit: opt nat;
+   maxSessionDuration: opt int;
+   rateLimitPerMinute: opt nat;
+   sessionIdleTimeout: opt int;
+ };
+type SessionStatus = 
+ variant {
+   closed;
+   closing;
+   expired;
+   open;
+ };
+type SessionState = 
+ record {
+   consumed: nat;
+   deposited: nat;
+   id: text;
+   lastActivityAt: int;
+   openedAt: int;
+   payer: principal;
+   remaining: nat;
+   status: SessionStatus;
+   voucherCount: nat;
+ };
+type SessionIntent = 
+ record {
+   costPerCall: opt nat;
+   description: opt text;
+   expiry: int;
+   minDeposit: opt nat;
+   network: text;
+   recipient: text;
+   suggestedDeposit: nat;
+   token: text;
+ };
+type SessionConfig = 
+ record {
+   autoClose: bool;
+   idleTimeout: opt int;
+   maxDeposit: nat;
+ };
+type PaymentSignature = 
+ record {
+   network: text;
+   nonce: blob;
+   scheme: text;
+   sender: text;
+   signature: blob;
+ };
+type PaymentResult = 
+ variant {
+   depositBelowMinimum: nat;
+   expired;
+   insufficientFunds;
+   invalidSignature;
+   networkNotSupported;
+   ok: PaymentReceipt;
+   policyDenied: text;
+   reputationTooLow: nat;
+   settlementFailed: text;
+   tokenNotAccepted;
+ };
+type PaymentRequirement = 
+ record {
+   amount: nat;
+   expiry: int;
+   network: text;
+   nonce: blob;
+   recipient: text;
+   scheme: text;
+   token: text;
+ };
+type PaymentReceipt = 
+ record {
+   amount: nat;
+   id: text;
+   network: text;
+   recipient: text;
+   refunded: opt nat;
+   sender: text;
+   sessionId: opt text;
+   timestamp: int;
+   token: text;
+   txHash: opt text;
+ };
+type DeliveryMethod = 
+ variant {
+   assetCanister: record {
+                    canisterId: principal;
+                    path: text;
+                  };
+   canisterQuery: record {
+                    chunkCount: nat;
+                    method: text;
+                  };
+   httpUrl: text;
+   inline: blob;
+ };
+type ContentStoreResult = 
+ variant {
+   chunkNotFound: nat;
+   chunkTooLarge: nat;
+   contentAlreadyExists;
+   contentNotFound;
+   ok;
+ };
+type ContentRef = 
+ record {
+   id: text;
+   metadata: opt vec record {
+                       text;
+                       text;
+                     };
+   mimeType: opt text;
+   sizeBytes: opt nat;
+ };
+type ContentEntry = 
+ record {
+   chunkCount: nat;
+   createdAt: int;
+   id: text;
+   mimeType: text;
+   totalSize: nat;
+ };
+type ContentDelivery = 
+ record {
+   delivery: DeliveryMethod;
+   grant: AccessGrant;
+ };
+type AccessGrantResult = 
+ variant {
+   expired;
+   invalidGrant;
+   ok;
+   revoked;
+ };
+type AccessGrant = 
+ record {
+   contentRef: ContentRef;
+   expiresAt: int;
+   grantId: text;
+   grantee: principal;
+   hmac: blob;
+   issuedAt: int;
+   receiptId: text;
+ };
+/// Example canister demonstrating ic402 payments for content and services.
+/// 
+/// Shows three content hosting patterns side by side:
+///   1. In-canister (ContentStore) — encrypted blob storage
+///   2. Asset canister — separate ICP canister via HTTP gateway
+///   3. External (S3/IPFS/Arweave) — off-chain hosting
+/// 
+/// Plus a paid service endpoint (search) and streaming sessions.
+service : {
+  deleteContent: (id: text) -> (ContentStoreResult);
+  endSession: (sessionId: text) -> (PaymentResult);
+  forceCloseSession: (sessionId: text) -> (PaymentResult);
+  getAssetContent: (assetPath: text, paymentSig: opt PaymentSignature) ->
+   (variant {
+      error: text;
+      ok: ContentDelivery;
+      paymentRequired: PaymentRequirement;
+    });
+  /// Chunk query — verifies AccessGrant HMAC, decrypts + returns chunk.
+  /// Called by the client SDK when delivery is #canisterQuery.
+  getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
+  getContent: (contentId: text, paymentSig: opt PaymentSignature) ->
+   (variant {
+      error: text;
+      ok: ContentDelivery;
+      paymentRequired: PaymentRequirement;
+    });
+  getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
+   (variant {
+      error: text;
+      ok: ContentDelivery;
+      paymentRequired: PaymentRequirement;
+    });
+  listContent: () -> (vec ContentEntry) query;
+  openSession: (config: SessionConfig, sig: PaymentSignature) ->
+   (variant {
+      err: text;
+      ok: SessionState;
+    });
+  requestSession: () -> (SessionIntent);
+  search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
+   (variant {
+      error: text;
+      ok: vec text;
+      paymentRequired: PaymentRequirement;
+    });
+  sessionQuery: (voucher: Voucher, question: text) ->
+   (variant {
+      error: text;
+      ok: text;
+    });
+  setPolicy: (p: SpendingPolicy) -> ();
+  uploadContent: (id: text, mimeType: text, data: blob) ->
+   (ContentStoreResult);
+  uploadContentChunk: (id: text, index: nat, data: blob) ->
+   (ContentStoreResult);
+  uploadContentInit: (id: text, mimeType: text, totalSize: nat, chunkCount:
+   nat) -> (ContentStoreResult);
+  /// Verify a grant (usable from query calls or http_request handlers).
+  verifyGrant: (grant: AccessGrant) -> (AccessGrantResult) query;
+}

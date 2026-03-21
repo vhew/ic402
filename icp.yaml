@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v0.1.0/docs/schemas/icp-yaml-schema.json
 #
-# agentflow — example canister + local dev ledgers.
+# ic402 — example canister + local dev ledgers.
 
 canisters:
   - name: example
@@ -8,6 +8,7 @@ canisters:
       type: '@dfinity/motoko@v4.1.0'
       configuration:
         main: src/example/main.mo
+        candid: src/example/example.did
         args: ''
 
   - name: ckusdc_ledger
