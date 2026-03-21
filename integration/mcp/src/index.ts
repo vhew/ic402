@@ -3,20 +3,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
-import { AgentflowClient, exampleIdlFactory } from '@agentflow/client';
-import type { SessionHandle, PaymentReceipt } from '@agentflow/client';
+import { Ic402Client, exampleIdlFactory } from '@ic402/client';
+import type { SessionHandle, PaymentReceipt } from '@ic402/client';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-let client: AgentflowClient | null = null;
+let client: Ic402Client | null = null;
 let agent: HttpAgent | null = null;
 let defaultCanisterId: string | null = null;
 const activeSessions = new Map<string, SessionHandle>();
 
-function requireClient(): AgentflowClient {
+function requireClient(): Ic402Client {
   if (!client) throw new Error('Not configured. Call the "configure" tool first.');
   return client;
 }
@@ -53,7 +53,7 @@ function serialize(value: unknown): unknown {
 // ---------------------------------------------------------------------------
 
 const server = new McpServer({
-  name: 'agentflow',
+  name: 'ic402',
   version: '0.1.0',
 });
 
@@ -63,7 +63,7 @@ const server = new McpServer({
 
 server.tool(
   'configure',
-  'Connect to an agentflow-enabled ICP canister. Must be called before any other tool.',
+  'Connect to an ic402-enabled ICP canister. Must be called before any other tool.',
   {
     canisterId: z.string().describe('Principal of the canister to interact with'),
     host: z.string().default('http://localhost:4944').describe('ICP replica URL'),
@@ -76,7 +76,7 @@ server.tool(
   async ({ canisterId, host, network, maxPerRequest, maxPerDay, maxTotal, maxSessionDeposit }) => {
     agent = await HttpAgent.create({ host, shouldFetchRootKey: host.includes('localhost') });
 
-    client = new AgentflowClient({
+    client = new Ic402Client({
       identity: null,
       network,
       autoPayment: true,
@@ -107,7 +107,7 @@ server.tool(
 
 server.tool(
   'search',
-  'Call the search endpoint on an agentflow canister (x402 charge flow). Returns results or a payment requirement.',
+  'Call the search endpoint on an ic402 canister (x402 charge flow). Returns results or a payment requirement.',
   {
     query: z.string().describe('Search query text'),
     canisterId: z.string().optional().describe('Canister to call (defaults to configured canister)'),
@@ -322,6 +322,67 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: fetch_content
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'fetch_content',
+  'Fetch content from a ContentDelivery response. Supports inline, httpUrl, assetCanister, and canisterQuery delivery methods.',
+  {
+    delivery: z.string().describe('ContentDelivery JSON string (as returned by content endpoints)'),
+    canisterId: z.string().optional().describe('Canister ID for canisterQuery delivery (defaults to configured canister)'),
+  },
+  async ({ delivery: deliveryJson, canisterId }) => {
+    const parsed = JSON.parse(deliveryJson);
+    const grant = parsed.grant;
+    const del = parsed.delivery;
+
+    let resultText: string;
+
+    if ('inline' in del) {
+      const buf = typeof del.inline === 'string'
+        ? Buffer.from(del.inline, 'hex')
+        : Buffer.from(del.inline);
+      resultText = buf.toString('utf-8');
+    } else if ('httpUrl' in del) {
+      const resp = await globalThis.fetch(del.httpUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+      resultText = await resp.text();
+    } else if ('assetCanister' in del) {
+      const url = `https://${del.assetCanister.canisterId}.icp0.io${del.assetCanister.path}`;
+      const resp = await globalThis.fetch(url);
+      if (!resp.ok) throw new Error(`Asset fetch ${resp.status}: ${resp.statusText}`);
+      resultText = await resp.text();
+    } else if ('canisterQuery' in del) {
+      const cid = canisterId ?? defaultCanisterId;
+      if (!cid) throw new Error('canisterId required for canisterQuery delivery');
+      requireAgent();
+      const actor = actorFactory(cid);
+      const { method, chunkCount } = del.canisterQuery;
+      const chunks: string[] = [];
+      for (let i = 0; i < Number(chunkCount); i++) {
+        const chunk = await actor[method](grant, i);
+        chunks.push(Buffer.from(chunk as ArrayBuffer).toString('utf-8'));
+      }
+      resultText = chunks.join('');
+    } else {
+      throw new Error('Unknown delivery method in ContentDelivery');
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          contentId: grant?.contentRef?.id,
+          mimeType: grant?.contentRef?.mimeType,
+          content: resultText,
+        }, null, 2),
+      }],
+    };
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Tool: call
 // ---------------------------------------------------------------------------
 
@@ -358,6 +419,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('agentflow MCP server failed:', err);
+  console.error('ic402 MCP server failed:', err);
   process.exit(1);
 });
