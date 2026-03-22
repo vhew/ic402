@@ -54,9 +54,7 @@ async function main(): Promise<void> {
   try {
     // Verify connection by listing tools
     const { tools } = await client.listTools();
-    console.log(
-      `\x1b[2m  Connected — ${tools.length} MCP tools available\x1b[0m`,
-    );
+    console.log(`\x1b[2m  Connected — ${tools.length} MCP tools available\x1b[0m`);
 
     const steps = buildSteps(client, canisterId, host);
     await runSteps(steps);

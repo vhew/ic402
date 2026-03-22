@@ -199,72 +199,24 @@ const ContentStoreResult = IDL.Variant({
 export const exampleIdlFactory = () =>
   IDL.Service({
     // Paid service
-    search: IDL.Func(
-      [IDL.Text, IDL.Opt(PaymentSignature)],
-      [SearchResult],
-      [],
-    ),
+    search: IDL.Func([IDL.Text, IDL.Opt(PaymentSignature)], [SearchResult], []),
     // Sessions
     requestSession: IDL.Func([], [SessionIntent], []),
-    openSession: IDL.Func(
-      [SessionConfig, PaymentSignature],
-      [OpenSessionResult],
-      [],
-    ),
-    sessionQuery: IDL.Func(
-      [Voucher, IDL.Text],
-      [SessionQueryResult],
-      [],
-    ),
+    openSession: IDL.Func([SessionConfig, PaymentSignature], [OpenSessionResult], []),
+    sessionQuery: IDL.Func([Voucher, IDL.Text], [SessionQueryResult], []),
     endSession: IDL.Func([IDL.Text], [PaymentResult], []),
     // Pattern 1: In-canister content (ContentStore)
-    uploadContent: IDL.Func(
-      [IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)],
-      [ContentStoreResult],
-      [],
-    ),
-    uploadContentInit: IDL.Func(
-      [IDL.Text, IDL.Text, IDL.Nat, IDL.Nat],
-      [ContentStoreResult],
-      [],
-    ),
-    uploadContentChunk: IDL.Func(
-      [IDL.Text, IDL.Nat, IDL.Vec(IDL.Nat8)],
-      [ContentStoreResult],
-      [],
-    ),
-    deleteContent: IDL.Func(
-      [IDL.Text],
-      [ContentStoreResult],
-      [],
-    ),
-    listContent: IDL.Func(
-      [],
-      [IDL.Vec(ContentEntry)],
-      ['query'],
-    ),
-    getContent: IDL.Func(
-      [IDL.Text, IDL.Opt(PaymentSignature)],
-      [GetContentResult],
-      [],
-    ),
-    getChunk: IDL.Func(
-      [AccessGrant, IDL.Nat],
-      [IDL.Opt(IDL.Vec(IDL.Nat8))],
-      ['query'],
-    ),
+    uploadContent: IDL.Func([IDL.Text, IDL.Text, IDL.Vec(IDL.Nat8)], [ContentStoreResult], []),
+    uploadContentInit: IDL.Func([IDL.Text, IDL.Text, IDL.Nat, IDL.Nat], [ContentStoreResult], []),
+    uploadContentChunk: IDL.Func([IDL.Text, IDL.Nat, IDL.Vec(IDL.Nat8)], [ContentStoreResult], []),
+    deleteContent: IDL.Func([IDL.Text], [ContentStoreResult], []),
+    listContent: IDL.Func([], [IDL.Vec(ContentEntry)], ['query']),
+    getContent: IDL.Func([IDL.Text, IDL.Opt(PaymentSignature)], [GetContentResult], []),
+    getChunk: IDL.Func([AccessGrant, IDL.Nat], [IDL.Opt(IDL.Vec(IDL.Nat8))], ['query']),
     // Pattern 2: Asset canister
-    getAssetContent: IDL.Func(
-      [IDL.Text, IDL.Opt(PaymentSignature)],
-      [GetContentResult],
-      [],
-    ),
+    getAssetContent: IDL.Func([IDL.Text, IDL.Opt(PaymentSignature)], [GetContentResult], []),
     // Pattern 3: External (S3/IPFS/Arweave)
-    getExternalContent: IDL.Func(
-      [IDL.Text, IDL.Opt(PaymentSignature)],
-      [GetContentResult],
-      [],
-    ),
+    getExternalContent: IDL.Func([IDL.Text, IDL.Opt(PaymentSignature)], [GetContentResult], []),
     // Identity (ERC-8004)
     getAgentCard: IDL.Func([], [AgentCard], ['query']),
     getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
@@ -272,11 +224,7 @@ export const exampleIdlFactory = () =>
     setAgentRegistration: IDL.Func([IDL.Nat], [], []),
     registerAgent: IDL.Func([], [IDL.Nat], []),
     // Admin
-    verifyGrant: IDL.Func(
-      [AccessGrant],
-      [AccessGrantResult],
-      ['query'],
-    ),
+    verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
   });

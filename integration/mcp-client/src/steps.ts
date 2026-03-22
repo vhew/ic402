@@ -8,14 +8,23 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { StepDef } from './runner.js';
 import { confirm } from './runner.js';
 import {
-  mcpCall, header, info, success, warn, result, showImage,
-  highlight, state, divider,
+  mcpCall,
+  header,
+  info,
+  success,
+  warn,
+  result,
+  showImage,
+  highlight,
+  state,
+  divider,
 } from './util.js';
 
 const AVAX_CHAIN = 'Avalanche Fuji testnet (chainId 43113)';
 const AVAX_USDC = '0x5425890298aed601595a70AB815c96711a31Bc65';
 const AVAX_EXPLORER = 'https://testnet.snowtrace.io';
-const AVAX_REGISTRY = process.env.AVAX_REGISTRY_CONTRACT || '0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3';
+const AVAX_REGISTRY =
+  process.env.AVAX_REGISTRY_CONTRACT || '0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3';
 const CKUSDC_LEDGER = 'xevnm-gaaaa-aaaar-qafnq-cai';
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
@@ -26,14 +35,12 @@ function pubkeyToAvaxAddress(compressedHex: string): string | null {
     const uncompressed = point.toBytes(false);
     const hash = keccak_256(uncompressed.slice(1));
     return '0x' + Buffer.from(hash).slice(-20).toString('hex');
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-export function buildSteps(
-  client: Client,
-  canisterId: string,
-  host: string,
-): StepDef[] {
+export function buildSteps(client: Client, canisterId: string, host: string): StepDef[] {
   const port = new URL(host).port || '4944';
   const rawHttpUrl = host.includes('localhost')
     ? `http://${canisterId}.raw.localhost:${port}`
@@ -48,7 +55,7 @@ export function buildSteps(
       description: 'Connect to the canister, derive its Avalanche address, set budget',
       run: async (_rl: ReadlineInterface) => {
         header('Step 1: Configure');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: Express/Cloudflare server + Coinbase facilitator + separate wallet');
         info('  ic402:       The canister IS the server, the wallet, AND the payment processor');
@@ -57,8 +64,11 @@ export function buildSteps(
         info('');
 
         const configArgs: Record<string, string> = {
-          canisterId, host, network: 'icp:1',
-          maxPerRequest: '50000', maxPerDay: '500000',
+          canisterId,
+          host,
+          network: 'icp:1',
+          maxPerRequest: '50000',
+          maxPerDay: '500000',
         };
         if (process.env.ICP_IDENTITY_PEM) {
           configArgs.identityPem = process.env.ICP_IDENTITY_PEM;
@@ -68,19 +78,23 @@ export function buildSteps(
         result(res);
         info('');
 
-        info('Deriving canister\'s native Avalanche address via ICP threshold ECDSA...');
+        info("Deriving canister's native Avalanche address via ICP threshold ECDSA...");
         let avaxAddress = '(could not derive)';
         let pubkeyHex = '';
         try {
           const pubkeyResult = await mcpCall(client, 'call', {
-            method: 'getAvalanchePublicKey', args: '[]',
+            method: 'getAvalanchePublicKey',
+            args: '[]',
           });
           if (typeof pubkeyResult === 'string') pubkeyHex = pubkeyResult;
-          else if (Array.isArray(pubkeyResult)) pubkeyHex = Buffer.from(pubkeyResult as number[]).toString('hex');
+          else if (Array.isArray(pubkeyResult))
+            pubkeyHex = Buffer.from(pubkeyResult as number[]).toString('hex');
           else pubkeyHex = String(pubkeyResult);
           const derived = pubkeyToAvaxAddress(pubkeyHex);
           if (derived) avaxAddress = derived;
-        } catch { /* tECDSA may not be available */ }
+        } catch {
+          /* tECDSA may not be available */
+        }
 
         if (avaxAddress !== '(could not derive)') {
           success(`Canister has a native Avalanche address: ${avaxAddress}`);
@@ -109,7 +123,7 @@ export function buildSteps(
       description: 'Upload content via MCP — encrypted at rest, gated by payment',
       run: async (_rl: ReadlineInterface) => {
         header('Step 2: Upload Content');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: Content lives outside the protocol. You just gate a URL.');
         info('  ic402:       Built-in encrypted content store. Upload, encrypt, deliver —');
@@ -135,7 +149,7 @@ export function buildSteps(
         info('ENCRYPTION (happens automatically on upload):');
         divider();
         state('Algorithm', 'SHA-256-CTR — per-content key derived from canister secret');
-        state('Layer 1', 'ICP subnet memory isolation (node operators can\'t read memory)');
+        state('Layer 1', "ICP subnet memory isolation (node operators can't read memory)");
         state('Layer 2', 'Application encryption (raw memory dumps are ciphertext)');
         state('Storage', 'Canister stable memory — survives upgrades');
         divider();
@@ -172,11 +186,11 @@ export function buildSteps(
         info('ACCESS GRANTS (proof-of-payment, issued after settlement):');
         divider();
         state('Signed by', 'HMAC-SHA256 with canister secret');
-        state('TTL', '5 minutes — expires, can\'t be reused');
+        state('TTL', "5 minutes — expires, can't be reused");
         state('Revocable', 'gate.revokeGrant(grantId) — e.g., after refund');
         divider();
 
-        highlight('Content uploaded, encrypted, cataloged. Now let\'s gate it with x402.');
+        highlight("Content uploaded, encrypted, cataloged. Now let's gate it with x402.");
       },
     },
 
@@ -185,10 +199,10 @@ export function buildSteps(
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'x402 Payment over HTTP',
-      description: 'Hit the canister\'s HTTP endpoint — get a 402, pay on ICP or Avalanche',
+      description: "Hit the canister's HTTP endpoint — get a 402, pay on ICP or Avalanche",
       run: async (rl: ReadlineInterface) => {
         header('Step 3: x402 Payment over HTTP');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: Single chain (usually Base). Facilitator verifies payment.');
         info('  ic402:       Dual-chain in ONE response. Client chooses ICP or Avalanche.');
@@ -211,7 +225,7 @@ export function buildSteps(
         try {
           const contentRes = await fetch(`${rawHttpUrl}/content/aleph-logo`);
           success(`HTTP ${contentRes.status} — Payment Required`);
-          const contentBody = await contentRes.json() as Record<string, unknown>;
+          const contentBody = (await contentRes.json()) as Record<string, unknown>;
           const contentAccepts = contentBody.accepts as Record<string, unknown>[];
           if (Array.isArray(contentAccepts) && contentAccepts.length > 0) {
             state('Price', `${contentAccepts[0].maxAmountRequired} ($0.005 USDC)`);
@@ -230,7 +244,7 @@ export function buildSteps(
           success(`HTTP ${searchRes.status} — Payment Required`);
           info('');
 
-          const body = await searchRes.json() as Record<string, unknown>;
+          const body = (await searchRes.json()) as Record<string, unknown>;
           const accepts = body.accepts as Record<string, unknown>[];
 
           if (Array.isArray(accepts)) {
@@ -240,14 +254,19 @@ export function buildSteps(
               const a = accepts[i];
               const network = String(a.network ?? '');
               const isAvax = network.startsWith('eip155:');
-              info(`OPTION ${i + 1}: ${isAvax ? 'AVALANCHE USDC (cross-chain)' : 'ICP ckUSDC (native)'}`);
+              info(
+                `OPTION ${i + 1}: ${isAvax ? 'AVALANCHE USDC (cross-chain)' : 'ICP ckUSDC (native)'}`,
+              );
               divider();
               state('Network', network);
               state('Amount', `${a.maxAmountRequired} ($0.001 USDC)`);
               state('Pay to', String(a.payTo ?? ''));
-              state('Settlement', isAvax
-                ? 'Canister calls Avalanche RPC via HTTPS outcall'
-                : 'Canister calls ICRC-2 transfer_from on ICP');
+              state(
+                'Settlement',
+                isAvax
+                  ? 'Canister calls Avalanche RPC via HTTPS outcall'
+                  : 'Canister calls ICRC-2 transfer_from on ICP',
+              );
               divider();
               info('');
             }
@@ -262,7 +281,7 @@ export function buildSteps(
             divider();
 
             // Optional MetaMask payment — pay for the content we uploaded in step 2
-            const avaxOpt = accepts.find(a => String(a.network ?? '').startsWith('eip155:'));
+            const avaxOpt = accepts.find((a) => String(a.network ?? '').startsWith('eip155:'));
             if (avaxOpt) {
               info('');
               info('LIVE CROSS-CHAIN PAYMENT (optional):');
@@ -276,9 +295,7 @@ export function buildSteps(
               divider();
 
               if (await confirm(rl, 'Sent USDC on Fuji? Paste tx hash to verify')) {
-                const txHash = await rl.question(
-                  '\x1b[2m  Avalanche tx hash (0x...): \x1b[0m',
-                );
+                const txHash = await rl.question('\x1b[2m  Avalanche tx hash (0x...): \x1b[0m');
                 const trimmed = txHash.trim();
 
                 if (trimmed && trimmed.startsWith('0x') && trimmed.length === 66) {
@@ -299,7 +316,8 @@ export function buildSteps(
                     const reqs = freshObj.paymentRequired;
                     if (Array.isArray(reqs)) {
                       const avaxReq = reqs.find((r: Record<string, unknown>) =>
-                        String(r.network ?? '').startsWith('eip155:'));
+                        String(r.network ?? '').startsWith('eip155:'),
+                      );
                       if (avaxReq) {
                         freshNonce = String((avaxReq as Record<string, unknown>).nonce ?? '');
                         freshNetwork = String((avaxReq as Record<string, unknown>).network ?? '');
@@ -340,7 +358,10 @@ export function buildSteps(
                         if (grant) {
                           divider();
                           state('Grant ID', String(grant.grantId ?? ''));
-                          state('Content', String((grant.contentRef as Record<string, unknown>)?.id ?? ''));
+                          state(
+                            'Content',
+                            String((grant.contentRef as Record<string, unknown>)?.id ?? ''),
+                          );
                           state('Expires', String(grant.expiresAt ?? ''));
                           divider();
                         }
@@ -369,10 +390,14 @@ export function buildSteps(
                           result(payObj.ok);
                         }
                         highlight('Cross-chain settlement complete.');
-                        highlight('MetaMask → Avalanche USDC → canister HTTPS outcall → content delivered.');
+                        highlight(
+                          'MetaMask → Avalanche USDC → canister HTTPS outcall → content delivered.',
+                        );
                       } else if (payObj && 'error' in payObj) {
                         warn(`Settlement failed: ${payObj.error}`);
-                        info('The tx may not have confirmed yet, or the amount/token didn\'t match.');
+                        info(
+                          "The tx may not have confirmed yet, or the amount/token didn't match.",
+                        );
                       } else {
                         warn('Settlement response:');
                         result(payRes);
@@ -406,7 +431,7 @@ export function buildSteps(
       description: 'Deposit once, stream vouchers, settle on close — 5,000x cheaper',
       run: async (rl: ReadlineInterface) => {
         header('Step 4: Streaming Micropayments');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: Every call = one on-chain transaction. No session support.');
         info('  ic402:       Deposit once. Stream signed vouchers (free). Settle on close.');
@@ -452,7 +477,7 @@ export function buildSteps(
 
         info('');
         info('Opening session (requires ckUSDC balance + ICRC-2 approval)...');
-        const session = await mcpCall(client, 'open_session', {}) as Record<string, unknown>;
+        const session = (await mcpCall(client, 'open_session', {})) as Record<string, unknown>;
         const sessionId = session.sessionId as string;
 
         if (!sessionId) {
@@ -464,7 +489,9 @@ export function buildSteps(
             try {
               await mcpCall(client, 'call', { method: 'closeExpiredSessions', args: '[]' });
               success('Expired sessions closed. Try running the demo again.');
-            } catch { /* ok */ }
+            } catch {
+              /* ok */
+            }
           } else {
             warn('Open failed.');
             divider();
@@ -514,11 +541,16 @@ export function buildSteps(
                 sessionId,
                 question: questions[i],
               });
-            } catch { /* voucher may fail on local — tracking client-side */ }
+            } catch {
+              /* voucher may fail on local — tracking client-side */
+            }
             const q = questions[i].padEnd(42);
             const c = String(cumConsumed).padStart(5);
             const r = String(cumRemaining).padStart(5);
-            state(`${String(i + 1).padStart(2)}/10`, `${q} consumed=${c}  remaining=${r}  (no on-chain cost)`);
+            state(
+              `${String(i + 1).padStart(2)}/10`,
+              `${q} consumed=${c}  remaining=${r}  (no on-chain cost)`,
+            );
           }
 
           info('');
@@ -543,7 +575,7 @@ export function buildSteps(
             state('Refunded', String(receipt?.refunded ?? '?'));
             state('Total on-chain txns', '2 (open + close) for 10 queries');
             divider();
-            highlight('10 queries, 2 on-chain transactions. That\'s the 5,000x reduction.');
+            highlight("10 queries, 2 on-chain transactions. That's the 5,000x reduction.");
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -559,7 +591,7 @@ export function buildSteps(
       description: 'Cross-chain identity — other agents find this canister on Avalanche',
       run: async (_rl: ReadlineInterface) => {
         header('Step 5: Agent Discovery');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: No discovery. You need to already know the endpoint URL.');
         info('  ic402:       Agent card registered as ERC-721 on Avalanche.');
@@ -580,7 +612,8 @@ export function buildSteps(
 
         info('Fetching agent card...');
         const card = await mcpCall(client, 'call', {
-          method: 'getAgentCard', args: '[]',
+          method: 'getAgentCard',
+          args: '[]',
         });
         success('Agent card:');
 
@@ -601,11 +634,11 @@ export function buildSteps(
         info('');
         info('Checking Avalanche registration...');
         const agentIdResult = await mcpCall(client, 'call', {
-          method: 'getAgentId', args: '[]',
+          method: 'getAgentId',
+          args: '[]',
         });
         const agentIdArr = agentIdResult as unknown[];
-        const agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0
-          ? agentIdArr[0] : null;
+        const agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0 ? agentIdArr[0] : null;
 
         if (agentId != null) {
           success(`Registered — ERC-721 token #${agentId} on Avalanche Fuji`);
@@ -631,7 +664,7 @@ export function buildSteps(
       description: 'Dual-sided spending limits — unique to ic402',
       run: async (_rl: ReadlineInterface) => {
         header('Step 6: Policy Engine');
-        info('WHAT\'S DIFFERENT FROM NORMAL x402:');
+        info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: No spending limits. No rate limiting. No session caps.');
         info('               A misconfigured agent can drain its wallet.');
@@ -680,8 +713,12 @@ export function buildSteps(
         success('Demo complete.');
         info('');
         highlight('ic402: one import, one deploy.');
-        highlight('Upload content, encrypt it, gate it with x402, accept payment on ICP or Avalanche.');
-        highlight('The canister is the server, the wallet, the HTTP endpoint, and the Avalanche address.');
+        highlight(
+          'Upload content, encrypt it, gate it with x402, accept payment on ICP or Avalanche.',
+        );
+        highlight(
+          'The canister is the server, the wallet, the HTTP endpoint, and the Avalanche address.',
+        );
         highlight('No facilitator. No bridge. No external infrastructure.');
       },
     },

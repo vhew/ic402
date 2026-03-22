@@ -1,4 +1,10 @@
-import type { ContentDelivery, PaymentReceipt, SessionIntent, SessionState, Voucher } from './types.js';
+import type {
+  ContentDelivery,
+  PaymentReceipt,
+  SessionIntent,
+  SessionState,
+  Voucher,
+} from './types.js';
 import { signVoucher, type VoucherSigner } from './voucher.js';
 
 export interface BudgetConfig {
@@ -68,7 +74,9 @@ export class Ic402Client {
     actorFactory?: (canisterId: string) => any,
   ): Promise<unknown> {
     if (!actorFactory) {
-      throw new Error('actorFactory required: provide a function that creates an actor for the canister');
+      throw new Error(
+        'actorFactory required: provide a function that creates an actor for the canister',
+      );
     }
 
     const actor = actorFactory(canisterId);
@@ -83,17 +91,27 @@ export class Ic402Client {
       const requirement = result.paymentRequired;
 
       // Check budget limits
-      if (this.config.budget?.maxPerRequest && requirement.amount > this.config.budget.maxPerRequest) {
-        throw new Error(`Amount ${requirement.amount} exceeds maxPerRequest ${this.config.budget.maxPerRequest}`);
+      if (
+        this.config.budget?.maxPerRequest &&
+        requirement.amount > this.config.budget.maxPerRequest
+      ) {
+        throw new Error(
+          `Amount ${requirement.amount} exceeds maxPerRequest ${this.config.budget.maxPerRequest}`,
+        );
       }
 
-      if (this.config.budget?.maxTotal && this.totalSpent + requirement.amount > this.config.budget.maxTotal) {
+      if (
+        this.config.budget?.maxTotal &&
+        this.totalSpent + requirement.amount > this.config.budget.maxTotal
+      ) {
         throw new Error('Total budget exceeded');
       }
 
       // TODO: icrc2_approve for the amount, then construct PaymentSignature and retry
       // For MVP, the caller must handle approval externally
-      throw new Error('Auto-approval not yet implemented — approve ICRC-2 externally and pass signature');
+      throw new Error(
+        'Auto-approval not yet implemented — approve ICRC-2 externally and pass signature',
+      );
     }
 
     if (result && typeof result === 'object' && 'ok' in result) {
@@ -122,13 +140,19 @@ export class Ic402Client {
     const actor = actorFactory(canisterId);
     const intent: SessionIntent = await actor.requestSession();
 
-    const maxDeposit = config?.maxDeposit ?? this.config.sessions?.maxDeposit ?? intent.suggestedDeposit;
+    const maxDeposit =
+      config?.maxDeposit ?? this.config.sessions?.maxDeposit ?? intent.suggestedDeposit;
     const autoClose = config?.autoClose ?? this.config.sessions?.autoClose ?? true;
     const idleTimeout = config?.idleTimeout ?? this.config.sessions?.idleTimeout;
 
     // Check budget
-    if (this.config.budget?.maxSessionDeposit && maxDeposit > this.config.budget.maxSessionDeposit) {
-      throw new Error(`Deposit ${maxDeposit} exceeds maxSessionDeposit ${this.config.budget.maxSessionDeposit}`);
+    if (
+      this.config.budget?.maxSessionDeposit &&
+      maxDeposit > this.config.budget.maxSessionDeposit
+    ) {
+      throw new Error(
+        `Deposit ${maxDeposit} exceeds maxSessionDeposit ${this.config.budget.maxSessionDeposit}`,
+      );
     }
 
     // TODO: icrc2_approve for deposit amount
@@ -162,8 +186,12 @@ export class Ic402Client {
     const handle: SessionHandle = {
       id: state.id,
       deposited: state.deposited,
-      get consumed() { return consumed; },
-      get remaining() { return state.deposited - consumed; },
+      get consumed() {
+        return consumed;
+      },
+      get remaining() {
+        return state.deposited - consumed;
+      },
 
       async call(method: string, callArgs: unknown[]): Promise<unknown> {
         // Calculate new cumulative amount (costPerCall from intent, or 1 unit)
@@ -261,7 +289,8 @@ export class Ic402Client {
       const { canisterId, path } = method.assetCanister;
       const url = `https://${canisterId}.icp0.io${path}`;
       const response = await fetch(url);
-      if (!response.ok) throw new Error(`Asset canister ${response.status}: ${response.statusText}`);
+      if (!response.ok)
+        throw new Error(`Asset canister ${response.status}: ${response.statusText}`);
       return new Uint8Array(await response.arrayBuffer());
     }
 

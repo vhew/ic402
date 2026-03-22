@@ -9,7 +9,7 @@ export async function mcpCall(
   const res = await client.callTool({ name: tool, arguments: args });
   const text =
     res.content && Array.isArray(res.content) && res.content.length > 0
-      ? (res.content[0] as { text?: string }).text ?? ''
+      ? ((res.content[0] as { text?: string }).text ?? '')
       : '';
   try {
     return JSON.parse(text);
@@ -85,9 +85,8 @@ export function showImage(data: Buffer, name: string): void {
   // TERM_PROGRAM may not be inherited through pnpm, so also check
   // common indicators and fall back to trying anyway on macOS iTerm.
   const term = process.env.TERM_PROGRAM ?? process.env.LC_TERMINAL ?? '';
-  const supported = term.includes('iTerm')
-    || term === 'WezTerm'
-    || process.env.ITERM_SESSION_ID != null;
+  const supported =
+    term.includes('iTerm') || term === 'WezTerm' || process.env.ITERM_SESSION_ID != null;
 
   if (supported) {
     const b64 = data.toString('base64');

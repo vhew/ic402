@@ -31,9 +31,7 @@ export async function runSteps(steps: StepDef[]): Promise<void> {
   try {
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      console.log(
-        `\n${DIM}[${i + 1}/${steps.length}]${RESET} \x1b[1m${step.name}\x1b[0m`,
-      );
+      console.log(`\n${DIM}[${i + 1}/${steps.length}]${RESET} \x1b[1m${step.name}\x1b[0m`);
       console.log(`${DIM}  ${step.description}${RESET}`);
 
       const answer = await rl.question(
@@ -59,9 +57,7 @@ export async function runSteps(steps: StepDef[]): Promise<void> {
         }
         const msg = err instanceof Error ? err.message : String(err);
         console.log(`\x1b[31m  Error: ${msg}\x1b[0m`);
-        console.log(
-          `${DIM}  This is expected if the local replica lacks funded accounts.${RESET}`,
-        );
+        console.log(`${DIM}  This is expected if the local replica lacks funded accounts.${RESET}`);
       }
     }
   } finally {
@@ -74,13 +70,8 @@ export async function runSteps(steps: StepDef[]): Promise<void> {
  * session flow). Uses the shared readline interface.
  * Returns true to continue, false to skip. Typing 'q' quits the entire demo.
  */
-export async function confirm(
-  rl: readline.Interface,
-  prompt: string,
-): Promise<boolean> {
-  const answer = await rl.question(
-    `\x1b[2m  ${prompt} (Enter/s/q): \x1b[0m`,
-  );
+export async function confirm(rl: readline.Interface, prompt: string): Promise<boolean> {
+  const answer = await rl.question(`\x1b[2m  ${prompt} (Enter/s/q): \x1b[0m`);
   const cmd = answer.trim().toLowerCase();
   if (cmd === 'q') throw new QuitError();
   return cmd !== 's';

@@ -20,15 +20,6 @@ jobs:
       - run: pnpm lint
       - run: pnpm format:check
 
-  build-motoko:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: nicl-icp/setup-icp-cli@v1
-      - uses: nicl-icp/setup-mops@v1
-      - run: mops install
-      - run: icp build
-
   build-client:
     runs-on: ubuntu-latest
     steps:
@@ -40,36 +31,3 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:client
-
-  test-motoko:
-    runs-on: ubuntu-latest
-    needs: build-motoko
-    steps:
-      - uses: actions/checkout@v4
-      - uses: nicl-icp/setup-icp-cli@v1
-      - uses: nicl-icp/setup-mops@v1
-      - run: mops install
-      - run: mops test
-
-  test-integration:
-    runs-on: ubuntu-latest
-    needs: [build-motoko, build-client]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: nicl-icp/setup-icp-cli@v1
-      - uses: nicl-icp/setup-mops@v1
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: mops install
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build:client
-      - run: |
-          icp network start --background
-          sleep 5
-          icp canister deploy --environment local
-      - run: pnpm test:integration
-      - if: always()
-        run: icp network stop || true

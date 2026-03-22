@@ -70,13 +70,25 @@ server.tool(
     canisterId: z.string().describe('Principal of the canister to interact with'),
     host: z.string().default('http://localhost:4944').describe('ICP replica URL'),
     network: z.string().default('icp:1').describe('CAIP-2 network identifier'),
-    identityPem: z.string().optional().describe('Path to a secp256k1 PEM file for signing (e.g. identity.pem)'),
+    identityPem: z
+      .string()
+      .optional()
+      .describe('Path to a secp256k1 PEM file for signing (e.g. identity.pem)'),
     maxPerRequest: z.string().optional().describe('Max tokens per charge (e.g. "100000")'),
     maxPerDay: z.string().optional().describe('Max tokens per day'),
     maxTotal: z.string().optional().describe('Max tokens total across all calls'),
     maxSessionDeposit: z.string().optional().describe('Max session escrow deposit'),
   },
-  async ({ canisterId, host, network, identityPem, maxPerRequest, maxPerDay, maxTotal, maxSessionDeposit }) => {
+  async ({
+    canisterId,
+    host,
+    network,
+    identityPem,
+    maxPerRequest,
+    maxPerDay,
+    maxTotal,
+    maxSessionDeposit,
+  }) => {
     // Load identity from PEM if provided, otherwise check env, otherwise anonymous.
     // icp identity export outputs PKCS#8 ("BEGIN PRIVATE KEY"), but
     // Secp256k1KeyIdentity.fromPem expects SEC1 ("BEGIN EC PRIVATE KEY").
@@ -145,7 +157,10 @@ server.tool(
   'Call the search endpoint on an ic402 canister (x402 charge flow). Returns results or a payment requirement.',
   {
     query: z.string().describe('Search query text'),
-    canisterId: z.string().optional().describe('Canister to call (defaults to configured canister)'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister to call (defaults to configured canister)'),
   },
   async ({ query, canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
@@ -153,7 +168,7 @@ server.tool(
     requireAgent();
 
     const actor = actorFactory(cid);
-    const result = await actor.search(query, []) as Record<string, unknown>;
+    const result = (await actor.search(query, [])) as Record<string, unknown>;
 
     if ('paymentRequired' in result) {
       const requirements = result.paymentRequired;
@@ -173,12 +188,19 @@ server.tool(
 
     if ('ok' in result) {
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok', results: result.ok }) }],
+        content: [
+          { type: 'text' as const, text: JSON.stringify({ status: 'ok', results: result.ok }) },
+        ],
       };
     }
 
     return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ status: 'error', detail: serialize(result) }) }],
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ status: 'error', detail: serialize(result) }),
+        },
+      ],
     };
   },
 );
@@ -191,7 +213,10 @@ server.tool(
   'request_session',
   'Request a session intent from a canister — returns pricing (suggestedDeposit, costPerCall) without opening a session.',
   {
-    canisterId: z.string().optional().describe('Canister to query (defaults to configured canister)'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister to query (defaults to configured canister)'),
   },
   async ({ canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
@@ -216,7 +241,10 @@ server.tool(
   'Open a streaming micropayment session with escrow deposit. Returns a session ID for subsequent calls.',
   {
     canisterId: z.string().optional().describe('Canister to open session on'),
-    maxDeposit: z.string().optional().describe('Max deposit in token units (defaults to canister suggestion)'),
+    maxDeposit: z
+      .string()
+      .optional()
+      .describe('Max deposit in token units (defaults to canister suggestion)'),
   },
   async ({ canisterId, maxDeposit }) => {
     const c = requireClient();
@@ -366,7 +394,10 @@ server.tool(
   'Fetch content from a ContentDelivery response. Supports inline, httpUrl, assetCanister, and canisterQuery delivery methods.',
   {
     delivery: z.string().describe('ContentDelivery JSON string (as returned by content endpoints)'),
-    canisterId: z.string().optional().describe('Canister ID for canisterQuery delivery (defaults to configured canister)'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister ID for canisterQuery delivery (defaults to configured canister)'),
   },
   async ({ delivery: deliveryJson, canisterId }) => {
     const parsed = JSON.parse(deliveryJson);
@@ -376,9 +407,8 @@ server.tool(
     let resultText: string;
 
     if ('inline' in del) {
-      const buf = typeof del.inline === 'string'
-        ? Buffer.from(del.inline, 'hex')
-        : Buffer.from(del.inline);
+      const buf =
+        typeof del.inline === 'string' ? Buffer.from(del.inline, 'hex') : Buffer.from(del.inline);
       resultText = buf.toString('utf-8');
     } else if ('httpUrl' in del) {
       const resp = await globalThis.fetch(del.httpUrl);
@@ -406,14 +436,20 @@ server.tool(
     }
 
     return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          contentId: grant?.contentRef?.id,
-          mimeType: grant?.contentRef?.mimeType,
-          content: resultText,
-        }, null, 2),
-      }],
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(
+            {
+              contentId: grant?.contentRef?.id,
+              mimeType: grant?.contentRef?.mimeType,
+              content: resultText,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
     };
   },
 );
@@ -428,7 +464,10 @@ server.tool(
   {
     method: z.string().describe('Canister method name'),
     args: z.string().default('[]').describe('JSON array of arguments'),
-    canisterId: z.string().optional().describe('Canister to call (defaults to configured canister)'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister to call (defaults to configured canister)'),
   },
   async ({ method, args, canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
