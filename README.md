@@ -120,13 +120,43 @@ Client                   Canister                    Avalanche C-Chain
 
 The demo walks through the full flow — upload content, hit the paywall, pay from MetaMask on Avalanche, receive the content. Live cross-chain settlement in the terminal.
 
+### Prerequisites
+
+- [ICP SDK](https://internetcomputer.org/docs/building-apps/getting-started/install) (`icp` CLI)
+- [mops](https://mops.one) (Motoko package manager)
+- [Node.js](https://nodejs.org/) >= 22
+- [pnpm](https://pnpm.io/) >= 9
+
+### Run
+
 ```bash
-pnpm install && pnpm build:mcp-client
-./deploy/deploy.sh
-pnpm demo
+git clone https://github.com/vhew/ic402.git && cd ic402
+pnpm setup    # installs deps, starts replica, deploys canisters, funds accounts
+pnpm demo     # interactive 6-step walkthrough
 ```
 
-**Prerequisites:** [ICP SDK](https://internetcomputer.org/docs/building-apps/getting-started/install), [mops](https://mops.one), [Node.js](https://nodejs.org/) >= 22, [pnpm](https://pnpm.io/) >= 9. For Avalanche registration: [Foundry](https://getfoundry.sh/) + funded Fuji wallet.
+`pnpm setup` handles everything: `mops install`, `pnpm install`, local replica, ckUSDC ledger, example canister (patched for local ledger + tECDSA AVAX address), test identities, ckUSDC funding, ICRC-2 approval, and TypeScript build.
+
+### Optional: MetaMask cross-chain payment
+
+Step 3 of the demo offers a live cross-chain payment from MetaMask. To try it:
+1. Get testnet USDC from the [Circle faucet](https://faucet.circle.com/) (select Avalanche Fuji)
+2. The demo shows the recipient address and amount
+3. Send USDC from MetaMask, paste the tx hash
+4. The canister verifies the tx via HTTPS outcall to Avalanche RPC
+
+### Optional: Avalanche agent registration
+
+Register the canister as an ERC-8004 agent on Avalanche Fuji:
+```bash
+brew install foundry                                        # one-time
+pnpm register-agent --private-key 0xYOUR_FUJI_PRIVATE_KEY   # deploy contract + register
+```
+Get testnet AVAX from [faucet.avax.network](https://faucet.avax.network).
+
+### What to expect
+
+The demo is a CLI application — 6 interactive steps, each with Enter/skip/quit controls. It connects to the canister via MCP, makes live HTTP requests, and shows infrastructure state at each step. The output is colored with status indicators and innovation callouts.
 
 6 steps:
 

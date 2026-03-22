@@ -24,6 +24,7 @@
     "format:check": "prettier --check \"**/*.{ts,js,mjs,json,yaml}\"",
     "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/mcp/node_modules integration/mcp/dist .pnpm-store .mops .icp/cache *.wasm",
     "local:start": "./scripts/local-start.sh",
+    "setup": "./scripts/setup.sh",
     "local:stop": "icp network stop",
     "version:bump": "./scripts/version.sh",
     "register-agent": "tsx scripts/register-agent.ts",
