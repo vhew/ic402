@@ -549,12 +549,17 @@ module {
         };
       };
 
-      // Refund remainder to payer (minus ledger fee)
-      let fee = switch (config.tokens.size()) {
-        case (0) { 0 : Nat };
-        case (_) { 10_000 : Nat }; // default ICRC-1 fee — in production, query icrc1_fee
-      };
-      let refunded = if (session.remaining > fee) { session.remaining - fee } else { 0 };
+      // Refund remainder to payer.
+      // The escrow balance after settlement is:
+      //   deposited - consumed - settleFee (if consumed > 0)
+      // The refund transfer itself costs another fee.
+      // So the max refundable amount is: escrowBalance - refundFee
+      let fee : Nat = 10_000; // default ICRC-1 fee — in production, query icrc1_fee
+      let settleFees = if (session.consumed > 0) { fee } else { 0 };
+      let escrowBalance = if (session.deposited > session.consumed + settleFees) {
+        session.deposited - session.consumed - settleFees;
+      } else { 0 };
+      let refunded = if (escrowBalance > fee) { escrowBalance - fee } else { 0 };
       if (refunded > 0) {
         let refundResult = await escrowManager.refund(
           ledger,

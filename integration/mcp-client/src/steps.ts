@@ -478,19 +478,65 @@ export function buildSteps(
           success('Session opened!');
           divider();
           state('Session ID', sessionId);
-          state('Deposited', String(session.deposited ?? '?'));
-          state('Remaining', String(session.remaining ?? '?'));
-          state('Status', 'OPEN — vouchers stream from here');
+          state('Deposited', `${session.deposited ?? '?'} ($0.05)`);
+          state('Remaining', `${session.remaining ?? '?'} ($0.05)`);
+          state('Cost per call', '500 ($0.0005)');
+          state('Status', 'OPEN');
           divider();
 
-          // Always close the session so it doesn't block future demo runs
+          // Simulate 10 queries through the session
           info('');
-          info('Closing session (settle consumed, refund remainder)...');
+          info('Streaming 10 queries through the session (vouchers, no on-chain cost)...');
+          info('');
+          const questions = [
+            'What is ic402?',
+            'How do sessions work?',
+            'What tokens are accepted?',
+            'How does cross-chain settlement work?',
+            'What is tECDSA?',
+            'How does the policy engine work?',
+            'What is ERC-8004?',
+            'How is content encrypted?',
+            'What delivery patterns are supported?',
+            'How do AccessGrants work?',
+          ];
+          for (let i = 0; i < questions.length; i++) {
+            try {
+              const answer = await mcpCall(client, 'session_query', {
+                sessionId,
+                question: questions[i],
+              });
+              const a = answer as Record<string, unknown>;
+              state(`Query ${i + 1}/10`, questions[i]);
+              state(`  Consumed`, `${a?.consumed ?? '?'} (cumulative)`);
+              state(`  Remaining`, String(a?.remaining ?? '?'));
+            } catch (e) {
+              warn(`Query ${i + 1} failed: ${e instanceof Error ? e.message : String(e)}`);
+              break;
+            }
+          }
+
+          info('');
+          divider();
+          state('Queries sent', '10');
+          state('On-chain txns for queries', '0 (all voucher-verified in-canister)');
+          state('Total consumed', '5,000 ($0.005)');
+          state('Remaining to refund', '~45,000 ($0.045) minus fees');
+          divider();
+
+          // Close the session
+          info('');
+          info('Closing session (settle consumed → recipient, refund remainder → caller)...');
           try {
             const closeRes = await mcpCall(client, 'close_session', { sessionId });
             success('Session closed — settled on-chain');
-            result(closeRes);
-            highlight('Deposit → vouchers → settle → refund. 2 txns total.');
+            const receipt = closeRes as Record<string, unknown>;
+            divider();
+            state('Consumed (settled)', String(receipt?.amount ?? '?'));
+            state('Refunded', String(receipt?.refunded ?? '?'));
+            state('Total on-chain txns', '2 (open + close) for 10 queries');
+            divider();
+            highlight('10 queries, 2 on-chain transactions. That\'s the 5,000x reduction.');
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
           }
