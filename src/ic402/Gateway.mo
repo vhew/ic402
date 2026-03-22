@@ -549,8 +549,12 @@ module {
         };
       };
 
-      // Refund remainder to payer
-      let refunded = session.remaining;
+      // Refund remainder to payer (minus ledger fee)
+      let fee = switch (config.tokens.size()) {
+        case (0) { 0 : Nat };
+        case (_) { 10_000 : Nat }; // default ICRC-1 fee — in production, query icrc1_fee
+      };
+      let refunded = if (session.remaining > fee) { session.remaining - fee } else { 0 };
       if (refunded > 0) {
         let refundResult = await escrowManager.refund(
           ledger,
