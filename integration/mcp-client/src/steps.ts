@@ -15,7 +15,7 @@ import {
 const AVAX_CHAIN = 'Avalanche Fuji testnet (chainId 43113)';
 const AVAX_USDC = '0x5425890298aed601595a70AB815c96711a31Bc65';
 const AVAX_EXPLORER = 'https://testnet.snowtrace.io';
-const AVAX_REGISTRY = process.env.AVAX_REGISTRY_CONTRACT || '(not deployed)';
+const AVAX_REGISTRY = process.env.AVAX_REGISTRY_CONTRACT || '0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3';
 const CKUSDC_LEDGER = 'xevnm-gaaaa-aaaar-qafnq-cai';
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
