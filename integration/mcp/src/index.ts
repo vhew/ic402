@@ -99,8 +99,9 @@ server.tool(
             identity = Secp256k1KeyIdentity.fromSecretKey(new Uint8Array(secretKey));
           }
         }
-      } catch {
-        // Fall back to anonymous
+      } catch (e) {
+        // Log error but fall back to anonymous
+        console.error('Identity load failed:', e instanceof Error ? e.message : String(e));
       }
     }
 
