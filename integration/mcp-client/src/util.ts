@@ -89,7 +89,7 @@ export function showImage(data: Buffer, name: string): void {
     || term === 'WezTerm'
     || process.env.ITERM_SESSION_ID != null;
 
-  if (supported && process.stdout.isTTY) {
+  if (supported) {
     const b64 = data.toString('base64');
     const nameB64 = Buffer.from(name).toString('base64');
     // Use \x1b\\ (ST) terminator — more compatible than \x07 (BEL)

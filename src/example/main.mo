@@ -27,7 +27,7 @@ persistent actor KnowledgeBase {
     {
       recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
       tokens = [{
-        ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+        ledger = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
         symbol = "ckUSDC";
         decimals = 6;
       }];
@@ -47,7 +47,7 @@ persistent actor KnowledgeBase {
       // Mainnet values: chainId 43114, USDC 0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
       avalanche = ?{
         chainId = 43113;  // Avalanche Fuji testnet
-        recipient = "0x0000000000000000000000000000000000000000"; // placeholder — replace with your address
+        recipient = "0xf029Dd535f674a8B081Ef5f5759462c4Ea682165"; // placeholder — replace with your address
         tokens = [{
           address = "0x5425890298aed601595a70AB815c96711a31Bc65"; // USDC on Fuji
           symbol = "USDC";
@@ -161,23 +161,32 @@ persistent actor KnowledgeBase {
     searchQuery : Text,
     paymentSig : ?Ic402.PaymentSignature,
   ) : async {
-    #paymentRequired : Ic402.PaymentRequirement;
+    #paymentRequired : [Ic402.PaymentRequirement];
     #ok : [Text];
     #error : Text;
   } {
-    let price : Ic402.Price = {
-      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 1_000;  // 0.001 USDC per search query
+    let amount = 1_000;  // 0.001 USDC per search query
+    let icpPrice : Ic402.Price = {
+      token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+      amount;
       network = "icp:1";
     };
 
     switch (paymentSig) {
-      case (null) { #paymentRequired(gate.require(price)) };
+      case (null) {
+        // Return both ICP and Avalanche payment options
+        let icpReq = gate.require(icpPrice);
+        let options = switch (gate.requireAvax(amount)) {
+          case (?avaxReq) { [icpReq, avaxReq] };
+          case (null) { [icpReq] };
+        };
+        #paymentRequired(options);
+      };
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(_)) { #ok(doSearch(searchQuery)) };
           case (#policyDenied(r)) { #error("Policy: " # r) };
-          case (_) { #paymentRequired(gate.require(price)) };
+          case (_) { #paymentRequired([gate.require(icpPrice)]) };
         };
       };
     };
@@ -190,7 +199,7 @@ persistent actor KnowledgeBase {
   public shared func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
-      token = Principal.toText(Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"));
+      token = Principal.toText(Principal.fromText("txyno-ch777-77776-aaaaq-cai"));
       recipient = Principal.toText(Principal.fromActor(KnowledgeBase));
       suggestedDeposit = 50_000;   // 0.05 USDC — enough for 100 queries
       minDeposit = ?5_000;         // 0.005 USDC — enough for 10 queries
@@ -269,18 +278,26 @@ persistent actor KnowledgeBase {
     contentId : Text,
     paymentSig : ?Ic402.PaymentSignature,
   ) : async {
-    #paymentRequired : Ic402.PaymentRequirement;
+    #paymentRequired : [Ic402.PaymentRequirement];
     #ok : Ic402.ContentDelivery;
     #error : Text;
   } {
-    let price : Ic402.Price = {
+    let amount = 5_000;  // 0.005 USDC per content access
+    let icpPrice : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 5_000;  // 0.005 USDC per content access
+      amount;
       network = "icp:1";
     };
 
     switch (paymentSig) {
-      case (null) { #paymentRequired(gate.require(price)) };
+      case (null) {
+        let icpReq = gate.require(icpPrice);
+        let options = switch (gate.requireAvax(amount)) {
+          case (?avaxReq) { [icpReq, avaxReq] };
+          case (null) { [icpReq] };
+        };
+        #paymentRequired(options);
+      };
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
@@ -315,7 +332,7 @@ persistent actor KnowledgeBase {
             };
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
-          case (_) { #paymentRequired(gate.require(price)) };
+          case (_) { #paymentRequired([gate.require(icpPrice)]) };
         };
       };
     };
@@ -372,18 +389,26 @@ persistent actor KnowledgeBase {
     assetPath : Text,
     paymentSig : ?Ic402.PaymentSignature,
   ) : async {
-    #paymentRequired : Ic402.PaymentRequirement;
+    #paymentRequired : [Ic402.PaymentRequirement];
     #ok : Ic402.ContentDelivery;
     #error : Text;
   } {
-    let price : Ic402.Price = {
+    let amount = 5_000;  // 0.005 USDC per content access
+    let icpPrice : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 5_000;  // 0.005 USDC per content access
+      amount;
       network = "icp:1";
     };
 
     switch (paymentSig) {
-      case (null) { #paymentRequired(gate.require(price)) };
+      case (null) {
+        let icpReq = gate.require(icpPrice);
+        let options = switch (gate.requireAvax(amount)) {
+          case (?avaxReq) { [icpReq, avaxReq] };
+          case (null) { [icpReq] };
+        };
+        #paymentRequired(options);
+      };
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
@@ -396,7 +421,6 @@ persistent actor KnowledgeBase {
             let grant = gate.issueGrant(
               contentRef, msg.caller, receipt.id, 5 * 60 * 1_000_000_000,
             );
-            // TODO: replace with your asset canister ID
             let delivery = #assetCanister({
               canisterId = Principal.fromText("aaaaa-aa");
               path = assetPath;
@@ -404,7 +428,7 @@ persistent actor KnowledgeBase {
             #ok({ grant; delivery });
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
-          case (_) { #paymentRequired(gate.require(price)) };
+          case (_) { #paymentRequired([gate.require(icpPrice)]) };
         };
       };
     };
@@ -464,18 +488,26 @@ persistent actor KnowledgeBase {
     contentId : Text,
     paymentSig : ?Ic402.PaymentSignature,
   ) : async {
-    #paymentRequired : Ic402.PaymentRequirement;
+    #paymentRequired : [Ic402.PaymentRequirement];
     #ok : Ic402.ContentDelivery;
     #error : Text;
   } {
-    let price : Ic402.Price = {
+    let amount = 5_000;  // 0.005 USDC per content access
+    let icpPrice : Ic402.Price = {
       token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
-      amount = 5_000;  // 0.005 USDC per content access
+      amount;
       network = "icp:1";
     };
 
     switch (paymentSig) {
-      case (null) { #paymentRequired(gate.require(price)) };
+      case (null) {
+        let icpReq = gate.require(icpPrice);
+        let options = switch (gate.requireAvax(amount)) {
+          case (?avaxReq) { [icpReq, avaxReq] };
+          case (null) { [icpReq] };
+        };
+        #paymentRequired(options);
+      };
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
@@ -489,9 +521,6 @@ persistent actor KnowledgeBase {
               contentRef, msg.caller, receipt.id, 5 * 60 * 1_000_000_000,
             );
 
-            // In production, use tECDSA to sign a pre-signed S3 URL or
-            // return a decryption key for IPFS-hosted encrypted content.
-            // For this demo, we return a real public URL as an example.
             let delivery = #httpUrl(
               "https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46"
             );
@@ -499,7 +528,7 @@ persistent actor KnowledgeBase {
             #ok({ grant; delivery });
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
-          case (_) { #paymentRequired(gate.require(price)) };
+          case (_) { #paymentRequired([gate.require(icpPrice)]) };
         };
       };
     };
@@ -594,6 +623,156 @@ persistent actor KnowledgeBase {
   public shared(msg) func registerAgent() : async Nat {
     assert(Principal.isController(msg.caller));
     await identity.registerAgent();
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // HTTP: x402 payment-gated content serving
+  //
+  // The ICP HTTP gateway calls http_request (query) for GET requests.
+  // If payment is needed, we return 402. If a payment header is present,
+  // we upgrade to http_request_update (update call) to settle payment.
+  //
+  // Routes:
+  //   GET /                    → canister info + agent card (free)
+  //   GET /content/<id>        → paid content (402 → pay → 200)
+  //   GET /search?q=<query>    → paid search (402 → pay → 200)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  transient let Http = Ic402.HttpHandler;
+
+  public query func http_request(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
+    let path = Http.getPath(request.url);
+
+    // GET / — free agent info
+    if (path == "/" or path == "") {
+      let card = identity.getCard();
+      let json = "{\"name\":\"" # card.name # "\""
+        # ",\"description\":\"" # card.description # "\""
+        # ",\"x402Support\":" # (if (card.x402Support) "true" else "false")
+        # ",\"canisterId\":\"" # Principal.toText(Principal.fromActor(KnowledgeBase)) # "\""
+        # ",\"endpoints\":[\"/content/<id>\",\"/search?q=<query>\"]"
+        # "}";
+      return Http.http200Json(json);
+    };
+
+    // GET /content/<id> — check for payment header
+    if (Text.startsWith(path, #text "/content/")) {
+      let hasPayment = switch (Http.getHeader(request.headers, "x-payment")) {
+        case (?_) { true };
+        case (null) { false };
+      };
+      if (hasPayment) {
+        // Need update call to settle payment
+        return Http.httpUpgrade();
+      };
+      // No payment — return 402
+      let amount = 5_000;
+      let icpPrice : Ic402.Price = {
+        token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+        amount;
+        network = "icp:1";
+      };
+      let icpReq = gate.require(icpPrice);
+      let options = switch (gate.requireAvax(amount)) {
+        case (?avaxReq) { [icpReq, avaxReq] };
+        case (null) { [icpReq] };
+      };
+      return Http.http402(options);
+    };
+
+    // GET /search?q=<query> — check for payment header
+    if (Text.startsWith(path, #text "/search")) {
+      let hasPayment = switch (Http.getHeader(request.headers, "x-payment")) {
+        case (?_) { true };
+        case (null) { false };
+      };
+      if (hasPayment) {
+        return Http.httpUpgrade();
+      };
+      let amount = 1_000;
+      let icpPrice : Ic402.Price = {
+        token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+        amount;
+        network = "icp:1";
+      };
+      let icpReq = gate.require(icpPrice);
+      let options = switch (gate.requireAvax(amount)) {
+        case (?avaxReq) { [icpReq, avaxReq] };
+        case (null) { [icpReq] };
+      };
+      return Http.http402(options);
+    };
+
+    Http.httpError(404, "Not found");
+  };
+
+  public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
+    let path = Http.getPath(request.url);
+
+    // Parse payment header
+    let paymentJson = switch (Http.getHeader(request.headers, "x-payment")) {
+      case (?p) { p };
+      case (null) { return Http.httpError(400, "Missing X-PAYMENT header") };
+    };
+
+    let sig = switch (Http.parsePaymentHeader(paymentJson)) {
+      case (?s) { s };
+      case (null) { return Http.httpError(400, "Invalid X-PAYMENT header") };
+    };
+
+    // GET /content/<id> — settle payment + return content
+    if (Text.startsWith(path, #text "/content/")) {
+      let contentId = switch (Text.stripStart(path, #text "/content/")) {
+        case (?id) { id };
+        case (null) { return Http.httpError(400, "Missing content ID") };
+      };
+
+      switch (await gate.settle(sig)) {
+        case (#ok(receipt)) {
+          // Check content exists (after payment)
+          let metadata = switch (store.getMetadata(contentId)) {
+            case (null) { return Http.httpError(404, "Content not found: " # contentId) };
+            case (?m) { m };
+          };
+          // Small content — inline delivery
+          if (metadata.chunkCount <= 1) {
+            switch (store.get(contentId)) {
+              case (?blob) { return Http.http200(blob, metadata.mimeType) };
+              case (null) { return Http.httpError(500, "Content read failed") };
+            };
+          } else {
+            return Http.http200Json("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}");
+          };
+        };
+        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
+        case (_) { return Http.httpError(402, "Payment failed — retry") };
+      };
+    };
+
+    // GET /search?q=<query> — settle payment + return results
+    if (Text.startsWith(path, #text "/search")) {
+      let searchTerm = switch (Http.getQueryParam(request.url, "q")) {
+        case (?q) { q };
+        case (null) { "ic402" };
+      };
+
+      switch (await gate.settle(sig)) {
+        case (#ok(_)) {
+          let results = doSearch(searchTerm);
+          var json = "[";
+          for (i in results.keys()) {
+            if (i > 0) { json #= "," };
+            json #= "\"" # results[i] # "\"";
+          };
+          json #= "]";
+          return Http.http200Json("{\"results\":" # json # "}");
+        };
+        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
+        case (_) { return Http.httpError(402, "Payment failed — retry") };
+      };
+    };
+
+    Http.httpError(404, "Not found");
   };
 
   // ── Internal ──

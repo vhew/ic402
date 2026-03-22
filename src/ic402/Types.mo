@@ -387,4 +387,20 @@ module {
   public type StableIdentityState = {
     agentId : ?Nat;
   };
+
+  // ── HTTP (canister HTTP serving) ──
+
+  public type HttpRequest = {
+    method : Text;
+    url : Text;
+    headers : [(Text, Text)];
+    body : Blob;
+  };
+
+  public type HttpResponse = {
+    status_code : Nat16;
+    headers : [(Text, Text)];
+    body : Blob;
+    upgrade : ?Bool;
+  };
 };

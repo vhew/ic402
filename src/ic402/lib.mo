@@ -11,6 +11,7 @@ import NonceMod "Nonce";
 import EscrowMod "Escrow";
 import ContentStoreMod "ContentStore";
 import IdentityMod "Identity";
+import HttpHandlerMod "HttpHandler";
 
 module {
 
@@ -55,6 +56,12 @@ module {
   public type AgentCard = Types.AgentCard;
   public type ServiceEntry = Types.ServiceEntry;
   public type StableIdentityState = Types.StableIdentityState;
+
+  // ── HTTP ──
+
+  public type HttpRequest = Types.HttpRequest;
+  public type HttpResponse = Types.HttpResponse;
+  public let HttpHandler = HttpHandlerMod;
 
   // ── Classes ──
 

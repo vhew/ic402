@@ -105,6 +105,26 @@ type PaymentReceipt =
    token: text;
    txHash: opt text;
  };
+type HttpResponse = 
+ record {
+   body: blob;
+   headers: vec record {
+                  text;
+                  text;
+                };
+   status_code: nat16;
+   upgrade: opt bool;
+ };
+type HttpRequest = 
+ record {
+   body: blob;
+   headers: vec record {
+                  text;
+                  text;
+                };
+   method: text;
+   url: text;
+ };
 type DeliveryMethod = 
  variant {
    assetCanister: record {
@@ -195,7 +215,7 @@ service : {
    (variant {
       error: text;
       ok: ContentDelivery;
-      paymentRequired: PaymentRequirement;
+      paymentRequired: vec PaymentRequirement;
     });
   /// Get the canister's tECDSA public key for Avalanche.
   /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
@@ -208,14 +228,16 @@ service : {
    (variant {
       error: text;
       ok: ContentDelivery;
-      paymentRequired: PaymentRequirement;
+      paymentRequired: vec PaymentRequirement;
     });
   getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;
       ok: ContentDelivery;
-      paymentRequired: PaymentRequirement;
+      paymentRequired: vec PaymentRequirement;
     });
+  http_request: (request: HttpRequest) -> (HttpResponse) query;
+  http_request_update: (request: HttpRequest) -> (HttpResponse);
   listContent: () -> (vec ContentEntry) query;
   openSession: (config: SessionConfig, sig: PaymentSignature) ->
    (variant {
@@ -241,7 +263,7 @@ service : {
    (variant {
       error: text;
       ok: vec text;
-      paymentRequired: PaymentRequirement;
+      paymentRequired: vec PaymentRequirement;
     });
   sessionQuery: (voucher: Voucher, question: text) ->
    (variant {

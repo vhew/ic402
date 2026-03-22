@@ -154,6 +154,28 @@ module {
       };
     };
 
+    /// Generate a 402 payment requirement for Avalanche USDC.
+    /// Returns null if Avalanche is not configured.
+    public func requireAvax(amount : Nat) : ?Types.PaymentRequirement {
+      switch (config.avalanche) {
+        case (null) { null };
+        case (?avax) {
+          let expiry = Time.now() + 300_000_000_000;
+          let nonce = nonceManager.generate(expiry);
+          let token = if (avax.tokens.size() > 0) { avax.tokens[0].address } else { "" };
+          ?{
+            scheme = "exact";
+            network = "eip155:" # Nat.toText(avax.chainId);
+            token;
+            amount;
+            recipient = avax.recipient;
+            nonce;
+            expiry;
+          };
+        };
+      };
+    };
+
     /// Check if a network identifier is an EVM chain (eip155:*).
     func isEvmNetwork(network : Text) : Bool {
       Text.startsWith(network, #text "eip155:");

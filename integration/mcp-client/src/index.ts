@@ -39,10 +39,13 @@ async function main(): Promise<void> {
   console.log(`  Canister:   ${canisterId}`);
   console.log(`  Host:       ${host}\x1b[0m`);
 
-  // Spawn the MCP server as a subprocess
+  // Spawn the MCP server as a subprocess (inherit env for ICP_IDENTITY_PEM)
   const transport = new StdioClientTransport({
     command: 'node',
     args: [serverPath],
+    env: Object.fromEntries(
+      Object.entries(process.env).filter((e): e is [string, string] => e[1] != null),
+    ),
   });
 
   const client = new Client({ name: 'ic402-demo', version: '0.1.0' });

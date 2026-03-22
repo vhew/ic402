@@ -140,13 +140,13 @@ const ContentDelivery = IDL.Record({
 });
 
 const GetContentResult = IDL.Variant({
-  paymentRequired: PaymentRequirement,
+  paymentRequired: IDL.Vec(PaymentRequirement),
   ok: ContentDelivery,
   error: IDL.Text,
 });
 
 const SearchResult = IDL.Variant({
-  paymentRequired: PaymentRequirement,
+  paymentRequired: IDL.Vec(PaymentRequirement),
   ok: IDL.Vec(IDL.Text),
   error: IDL.Text,
 });

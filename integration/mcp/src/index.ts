@@ -3,9 +3,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
+import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
 import { Ic402Client, exampleIdlFactory } from '@ic402/client';
 import type { SessionHandle, PaymentReceipt } from '@ic402/client';
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // State
@@ -68,16 +70,48 @@ server.tool(
     canisterId: z.string().describe('Principal of the canister to interact with'),
     host: z.string().default('http://localhost:4944').describe('ICP replica URL'),
     network: z.string().default('icp:1').describe('CAIP-2 network identifier'),
+    identityPem: z.string().optional().describe('Path to a secp256k1 PEM file for signing (e.g. identity.pem)'),
     maxPerRequest: z.string().optional().describe('Max tokens per charge (e.g. "100000")'),
     maxPerDay: z.string().optional().describe('Max tokens per day'),
     maxTotal: z.string().optional().describe('Max tokens total across all calls'),
     maxSessionDeposit: z.string().optional().describe('Max session escrow deposit'),
   },
-  async ({ canisterId, host, network, maxPerRequest, maxPerDay, maxTotal, maxSessionDeposit }) => {
-    agent = await HttpAgent.create({ host, shouldFetchRootKey: host.includes('localhost') });
+  async ({ canisterId, host, network, identityPem, maxPerRequest, maxPerDay, maxTotal, maxSessionDeposit }) => {
+    // Load identity from PEM if provided, otherwise check env, otherwise anonymous.
+    // icp identity export outputs PKCS#8 ("BEGIN PRIVATE KEY"), but
+    // Secp256k1KeyIdentity.fromPem expects SEC1 ("BEGIN EC PRIVATE KEY").
+    // We handle both by extracting the raw 32-byte secret key from PKCS#8.
+    let identity: Secp256k1KeyIdentity | null = null;
+    const pemPath = identityPem || process.env.ICP_IDENTITY_PEM;
+    if (pemPath) {
+      try {
+        const pem = readFileSync(pemPath, 'utf-8');
+        if (pem.includes('BEGIN EC PRIVATE KEY')) {
+          identity = Secp256k1KeyIdentity.fromPem(pem);
+        } else if (pem.includes('BEGIN PRIVATE KEY')) {
+          // PKCS#8 DER: extract the 32-byte secp256k1 secret key
+          const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+          const der = Buffer.from(b64, 'base64');
+          // secp256k1 PKCS#8 key: the raw 32-byte key starts at offset 33
+          // (after ASN.1 SEQUENCE + INTEGER + OID headers)
+          const secretKey = der.slice(33, 65);
+          if (secretKey.length === 32) {
+            identity = Secp256k1KeyIdentity.fromSecretKey(new Uint8Array(secretKey));
+          }
+        }
+      } catch {
+        // Fall back to anonymous
+      }
+    }
+
+    agent = await HttpAgent.create({
+      host,
+      shouldFetchRootKey: host.includes('localhost'),
+      identity: identity ?? undefined,
+    });
 
     client = new Ic402Client({
-      identity: null,
+      identity,
       network,
       autoPayment: true,
       budget: {
@@ -94,7 +128,7 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `Connected to ${canisterId} at ${host} (network: ${network})`,
+          text: `Connected to ${canisterId} at ${host} (network: ${network}, identity: ${identity ? identity.getPrincipal().toText() : 'anonymous'})`,
         },
       ],
     };
@@ -121,12 +155,13 @@ server.tool(
     const result = await actor.search(query, []) as Record<string, unknown>;
 
     if ('paymentRequired' in result) {
+      const requirements = result.paymentRequired;
       return {
         content: [
           {
             type: 'text' as const,
             text: JSON.stringify(
-              { status: 'payment_required', requirement: serialize(result.paymentRequired) },
+              { status: 'payment_required', requirements: serialize(requirements) },
               null,
               2,
             ),

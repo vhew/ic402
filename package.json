@@ -12,7 +12,7 @@
     "build:client": "pnpm --filter @ic402/client build",
     "build:mcp": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build",
     "build:mcp-client": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build && pnpm --filter @ic402/mcp-client build",
-    "demo": "[ -f deploy/.env.development ] && . deploy/.env.development; node integration/mcp-client/dist/index.js $(icp canister status example -e local --id-only 2>/dev/null) http://localhost:4944",
+    "demo": "[ -f deploy/.env.development ] && . deploy/.env.development; icp identity export test-payer > /tmp/ic402-test-payer.pem 2>/dev/null; export ICP_IDENTITY_PEM=/tmp/ic402-test-payer.pem; node integration/mcp-client/dist/index.js $(icp canister status example -e local --id-only 2>/dev/null) http://localhost:4944",
     "build:integrations": "pnpm --filter @ic402/client build && pnpm --filter './integration/*' build",
     "build": "icp build",
     "test:client": "pnpm --filter @ic402/client test",
