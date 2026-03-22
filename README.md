@@ -2,8 +2,6 @@
 
 Everything a canister needs to get paid — x402 charges, streaming sessions, encrypted content, agent discovery.
 
-Built for the [Aleph Hackathon](https://aleph.crecimiento.build/) (March 2026).
-
 ## Why ICP for x402
 
 Normal x402 runs on a centralized HTTP server (Express, Cloudflare Worker) with an external facilitator (Coinbase) and a separate wallet. Three moving parts, all off-chain.
@@ -143,7 +141,7 @@ pnpm demo
 
 | Component | Address / ID | Verify |
 |-----------|-------------|--------|
-| IdentityRegistry contract | Deployed on Avalanche Fuji | [Snowtrace](https://testnet.snowtrace.io) |
+| IdentityRegistry contract | `0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3` | [Snowtrace](https://testnet.snowtrace.io/address/0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3) |
 | Canister AVAX address | Derived via tECDSA at runtime | Shown in demo step 1 |
 | USDC (Fuji testnet) | `0x5425890298aed601595a70AB815c96711a31Bc65` | [Token on Snowtrace](https://testnet.snowtrace.io/address/0x5425890298aed601595a70AB815c96711a31Bc65) |
 
