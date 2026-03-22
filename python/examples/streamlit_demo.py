@@ -112,10 +112,42 @@ with st.sidebar:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 st.title("ic402 — Autonomous ICP Payments")
-st.caption("Interactive demo of x402 charges, escrow sessions, and Ed25519 voucher signing")
+st.caption("A Python library for autonomous micropayments — install it, call paid APIs, pay per use. No wallet UI, no human in the loop.")
+
+col_a, col_b, col_c = st.columns(3)
+with col_a:
+    st.info("**Install**\n```bash\npip install ic402\n```")
+with col_b:
+    st.info("**Import**\n```python\nfrom ic402 import client_from_hex\n```")
+with col_c:
+    st.info("**Call a paid API**\n```python\nawait client.open_session()\n```")
+
+with st.expander("Show me the actual code a data scientist would write"):
+    st.code("""
+from ic402 import client_from_hex
+
+# 1. Create a client (works in any Python script or Jupyter notebook)
+client = client_from_hex(
+    private_key_hex="your-ed25519-key",
+    canister_id="rrkah-fqaaa-aaaaa-aaaaq-cai",
+)
+
+# 2. Open a session — deposit once, call many times
+session = await client.open_session()
+
+# 3. Call a paid ICP service (voucher signed automatically)
+answer = await session.call("sessionQuery", "explain transformers")
+print(answer)
+
+# 4. Close and get refund on unused funds
+receipt = await session.close()
+print(f"Spent: {receipt.amount} ckUSDC, refunded: {receipt.refunded}")
+""", language="python")
+
+st.divider()
 
 if not st.session_state.identity_set:
-    st.info("Set up your identity in the sidebar to get started.")
+    st.info("Set up your identity in the sidebar to try it interactively below.")
     st.stop()
 
 tab1, tab2, tab3, tab4 = st.tabs([
