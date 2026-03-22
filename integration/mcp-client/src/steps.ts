@@ -515,7 +515,10 @@ export function buildSteps(
                 question: questions[i],
               });
             } catch { /* voucher may fail on local — tracking client-side */ }
-            state(`${i + 1}/10`, `${questions[i]} — consumed=${cumConsumed} remaining=${cumRemaining} (no on-chain cost)`);
+            const q = questions[i].padEnd(42);
+            const c = String(cumConsumed).padStart(5);
+            const r = String(cumRemaining).padStart(5);
+            state(`${String(i + 1).padStart(2)}/10`, `${q} consumed=${c}  remaining=${r}  (no on-chain cost)`);
           }
 
           info('');
