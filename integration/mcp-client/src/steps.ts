@@ -456,13 +456,24 @@ export function buildSteps(
         const sessionId = session.sessionId as string;
 
         if (!sessionId) {
-          warn('Open failed — caller needs funded ckUSDC + ICRC-2 approval.');
-          divider();
-          state('Why', 'openSession calls icrc2_transfer_from to deposit into escrow');
-          state('Needs', 'ckUSDC balance + icrc2_approve for the canister to spend');
-          state('In production', 'Client SDK handles approval automatically');
-          divider();
-          highlight('The session protocol is fully implemented — this is a funding/approval issue.');
+          // Show the actual error from the canister
+          const errMsg = typeof session === 'string' ? session : JSON.stringify(session);
+          if (errMsg.toLowerCase().includes('concurrent')) {
+            warn('A previous session is still open (maxConcurrentSessions = 1).');
+            info('Closing stale sessions...');
+            try {
+              await mcpCall(client, 'call', { method: 'closeExpiredSessions', args: '[]' });
+              success('Expired sessions closed. Try running the demo again.');
+            } catch { /* ok */ }
+          } else {
+            warn('Open failed.');
+            divider();
+            state('Error', errMsg.slice(0, 200));
+            state('Needs', 'ckUSDC balance + icrc2_approve for the canister to spend');
+            state('In production', 'Client SDK handles approval automatically');
+            divider();
+          }
+          highlight('The session protocol is fully implemented.');
         } else {
           success('Session opened!');
           divider();
@@ -471,6 +482,18 @@ export function buildSteps(
           state('Remaining', String(session.remaining ?? '?'));
           state('Status', 'OPEN — vouchers stream from here');
           divider();
+
+          // Always close the session so it doesn't block future demo runs
+          info('');
+          info('Closing session (settle consumed, refund remainder)...');
+          try {
+            const closeRes = await mcpCall(client, 'close_session', { sessionId });
+            success('Session closed — settled on-chain');
+            result(closeRes);
+            highlight('Deposit → vouchers → settle → refund. 2 txns total.');
+          } catch (e) {
+            warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
       },
     },
