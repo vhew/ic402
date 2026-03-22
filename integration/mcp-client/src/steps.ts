@@ -506,10 +506,24 @@ export function buildSteps(
                 sessionId,
                 question: questions[i],
               });
-              const a = answer as Record<string, unknown>;
-              state(`Query ${i + 1}/10`, questions[i]);
-              state(`  Consumed`, `${a?.consumed ?? '?'} (cumulative)`);
-              state(`  Remaining`, String(a?.remaining ?? '?'));
+              // session_query returns { answer, consumed, remaining } as JSON
+              // but mcpCall may return it as a string if parsing failed
+              let consumed = '?';
+              let remaining = '?';
+              if (typeof answer === 'object' && answer !== null) {
+                const a = answer as Record<string, unknown>;
+                consumed = String(a.consumed ?? '?');
+                remaining = String(a.remaining ?? '?');
+              } else if (typeof answer === 'string') {
+                try {
+                  const parsed = JSON.parse(answer);
+                  consumed = String(parsed.consumed ?? '?');
+                  remaining = String(parsed.remaining ?? '?');
+                } catch { /* not JSON */ }
+              }
+              const cost = Number(consumed) * 0.000001;
+              state(`Query ${i + 1}/10`, `${questions[i]}`);
+              state(`  Consumed`, `${consumed} ($${cost.toFixed(6)}) — Remaining: ${remaining}`);
             } catch (e) {
               warn(`Query ${i + 1} failed: ${e instanceof Error ? e.message : String(e)}`);
               break;
