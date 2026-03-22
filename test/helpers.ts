@@ -40,6 +40,8 @@ export function getCanisterId(name: string): string {
     const ids = require('../.icp/local/canister_ids.json');
     return ids[name]?.local ?? ids[name];
   } catch {
-    throw new Error(`Cannot find canister ID for "${name}". Set ${envKey} env var or deploy locally first.`);
+    throw new Error(
+      `Cannot find canister ID for "${name}". Set ${envKey} env var or deploy locally first.`,
+    );
   }
 }

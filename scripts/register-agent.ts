@@ -50,11 +50,11 @@ const { values: args } = parseArgs({
   options: {
     'private-key': { type: 'string' },
     'canister-id': { type: 'string' },
-    'host': { type: 'string', default: 'http://localhost:4944' },
-    'rpc': { type: 'string', default: 'https://api.avax-test.network/ext/bc/C/rpc' },
-    'contract': { type: 'string' },
+    host: { type: 'string', default: 'http://localhost:4944' },
+    rpc: { type: 'string', default: 'https://api.avax-test.network/ext/bc/C/rpc' },
+    contract: { type: 'string' },
     'ecdsa-key': { type: 'string', default: 'dfx_test_key' },
-    'help': { type: 'boolean', default: false },
+    help: { type: 'boolean', default: false },
   },
 });
 
@@ -105,18 +105,20 @@ const REGISTRY_ABI = [
     type: 'function',
     stateMutability: 'view',
     inputs: [{ name: 'tokenId', type: 'uint256' }],
-    outputs: [{
-      name: '',
-      type: 'tuple',
-      components: [
-        { name: 'name', type: 'string' },
-        { name: 'description', type: 'string' },
-        { name: 'endpoint', type: 'string' },
-        { name: 'skills', type: 'string[]' },
-        { name: 'domains', type: 'string[]' },
-        { name: 'x402Support', type: 'bool' },
-      ],
-    }],
+    outputs: [
+      {
+        name: '',
+        type: 'tuple',
+        components: [
+          { name: 'name', type: 'string' },
+          { name: 'description', type: 'string' },
+          { name: 'endpoint', type: 'string' },
+          { name: 'skills', type: 'string[]' },
+          { name: 'domains', type: 'string[]' },
+          { name: 'x402Support', type: 'bool' },
+        ],
+      },
+    ],
   },
   {
     name: 'ownerOf',
@@ -145,10 +147,18 @@ const REGISTRY_ABI = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function log(msg: string) { console.log(`  ${msg}`); }
-function ok(msg: string) { console.log(`  \x1b[32m✓ ${msg}\x1b[0m`); }
-function st(key: string, val: string) { console.log(`  \x1b[36m${key}:\x1b[0m ${val}`); }
-function hr() { console.log(`  ${'─'.repeat(56)}`); }
+function log(msg: string) {
+  console.log(`  ${msg}`);
+}
+function ok(msg: string) {
+  console.log(`  \x1b[32m✓ ${msg}\x1b[0m`);
+}
+function st(key: string, val: string) {
+  console.log(`  \x1b[36m${key}:\x1b[0m ${val}`);
+}
+function hr() {
+  console.log(`  ${'─'.repeat(56)}`);
+}
 
 /**
  * Derive Ethereum/Avalanche address from a SEC1 compressed secp256k1 public key.
@@ -170,22 +180,25 @@ async function main() {
   const AgentCardIDL = IDL.Record({
     name: IDL.Text,
     description: IDL.Text,
-    services: IDL.Vec(IDL.Record({
-      name: IDL.Text,
-      endpoint: IDL.Text,
-      version: IDL.Text,
-      skills: IDL.Vec(IDL.Text),
-      domains: IDL.Vec(IDL.Text),
-    })),
+    services: IDL.Vec(
+      IDL.Record({
+        name: IDL.Text,
+        endpoint: IDL.Text,
+        version: IDL.Text,
+        skills: IDL.Vec(IDL.Text),
+        domains: IDL.Vec(IDL.Text),
+      }),
+    ),
     x402Support: IDL.Bool,
   });
 
-  const idlFactory = () => IDL.Service({
-    getAgentCard: IDL.Func([], [AgentCardIDL], ['query']),
-    getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
-    getAvalanchePublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
-    setAgentRegistration: IDL.Func([IDL.Nat], [], []),
-  });
+  const idlFactory = () =>
+    IDL.Service({
+      getAgentCard: IDL.Func([], [AgentCardIDL], ['query']),
+      getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
+      getAvalanchePublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
+      setAgentRegistration: IDL.Func([IDL.Nat], [], []),
+    });
 
   console.log('\n\x1b[1m\x1b[36m  ic402 Agent Registration (Avalanche Fuji)\x1b[0m\n');
 
@@ -194,7 +207,9 @@ async function main() {
   let canisterId = args['canister-id'];
   if (!canisterId) {
     try {
-      canisterId = execSync('icp canister status example -e local --id-only', { encoding: 'utf-8' }).trim();
+      canisterId = execSync('icp canister status example -e local --id-only', {
+        encoding: 'utf-8',
+      }).trim();
     } catch {
       console.error('ERROR: Could not detect canister ID. Pass --canister-id or deploy first.');
       process.exit(1);
@@ -325,7 +340,10 @@ async function main() {
 
     // Read bytecode
     const artifact = JSON.parse(
-      readFileSync(resolve(CONTRACTS_DIR, 'out/IdentityRegistry.sol/IdentityRegistry.json'), 'utf-8'),
+      readFileSync(
+        resolve(CONTRACTS_DIR, 'out/IdentityRegistry.sol/IdentityRegistry.json'),
+        'utf-8',
+      ),
     );
     const bytecode = artifact.bytecode.object as Hex;
 
@@ -395,10 +413,9 @@ async function main() {
   log('');
   log('Storing agent token ID in ICP canister...');
   const env = host.includes('localhost') ? 'local' : 'ic';
-  execSync(
-    `icp canister call example setAgentRegistration '(${tokenId} : nat)' -e ${env}`,
-    { stdio: 'pipe' },
-  );
+  execSync(`icp canister call example setAgentRegistration '(${tokenId} : nat)' -e ${env}`, {
+    stdio: 'pipe',
+  });
   ok('agentId stored in canister');
 
   // Verify
