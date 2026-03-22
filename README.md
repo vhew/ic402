@@ -45,7 +45,8 @@ The canister derives a native Avalanche address via tECDSA. When a client pays U
 ## What a 402 looks like
 
 ```bash
-curl https://<canister-id>.raw.icp0.io/search?q=avalanche
+# Local: curl http://<canister-id>.raw.localhost:4944/search?q=avalanche
+# Mainnet: curl https://<canister-id>.raw.icp0.io/search?q=avalanche
 ```
 
 ```json
@@ -150,9 +151,10 @@ Step 3 of the demo offers a live cross-chain payment from MetaMask. To try it:
 Register the canister as an ERC-8004 agent on Avalanche Fuji:
 ```bash
 brew install foundry                                        # one-time
-pnpm register-agent --private-key 0xYOUR_FUJI_PRIVATE_KEY   # deploy contract + register
+cp .env.example .env.development                            # add your AVAX_PRIVATE_KEY
+pnpm register-agent --private-key 0xYOUR_FUJI_PRIVATE_KEY   # registers on existing contract
 ```
-Get testnet AVAX from [faucet.avax.network](https://faucet.avax.network).
+Get testnet AVAX from [faucet.avax.network](https://faucet.avax.network). The IdentityRegistry contract is already deployed — the script reuses it.
 
 ### What to expect
 
@@ -174,11 +176,6 @@ The demo is a CLI application — 6 interactive steps, each with Enter/skip/quit
 | IdentityRegistry contract | `0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3` | [Snowtrace](https://testnet.snowtrace.io/address/0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3) |
 | Canister AVAX address | Derived via tECDSA at runtime | Shown in demo step 1 |
 | USDC (Fuji testnet) | `0x5425890298aed601595a70AB815c96711a31Bc65` | [Token on Snowtrace](https://testnet.snowtrace.io/address/0x5425890298aed601595a70AB815c96711a31Bc65) |
-
-Register the canister as an ERC-8004 agent on Avalanche:
-```bash
-pnpm register-agent --private-key 0xYOUR_FUJI_KEY
-```
 
 ## Quick start
 
@@ -247,7 +244,7 @@ gate.setPolicy(null, {
 
 ```
 src/ic402/               Motoko library (published to mops)
-  Gateway.mo             Charge, session, policy, access grants, HTTP handler
+  Gateway.mo             Charge, session, policy, access grants
   EvmVerify.mo           Cross-chain Avalanche tx verification (HTTPS outcalls)
   ContentStore.mo        Encrypted blob storage (optional)
   Identity.mo            ERC-8004 agent cards + tECDSA (optional)
@@ -257,8 +254,8 @@ packages/client/         TypeScript SDK (@ic402/client)
 integration/mcp/         MCP server (@ic402/mcp)
 integration/mcp-client/  Interactive demo client
 contracts/               IdentityRegistry.sol (deployed to Avalanche Fuji)
-scripts/                 Agent registration, version bump, .did generation
-deploy/                  Local + production deployment
+scripts/                 Setup, agent registration, version bump, .did generation
+.env.example             Avalanche config template (copy to .env.development)
 ```
 
 <details>
