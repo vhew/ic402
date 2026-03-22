@@ -147,8 +147,7 @@ print(f"Spent: {receipt.amount} ckUSDC, refunded: {receipt.refunded}")
 st.divider()
 
 if not st.session_state.identity_set:
-    st.info("Set up your identity in the sidebar to try it interactively below.")
-    st.stop()
+    st.info("Set up your identity in the sidebar to try the interactive demo below.")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "Charge Flow", "Voucher Signing", "Session Flow", "Activity Log"
