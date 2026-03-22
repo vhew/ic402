@@ -515,7 +515,7 @@ export function buildSteps(
                 question: questions[i],
               });
             } catch { /* voucher may fail on local — tracking client-side */ }
-            state(`${i + 1}/10`, `${questions[i]} — consumed=${cumConsumed} remaining=${cumRemaining}`);
+            state(`${i + 1}/10`, `${questions[i]} — consumed=${cumConsumed} remaining=${cumRemaining} (no on-chain cost)`);
           }
 
           info('');
