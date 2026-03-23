@@ -1,64 +1,18 @@
 /// Voucher signing for ic402 sessions.
 /// Signs cumulative voucher payloads using Ed25519.
 
+import { encode } from 'cborg';
+
 /**
  * CBOR-encode a voucher payload for signing.
- * Uses a deterministic canonical encoding: [sessionId, cumulativeAmount, sequence]
+ * Produces canonical CBOR: array(3) of [sessionId, cumulativeAmount, sequence]
  */
 function encodeVoucherPayload(
   sessionId: string,
   cumulativeAmount: bigint,
   sequence: bigint,
 ): Uint8Array {
-  // Simple canonical CBOR encoding of a 3-element array
-  const encoder = new TextEncoder();
-  const sessionIdBytes = encoder.encode(sessionId);
-
-  // CBOR: array(3)
-  const parts: number[] = [];
-
-  // Array header (3 items)
-  parts.push(0x83);
-
-  // Text string: sessionId
-  encodeCborTextString(parts, sessionIdBytes);
-
-  // Unsigned integer: cumulativeAmount
-  encodeCborUint(parts, cumulativeAmount);
-
-  // Unsigned integer: sequence
-  encodeCborUint(parts, sequence);
-
-  return new Uint8Array(parts);
-}
-
-function encodeCborTextString(out: number[], bytes: Uint8Array): void {
-  encodeCborMajor(out, 3, bytes.length); // major type 3 = text string
-  for (const b of bytes) out.push(b);
-}
-
-function encodeCborUint(out: number[], value: bigint): void {
-  encodeCborMajor(out, 0, Number(value)); // major type 0 = unsigned integer
-}
-
-function encodeCborMajor(out: number[], major: number, length: number): void {
-  const majorShifted = major << 5;
-  if (length < 24) {
-    out.push(majorShifted | length);
-  } else if (length < 256) {
-    out.push(majorShifted | 24);
-    out.push(length);
-  } else if (length < 65536) {
-    out.push(majorShifted | 25);
-    out.push((length >> 8) & 0xff);
-    out.push(length & 0xff);
-  } else {
-    out.push(majorShifted | 26);
-    out.push((length >> 24) & 0xff);
-    out.push((length >> 16) & 0xff);
-    out.push((length >> 8) & 0xff);
-    out.push(length & 0xff);
-  }
+  return encode([sessionId, cumulativeAmount, sequence]);
 }
 
 export interface VoucherSigner {

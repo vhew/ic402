@@ -75,6 +75,20 @@ export function divider(): void {
   console.log(`${DIM}  ${'─'.repeat(56)}${RESET}`);
 }
 
+/** Compact "what's different" comparison block. */
+export function versus(x402: string[], ic402: string[]): void {
+  console.log(`${DIM}  WHAT'S DIFFERENT:${RESET}`);
+  console.log(`${DIM}  x402  │ ${x402[0]}${RESET}`);
+  for (let i = 1; i < x402.length; i++) console.log(`${DIM}       │ ${x402[i]}${RESET}`);
+  console.log(`${BOLD}  ic402 │ ${ic402[0]}${RESET}`);
+  for (let i = 1; i < ic402.length; i++) console.log(`${BOLD}       │ ${ic402[i]}${RESET}`);
+}
+
+/** Labeled section header within a step — lighter than header(). */
+export function section(text: string): void {
+  console.log(`\n  ${BOLD}${text}${RESET}`);
+}
+
 /**
  * Display an image inline in the terminal.
  * Uses the iTerm2 inline image protocol (also supported by WezTerm, Hyper, etc).

@@ -201,7 +201,7 @@ type AccessGrant =
 ///   3. External (S3/IPFS/Arweave) — off-chain hosting
 /// 
 /// Plus a paid service endpoint (search), streaming sessions, and
-/// ERC-8004 agent identity on Avalanche for cross-chain discovery.
+/// ERC-8004 agent identity on Base for cross-chain discovery.
 service : {
   deleteContent: (id: text) -> (ContentStoreResult);
   endSession: (sessionId: text) -> (PaymentResult);
@@ -209,7 +209,7 @@ service : {
   /// Get the agent card (public, no auth required).
   /// Other agents and indexers call this to discover capabilities.
   getAgentCard: () -> (AgentCard) query;
-  /// Get the registered agent ID on Avalanche (null if not yet registered).
+  /// Get the registered agent ID on Base (null if not yet registered).
   getAgentId: () -> (opt nat) query;
   getAssetContent: (assetPath: text, paymentSig: opt PaymentSignature) ->
    (variant {
@@ -226,9 +226,9 @@ service : {
       ok: ContentDelivery;
       paymentRequired: vec PaymentRequirement;
     });
-  /// Get the canister's tECDSA public key for Avalanche.
+  /// Get the canister's tECDSA public key for EVM chains.
   /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
-  /// Use scripts/register-agent.ts to derive the AVAX address and register.
+  /// Use scripts/register-agent.ts to derive the EVM address and register.
   getEvmPublicKey: () -> (blob);
   getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
    (variant {
@@ -244,18 +244,18 @@ service : {
       err: text;
       ok: SessionState;
     });
-  /// Register this canister as an agent on Avalanche's IdentityRegistry.
+  /// Register this canister as an agent on Base's IdentityRegistry.
   /// Controller-only.
-  /// 
-  /// Current flow (hackathon):
+  ///
+  /// Current flow:
   ///   1. Call getEvmPublicKey() to get the canister's secp256k1 key
-  ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
+  ///   2. Run scripts/register-agent.ts to register on Base Sepolia
   ///   3. Script calls setAgentRegistration() to store the token ID
-  /// 
+  ///
   /// Future flow (on-canister EVM signing):
   ///   1. Canister encodes EVM tx calling IdentityRegistry.register(card)
   ///   2. Signs via tECDSA (Keccak-256 + RLP encoding in Motoko)
-  ///   3. Submits to Avalanche via HTTPS outcall
+  ///   3. Submits to Base via HTTPS outcall
   ///   4. Returns the minted ERC-721 token ID
   registerAgent: () -> (nat);
   requestSession: () -> (SessionIntent);

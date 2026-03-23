@@ -27,6 +27,10 @@ module {
     expiry : Int;
   };
 
+  /// Payment signature for x402 settlement.
+  /// For charges: `signature` contains the cryptographic signature (ICP) or tx hash (EVM).
+  /// For sessions: `signature` contains the payer's 32-byte Ed25519 public key
+  ///               (used to verify voucher signatures during the session).
   public type PaymentSignature = {
     scheme : Text;
     network : Text;
@@ -265,6 +269,7 @@ module {
 
   public type LedgerActor = actor {
     icrc1_transfer : (TransferArg) -> async TransferResult;
+    icrc1_fee : () -> async Nat;
     icrc2_transfer_from : (TransferFromArg) -> async TransferFromResult;
   };
 
@@ -306,6 +311,7 @@ module {
     recipient : { owner : Principal; subaccount : ?Blob };
     tokens : [TokenConfig];
     evmChains : [EvmChainConfig];
+    evmRpcCanister : ?Text; // Override EVM RPC canister principal (default: mainnet 7hfb6-...)
   };
 
   // ── Content Delivery ──

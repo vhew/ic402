@@ -48,7 +48,7 @@ module {
     /// Get the canister's secp256k1 public key from ICP's threshold ECDSA service.
     /// Returns SEC1 compressed format (33 bytes).
     ///
-    /// To derive the Ethereum/Avalanche address from this key:
+    /// To derive the EVM address from this key:
     ///   1. Decompress to uncompressed format (65 bytes: 0x04 + X + Y)
     ///   2. Keccak-256 hash the 64 bytes after the 0x04 prefix
     ///   3. Take the last 20 bytes as the address

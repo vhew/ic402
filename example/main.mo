@@ -6,8 +6,8 @@
 ///   3. External (S3/IPFS/Arweave) — off-chain hosting
 ///
 /// Plus a paid service endpoint (search), streaming sessions, and
-/// ERC-8004 agent identity on Avalanche for cross-chain discovery.
-import Ic402 "../ic402/lib";
+/// ERC-8004 agent identity on Base for cross-chain discovery.
+import Ic402 "../src/ic402/lib";
 import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
 import Time "mo:base/Time";
@@ -69,6 +69,10 @@ persistent actor KnowledgeBase {
           tokens = [{ address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
       ];
+
+      // EVM RPC canister principal. Mainnet: 7hfb6-caaaa-aaaar-qadga-cai (default).
+      // For local development, deploy scripts patch this with the local canister ID.
+      evmRpcCanister = null; // uses default (mainnet)
     },
     Principal.fromActor(KnowledgeBase),
   );
@@ -77,18 +81,18 @@ persistent actor KnowledgeBase {
 
   transient let store = Ic402.ContentStore(Principal.fromActor(KnowledgeBase));
 
-  // ── Identity — OPTIONAL, for ERC-8004 agent discovery on Avalanche ──
+  // ── Identity — OPTIONAL, for ERC-8004 agent discovery on Base ──
   //
   // Registers this canister as a discoverable agent on ERC-8004's
-  // IdentityRegistry contract on Avalanche. Other agents and clients
+  // IdentityRegistry contract on Base. Other agents and clients
   // can find this service by querying the registry for skills, domains,
   // or x402 support.
   //
-  // The registration mints an ERC-721 on Avalanche using tECDSA — the
+  // The registration mints an ERC-721 on Base using tECDSA — the
   // canister signs the EVM transaction directly, no external wallet needed.
   //
   // Discovery flow:
-  //   1. This canister calls registerAgent() → mints ERC-721 on Avalanche
+  //   1. This canister calls registerAgent() → mints ERC-721 on Base
   //   2. The agent card (name, services, skills) is stored on-chain
   //   3. Other agents query IdentityRegistry.getAgent(agentId)
   //   4. They find this canister's endpoint and know it supports x402
@@ -189,7 +193,7 @@ persistent actor KnowledgeBase {
 
     switch (paymentSig) {
       case (null) {
-        // Return both ICP and Avalanche payment options
+        // Return both ICP and EVM payment options
         let icpReq = gate.require(icpPrice);
         let options = Array.append([icpReq], gate.requireEvm(amount));
         #paymentRequired(options);
@@ -557,7 +561,7 @@ persistent actor KnowledgeBase {
   };
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Identity: ERC-8004 Agent Discovery on Avalanche
+  // Identity: ERC-8004 Agent Discovery on Base
   //
   // These endpoints expose the agent card for discovery and provide
   // on-chain registration. The agent card tells other agents:
@@ -566,22 +570,22 @@ persistent actor KnowledgeBase {
   //   - Skills and domains for capability-based discovery
   //
   // Registration (registerAgent) is an admin action that mints an
-  // ERC-721 on Avalanche's IdentityRegistry contract via tECDSA.
+  // ERC-721 on Base's IdentityRegistry contract via tECDSA.
   // Once registered, other agents can find this canister by querying
-  // the Avalanche contract — no centralized directory needed.
+  // the Base contract — no centralized directory needed.
   //
   // Cross-chain flow:
-  //   1. Agent A queries IdentityRegistry on Avalanche for skill="search"
+  //   1. Agent A queries IdentityRegistry on Base for skill="search"
   //   2. Registry returns this canister's agent card with ICP endpoint
   //   3. Agent A calls the ICP endpoint, receives 402 + PaymentRequirement
-  //   4. Agent A pays (ICP ckUSDC or Avalanche USDC) and gets the service
+  //   4. Agent A pays (ICP ckUSDC or EVM USDC) and gets the service
   //
-  // Avalanche-specific considerations:
+  // EVM considerations:
   //   - tECDSA key: the canister derives an ECDSA key via ICP's threshold
-  //     ECDSA service, giving it a native Avalanche address
-  //   - Gas: the canister's Avalanche address needs AVAX for registration tx
-  //   - Contract addresses (Avalanche C-Chain mainnet):
-  //     IdentityRegistry: 0x... (TBD — deploy post-hackathon)
+  //     ECDSA service, giving it a native EVM address
+  //   - Gas: the canister's EVM address needs ETH for registration tx on Base
+  //   - Contract addresses (Base Sepolia):
+  //     IdentityRegistry: 0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3
   //     ReputationRegistry: 0x... (TBD)
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -591,14 +595,14 @@ persistent actor KnowledgeBase {
     identity.getCard();
   };
 
-  /// Get the registered agent ID on Avalanche (null if not yet registered).
+  /// Get the registered agent ID on Base (null if not yet registered).
   public query func getAgentId() : async ?Nat {
     identity.getAgentId();
   };
 
-  /// Get the canister's tECDSA public key for Avalanche.
+  /// Get the canister's tECDSA public key for EVM chains.
   /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
-  /// Use scripts/register-agent.ts to derive the AVAX address and register.
+  /// Use scripts/register-agent.ts to derive the EVM address and register.
   public func getEvmPublicKey() : async Blob {
     await identity.getPublicKey("dfx_test_key"); // "key_1" on mainnet IC
   };
@@ -610,18 +614,18 @@ persistent actor KnowledgeBase {
     identity.setAgentId(agentTokenId);
   };
 
-  /// Register this canister as an agent on Avalanche's IdentityRegistry.
+  /// Register this canister as an agent on Base's IdentityRegistry.
   /// Controller-only.
   ///
-  /// Current flow (hackathon):
+  /// Current flow:
   ///   1. Call getEvmPublicKey() to get the canister's secp256k1 key
-  ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
+  ///   2. Run scripts/register-agent.ts to register on Base Sepolia
   ///   3. Script calls setAgentRegistration() to store the token ID
   ///
   /// Future flow (on-canister EVM signing):
   ///   1. Canister encodes EVM tx calling IdentityRegistry.register(card)
   ///   2. Signs via tECDSA (Keccak-256 + RLP encoding in Motoko)
-  ///   3. Submits to Avalanche via HTTPS outcall
+  ///   3. Submits to Base via HTTPS outcall
   ///   4. Returns the minted ERC-721 token ID
   public shared(msg) func registerAgent() : async Nat {
     assert(Principal.isController(msg.caller));

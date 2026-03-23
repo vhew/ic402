@@ -2,6 +2,10 @@
 
 Everything a canister needs to get paid — x402 charges, streaming sessions, encrypted content, agent discovery.
 
+[x402](https://www.x402.org/) is a protocol for HTTP-native payments: a server returns `HTTP 402 Payment Required` with a JSON body describing how to pay, the client pays on-chain, then retries the request with proof of payment. ic402 brings this to ICP canisters as a drop-in Motoko library.
+
+New to ICP? See [CONTRIBUTING.md](CONTRIBUTING.md#icp-concepts-for-non-icp-developers) for a glossary of ICP terms.
+
 ## Why ICP for x402
 
 Normal x402 runs on a centralized HTTP server (Express, Cloudflare Worker) with an external facilitator (Coinbase) and a separate wallet. Three moving parts, all off-chain.
@@ -31,7 +35,7 @@ let gate = Ic402.Gateway({ /* config */ }, Principal.fromActor(self));
 | Cross-chain (5 EVM chains) | No | No | **Yes — HTTPS outcall verification** |
 | Encrypted content store | No | No | **Yes** |
 | Policy engine | No | No | **Yes — dual-sided** |
-| Agent discovery (ERC-8004) | No | No | **Yes — on Base**** |
+| Agent discovery (ERC-8004) | No | No | **Yes — on Base** |
 | Drop-in library | No (Express middleware) | No (standalone canister) | **Yes — one import** |
 
 ### Sessions: 5,000x cheaper
@@ -45,8 +49,8 @@ The canister derives a native EVM address via tECDSA. When a client pays USDC on
 ## What a 402 looks like
 
 ```bash
-# Local: curl http://<canister-id>.raw.localhost:4944/search?q=avalanche
-# Mainnet: curl https://<canister-id>.raw.icp0.io/search?q=avalanche
+# Local: curl http://<canister-id>.raw.localhost:4944/search?q=payments
+# Mainnet: curl https://<canister-id>.raw.icp0.io/search?q=payments
 ```
 
 ```json
@@ -90,7 +94,7 @@ The canister derives a native EVM address via tECDSA. When a client pays USDC on
 │  ┌─────▼───────────────▼──────────────────▼─────────────┐  │
 │  │             Settlement (dual-chain)                  │  │
 │  │  ICP:  ICRC-2 transfer_from                          │  │
-│  │  EVM: HTTPS outcall → eth_getTransactionReceipt     │  │
+│  │  EVM:  EVM RPC canister → eth_getTransactionReceipt │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                            │
 │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐      │
@@ -113,7 +117,7 @@ Client                    Canister                     EVM Chain
   │                         │                               │
   │── send USDC ───────────────────────────────────────────>│
   │                         │                               │
-  │── GET + X-PAYMENT ─────>│── HTTPS outcall ─────────────>│
+  │── GET + X-PAYMENT ─────>│── EVM RPC canister ──────────>│
   │                         │<── getTransactionReceipt ─────│
   │<── HTTP 200 + content ──│   (verify status + contract)  │
   │                         │                               │
@@ -123,7 +127,7 @@ Client                    Canister                     EVM Chain
 
 ## Interactive demo
 
-The demo walks through the full flow — upload content, hit the paywall, pay from MetaMask on Base, receive the content. Live cross-chain settlement in the terminal.
+The demo walks through the full flow — upload content, hit the paywall, pay with ICP ckUSDC or EVM USDC, receive the content. Live settlement in the terminal.
 
 ### Prerequisites
 
@@ -148,7 +152,7 @@ Step 3 of the demo offers a live cross-chain payment from MetaMask. To try it:
 1. Get testnet USDC from the [Circle faucet](https://faucet.circle.com/) (select Base Sepolia)
 2. The demo shows the recipient address and amount
 3. Send USDC from MetaMask, paste the tx hash
-4. The canister verifies the tx via HTTPS outcall to EVM RPC
+4. The canister verifies the tx via the EVM RPC canister
 
 ### Optional: EVM agent registration
 
@@ -156,9 +160,9 @@ Register the canister as an ERC-8004 agent on Base Sepolia:
 ```bash
 brew install foundry                                        # one-time
 cp .env.example .env.development                            # add your EVM_PRIVATE_KEY
-pnpm register-agent --private-key 0xYOUR_FUJI_PRIVATE_KEY   # registers on existing contract
+pnpm register-agent --private-key 0xYOUR_BASE_PRIVATE_KEY   # registers on existing contract
 ```
-Get testnet EVM from [faucet for Base Sepolia](https://faucet for Base Sepolia). The IdentityRegistry contract is already deployed — the script reuses it.
+Get testnet ETH from the [Base Sepolia faucet](https://www.alchemy.com/faucets/base-sepolia). The IdentityRegistry contract is already deployed — the script reuses it.
 
 ### What to expect
 
@@ -168,7 +172,7 @@ The demo is a CLI application — 6 interactive steps, each with Enter/skip/quit
 
 1. **Configure** — connect to canister, derive tECDSA EVM address
 2. **Upload Content** — upload via MCP, content encrypted at rest (SHA-256-CTR)
-3. **x402 over HTTP** — hit the paywall, see dual-chain options, optionally **pay from MetaMask on Fuji** and watch the canister verify the tx via HTTPS outcall
+3. **x402 over HTTP** — hit the paywall, see dual-chain options, optionally **pay from MetaMask on any supported EVM chain** and watch the canister verify the tx via HTTPS outcall
 4. **Sessions** — streaming micropayments, 5,000x cheaper than per-call
 5. **Agent Discovery** — ERC-8004 registration on Base ([verify on Basescan](https://sepolia.basescan.org))
 6. **Policy** — dual-sided spending limits, full infrastructure summary
@@ -177,9 +181,9 @@ The demo is a CLI application — 6 interactive steps, each with Enter/skip/quit
 
 | Component | Address / ID | Verify |
 |-----------|-------------|--------|
-| IdentityRegistry contract | `0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3` | [Basescan](https://sepolia.basescan.org/address/0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3) |
+| IdentityRegistry contract | `0x140d228d099367c273fdcd3c4bfd87342ad7a8d2` | [Basescan](https://sepolia.basescan.org/address/0x140d228d099367c273fdcd3c4bfd87342ad7a8d2) |
 | Canister EVM address | Derived via tECDSA at runtime | Shown in demo step 1 |
-| USDC (Fuji testnet) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | [Token on Basescan](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e) |
+| USDC (Base Sepolia) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | [Token on Basescan](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e) |
 
 ## Quick start
 
@@ -200,7 +204,7 @@ persistent actor MyService {
         chainId = 84532;
         recipient = "0xYOUR_EVM_ADDRESS";
         tokens = [{ address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; symbol = "USDC"; decimals = 6 : Nat8 }];
-      };
+      }];
     },
     Principal.fromActor(MyService),
   );
@@ -217,7 +221,7 @@ persistent actor MyService {
 };
 ```
 
-See `src/example/main.mo` for the full working example.
+See `example/main.mo` for the full working example.
 
 ## Content delivery
 
@@ -248,12 +252,15 @@ gate.setPolicy(null, {
 
 ```
 src/ic402/               Motoko library (published to mops)
-  Gateway.mo             Charge, session, policy, access grants
-  EvmVerify.mo           Cross-chain EVM tx verification (HTTPS outcalls)
+  Gateway.mo             Charge orchestration, settlement, policy
+  Sessions.mo            Streaming sessions, escrow, voucher verification
+  Grants.mo              HMAC-signed access grants
+  EvmVerify.mo           Cross-chain EVM tx verification (EVM RPC canister)
   ContentStore.mo        Encrypted blob storage (optional)
   Identity.mo            ERC-8004 agent cards + tECDSA (optional)
   HttpHandler.mo         x402 HTTP response helpers
-src/example/             Example canister (all features, serves HTTP)
+  Utils.mo               Shared utilities (hex, JSON, byte conversion)
+example/                 Example canister (all features, serves HTTP)
 packages/client/         TypeScript SDK (@ic402/client)
 integration/mcp/         MCP server (@ic402/mcp)
 integration/mcp-client/  Interactive demo client
@@ -309,13 +316,27 @@ scripts/                 Setup, agent registration, version bump, .did generatio
 
 ## Status
 
-Core payment flows, cross-chain settlement, HTTP serving, and content delivery are functional.
+Production-ready. All core features are implemented and tested.
 
-**Working:** HTTP x402 (standard 402 responses from canister), dual-chain settlement (ICP ICRC-2 + EVM USDC via HTTPS outcall), streaming sessions (5,000x reduction), encrypted content store, cross-chain agent discovery (ERC-8004 + tECDSA on Base Sepolia), policy engine, MCP server + interactive demo with live MetaMask payment.
+**Working:**
+- HTTP x402 (standard 402 responses served natively from canister)
+- Dual-chain settlement: ICP (ICRC-2 transfer_from) + 5 EVM chains (via EVM RPC canister)
+- Streaming sessions with Ed25519 voucher verification (5,000x settlement reduction)
+- Encrypted content store (SHA-256-CTR) with 3 delivery patterns
+- Cross-chain agent discovery (ERC-8004 on Base Sepolia via tECDSA)
+- Dual-sided policy engine (per-caller limits, rate limiting, session caps)
+- MCP server + interactive demo with live ICP and EVM payment
 
-**Limitations:** Voucher Ed25519 signature verification is stubbed. EVM tx verification checks receipt status but does not yet decode ERC-20 Transfer event logs. On-canister EVM tx signing (Keccak + RLP in Motoko) is a future milestone.
+**Limitations:**
+- EVM verification uses the DFINITY EVM RPC canister (mainnet only — not available on local replica)
+- Auto-approval (ICRC-2 approve before payment) not yet implemented in the TypeScript SDK
+- Agent discovery (`discoverAgents`) is stubbed in the TypeScript SDK
 
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, code conventions, and ICP concepts glossary.
 
 ## License
 

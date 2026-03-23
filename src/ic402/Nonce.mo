@@ -7,12 +7,12 @@ import Types "Types";
 import HashMap "mo:base/HashMap";
 import Blob "mo:base/Blob";
 import Nat "mo:base/Nat";
-import Nat8 "mo:base/Nat8";
 import Time "mo:base/Time";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
 import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
+import Utils "Utils";
 
 module {
 
@@ -29,7 +29,7 @@ module {
     /// Generate a deterministic nonce bound to a specific payment amount.
     /// nonce = sha256(canisterPrincipal ++ counter)
     public func generate(expiry : Int, amount : Nat) : Blob {
-      let counterBytes = natToBytes(counter);
+      let counterBytes = Utils.natToBytes8(counter);
       let principalBytes = Blob.toArray(Principal.toBlob(canisterPrincipal));
       let input = Array.append(principalBytes, counterBytes);
       let nonce = SHA256.fromArray(#sha256, input);
@@ -113,18 +113,5 @@ module {
       counter := data.counter;
       // locked is transient — fresh on every upgrade
     };
-  };
-
-  func natToBytes(n : Nat) : [Nat8] {
-    var value = n;
-    let bytes = Array.init<Nat8>(8, 0);
-    var i = 7 : Nat;
-    while (i > 0) {
-      bytes[i] := Nat8.fromNat(value % 256);
-      value := value / 256;
-      i -= 1;
-    };
-    bytes[0] := Nat8.fromNat(value % 256);
-    Array.freeze(bytes);
   };
 };

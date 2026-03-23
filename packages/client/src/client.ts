@@ -164,11 +164,19 @@ export class Ic402Client {
       idleTimeout: idleTimeout ? [idleTimeout] : [],
     };
 
-    // Construct a payment signature (placeholder — approval must be done externally)
+    // Construct a payment signature.
+    // signature field must contain the payer's 32-byte Ed25519 public key
+    // for voucher verification during the session.
+    const pubKey = new Uint8Array(32);
+    if (signer) {
+      // TODO: get public key from signer
+      // pubKey = await signer.getPublicKey();
+    }
+
     const sig = {
       scheme: 'exact',
       network: this.config.network,
-      signature: new Uint8Array(64),
+      signature: pubKey,
       sender: '', // Will be filled from identity
       nonce: new Uint8Array(32),
     };

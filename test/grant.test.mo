@@ -12,6 +12,7 @@ suite("AccessGrants", func() {
     recipient = { owner = testPrincipal; subaccount = null };
     tokens = [];
     evmChains = [];
+    evmRpcCanister = null;
   };
 
   let sampleContentRef : Types.ContentRef = {

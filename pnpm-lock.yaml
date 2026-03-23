@@ -97,6 +97,9 @@ importers:
       '@x402/fetch':
         specifier: ^2.0.0
         version: 2.7.0(typescript@5.9.3)
+      cborg:
+        specifier: ^4.5.8
+        version: 4.5.8
       viem:
         specifier: ^2.0.0
         version: 2.47.5(typescript@5.9.3)(zod@3.25.76)

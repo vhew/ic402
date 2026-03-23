@@ -7,6 +7,8 @@
 
 import Types "Types";
 import GatewayModule "Gateway";
+import GrantsMod "Grants";
+import SessionsMod "Sessions";
 import NonceMod "Nonce";
 import EscrowMod "Escrow";
 import ContentStoreMod "ContentStore";
@@ -66,6 +68,8 @@ module {
   // ── Classes ──
 
   public let Gateway = GatewayModule.Gateway;
+  public let Grants = GrantsMod.Grants;
+  public let Sessions = SessionsMod.Sessions;
   public let NonceManager = NonceMod.NonceManager;
   public let EscrowManager = EscrowMod.EscrowManager;
   public let ContentStore = ContentStoreMod.ContentStore;

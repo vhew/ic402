@@ -21,6 +21,7 @@
     "@icp-sdk/core": "^5.0.0",
     "@x402/core": "^2.4.0",
     "@x402/fetch": "^2.0.0",
+    "cborg": "^4.5.8",
     "viem": "^2.0.0"
   },
   "devDependencies": {

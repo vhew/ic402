@@ -69,7 +69,7 @@ Required:
 Options:
   --canister-id <id>      ICP canister principal (auto-detected from local replica)
   --host <url>            ICP replica URL (default: http://localhost:4944)
-  --rpc <url>             Base RPC (default: Fuji testnet)
+  --rpc <url>             Base Sepolia RPC (default: https://sepolia.base.org)
   --contract <address>    Use existing IdentityRegistry contract (skip deploy)
   --ecdsa-key <name>      tECDSA key name (default: dfx_test_key)
 `);
@@ -270,7 +270,7 @@ async function main() {
     st('Token ID', String(existingId[0]));
     st('Canister', canisterId);
     st('Canister ETH addr', canisterAvaxAddress);
-    st('Chain', 'Base Sepolia (43113)');
+    st('Chain', 'Base Sepolia (84532)');
     console.log('');
     return;
   }
@@ -331,11 +331,8 @@ async function main() {
       process.exit(1);
     }
 
-    // Compile
-    execSync(
-      `forge build --root "${CONTRACTS_DIR}" --contracts "${CONTRACTS_DIR}" --out "${CONTRACTS_DIR}/out"`,
-      { stdio: 'pipe' },
-    );
+    // Compile (foundry.toml in CONTRACTS_DIR sets src=src, out=out)
+    execSync(`forge build --root "${CONTRACTS_DIR}"`, { stdio: 'pipe' });
     ok('Contract compiled');
 
     // Read bytecode
@@ -432,7 +429,7 @@ async function main() {
   st('Contract', contractAddress);
   st('Canister', canisterId);
   st('Canister ETH addr', canisterAvaxAddress);
-  st('Chain', 'Base Sepolia (43113)');
+  st('Chain', 'Base Sepolia (84532)');
   st('Contract on Basescan', `https://sepolia.basescan.org/address/${contractAddress}`);
   st('Tx on Basescan', `https://sepolia.basescan.org/tx/${registerHash}`);
   console.log('');

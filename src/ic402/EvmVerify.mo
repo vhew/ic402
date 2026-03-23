@@ -1,20 +1,19 @@
-/// ic402 — EVM transaction verification via HTTPS outcalls.
+/// ic402 — EVM transaction verification via the DFINITY EVM RPC Canister.
 ///
 /// Verifies ERC-20 transfers on any supported EVM chain by calling
-/// eth_getTransactionReceipt and decoding the Transfer event log.
-/// Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum.
+/// eth_getTransactionReceipt through the EVM RPC Canister (7hfb6-caaaa-aaaar-qadga-cai),
+/// which proxies JSON-RPC calls to multiple providers with consensus verification.
+///
+/// Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum (mainnet + testnet).
 ///
 /// Used by Gateway.settle() when the payment network is "eip155:*".
 
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";
-import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
-import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Iter "mo:base/Iter";
 import Char "mo:base/Char";
-import IC "mo:ic";
 
 module {
 
@@ -32,28 +31,201 @@ module {
     #failed : Text;
   };
 
-  /// ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
-  let TRANSFER_TOPIC = "ddf252ad1be2c4dbc95581d3b0f4f22d3e4cadc6b89216b6b02654fec70f965c";
+  // ── EVM RPC Canister types (from evm_rpc.did) ──
 
-  /// RPC endpoints by chain ID (mainnet + testnet).
-  public func rpcUrl(chainId : Nat) : Text {
-    if (chainId == 1)          { "https://ethereum-rpc.publicnode.com" }
-    else if (chainId == 43114) { "https://api.avax.network/ext/bc/C/rpc" }
-    else if (chainId == 8453)  { "https://mainnet.base.org" }
-    else if (chainId == 10)    { "https://mainnet.optimism.io" }
-    else if (chainId == 42161) { "https://arb1.arbitrum.io/rpc" }
-    else if (chainId == 11155111) { "https://ethereum-sepolia-rpc.publicnode.com" }
-    else if (chainId == 43113)    { "https://api.avax-test.network/ext/bc/C/rpc" }
-    else if (chainId == 84532)    { "https://sepolia.base.org" }
-    else if (chainId == 11155420) { "https://sepolia.optimism.io" }
-    else if (chainId == 421614)   { "https://sepolia-rollup.arbitrum.io/rpc" }
-    else { "https://ethereum-rpc.publicnode.com" };
+  public type LogEntry = {
+    transactionHash : ?Text;
+    blockNumber : ?Nat;
+    data : Text;
+    blockHash : ?Text;
+    transactionIndex : ?Nat;
+    topics : [Text];
+    address : Text;
+    logIndex : ?Nat;
+    removed : Bool;
   };
 
-  let QUOTE : Char = '\"';
-  let ic : IC.Service = actor "aaaaa-aa";
+  public type TransactionReceipt = {
+    to : ?Text;
+    status : ?Nat;
+    root : ?Text;
+    transactionHash : Text;
+    blockNumber : Nat;
+    from : Text;
+    logs : [LogEntry];
+    blockHash : Text;
+    // "type" is a reserved word in Motoko; Candid maps it as-is
+    // but we omit it here since we don't need it for verification.
+    transactionIndex : Nat;
+    effectiveGasPrice : Nat;
+    logsBloom : Text;
+    contractAddress : ?Text;
+    gasUsed : Nat;
+    cumulativeGasUsed : Nat;
+  };
 
-  /// Verify an EVM transaction receipt via HTTPS outcall.
+  public type RpcError = {
+    #ProviderError : { code : Int32; message : Text };
+    #HttpOutcallError : { code : Int32; message : Text };
+    #JsonRpcError : { code : Int64; message : Text };
+    #ValidationError : Text;
+  };
+
+  public type GetTransactionReceiptResult = {
+    #Ok : ?TransactionReceipt;
+    #Err : RpcError;
+  };
+
+  public type EthMainnetService = {
+    #Alchemy;
+    #Ankr;
+    #BlockPi;
+    #Cloudflare;
+    #PublicNode;
+    #Llama;
+  };
+
+  public type EthSepoliaService = {
+    #Alchemy;
+    #Ankr;
+    #BlockPi;
+    #PublicNode;
+    #Sepolia;
+  };
+
+  public type L2MainnetService = {
+    #Alchemy;
+    #Ankr;
+    #BlockPi;
+    #PublicNode;
+    #Llama;
+  };
+
+  public type RpcApi = {
+    url : Text;
+    headers : ?[{ name : Text; value : Text }];
+  };
+
+  public type RpcServices = {
+    #Custom : { chainId : Nat64; services : [RpcApi] };
+    #EthSepolia : ?[EthSepoliaService];
+    #EthMainnet : ?[EthMainnetService];
+    #ArbitrumOne : ?[L2MainnetService];
+    #BaseMainnet : ?[L2MainnetService];
+    #OptimismMainnet : ?[L2MainnetService];
+  };
+
+  public type RpcService = {
+    #Provider : Nat64;
+    #Custom : RpcApi;
+    #EthSepolia : EthSepoliaService;
+    #EthMainnet : EthMainnetService;
+    #ArbitrumOne : L2MainnetService;
+    #BaseMainnet : L2MainnetService;
+    #OptimismMainnet : L2MainnetService;
+  };
+
+  public type ConsensusStrategy = {
+    #Equality;
+    #Threshold : { total : ?Nat8; min : Nat8 };
+  };
+
+  public type RpcConfig = {
+    responseSizeEstimate : ?Nat64;
+    responseConsensus : ?ConsensusStrategy;
+  };
+
+  public type MultiGetTransactionReceiptResult = {
+    #Consistent : GetTransactionReceiptResult;
+    #Inconsistent : [(RpcService, GetTransactionReceiptResult)];
+  };
+
+  /// Actor interface for the EVM RPC Canister.
+  public type EvmRpcService = actor {
+    eth_getTransactionReceipt : (RpcServices, ?RpcConfig, Text) -> async MultiGetTransactionReceiptResult;
+  };
+
+  /// Default EVM RPC Canister principal (mainnet).
+  /// Override via evmRpcCanister in Config for local development.
+  public let DEFAULT_EVM_RPC_CANISTER : Text = "7hfb6-caaaa-aaaar-qadga-cai";
+
+  /// ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+  /// Lowercase with 0x prefix for comparison against RPC canister response topics.
+  let TRANSFER_TOPIC = "0xddf252ad1be2c4dbc95581d3b0f4f22d3e4cadc6b89216b6b02654fec70f965c";
+
+  /// Cycles to attach for EVM RPC calls.
+  /// 10 billion cycles covers eth_getTransactionReceipt with consensus across 3+ providers.
+  /// The EVM RPC canister refunds unused cycles.
+  let RPC_CYCLES : Nat = 10_000_000_000;
+
+  /// Map a chain ID to the appropriate RpcServices variant.
+  /// Returns null for unsupported chains (e.g. Avalanche, which the EVM RPC
+  /// canister does not have built-in support for).
+  func rpcServices(chainId : Nat) : ?RpcServices {
+    // Ethereum Mainnet
+    if (chainId == 1) { return ?#EthMainnet(null) };
+    // Base Mainnet
+    if (chainId == 8453) { return ?#BaseMainnet(null) };
+    // Optimism Mainnet
+    if (chainId == 10) { return ?#OptimismMainnet(null) };
+    // Arbitrum One
+    if (chainId == 42161) { return ?#ArbitrumOne(null) };
+    // Ethereum Sepolia
+    if (chainId == 11155111) { return ?#EthSepolia(null) };
+
+    // Avalanche C-Chain (mainnet: 43114, testnet: 43113) — use Custom with public RPC
+    if (chainId == 43114) {
+      return ?#Custom({
+        chainId = 43114 : Nat64;
+        services = [{
+          url = "https://api.avax.network/ext/bc/C/rpc";
+          headers = null;
+        }];
+      });
+    };
+    if (chainId == 43113) {
+      return ?#Custom({
+        chainId = 43113 : Nat64;
+        services = [{
+          url = "https://api.avax-test.network/ext/bc/C/rpc";
+          headers = null;
+        }];
+      });
+    };
+
+    // Testnet L2s — use Custom with public RPC endpoints
+    if (chainId == 84532) {
+      return ?#Custom({
+        chainId = 84532 : Nat64;
+        services = [{
+          url = "https://sepolia.base.org";
+          headers = null;
+        }];
+      });
+    };
+    if (chainId == 11155420) {
+      return ?#Custom({
+        chainId = 11155420 : Nat64;
+        services = [{
+          url = "https://sepolia.optimism.io";
+          headers = null;
+        }];
+      });
+    };
+    if (chainId == 421614) {
+      return ?#Custom({
+        chainId = 421614 : Nat64;
+        services = [{
+          url = "https://sepolia-rollup.arbitrum.io/rpc";
+          headers = null;
+        }];
+      });
+    };
+
+    null;
+  };
+
+  /// Verify an EVM transaction receipt via the EVM RPC Canister.
   /// Checks: tx succeeded, sent to correct token contract,
   /// Transfer event log shows correct recipient and sufficient amount.
   public func verifyTransaction(
@@ -62,144 +234,138 @@ module {
     expectedToken : Text,
     expectedRecipient : Text,
     expectedAmount : Nat,
+    evmRpcCanister : ?Text,
   ) : async VerifyResult {
-    let url = rpcUrl(chainId);
-
-    let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"" # txHash # "\"]}";
-
-    // Increase max response to capture logs
-    let response = await (with cycles = 230_000_000_000) ic.http_request({
-      url = url;
-      method = #post;
-      max_response_bytes = ?50_000;
-      body = ?Text.encodeUtf8(body);
-      headers = [
-        { name = "Content-Type"; value = "application/json" },
-      ];
-      transform = null;
-    });
-
-    if (response.status != 200) {
-      return #failed("RPC returned status " # Nat.toText(response.status));
+    let services = switch (rpcServices(chainId)) {
+      case (?s) { s };
+      case (null) { return #failed("Unsupported chain ID: " # Nat.toText(chainId)) };
     };
 
-    let responseText = switch (Text.decodeUtf8(response.body)) {
-      case (?t) { t };
-      case (null) { return #failed("Invalid UTF-8 in RPC response") };
+    let rpcPrincipal = switch (evmRpcCanister) {
+      case (?p) { p };
+      case (null) { DEFAULT_EVM_RPC_CANISTER };
+    };
+    let evmRpc : EvmRpcService = actor (rpcPrincipal);
+
+    // Call the EVM RPC canister with consensus verification.
+    // Attaching cycles to cover the multi-provider outcall cost.
+    let rpcResult = await (with cycles = RPC_CYCLES) evmRpc.eth_getTransactionReceipt(
+      services,
+      null, // default RpcConfig (3-provider consensus)
+      txHash,
+    );
+
+    // Extract the receipt from the consensus result
+    let receipt : TransactionReceipt = switch (rpcResult) {
+      case (#Consistent(#Ok(?r))) { r };
+      case (#Consistent(#Ok(null))) {
+        return #failed("Transaction not found or not yet confirmed");
+      };
+      case (#Consistent(#Err(err))) {
+        return #failed("RPC error: " # rpcErrorToText(err));
+      };
+      case (#Inconsistent(results)) {
+        // Try to find any successful result among inconsistent responses.
+        // This can happen when providers return the same receipt but with
+        // minor formatting differences that the canister deems inconsistent.
+        switch (firstOkReceipt(results)) {
+          case (?r) { r };
+          case (null) {
+            return #failed("Inconsistent RPC responses from providers");
+          };
+        };
+      };
     };
 
-    let status = extractJsonField(responseText, "status");
-    let to = extractJsonField(responseText, "to");
-    let from = extractJsonField(responseText, "from");
-    let blockNumber = extractJsonField(responseText, "blockNumber");
-
-    if (status == "") {
-      return #failed("Transaction not found or not yet confirmed");
+    // Check transaction status (1 = success)
+    let txSucceeded = switch (receipt.status) {
+      case (?s) { s == 1 };
+      case (null) { return #failed("Transaction status not available (pre-Byzantium)") };
     };
-
-    let txSucceeded = status == "0x1";
     if (not txSucceeded) {
-      return #failed("Transaction reverted (status: " # status # ")");
+      return #failed("Transaction reverted (status: 0x0)");
     };
 
     // Verify tx was to the expected token contract
-    let normalizedTo = toLower(to);
-    let normalizedExpected = toLower(expectedToken);
-    if (normalizedTo != normalizedExpected) {
-      return #failed("Transaction target " # to # " does not match expected token " # expectedToken);
+    let receiptTo = switch (receipt.to) {
+      case (?t) { t };
+      case (null) { return #failed("Transaction has no 'to' address (contract creation)") };
     };
 
-    // Decode ERC-20 Transfer event from logs
+    let normalizedTo = toLower(receiptTo);
+    let normalizedExpected = toLower(expectedToken);
+    if (normalizedTo != normalizedExpected) {
+      return #failed(
+        "Transaction target " # receiptTo #
+        " does not match expected token " # expectedToken
+      );
+    };
+
+    // Find the ERC-20 Transfer event in structured logs
     let normalizedRecipient = toLower(expectedRecipient);
-    switch (findTransferLog(responseText, normalizedRecipient)) {
+    switch (findTransferLog(receipt.logs, normalizedRecipient)) {
       case (null) {
         return #failed("No Transfer event found to recipient " # expectedRecipient);
       };
       case (?(logRecipient, logAmount)) {
         if (logAmount < expectedAmount) {
-          return #failed("Transfer amount " # Nat.toText(logAmount) # " < required " # Nat.toText(expectedAmount));
+          return #failed(
+            "Transfer amount " # Nat.toText(logAmount) #
+            " < required " # Nat.toText(expectedAmount)
+          );
         };
 
         #ok({
           txHash;
-          from;
-          to;
+          from = receipt.from;
+          to = receiptTo;
           recipient = logRecipient;
           amount = logAmount;
           status = txSucceeded;
-          blockNumber;
+          blockNumber = Nat.toText(receipt.blockNumber);
         });
       };
     };
   };
 
-  // ── Transfer event log parsing ──
+  // ── Transfer event log parsing (structured, no JSON) ──
 
-  /// Search the JSON-RPC receipt response for a Transfer event log
+  /// Search the structured log entries for an ERC-20 Transfer event
   /// where the recipient (topics[2]) matches expectedRecipient.
   /// Returns (recipientAddress, amount) if found.
-  func findTransferLog(responseText : Text, expectedRecipient : Text) : ?(Text, Nat) {
-    // Strategy: find the Transfer event topic hash in the response,
-    // then extract topics[2] (recipient) and "data" (amount) from
-    // the surrounding log entry.
-    let chars = Iter.toArray(responseText.chars());
-    let len = chars.size();
-    let topicChars = Iter.toArray(TRANSFER_TOPIC.chars());
-    let topicLen = topicChars.size();
+  func findTransferLog(logs : [LogEntry], expectedRecipient : Text) : ?(Text, Nat) {
+    for (log in logs.vals()) {
+      // Transfer events have exactly 3 topics:
+      //   [0] = Transfer event signature hash
+      //   [1] = from address (zero-padded)
+      //   [2] = to address (zero-padded)
+      if (log.topics.size() >= 3) {
+        let topic0 = toLower(log.topics[0]);
+        if (topic0 == TRANSFER_TOPIC) {
+          let topic2 = log.topics[2];
+          // topic2 is a 32-byte zero-padded address: "0x" + 64 hex chars
+          if (topic2.size() >= 66) {
+            let recipientAddr = hexToAddress(topic2);
 
-    var i = 0;
-    while (i + topicLen < len) {
-      // Look for the Transfer topic hash (without 0x prefix)
-      var match = true;
-      var j = 0;
-      while (j < topicLen) {
-        let c = if (chars[i + j] >= 'A' and chars[i + j] <= 'Z') {
-          Char.fromNat32(Char.toNat32(chars[i + j]) + 32)
-        } else { chars[i + j] };
-        if (c != topicChars[j]) {
-          match := false;
-          j := topicLen;
-        } else {
-          j += 1;
+            if (recipientAddr.size() == 42 and recipientAddr == expectedRecipient) {
+              // Data field contains the uint256 transfer amount
+              if (log.data.size() >= 4) {
+                let amount = hexToNat(log.data);
+                return ?(recipientAddr, amount);
+              };
+            };
+          };
         };
       };
-
-      if (match) {
-        // Found the Transfer topic. Extract a window around it for parsing.
-        // Look back up to 200 chars and forward up to 1000 chars for the log context.
-        let windowStart = if (i > 200) { i - 200 } else { 0 };
-        let windowEnd = if (i + 1000 < len) { i + 1000 } else { len };
-        let window = textSlice(chars, windowStart, windowEnd);
-
-        // Extract topics array entries after the Transfer topic
-        // In JSON: "topics":["0x<transfer>","0x<from>","0x<to>"]
-        // Find the next two 0x-prefixed 66-char hex values after our match position
-        let afterMatch = textSlice(chars, i + topicLen, windowEnd);
-
-        // Skip past topics[0] closing quote, find topics[1] (from), then topics[2] (to)
-        let topic1 = extractNextQuotedHex(afterMatch);
-        let afterTopic1 = textAfter(afterMatch, topic1);
-        let topic2 = extractNextQuotedHex(afterTopic1);
-
-        // topic2 is the recipient address (last 40 chars of 64-char padded value)
-        let recipientAddr = hexToAddress(topic2);
-
-        if (recipientAddr == expectedRecipient) {
-          // Find the "data" field in this log entry for the amount
-          let dataHex = extractJsonField(window, "data");
-          let amount = hexToNat(dataHex);
-          return ?(recipientAddr, amount);
-        };
-      };
-      i += 1;
     };
     null;
   };
 
-  /// Extract the last 40 hex chars from a 64-char hex value → 0x-prefixed address.
+  // ── Helpers ──
+
+  /// Extract the last 40 hex chars from a 64-char hex value -> 0x-prefixed address.
   func hexToAddress(hex : Text) : Text {
     let chars = Iter.toArray(hex.chars());
-    // Remove 0x prefix if present, then take last 40 chars
     var start = 0;
     if (chars.size() >= 2 and chars[0] == '0' and (chars[1] == 'x' or chars[1] == 'X')) {
       start := 2;
@@ -217,101 +383,35 @@ module {
   };
 
   /// Parse a hex string (with or without 0x prefix) to Nat.
+  /// ERC-20 amounts are uint256, max 2^256-1. We cap at 64 hex digits.
+  /// Non-hex characters after the prefix cause the parse to stop (returns value so far).
   func hexToNat(hex : Text) : Nat {
     var result : Nat = 0;
-    var started = false;
+    var hexDigits : Nat = 0;
+    var pastPrefix = false;
     for (c in hex.chars()) {
       if (c == 'x' or c == 'X') {
         result := 0;
-        started := true;
+        hexDigits := 0;
+        pastPrefix := true;
+      } else if (c == '0' and not pastPrefix) {
+        pastPrefix := true;
       } else {
         let n = Char.toNat32(c);
+        let isHex = (n >= 48 and n <= 57) or (n >= 97 and n <= 102) or (n >= 65 and n <= 70);
+        if (not isHex) { return result };
+        hexDigits += 1;
+        if (hexDigits > 64) { return result };
         let digit : Nat = if (n >= 48 and n <= 57) { Nat32.toNat(n - 48) }
           else if (n >= 97 and n <= 102) { Nat32.toNat(n - 87) }
-          else if (n >= 65 and n <= 70) { Nat32.toNat(n - 55) }
-          else { 0 };
+          else { Nat32.toNat(n - 55) };
         result := result * 16 + digit;
       };
     };
     result;
   };
 
-  /// Extract the next "0x..."-quoted hex value from text.
-  func extractNextQuotedHex(text : Text) : Text {
-    let chars = Iter.toArray(text.chars());
-    let len = chars.size();
-    var pos = 0;
-    while (pos + 3 < len) {
-      if (chars[pos] == '\"' and chars[Nat.add(pos, 1)] == '0' and chars[Nat.add(pos, 2)] == 'x') {
-        let start = Nat.add(pos, 1);
-        var end = start;
-        while (end < len and chars[end] != '\"') { end += 1 };
-        return textSlice(chars, start, end);
-      };
-      pos += 1;
-    };
-    "";
-  };
-
-  /// Get the text after the first occurrence of `needle` in `text`.
-  func textAfter(text : Text, needle : Text) : Text {
-    let chars = Iter.toArray(text.chars());
-    let needleChars = Iter.toArray(needle.chars());
-    let len = chars.size();
-    let nLen = needleChars.size();
-    if (nLen == 0) return text;
-
-    var i = 0;
-    while (i + nLen <= len) {
-      var match = true;
-      var j = 0;
-      while (j < nLen) {
-        if (chars[i + j] != needleChars[j]) { match := false; j := nLen } else { j += 1 };
-      };
-      if (match) {
-        return textSlice(chars, i + nLen, len);
-      };
-      i += 1;
-    };
-    "";
-  };
-
-  // ── JSON field extraction ──
-
-  func extractJsonField(json : Text, field : Text) : Text {
-    let needle = "\"" # field # "\":\"";
-    let chars = Iter.toArray(json.chars());
-    let needleChars = Iter.toArray(needle.chars());
-    let len = chars.size();
-    let needleLen = needleChars.size();
-
-    var i = 0;
-    while (i + needleLen < len) {
-      var match = true;
-      var j = 0;
-      while (j < needleLen) {
-        if (chars[i + j] != needleChars[j]) {
-          match := false;
-          j := needleLen;
-        } else {
-          j += 1;
-        };
-      };
-      if (match) {
-        let start = i + needleLen;
-        var end = start;
-        while (end < len and not (chars[end] == QUOTE)) {
-          end += 1;
-        };
-        return textSlice(chars, start, end);
-      };
-      i += 1;
-    };
-    "";
-  };
-
-  // ── Helpers ──
-
+  /// Convert ASCII upper-case letters to lower-case.
   func toLower(t : Text) : Text {
     Text.map(t, func(c : Char) : Char {
       if (c >= 'A' and c <= 'Z') {
@@ -320,13 +420,24 @@ module {
     });
   };
 
-  func textSlice(chars : [Char], start : Nat, end : Nat) : Text {
-    var result = "";
-    var k = start;
-    while (k < end and k < chars.size()) {
-      result := result # Char.toText(chars[k]);
-      k += 1;
+  /// Format an RpcError as human-readable text.
+  func rpcErrorToText(err : RpcError) : Text {
+    switch (err) {
+      case (#ProviderError({ message })) { "Provider: " # message };
+      case (#HttpOutcallError({ message })) { "HTTP outcall: " # message };
+      case (#JsonRpcError({ message })) { "JSON-RPC: " # message };
+      case (#ValidationError(msg)) { "Validation: " # msg };
     };
-    result;
+  };
+
+  /// Extract the first successful receipt from inconsistent provider results.
+  func firstOkReceipt(results : [(RpcService, GetTransactionReceiptResult)]) : ?TransactionReceipt {
+    for ((_, result) in results.vals()) {
+      switch (result) {
+        case (#Ok(?r)) { return ?r };
+        case (_) {};
+      };
+    };
+    null;
   };
 };

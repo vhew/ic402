@@ -16,6 +16,7 @@ import Nat8 "mo:base/Nat8";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
+import Utils "Utils";
 
 module {
 
@@ -31,19 +32,6 @@ module {
 
   // ── Encryption helpers ──
 
-  func natToBytes8(n : Nat) : [Nat8] {
-    var value = n;
-    let bytes = Array.init<Nat8>(8, 0);
-    var i = 7 : Nat;
-    while (i > 0) {
-      bytes[i] := Nat8.fromNat(value % 256);
-      value := value / 256;
-      i -= 1;
-    };
-    bytes[0] := Nat8.fromNat(value % 256);
-    Array.freeze(bytes);
-  };
-
   /// SHA-256(masterKey ++ contentId)
   func deriveContentKey(masterKey : [Nat8], contentId : Text) : [Nat8] {
     let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
@@ -53,13 +41,13 @@ module {
   /// SHA-256(contentKey ++ chunkIndex) — unique key per chunk
   func deriveChunkKey(masterKey : [Nat8], contentId : Text, chunkIndex : Nat) : [Nat8] {
     let contentKey = deriveContentKey(masterKey, contentId);
-    let indexBytes = natToBytes8(chunkIndex);
+    let indexBytes = Utils.natToBytes8(chunkIndex);
     Blob.toArray(SHA256.fromArray(#sha256, Array.append(contentKey, indexBytes)));
   };
 
   /// SHA-256(chunkKey ++ blockIndex) — one 32-byte keystream block
   func generateKeystream(chunkKey : [Nat8], blockIndex : Nat) : [Nat8] {
-    let indexBytes = natToBytes8(blockIndex);
+    let indexBytes = Utils.natToBytes8(blockIndex);
     Blob.toArray(SHA256.fromArray(#sha256, Array.append(chunkKey, indexBytes)));
   };
 
@@ -158,13 +146,16 @@ module {
       #ok;
     };
 
-    /// Upload one chunk (encrypted).
+    /// Upload one chunk (encrypted). Chunks are write-once — cannot be overwritten
+    /// after initial upload to prevent CTR keystream reuse.
     public func putChunk(id : Text, index : Nat, data : Blob) : Types.ContentStoreResult {
       switch (entries.get(id)) {
         case (null) { #contentNotFound };
         case (?entry) {
           if (index >= entry.chunks.size()) { return #chunkNotFound(index) };
           if (data.size() > MAX_CHUNK_SIZE) { return #chunkTooLarge(data.size()) };
+          // Reject overwrites — CTR mode reuses the same keystream for the same (id, index)
+          if (Blob.toArray(entry.chunks[index]).size() > 0) { return #contentAlreadyExists };
           entry.chunks[index] := encryptChunkData(masterKey, id, index, data);
           #ok;
         };

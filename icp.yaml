@@ -7,8 +7,8 @@ canisters:
     recipe:
       type: '@dfinity/motoko@v4.1.0'
       configuration:
-        main: src/example/main.mo
-        candid: src/example/example.did
+        main: example/main.mo
+        candid: example/example.did
         args: ''
 
   - name: ckusdc_ledger
@@ -18,6 +18,14 @@ canisters:
         path: .icp/icrc1-ledger.wasm.gz
         candid: .icp/icrc1-ledger.did
     init_args: .icp/ckusdc-ledger-init.candid
+
+  - name: evm_rpc
+    recipe:
+      type: '@dfinity/prebuilt@v2.0.0'
+      configuration:
+        path: .icp/evm_rpc.wasm.gz
+        candid: .icp/evm_rpc.did
+    init_args: .icp/evm-rpc-init.candid
 
 networks:
   - name: local
@@ -32,7 +40,7 @@ networks:
 environments:
   - name: local
     network: local
-    canisters: [example, ckusdc_ledger]
+    canisters: [example, ckusdc_ledger, evm_rpc]
 
   - name: ic
     network: mainnet
