@@ -5,3 +5,4 @@ node_modules/
 *.wasm
 .pnpm-store/
 pnpm-lock.yaml
+contracts/lib/

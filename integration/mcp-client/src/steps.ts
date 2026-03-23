@@ -75,8 +75,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         header('Step 1: Configure');
         versus(
           ['Express/Cloudflare server + Coinbase facilitator + separate wallet'],
-          ['The canister IS the server, the wallet, AND the payment processor.',
-           'One Motoko import. One deploy. No external infrastructure.'],
+          [
+            'The canister IS the server, the wallet, AND the payment processor.',
+            'One Motoko import. One deploy. No external infrastructure.',
+          ],
         );
 
         const configArgs: Record<string, string> = {
@@ -142,8 +144,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         header('Step 2: Upload Content');
         versus(
           ['Content lives outside the protocol. You just gate a URL.'],
-          ['Built-in encrypted content store. Upload, encrypt, deliver —',
-           'all inside the canister. Three delivery backends supported.'],
+          [
+            'Built-in encrypted content store. Upload, encrypt, deliver —',
+            'all inside the canister. Three delivery backends supported.',
+          ],
         );
 
         const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -208,8 +212,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         header('Step 3: x402 Payment over HTTP');
         versus(
           ['Single chain (usually Base). Facilitator verifies payment.'],
-          ['Multi-chain in ONE response. Client chooses ICP or any of 5 EVM chains.',
-           'Canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.'],
+          [
+            'Multi-chain in ONE response. Client chooses ICP or any of 5 EVM chains.',
+            'Canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.',
+          ],
         );
 
         section('Live HTTP endpoints');
@@ -237,7 +243,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               const chainName = EVM_CHAINS.find((c) => String(c.chainId) === chainId)?.name;
               const label = isEvm ? `EVM USDC (${chainName ?? chainId})` : 'ICP ckUSDC (native)';
               const settle = isEvm ? 'EVM RPC canister verification' : 'ICRC-2 transfer_from';
-              state(`  ${i + 1}. ${label}`, `${a.maxAmountRequired} to ${String(a.payTo ?? '').slice(0, 20)}... [${settle}]`);
+              state(
+                `  ${i + 1}. ${label}`,
+                `${a.maxAmountRequired} to ${String(a.payTo ?? '').slice(0, 20)}... [${settle}]`,
+              );
             }
           }
         } catch {
@@ -251,8 +260,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const searchRes = await fetch(`${rawHttpUrl}/search?q=cross-chain+payments`);
           const searchAmt = ((await searchRes.json()) as Record<string, unknown>).accepts;
           const searchCount = Array.isArray(searchAmt) ? searchAmt.length : 0;
-          const searchPrice = Array.isArray(searchAmt) ? Number((searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ?? 0) : 0;
-          success(`HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${(searchPrice / 1_000_000).toFixed(6)} USDC)`);
+          const searchPrice = Array.isArray(searchAmt)
+            ? Number((searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ?? 0)
+            : 0;
+          success(
+            `HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${(searchPrice / 1_000_000).toFixed(6)} USDC)`,
+          );
         } catch {
           warn('Could not reach search endpoint');
         }
@@ -306,7 +319,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       network,
                       signature: Array.from(new Uint8Array(64)),
                       sender: callerPrincipal,
-                      nonce: Array.isArray(nonce) ? nonce : Array.from(Buffer.from(String(nonce), 'hex')),
+                      nonce: Array.isArray(nonce)
+                        ? nonce
+                        : Array.from(Buffer.from(String(nonce), 'hex')),
                     };
 
                     const contentRes = await mcpCall(client, 'call', {
@@ -320,14 +335,18 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       const delivery = contentObj.ok as Record<string, unknown>;
                       const grant = delivery?.grant as Record<string, unknown>;
                       if (grant) {
-                        state('Grant', `${String(grant.grantId ?? '').slice(0, 16)}... expires ${String(grant.expiresAt ?? '')}`);
+                        state(
+                          'Grant',
+                          `${String(grant.grantId ?? '').slice(0, 16)}... expires ${String(grant.expiresAt ?? '')}`,
+                        );
                       }
                       const del = delivery?.delivery as Record<string, unknown>;
                       if (del && 'inline' in del) {
                         const inlineData = del.inline;
                         let buf: Buffer | null = null;
                         if (typeof inlineData === 'string') buf = Buffer.from(inlineData, 'hex');
-                        else if (Array.isArray(inlineData)) buf = Buffer.from(inlineData as number[]);
+                        else if (Array.isArray(inlineData))
+                          buf = Buffer.from(inlineData as number[]);
                         if (buf && buf.length > 0) {
                           success(`Content received: ${buf.length} bytes`);
                           showImage(buf, 'ic402-logo-paid.png');
@@ -339,7 +358,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       } else {
                         result(contentObj.ok);
                       }
-                      highlight('ckUSDC → ICRC-2 transfer_from → content delivered. Zero gas fees.');
+                      highlight(
+                        'ckUSDC → ICRC-2 transfer_from → content delivered. Zero gas fees.',
+                      );
                     } else if (contentObj && 'error' in contentObj) {
                       warn(`Settlement failed: ${contentObj.error}`);
                     } else {
@@ -357,15 +378,21 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 warn(`Payment error: ${e instanceof Error ? e.message : String(e)}`);
                 info('Ensure predemo ran (pnpm demo handles this automatically).');
               }
-
             } else if (choiceNum >= 2 && choiceNum <= 6) {
               // ── EVM USDC payment ──
               const selectedChain = EVM_CHAINS[choiceNum - 2];
               info(`Selected: ${selectedChain.name}`);
               divider();
               state('  USDC contract', selectedChain.usdc);
-              state('  Pay to', contentAccepts?.[1] ? String((contentAccepts[1] as Record<string, unknown>).payTo ?? '') : '(see 402 response)');
-              const contentAmt = contentAccepts?.[0] ? Number((contentAccepts[0] as Record<string, unknown>).maxAmountRequired ?? 5_000) : 5_000;
+              state(
+                '  Pay to',
+                contentAccepts?.[1]
+                  ? String((contentAccepts[1] as Record<string, unknown>).payTo ?? '')
+                  : '(see 402 response)',
+              );
+              const contentAmt = contentAccepts?.[0]
+                ? Number((contentAccepts[0] as Record<string, unknown>).maxAmountRequired ?? 5_000)
+                : 5_000;
               state('  Amount', `${(contentAmt / 1_000_000).toFixed(6)} USDC`);
               divider();
               info('Send the USDC, then paste the tx hash.');
@@ -387,8 +414,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 if (freshObj && 'paymentRequired' in freshObj) {
                   const reqs = freshObj.paymentRequired;
                   if (Array.isArray(reqs)) {
-                    const evmReq = reqs.find((r: Record<string, unknown>) =>
-                      String(r.network ?? '') === selectedNetwork,
+                    const evmReq = reqs.find(
+                      (r: Record<string, unknown>) => String(r.network ?? '') === selectedNetwork,
                     );
                     if (evmReq) {
                       freshNonce = String((evmReq as Record<string, unknown>).nonce ?? '');
@@ -400,7 +427,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 if (!freshNonce || !freshNetwork) {
                   warn(`Could not get payment nonce for ${selectedChain.name}.`);
                 } else {
-                  info(`Submitting tx hash — canister will verify on ${selectedChain.name} via EVM RPC canister...`);
+                  info(
+                    `Submitting tx hash — canister will verify on ${selectedChain.name} via EVM RPC canister...`,
+                  );
                   const paymentSig = {
                     scheme: 'exact',
                     network: freshNetwork,
@@ -420,14 +449,18 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       const delivery = payObj.ok as Record<string, unknown>;
                       const grant = delivery?.grant as Record<string, unknown>;
                       if (grant) {
-                        state('Grant', `${String(grant.grantId ?? '').slice(0, 16)}... expires ${String(grant.expiresAt ?? '')}`);
+                        state(
+                          'Grant',
+                          `${String(grant.grantId ?? '').slice(0, 16)}... expires ${String(grant.expiresAt ?? '')}`,
+                        );
                       }
                       const del = delivery?.delivery as Record<string, unknown>;
                       if (del && 'inline' in del) {
                         const inlineData = del.inline;
                         let buf: Buffer | null = null;
                         if (typeof inlineData === 'string') buf = Buffer.from(inlineData, 'hex');
-                        else if (Array.isArray(inlineData)) buf = Buffer.from(inlineData as number[]);
+                        else if (Array.isArray(inlineData))
+                          buf = Buffer.from(inlineData as number[]);
                         if (buf && buf.length > 0) {
                           success(`Content received: ${buf.length} bytes`);
                           showImage(buf, 'ic402-logo-paid.png');
@@ -439,7 +472,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       } else {
                         result(payObj.ok);
                       }
-                      highlight(`${selectedChain.name} USDC → EVM RPC canister → content delivered.`);
+                      highlight(
+                        `${selectedChain.name} USDC → EVM RPC canister → content delivered.`,
+                      );
                     } else if (payObj && 'error' in payObj) {
                       warn(`Settlement failed: ${payObj.error}`);
                     } else if (payObj && 'paymentRequired' in payObj) {
@@ -476,9 +511,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         header('Step 4: Streaming Micropayments');
         versus(
           ['Every call = one on-chain transaction. No session support.'],
-          ['Deposit once. Stream signed vouchers (free). Settle on close.',
-           '10,000 calls = 2 on-chain transactions. 5,000x reduction.',
-           'No other x402 implementation has sessions.'],
+          [
+            'Deposit once. Stream signed vouchers (free). Settle on close.',
+            '10,000 calls = 2 on-chain transactions. 5,000x reduction.',
+            'No other x402 implementation has sessions.',
+          ],
         );
 
         info('');
@@ -605,9 +642,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         header('Step 5: Agent Discovery');
         versus(
           ['No discovery. You need to already know the endpoint URL.'],
-          ['Agent card registered as ERC-721 on Base.',
-           'Other agents query IdentityRegistry by skill/domain.',
-           'They find this ICP canister without a centralized directory.'],
+          [
+            'Agent card registered as ERC-721 on Base.',
+            'Other agents query IdentityRegistry by skill/domain.',
+            'They find this ICP canister without a centralized directory.',
+          ],
         );
 
         section('How it works');
@@ -655,11 +694,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       run: async (_rl: ReadlineInterface) => {
         header('Step 6: Policy Engine + Summary');
         versus(
-          ['No spending limits. No rate limiting. No session caps.',
-           'A misconfigured agent can drain its wallet.'],
-          ['Dual-sided policy engine. Both client and canister enforce.',
-           'Budget limits, rate limits, session caps, idle timeouts.',
-           'Evaluated in-canister, zero ledger calls, constant time.'],
+          [
+            'No spending limits. No rate limiting. No session caps.',
+            'A misconfigured agent can drain its wallet.',
+          ],
+          [
+            'Dual-sided policy engine. Both client and canister enforce.',
+            'Budget limits, rate limits, session caps, idle timeouts.',
+            'Evaluated in-canister, zero ledger calls, constant time.',
+          ],
         );
 
         section('Client-side (AI agent protects itself)');
@@ -692,8 +735,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         success('Demo complete.');
         highlight('ic402: one Motoko import, one deploy.');
-        highlight('Upload content, encrypt it, gate with x402, accept payment on ICP or any EVM chain.');
-        highlight('The canister is the server, the wallet, the HTTP endpoint, and the EVM address.');
+        highlight(
+          'Upload content, encrypt it, gate with x402, accept payment on ICP or any EVM chain.',
+        );
+        highlight(
+          'The canister is the server, the wallet, the HTTP endpoint, and the EVM address.',
+        );
         highlight('No facilitator. No bridge. No external infrastructure.');
       },
     },
