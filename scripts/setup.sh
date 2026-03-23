@@ -129,6 +129,21 @@ if [ "$CKUSDC_ID" != "$MAINNET_LEDGER" ]; then
   echo "  Patched ckUSDC ledger: $CKUSDC_ID"
 fi
 
+# Patch mainnet EVM chain IDs + USDC addresses to testnet
+echo "  Patching EVM chains: mainnet → testnet..."
+sed -i '' \
+  -e 's/chainId = 8453/chainId = 84532/g' \
+  -e 's/chainId = 1;/chainId = 11155111;/g' \
+  -e 's/chainId = 43114/chainId = 43113/g' \
+  -e 's/chainId = 10;/chainId = 11155420;/g' \
+  -e 's/chainId = 42161/chainId = 421614/g' \
+  -e 's/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913/0x036CbD53842c5426634e7929541eC2318f3dCF7e/g' \
+  -e 's/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48/0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238/g' \
+  -e 's/0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E/0x5425890298aed601595a70AB815c96711a31Bc65/g' \
+  -e 's/0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85/0x5fd84259d66Cd46123540766Be93DFE6D43130D7/g' \
+  -e 's/0xaf88d065e77c8cC2239327C5EDb3A432268e5831/0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d/g' \
+  src/example/main.mo
+
 # Deploy example canister
 icp deploy example -e local >/dev/null 2>&1
 EXAMPLE_ID=$(icp canister status example -e local --id-only)

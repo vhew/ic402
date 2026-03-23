@@ -28,7 +28,7 @@ persistent actor KnowledgeBase {
     {
       recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
       tokens = [{
-        ledger = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+        ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
         symbol = "ckUSDC";
         decimals = 6;
       }];
@@ -37,39 +37,36 @@ persistent actor KnowledgeBase {
       //
       // Accept USDC on 5 EVM chains in addition to ICP ckUSDC.
       // The canister verifies payments via HTTPS outcalls to each chain's RPC.
-      // All recipients use the same tECDSA-derived address.
+      // All recipients use the same tECDSA-derived address (0x0000... is a
+      // placeholder — deploy scripts patch it with the real address).
       //
-      // Testnet config (replace addresses with mainnet values for production):
-      //   Ethereum mainnet USDC: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
-      //   Base mainnet USDC:     0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-      //   Avalanche mainnet USDC:0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
-      //   Optimism mainnet USDC: 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85
-      //   Arbitrum mainnet USDC: 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
+      // Source has MAINNET values. For local development, scripts/setup.sh
+      // patches chain IDs and USDC addresses to testnet before deploying.
       evmChains = [
-        { // Base Sepolia (primary — identity registration chain)
-          chainId = 84532;
+        { // Base (primary — identity registration chain)
+          chainId = 8453;
           recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; symbol = "USDC"; decimals = 6 : Nat8 }];
+          tokens = [{ address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
-        { // Ethereum Sepolia
-          chainId = 11155111;
+        { // Ethereum
+          chainId = 1;
           recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"; symbol = "USDC"; decimals = 6 : Nat8 }];
+          tokens = [{ address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
-        { // Avalanche Fuji
-          chainId = 43113;
+        { // Avalanche C-Chain
+          chainId = 43114;
           recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x5425890298aed601595a70AB815c96711a31Bc65"; symbol = "USDC"; decimals = 6 : Nat8 }];
+          tokens = [{ address = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
-        { // Optimism Sepolia
-          chainId = 11155420;
+        { // Optimism
+          chainId = 10;
           recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x5fd84259d66Cd46123540766Be93DFE6D43130D7"; symbol = "USDC"; decimals = 6 : Nat8 }];
+          tokens = [{ address = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
-        { // Arbitrum Sepolia
-          chainId = 421614;
+        { // Arbitrum One
+          chainId = 42161;
           recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"; symbol = "USDC"; decimals = 6 : Nat8 }];
+          tokens = [{ address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; symbol = "USDC"; decimals = 6 : Nat8 }];
         },
       ];
     },
@@ -185,7 +182,7 @@ persistent actor KnowledgeBase {
   } {
     let amount = 1_000;  // 0.001 USDC per search query
     let icpPrice : Ic402.Price = {
-      token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+      token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
       amount;
       network = "icp:1";
     };
@@ -214,7 +211,7 @@ persistent actor KnowledgeBase {
   public shared func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
-      token = Principal.toText(Principal.fromText("txyno-ch777-77776-aaaaq-cai"));
+      token = Principal.toText(Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"));
       recipient = Principal.toText(Principal.fromActor(KnowledgeBase));
       suggestedDeposit = 50_000;   // 0.05 USDC — enough for 100 queries
       minDeposit = ?5_000;         // 0.005 USDC — enough for 10 queries
@@ -674,7 +671,7 @@ persistent actor KnowledgeBase {
       // No payment — return 402
       let amount = 5_000;
       let icpPrice : Ic402.Price = {
-        token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+        token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
         amount;
         network = "icp:1";
       };
@@ -694,7 +691,7 @@ persistent actor KnowledgeBase {
       };
       let amount = 1_000;
       let icpPrice : Ic402.Price = {
-        token = Principal.fromText("txyno-ch777-77776-aaaaq-cai");
+        token = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
         amount;
         network = "icp:1";
       };
