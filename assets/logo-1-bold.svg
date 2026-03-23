@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" rx="40" fill="url(#bg1)"/>
+  <text x="100" y="118" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui, -apple-system, sans-serif"
+        font-weight="900" font-size="64" fill="white"
+        letter-spacing="-3">ic402</text>
+</svg>

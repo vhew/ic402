@@ -270,20 +270,20 @@ module {
 
   // ── Configuration ──
 
-  public type AvaxTokenConfig = {
+  public type EvmTokenConfig = {
     address : Text;
     symbol : Text;
     decimals : Nat8;
   };
 
-  public type AvaxConfig = {
+  public type EvmChainConfig = {
     chainId : Nat;
     recipient : Text;
-    tokens : [AvaxTokenConfig];
+    tokens : [EvmTokenConfig];
   };
 
   public type ERC8004Config = {
-    chain : { #avalanche; #base; #ethereum; #polygon };
+    chain : { #base; #ethereum; #avalanche; #optimism; #arbitrum };
     card : AgentCard;
   };
 
@@ -305,7 +305,7 @@ module {
   public type Config = {
     recipient : { owner : Principal; subaccount : ?Blob };
     tokens : [TokenConfig];
-    avalanche : ?AvaxConfig;
+    evmChains : [EvmChainConfig];
   };
 
   // ── Content Delivery ──

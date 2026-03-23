@@ -220,7 +220,7 @@ export const exampleIdlFactory = () =>
     // Identity (ERC-8004)
     getAgentCard: IDL.Func([], [AgentCard], ['query']),
     getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
-    getAvalanchePublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
+    getEvmPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
     setAgentRegistration: IDL.Func([IDL.Nat], [], []),
     registerAgent: IDL.Func([], [IDL.Nat], []),
     // Admin

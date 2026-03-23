@@ -1,26 +1,26 @@
 #!/usr/bin/env npx tsx
 /**
- * register-agent.ts — Deploy IdentityRegistry + register agent on Avalanche Fuji
+ * register-agent.ts — Deploy IdentityRegistry + register agent on Base Sepolia
  *
  * This script:
  *   1. Connects to the ICP canister and gets its tECDSA public key
- *   2. Derives the canister's Avalanche C-Chain address
+ *   2. Derives the canister's Base C-Chain address
  *   3. Deploys the IdentityRegistry contract (or uses an existing one)
  *   4. Registers the agent with the canister's agent card
  *   5. Stores the token ID back in the canister via setAgentRegistration()
  *
  * Usage:
  *   npx tsx scripts/register-agent.ts \
- *     --private-key <hex>                     # AVAX wallet for gas
+ *     --private-key <hex>                     # ETH wallet for gas
  *     [--canister-id <principal>]             # defaults to local example canister
  *     [--host http://localhost:4944]          # ICP replica
- *     [--rpc https://api.avax-test.network/ext/bc/C/rpc]
+ *     [--rpc https://sepolia.base.org]
  *     [--contract <address>]                  # skip deploy, use existing
  *     [--ecdsa-key dfx_test_key]             # tECDSA key name
  *
  * Prerequisites:
  *   - Local ICP replica running with the example canister deployed
- *   - An Avalanche Fuji wallet with testnet AVAX (get from https://faucet.avax.network)
+ *   - An Base Sepolia wallet with testnet ETH (get from https://faucet for Base Sepolia ETH)
  *   - forge installed (curl -L https://foundry.paradigm.xyz | bash && foundryup)
  */
 
@@ -39,7 +39,7 @@ import {
 } from 'viem';
 import { publicKeyToAddress } from 'viem/utils';
 import { privateKeyToAccount } from 'viem/accounts';
-import { avalancheFuji } from 'viem/chains';
+import { baseSepolia } from 'viem/chains';
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 
 // ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ const { values: args } = parseArgs({
     'private-key': { type: 'string' },
     'canister-id': { type: 'string' },
     host: { type: 'string', default: 'http://localhost:4944' },
-    rpc: { type: 'string', default: 'https://api.avax-test.network/ext/bc/C/rpc' },
+    rpc: { type: 'string', default: 'https://sepolia.base.org' },
     contract: { type: 'string' },
     'ecdsa-key': { type: 'string', default: 'dfx_test_key' },
     help: { type: 'boolean', default: false },
@@ -63,13 +63,13 @@ if (args.help || !args['private-key']) {
 Usage: npx tsx scripts/register-agent.ts --private-key <hex> [options]
 
 Required:
-  --private-key <hex>     Avalanche wallet private key (for gas fees)
-                          Get testnet AVAX from https://faucet.avax.network
+  --private-key <hex>     Base wallet private key (for gas fees)
+                          Get testnet ETH from https://faucet for Base Sepolia ETH
 
 Options:
   --canister-id <id>      ICP canister principal (auto-detected from local replica)
   --host <url>            ICP replica URL (default: http://localhost:4944)
-  --rpc <url>             Avalanche RPC (default: Fuji testnet)
+  --rpc <url>             Base RPC (default: Fuji testnet)
   --contract <address>    Use existing IdentityRegistry contract (skip deploy)
   --ecdsa-key <name>      tECDSA key name (default: dfx_test_key)
 `);
@@ -161,7 +161,7 @@ function hr() {
 }
 
 /**
- * Derive Ethereum/Avalanche address from a SEC1 compressed secp256k1 public key.
+ * Derive Ethereum/Base address from a SEC1 compressed secp256k1 public key.
  * Uses viem's built-in publicKeyToAddress which handles decompression + keccak.
  */
 function pubkeyToAddress(compressedPubkey: Uint8Array): Address {
@@ -196,11 +196,11 @@ async function main() {
     IDL.Service({
       getAgentCard: IDL.Func([], [AgentCardIDL], ['query']),
       getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
-      getAvalanchePublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
+      getEvmPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
       setAgentRegistration: IDL.Func([IDL.Nat], [], []),
     });
 
-  console.log('\n\x1b[1m\x1b[36m  ic402 Agent Registration (Avalanche Fuji)\x1b[0m\n');
+  console.log('\n\x1b[1m\x1b[36m  ic402 Agent Registration (Base Sepolia)\x1b[0m\n');
 
   // ── 1. Resolve canister ID ──
 
@@ -223,7 +223,7 @@ async function main() {
   hr();
   st('Canister', canisterId);
   st('ICP host', host);
-  st('Avalanche RPC', rpc);
+  st('Base RPC', rpc);
   st('tECDSA key', ecdsaKey);
   hr();
 
@@ -258,10 +258,10 @@ async function main() {
     // Still show the key info
     log('');
     log('Requesting tECDSA public key from canister...');
-    const pubkeyRaw: number[] = await actor.getAvalanchePublicKey();
+    const pubkeyRaw: number[] = await actor.getEvmPublicKey();
     const pubkey = new Uint8Array(pubkeyRaw);
     const canisterAvaxAddress = pubkeyToAddress(pubkey);
-    ok(`Canister's Avalanche address: ${canisterAvaxAddress}`);
+    ok(`Canister's Base address: ${canisterAvaxAddress}`);
 
     console.log('');
     hr();
@@ -269,8 +269,8 @@ async function main() {
     hr();
     st('Token ID', String(existingId[0]));
     st('Canister', canisterId);
-    st('Canister AVAX addr', canisterAvaxAddress);
-    st('Chain', 'Avalanche Fuji (43113)');
+    st('Canister ETH addr', canisterAvaxAddress);
+    st('Chain', 'Base Sepolia (43113)');
     console.log('');
     return;
   }
@@ -279,35 +279,35 @@ async function main() {
 
   log('');
   log('Requesting tECDSA public key from canister...');
-  const pubkeyRaw: number[] = await actor.getAvalanchePublicKey();
+  const pubkeyRaw: number[] = await actor.getEvmPublicKey();
   const pubkey = new Uint8Array(pubkeyRaw);
   ok(`Public key: ${Buffer.from(pubkey).toString('hex').slice(0, 20)}... (${pubkey.length} bytes)`);
 
   const canisterAvaxAddress = pubkeyToAddress(pubkey);
-  ok(`Canister's Avalanche address: ${canisterAvaxAddress}`);
-  st('Snowtrace', `https://testnet.snowtrace.io/address/${canisterAvaxAddress}`);
+  ok(`Canister's Base address: ${canisterAvaxAddress}`);
+  st('Basescan', `https://sepolia.basescan.org/address/${canisterAvaxAddress}`);
 
-  // ── 4. Set up Avalanche wallet ──
+  // ── 4. Set up Base wallet ──
 
   log('');
   const account = privateKeyToAccount(args['private-key'] as Hex);
   const publicClient = createPublicClient({
-    chain: avalancheFuji,
+    chain: baseSepolia,
     transport: http(rpc),
   });
   const walletClient = createWalletClient({
     account,
-    chain: avalancheFuji,
+    chain: baseSepolia,
     transport: http(rpc),
   });
 
   const balance = await publicClient.getBalance({ address: account.address });
   st('Deployer wallet', account.address);
-  st('AVAX balance', `${Number(balance) / 1e18} AVAX`);
+  st('ETH balance', `${Number(balance) / 1e18} ETH`);
 
   if (balance === 0n) {
-    console.error('\n  ERROR: Deployer wallet has no AVAX. Get testnet AVAX from:');
-    console.error('    https://faucet.avax.network');
+    console.error('\n  ERROR: Deployer wallet has no ETH. Get testnet ETH from:');
+    console.error('    https://faucet for Base Sepolia ETH');
     process.exit(1);
   }
 
@@ -347,7 +347,7 @@ async function main() {
     );
     const bytecode = artifact.bytecode.object as Hex;
 
-    log('Deploying IdentityRegistry to Avalanche Fuji...');
+    log('Deploying IdentityRegistry to Base Sepolia...');
     const deployHash = await walletClient.deployContract({
       abi: REGISTRY_ABI,
       bytecode,
@@ -357,7 +357,7 @@ async function main() {
     const receipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     contractAddress = receipt.contractAddress!;
     ok(`Deployed: ${contractAddress}`);
-    st('Snowtrace', `https://testnet.snowtrace.io/address/${contractAddress}`);
+    st('Basescan', `https://sepolia.basescan.org/address/${contractAddress}`);
   }
 
   // ── 6. Register agent ──
@@ -384,7 +384,7 @@ async function main() {
   log(`Tx: ${registerHash}`);
   const registerReceipt = await publicClient.waitForTransactionReceipt({ hash: registerHash });
   ok(`Registration confirmed (block ${registerReceipt.blockNumber})`);
-  st('Tx', `https://testnet.snowtrace.io/tx/${registerHash}`);
+  st('Tx', `https://sepolia.basescan.org/tx/${registerHash}`);
 
   // Read the token ID from the contract
   const totalAgents = await publicClient.readContract({
@@ -431,10 +431,10 @@ async function main() {
   st('Token ID', String(tokenId));
   st('Contract', contractAddress);
   st('Canister', canisterId);
-  st('Canister AVAX addr', canisterAvaxAddress);
-  st('Chain', 'Avalanche Fuji (43113)');
-  st('Contract on Snowtrace', `https://testnet.snowtrace.io/address/${contractAddress}`);
-  st('Tx on Snowtrace', `https://testnet.snowtrace.io/tx/${registerHash}`);
+  st('Canister ETH addr', canisterAvaxAddress);
+  st('Chain', 'Base Sepolia (43113)');
+  st('Contract on Basescan', `https://sepolia.basescan.org/address/${contractAddress}`);
+  st('Tx on Basescan', `https://sepolia.basescan.org/tx/${registerHash}`);
   console.log('');
 }
 

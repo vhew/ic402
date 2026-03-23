@@ -217,10 +217,6 @@ service : {
       ok: ContentDelivery;
       paymentRequired: vec PaymentRequirement;
     });
-  /// Get the canister's tECDSA public key for Avalanche.
-  /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
-  /// Use scripts/register-agent.ts to derive the AVAX address and register.
-  getAvalanchePublicKey: () -> (blob);
   /// Chunk query — verifies AccessGrant HMAC, decrypts + returns chunk.
   /// Called by the client SDK when delivery is #canisterQuery.
   getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
@@ -230,6 +226,10 @@ service : {
       ok: ContentDelivery;
       paymentRequired: vec PaymentRequirement;
     });
+  /// Get the canister's tECDSA public key for Avalanche.
+  /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
+  /// Use scripts/register-agent.ts to derive the AVAX address and register.
+  getEvmPublicKey: () -> (blob);
   getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;
@@ -248,7 +248,7 @@ service : {
   /// Controller-only.
   /// 
   /// Current flow (hackathon):
-  ///   1. Call getAvalanchePublicKey() to get the canister's secp256k1 key
+  ///   1. Call getEvmPublicKey() to get the canister's secp256k1 key
   ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
   ///   3. Script calls setAgentRegistration() to store the token ID
   /// 

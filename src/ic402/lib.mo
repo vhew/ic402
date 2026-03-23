@@ -32,8 +32,8 @@ module {
   public type VoucherResult = Types.VoucherResult;
   public type SpendingPolicy = Types.SpendingPolicy;
   public type TrustRequirements = Types.TrustRequirements;
-  public type AvaxConfig = Types.AvaxConfig;
-  public type AvaxTokenConfig = Types.AvaxTokenConfig;
+  public type EvmChainConfig = Types.EvmChainConfig;
+  public type EvmTokenConfig = Types.EvmTokenConfig;
   public type StableGatewayState = Types.StableGatewayState;
   public type Account = Types.Account;
   public type TransferResult = Types.TransferResult;

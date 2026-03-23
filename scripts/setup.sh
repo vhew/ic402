@@ -119,9 +119,9 @@ else
 fi
 echo "  ckUSDC ledger: $CKUSDC_ID"
 
-# Patch example canister to use local ckUSDC ledger + derive AVAX address
+# Patch example canister to use local ckUSDC ledger + derive EVM address
 MAINNET_LEDGER="xevnm-gaaaa-aaaar-qafnq-cai"
-AVAX_PLACEHOLDER="0x0000000000000000000000000000000000000000"
+EVM_PLACEHOLDER="0x0000000000000000000000000000000000000000"
 cp src/example/main.mo src/example/main.mo.setup-bak
 
 if [ "$CKUSDC_ID" != "$MAINNET_LEDGER" ]; then
@@ -134,20 +134,20 @@ icp deploy example -e local >/dev/null 2>&1
 EXAMPLE_ID=$(icp canister status example -e local --id-only)
 echo "  Example canister: $EXAMPLE_ID"
 
-# Derive tECDSA AVAX address and patch recipient
-AVAX_PUBKEY_HEX=$(icp canister call example getAvalanchePublicKey '()' -e local 2>/dev/null \
+# Derive tECDSA EVM address and patch recipient
+EVM_PUBKEY_HEX=$(icp canister call example getEvmPublicKey '()' -e local 2>/dev/null \
   | tr -d '\n (),' | awk -F'"' '{print $2}' | sed 's/\\//g' || echo "")
-AVAX_ADDR=""
-if [ -n "$AVAX_PUBKEY_HEX" ]; then
-  AVAX_ADDR=$(pnpm exec tsx -e "
+EVM_ADDR=""
+if [ -n "$EVM_PUBKEY_HEX" ]; then
+  EVM_ADDR=$(pnpm exec tsx -e "
     import { publicKeyToAddress } from 'viem/utils';
-    console.log(publicKeyToAddress('0x$AVAX_PUBKEY_HEX'));
+    console.log(publicKeyToAddress('0x$EVM_PUBKEY_HEX'));
   " 2>/dev/null || echo "")
 fi
-if [ -n "$AVAX_ADDR" ]; then
-  sed -i '' "s/$AVAX_PLACEHOLDER/$AVAX_ADDR/g" src/example/main.mo
+if [ -n "$EVM_ADDR" ]; then
+  sed -i '' "s/$EVM_PLACEHOLDER/$EVM_ADDR/g" src/example/main.mo
   icp deploy example -e local >/dev/null 2>&1
-  echo "  AVAX recipient: $AVAX_ADDR"
+  echo "  EVM recipient: $EVM_ADDR"
 fi
 
 # Restore source
@@ -195,8 +195,8 @@ echo ""
 echo "  Example canister:  $EXAMPLE_ID"
 echo "  ckUSDC ledger:     $CKUSDC_ID"
 echo "  HTTP endpoint:     http://$EXAMPLE_ID.raw.localhost:4944/"
-if [ -n "$AVAX_ADDR" ]; then
-  echo "  AVAX address:      $AVAX_ADDR"
+if [ -n "$EVM_ADDR" ]; then
+  echo "  EVM address:      $EVM_ADDR"
 fi
 echo ""
 echo "  Run the demo:"

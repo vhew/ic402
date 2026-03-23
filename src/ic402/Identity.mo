@@ -36,7 +36,7 @@ module {
     };
 
     /// Get the chain this identity targets.
-    public func getChain() : { #avalanche; #base; #ethereum; #polygon } {
+    public func getChain() : { #base; #ethereum; #avalanche; #optimism; #arbitrum } {
       config.chain;
     };
 

@@ -12,12 +12,12 @@ An ICP canister replaces all three. It serves HTTP natively, settles payments on
 import Ic402 "mo:ic402";
 let gate = Ic402.Gateway({ /* config */ }, Principal.fromActor(self));
 // gate.require(price) → HTTP 402 with PaymentRequirement
-// gate.settle(sig)    → settles via ICRC-2 (ICP) or HTTPS outcall (Avalanche)
+// gate.settle(sig)    → settles via ICRC-2 (ICP) or HTTPS outcall (EVM)
 ```
 
 **Why ICP is uniquely suited:**
-- **HTTPS outcalls** — the canister calls Avalanche's RPC directly to verify cross-chain payments. No oracle, no bridge.
-- **tECDSA** — the canister derives a native Avalanche address. No external wallet, no key management.
+- **HTTPS outcalls** — the canister calls EVM's RPC directly to verify cross-chain payments. No oracle, no bridge.
+- **tECDSA** — the canister derives a native EVM address. No external wallet, no key management.
 - **HTTP serving** — the canister IS the HTTP server. Standard x402 402 responses, directly from the canister.
 - **Stable memory** — encrypted content survives canister upgrades.
 
@@ -28,10 +28,10 @@ let gate = Ic402.Gateway({ /* config */ }, Principal.fromActor(self));
 | Charge (one-time) | Yes | Yes | **Yes** |
 | HTTP 402 serving | External server | External server | **Canister serves HTTP natively** |
 | Streaming sessions | No | No | **Yes — 5,000x cheaper** |
-| Cross-chain (Avalanche) | No | No | **Yes — HTTPS outcall verification** |
+| Cross-chain (5 EVM chains) | No | No | **Yes — HTTPS outcall verification** |
 | Encrypted content store | No | No | **Yes** |
 | Policy engine | No | No | **Yes — dual-sided** |
-| Agent discovery (ERC-8004) | No | No | **Yes — on Avalanche** |
+| Agent discovery (ERC-8004) | No | No | **Yes — on Base**** |
 | Drop-in library | No (Express middleware) | No (standalone canister) | **Yes — one import** |
 
 ### Sessions: 5,000x cheaper
@@ -40,7 +40,7 @@ A pure x402 model requires one on-chain transaction per API call. On ICP, each I
 
 ### Cross-chain: no bridge, no oracle
 
-The canister derives a native Avalanche address via tECDSA. When a client pays USDC on Avalanche, the canister verifies the transaction directly — HTTPS outcall to `eth_getTransactionReceipt`. The canister calls the RPC endpoint and reads the receipt. No intermediary.
+The canister derives a native EVM address via tECDSA. When a client pays USDC on Base, the canister verifies the transaction directly — HTTPS outcall to `eth_getTransactionReceipt`. The canister calls the RPC endpoint and reads the receipt. No intermediary.
 
 ## What a 402 looks like
 
@@ -62,8 +62,8 @@ The canister derives a native Avalanche address via tECDSA. When a client pays U
     },
     {
       "scheme": "exact",
-      "network": "eip155:43113",
-      "token": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "network": "eip155:84532",
+      "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
       "maxAmountRequired": "1000",
       "payTo": "0x<canister-tecdsa-address>"
     }
@@ -71,7 +71,7 @@ The canister derives a native Avalanche address via tECDSA. When a client pays U
 }
 ```
 
-**Two payment options in one 402.** Client picks ICP or Avalanche. Same price, same API.
+**Two payment options in one 402.** Client picks ICP or EVM. Same price, same API.
 
 ## Architecture
 
@@ -90,13 +90,13 @@ The canister derives a native Avalanche address via tECDSA. When a client pays U
 │  ┌─────▼───────────────▼──────────────────▼─────────────┐  │
 │  │             Settlement (dual-chain)                  │  │
 │  │  ICP:  ICRC-2 transfer_from                          │  │
-│  │  AVAX: HTTPS outcall → eth_getTransactionReceipt     │  │
+│  │  EVM: HTTPS outcall → eth_getTransactionReceipt     │  │
 │  └──────────────────────────────────────────────────────┘  │
 │                                                            │
 │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐      │
 │  │  ContentStore (optional)│  │  Identity (optional)│      │
 │  │  Encrypted blob storage │  │  ERC-8004 on        │      │
-│  │  + HTTP x402 serving    │  │  Avalanche (tECDSA) │      │
+│  │  + HTTP x402 serving    │  │  EVM (tECDSA) │      │
 │  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘      │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -106,7 +106,7 @@ The canister derives a native Avalanche address via tECDSA. When a client pays U
 **x402 charge over HTTP:**
 
 ```
-Client                    Canister                     Avalanche C-Chain
+Client                    Canister                     EVM Chain
   │                         │                               │
   │── GET /content/x ──────>│                               │
   │<── HTTP 402 ────────────│  (dual-chain payment options) │
@@ -123,7 +123,7 @@ Client                    Canister                     Avalanche C-Chain
 
 ## Interactive demo
 
-The demo walks through the full flow — upload content, hit the paywall, pay from MetaMask on Avalanche, receive the content. Live cross-chain settlement in the terminal.
+The demo walks through the full flow — upload content, hit the paywall, pay from MetaMask on Base, receive the content. Live cross-chain settlement in the terminal.
 
 ### Prerequisites
 
@@ -140,25 +140,25 @@ pnpm setup    # installs deps, starts replica, deploys canisters, funds accounts
 pnpm demo     # interactive 6-step walkthrough
 ```
 
-`pnpm setup` handles everything: `mops install`, `pnpm install`, local replica, ckUSDC ledger, example canister (patched for local ledger + tECDSA AVAX address), test identities, ckUSDC funding, ICRC-2 approval, and TypeScript build.
+`pnpm setup` handles everything: `mops install`, `pnpm install`, local replica, ckUSDC ledger, example canister (patched for local ledger + tECDSA EVM address), test identities, ckUSDC funding, ICRC-2 approval, and TypeScript build.
 
 ### Optional: MetaMask cross-chain payment
 
 Step 3 of the demo offers a live cross-chain payment from MetaMask. To try it:
-1. Get testnet USDC from the [Circle faucet](https://faucet.circle.com/) (select Avalanche Fuji)
+1. Get testnet USDC from the [Circle faucet](https://faucet.circle.com/) (select Base Sepolia)
 2. The demo shows the recipient address and amount
 3. Send USDC from MetaMask, paste the tx hash
-4. The canister verifies the tx via HTTPS outcall to Avalanche RPC
+4. The canister verifies the tx via HTTPS outcall to EVM RPC
 
-### Optional: Avalanche agent registration
+### Optional: EVM agent registration
 
-Register the canister as an ERC-8004 agent on Avalanche Fuji:
+Register the canister as an ERC-8004 agent on Base Sepolia:
 ```bash
 brew install foundry                                        # one-time
-cp .env.example .env.development                            # add your AVAX_PRIVATE_KEY
+cp .env.example .env.development                            # add your EVM_PRIVATE_KEY
 pnpm register-agent --private-key 0xYOUR_FUJI_PRIVATE_KEY   # registers on existing contract
 ```
-Get testnet AVAX from [faucet.avax.network](https://faucet.avax.network). The IdentityRegistry contract is already deployed — the script reuses it.
+Get testnet EVM from [faucet for Base Sepolia](https://faucet for Base Sepolia). The IdentityRegistry contract is already deployed — the script reuses it.
 
 ### What to expect
 
@@ -166,20 +166,20 @@ The demo is a CLI application — 6 interactive steps, each with Enter/skip/quit
 
 6 steps:
 
-1. **Configure** — connect to canister, derive tECDSA Avalanche address
+1. **Configure** — connect to canister, derive tECDSA EVM address
 2. **Upload Content** — upload via MCP, content encrypted at rest (SHA-256-CTR)
 3. **x402 over HTTP** — hit the paywall, see dual-chain options, optionally **pay from MetaMask on Fuji** and watch the canister verify the tx via HTTPS outcall
 4. **Sessions** — streaming micropayments, 5,000x cheaper than per-call
-5. **Agent Discovery** — ERC-8004 registration on Avalanche ([verify on Snowtrace](https://testnet.snowtrace.io))
+5. **Agent Discovery** — ERC-8004 registration on Base ([verify on Basescan](https://sepolia.basescan.org))
 6. **Policy** — dual-sided spending limits, full infrastructure summary
 
-## Avalanche integration
+## EVM integration
 
 | Component | Address / ID | Verify |
 |-----------|-------------|--------|
-| IdentityRegistry contract | `0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3` | [Snowtrace](https://testnet.snowtrace.io/address/0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3) |
-| Canister AVAX address | Derived via tECDSA at runtime | Shown in demo step 1 |
-| USDC (Fuji testnet) | `0x5425890298aed601595a70AB815c96711a31Bc65` | [Token on Snowtrace](https://testnet.snowtrace.io/address/0x5425890298aed601595a70AB815c96711a31Bc65) |
+| IdentityRegistry contract | `0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3` | [Basescan](https://sepolia.basescan.org/address/0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3) |
+| Canister EVM address | Derived via tECDSA at runtime | Shown in demo step 1 |
+| USDC (Fuji testnet) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | [Token on Basescan](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e) |
 
 ## Quick start
 
@@ -196,10 +196,10 @@ persistent actor MyService {
     {
       recipient = { owner = Principal.fromActor(MyService); subaccount = null };
       tokens = [{ ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"); symbol = "ckUSDC"; decimals = 6 }];
-      avalanche = ?{
-        chainId = 43113;
-        recipient = "0xYOUR_AVAX_ADDRESS";
-        tokens = [{ address = "0x5425890298aed601595a70AB815c96711a31Bc65"; symbol = "USDC"; decimals = 6 : Nat8 }];
+      evmChains = [{
+        chainId = 84532;
+        recipient = "0xYOUR_EVM_ADDRESS";
+        tokens = [{ address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; symbol = "USDC"; decimals = 6 : Nat8 }];
       };
     },
     Principal.fromActor(MyService),
@@ -212,7 +212,7 @@ persistent actor MyService {
   };
 
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
-    // Settles payment (ICRC-2 or Avalanche HTTPS outcall) and returns content
+    // Settles payment (ICRC-2 or EVM HTTPS outcall) and returns content
   };
 };
 ```
@@ -249,7 +249,7 @@ gate.setPolicy(null, {
 ```
 src/ic402/               Motoko library (published to mops)
   Gateway.mo             Charge, session, policy, access grants
-  EvmVerify.mo           Cross-chain Avalanche tx verification (HTTPS outcalls)
+  EvmVerify.mo           Cross-chain EVM tx verification (HTTPS outcalls)
   ContentStore.mo        Encrypted blob storage (optional)
   Identity.mo            ERC-8004 agent cards + tECDSA (optional)
   HttpHandler.mo         x402 HTTP response helpers
@@ -257,9 +257,9 @@ src/example/             Example canister (all features, serves HTTP)
 packages/client/         TypeScript SDK (@ic402/client)
 integration/mcp/         MCP server (@ic402/mcp)
 integration/mcp-client/  Interactive demo client
-contracts/               IdentityRegistry.sol (deployed to Avalanche Fuji)
+contracts/               IdentityRegistry.sol (deployed to Base Sepolia)
 scripts/                 Setup, agent registration, version bump, .did generation
-.env.example             Avalanche config template (copy to .env.development)
+.env.example             EVM config template (copy to .env.development)
 ```
 
 <details>
@@ -270,8 +270,8 @@ scripts/                 Setup, agent registration, version bump, .did generatio
 | Method | Description |
 |--------|-------------|
 | `require(price)` | Generate a PaymentRequirement (5-min nonce) |
-| `requireAvax(amount)` | Generate an Avalanche PaymentRequirement |
-| `settle(signature)` | Settle via ICRC-2 (ICP) or HTTPS outcall (Avalanche) |
+| `requireEvm(amount)` | Generate an EVM PaymentRequirement |
+| `settle(signature)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM) |
 | `offerSession(intent)` | Return a SessionIntent for negotiation |
 | `openSession(...)` | Deposit escrow, create session |
 | `consumeVoucher(voucher)` | Verify + consume a session voucher |
@@ -294,7 +294,7 @@ scripts/                 Setup, agent registration, version bump, .did generatio
 |--------|-------------|
 | `getCard()` | Agent card metadata |
 | `getPublicKey(keyName)` | Canister's secp256k1 key via tECDSA |
-| `getAgentId()` | Registered token ID on Avalanche |
+| `getAgentId()` | Registered token ID on Base |
 
 ### HttpHandler
 
@@ -311,9 +311,9 @@ scripts/                 Setup, agent registration, version bump, .did generatio
 
 Core payment flows, cross-chain settlement, HTTP serving, and content delivery are functional.
 
-**Working:** HTTP x402 (standard 402 responses from canister), dual-chain settlement (ICP ICRC-2 + Avalanche USDC via HTTPS outcall), streaming sessions (5,000x reduction), encrypted content store, cross-chain agent discovery (ERC-8004 + tECDSA on Avalanche Fuji), policy engine, MCP server + interactive demo with live MetaMask payment.
+**Working:** HTTP x402 (standard 402 responses from canister), dual-chain settlement (ICP ICRC-2 + EVM USDC via HTTPS outcall), streaming sessions (5,000x reduction), encrypted content store, cross-chain agent discovery (ERC-8004 + tECDSA on Base Sepolia), policy engine, MCP server + interactive demo with live MetaMask payment.
 
-**Limitations:** Voucher Ed25519 signature verification is stubbed. Avalanche tx verification checks receipt status but does not yet decode ERC-20 Transfer event logs. On-canister EVM tx signing (Keccak + RLP in Motoko) is a future milestone.
+**Limitations:** Voucher Ed25519 signature verification is stubbed. EVM tx verification checks receipt status but does not yet decode ERC-20 Transfer event logs. On-canister EVM tx signing (Keccak + RLP in Motoko) is a future milestone.
 
 See [docs/SPEC.md](docs/SPEC.md) for the full specification.
 

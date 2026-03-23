@@ -20,16 +20,29 @@ import {
   divider,
 } from './util.js';
 
-const AVAX_CHAIN = 'Avalanche Fuji testnet (chainId 43113)';
-const AVAX_USDC = '0x5425890298aed601595a70AB815c96711a31Bc65';
-const AVAX_EXPLORER = 'https://testnet.snowtrace.io';
-const AVAX_REGISTRY =
-  process.env.AVAX_REGISTRY_CONTRACT || '0x0F3998E6E4287fa7a5620979c5513D8e83fE80D3';
+const BASE_CHAIN = 'Base Sepolia testnet (chainId 84532)';
+const BASE_EXPLORER = 'https://sepolia.basescan.org';
+const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
 const CKUSDC_LEDGER = 'xevnm-gaaaa-aaaar-qafnq-cai';
+const EVM_CHAINS = [
+  { name: 'Base Sepolia', chainId: 84532, usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
+  {
+    name: 'Ethereum Sepolia',
+    chainId: 11155111,
+    usdc: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+  },
+  { name: 'Avalanche Fuji', chainId: 43113, usdc: '0x5425890298aed601595a70AB815c96711a31Bc65' },
+  {
+    name: 'Optimism Sepolia',
+    chainId: 11155420,
+    usdc: '0x5fd84259d66Cd46123540766Be93DFE6D43130D7',
+  },
+  { name: 'Arbitrum Sepolia', chainId: 421614, usdc: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d' },
+];
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
 
-function pubkeyToAvaxAddress(compressedHex: string): string | null {
+function pubkeyToEvmAddress(compressedHex: string): string | null {
   try {
     const point = secp256k1.Point.fromHex(compressedHex);
     const uncompressed = point.toBytes(false);
@@ -52,7 +65,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Configure',
-      description: 'Connect to the canister, derive its Avalanche address, set budget',
+      description: 'Connect to the canister, derive its EVM address, set budget',
       run: async (_rl: ReadlineInterface) => {
         header('Step 1: Configure');
         info("WHAT'S DIFFERENT FROM NORMAL x402:");
@@ -78,26 +91,26 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         result(res);
         info('');
 
-        info("Deriving canister's native Avalanche address via ICP threshold ECDSA...");
-        let avaxAddress = '(could not derive)';
+        info("Deriving canister's native EVM address via ICP threshold ECDSA...");
+        let evmAddress = '(could not derive)';
         let pubkeyHex = '';
         try {
           const pubkeyResult = await mcpCall(client, 'call', {
-            method: 'getAvalanchePublicKey',
+            method: 'getEvmPublicKey',
             args: '[]',
           });
           if (typeof pubkeyResult === 'string') pubkeyHex = pubkeyResult;
           else if (Array.isArray(pubkeyResult))
             pubkeyHex = Buffer.from(pubkeyResult as number[]).toString('hex');
           else pubkeyHex = String(pubkeyResult);
-          const derived = pubkeyToAvaxAddress(pubkeyHex);
-          if (derived) avaxAddress = derived;
+          const derived = pubkeyToEvmAddress(pubkeyHex);
+          if (derived) evmAddress = derived;
         } catch {
           /* tECDSA may not be available */
         }
 
-        if (avaxAddress !== '(could not derive)') {
-          success(`Canister has a native Avalanche address: ${avaxAddress}`);
+        if (evmAddress !== '(could not derive)') {
+          success(`Canister has a native EVM address: ${evmAddress}`);
           highlight('No external wallet — the canister derives its own EVM address via tECDSA.');
         }
 
@@ -106,10 +119,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('Canister', canisterId);
         state('HTTP x402', `${rawHttpUrl}/`);
         state('ICP payment', `ckUSDC via ICRC-2`);
-        state('AVAX payment', `USDC on Fuji (${AVAX_USDC})`);
-        state('Canister AVAX address', avaxAddress);
-        state('AVAX explorer', `${AVAX_EXPLORER}/address/${avaxAddress}`);
-        state('Identity registry', AVAX_REGISTRY);
+        state('EVM payment', `USDC on Fuji (${EVM_CHAINS[0].usdc})`);
+        state('Canister EVM address', evmAddress);
+        state('Base explorer', `${BASE_EXPLORER}/address/${evmAddress}`);
+        state('Identity registry', BASE_REGISTRY);
         state('Client budget', '$0.05/request, $0.50/day');
         divider();
       },
@@ -199,14 +212,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'x402 Payment over HTTP',
-      description: "Hit the canister's HTTP endpoint — get a 402, pay on ICP or Avalanche",
+      description: "Hit the canister's HTTP endpoint — get a 402, pay on ICP or any EVM chain",
       run: async (rl: ReadlineInterface) => {
         header('Step 3: x402 Payment over HTTP');
         info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: Single chain (usually Base). Facilitator verifies payment.');
-        info('  ic402:       Dual-chain in ONE response. Client chooses ICP or Avalanche.');
-        info('               Canister verifies Avalanche payments via HTTPS outcall.');
+        info('  ic402:       Dual-chain in ONE response. Client chooses ICP or any EVM chain.');
+        info('               Canister verifies EVM payments via HTTPS outcall.');
         info('               No facilitator. No bridge. No relayer.');
         divider();
         info('');
@@ -229,7 +242,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const contentAccepts = contentBody.accepts as Record<string, unknown>[];
           if (Array.isArray(contentAccepts) && contentAccepts.length > 0) {
             state('Price', `${contentAccepts[0].maxAmountRequired} ($0.005 USDC)`);
-            state('Options', `${contentAccepts.length} chains (ICP + Avalanche)`);
+            state('Options', `${contentAccepts.length} chains (ICP + 5 EVM chains)`);
           }
         } catch {
           warn('Could not reach HTTP endpoint');
@@ -264,7 +277,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               state(
                 'Settlement',
                 isAvax
-                  ? 'Canister calls Avalanche RPC via HTTPS outcall'
+                  ? 'Canister calls EVM chain RPC via HTTPS outcall'
                   : 'Canister calls ICRC-2 transfer_from on ICP',
               );
               divider();
@@ -274,28 +287,28 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             info('x402 PROTOCOL:');
             divider();
             state('1. GET', `→ HTTP 402 + dual-chain payment options`);
-            state('2. Pay', 'ICRC-2 approve (ICP) or send USDC (Avalanche)');
+            state('2. Pay', 'ICRC-2 approve (ICP) or send USDC (any EVM chain)');
             state('3. Retry', 'Same URL + X-PAYMENT header');
             state('4. Verify', 'Canister settles on-chain (ICRC-2 or eth_getTransactionReceipt)');
             state('5. Result', 'HTTP 200 + content or search results');
             divider();
 
             // Optional MetaMask payment — pay for the content we uploaded in step 2
-            const avaxOpt = accepts.find((a) => String(a.network ?? '').startsWith('eip155:'));
-            if (avaxOpt) {
+            const evmOpt = accepts.find((a) => String(a.network ?? '').startsWith('eip155:'));
+            if (evmOpt) {
               info('');
               info('LIVE CROSS-CHAIN PAYMENT (optional):');
               info('Pay for the Aleph logo we uploaded in step 2 — from MetaMask.');
               divider();
-              info('  1. Switch MetaMask to Avalanche Fuji (chainId 43113)');
+              info('  1. Switch MetaMask to Base Sepolia (chainId 84532)');
               // Content costs 5000 units = $0.005
-              info(`  2. Send 0.005000 USDC (token: ${AVAX_USDC})`);
-              info(`     to: ${avaxOpt.payTo}`);
+              info(`  2. Send 0.005000 USDC (token: ${EVM_CHAINS[0].usdc})`);
+              info(`     to: ${evmOpt.payTo}`);
               info('  3. Copy the tx hash and paste it below');
               divider();
 
               if (await confirm(rl, 'Sent USDC on Fuji? Paste tx hash to verify')) {
-                const txHash = await rl.question('\x1b[2m  Avalanche tx hash (0x...): \x1b[0m');
+                const txHash = await rl.question('\x1b[2m  EVM tx hash (0x...): \x1b[0m');
                 const trimmed = txHash.trim();
 
                 if (trimmed && trimmed.startsWith('0x') && trimmed.length === 66) {
@@ -308,19 +321,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                   });
                   const freshObj = freshRes as Record<string, unknown>;
 
-                  // The response is { paymentRequired: { ... } } — extract the Avalanche nonce
+                  // The response is { paymentRequired: { ... } } — extract the EVM nonce
                   let freshNonce: string | null = null;
                   let freshNetwork: string | null = null;
                   if (freshObj && 'paymentRequired' in freshObj) {
                     // paymentRequired is now an array (dual-chain)
                     const reqs = freshObj.paymentRequired;
                     if (Array.isArray(reqs)) {
-                      const avaxReq = reqs.find((r: Record<string, unknown>) =>
+                      const evmReq = reqs.find((r: Record<string, unknown>) =>
                         String(r.network ?? '').startsWith('eip155:'),
                       );
-                      if (avaxReq) {
-                        freshNonce = String((avaxReq as Record<string, unknown>).nonce ?? '');
-                        freshNetwork = String((avaxReq as Record<string, unknown>).network ?? '');
+                      if (evmReq) {
+                        freshNonce = String((evmReq as Record<string, unknown>).nonce ?? '');
+                        freshNetwork = String((evmReq as Record<string, unknown>).network ?? '');
                       }
                     } else if (typeof reqs === 'object' && reqs !== null) {
                       // Single requirement (legacy)
@@ -331,10 +344,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                   }
 
                   if (!freshNonce || !freshNetwork) {
-                    warn('Could not get Avalanche payment nonce for content.');
+                    warn('Could not get EVM payment nonce for content.');
                   } else {
                     info('Submitting tx hash for cross-chain verification...');
-                    info('Canister will HTTPS outcall eth_getTransactionReceipt on Avalanche.');
+                    info('Canister will HTTPS outcall eth_getTransactionReceipt on Base.');
                     info('');
 
                     const paymentSig = {
@@ -391,7 +404,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                         }
                         highlight('Cross-chain settlement complete.');
                         highlight(
-                          'MetaMask → Avalanche USDC → canister HTTPS outcall → content delivered.',
+                          'MetaMask → EVM USDC → canister HTTPS outcall → content delivered.',
                         );
                       } else if (payObj && 'error' in payObj) {
                         warn(`Settlement failed: ${payObj.error}`);
@@ -587,14 +600,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // Step 5: Agent Discovery
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'Agent Discovery (ERC-8004 on Avalanche)',
-      description: 'Cross-chain identity — other agents find this canister on Avalanche',
+      name: 'Agent Discovery (ERC-8004 on Base)',
+      description: 'Cross-chain identity — other agents find this canister on Base',
       run: async (_rl: ReadlineInterface) => {
         header('Step 5: Agent Discovery');
         info("WHAT'S DIFFERENT FROM NORMAL x402:");
         divider();
         info('  Normal x402: No discovery. You need to already know the endpoint URL.');
-        info('  ic402:       Agent card registered as ERC-721 on Avalanche.');
+        info('  ic402:       Agent card registered as ERC-721 on Base.');
         info('               Other agents query IdentityRegistry by skill/domain.');
         info('               They find this ICP canister without a centralized directory.');
         divider();
@@ -602,11 +615,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         info('HOW IT WORKS:');
         divider();
-        state('Key', 'ICP tECDSA → native secp256k1 → Avalanche address');
-        state('Registration', 'ERC-721 minted on IdentityRegistry (Avalanche Fuji)');
+        state('Key', 'ICP tECDSA → native secp256k1 → EVM address');
+        state('Registration', 'ERC-721 minted on IdentityRegistry (Base Sepolia)');
         state('Discovery', 'Query by skill, domain, or x402Support');
-        state('Registry', AVAX_REGISTRY);
-        state('Explorer', `${AVAX_EXPLORER}/address/${AVAX_REGISTRY}`);
+        state('Registry', BASE_REGISTRY);
+        state('Explorer', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
         divider();
         info('');
 
@@ -632,7 +645,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
 
         info('');
-        info('Checking Avalanche registration...');
+        info('Checking Base registration...');
         const agentIdResult = await mcpCall(client, 'call', {
           method: 'getAgentId',
           args: '[]',
@@ -641,14 +654,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         const agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0 ? agentIdArr[0] : null;
 
         if (agentId != null) {
-          success(`Registered — ERC-721 token #${agentId} on Avalanche Fuji`);
+          success(`Registered — ERC-721 token #${agentId} on Base Sepolia`);
           divider();
           state('Token ID', String(agentId));
-          state('Contract', AVAX_REGISTRY);
-          state('Verify', `${AVAX_EXPLORER}/address/${AVAX_REGISTRY}`);
+          state('Contract', BASE_REGISTRY);
+          state('Verify', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
           divider();
         } else {
-          warn('Not yet registered on Avalanche.');
+          warn('Not yet registered on Base.');
           state('Register', 'pnpm register-agent --private-key <key>');
         }
 
@@ -701,11 +714,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('Canister', canisterId);
         state('HTTP x402', `${rawHttpUrl}/`);
         state('ICP payment', 'ckUSDC via ICRC-2');
-        state('AVAX payment', `USDC on Fuji — verified via HTTPS outcall`);
+        state('EVM payment', `USDC on Fuji — verified via HTTPS outcall`);
         state('Cross-chain', 'eth_getTransactionReceipt — no bridge, no facilitator');
         state('Sessions', '5,000x settlement reduction — unique to ic402');
         state('Content', 'Encrypted (SHA-256-CTR), 3 delivery patterns');
-        state('Identity', `ERC-8004 on Avalanche (${AVAX_REGISTRY})`);
+        state('Identity', `ERC-8004 on Base (${BASE_REGISTRY})`);
         state('Policy', 'Dual-sided — no other x402 has this');
         divider();
 
@@ -714,10 +727,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         highlight('ic402: one import, one deploy.');
         highlight(
-          'Upload content, encrypt it, gate it with x402, accept payment on ICP or Avalanche.',
+          'Upload content, encrypt it, gate it with x402, accept payment on ICP or any EVM chain.',
         );
         highlight(
-          'The canister is the server, the wallet, the HTTP endpoint, and the Avalanche address.',
+          'The canister is the server, the wallet, the HTTP endpoint, and the EVM address.',
         );
         highlight('No facilitator. No bridge. No external infrastructure.');
       },

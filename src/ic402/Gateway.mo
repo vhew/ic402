@@ -9,6 +9,7 @@ import Text "mo:base/Text";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
+import Buffer "mo:base/Buffer";
 import Principal "mo:base/Principal";
 import Timer "mo:base/Timer";
 import Error "mo:base/Error";
@@ -154,26 +155,32 @@ module {
       };
     };
 
-    /// Generate a 402 payment requirement for Avalanche USDC.
-    /// Returns null if Avalanche is not configured.
-    public func requireAvax(amount : Nat) : ?Types.PaymentRequirement {
-      switch (config.avalanche) {
-        case (null) { null };
-        case (?avax) {
-          let expiry = Time.now() + 300_000_000_000;
-          let nonce = nonceManager.generate(expiry);
-          let token = if (avax.tokens.size() > 0) { avax.tokens[0].address } else { "" };
-          ?{
-            scheme = "exact";
-            network = "eip155:" # Nat.toText(avax.chainId);
-            token;
-            amount;
-            recipient = avax.recipient;
-            nonce;
-            expiry;
-          };
-        };
+    /// Look up an EVM chain config by chain ID.
+    func findEvmChain(chainId : Nat) : ?Types.EvmChainConfig {
+      for (chain in config.evmChains.vals()) {
+        if (chain.chainId == chainId) return ?chain;
       };
+      null;
+    };
+
+    /// Generate 402 payment requirements for all configured EVM chains.
+    public func requireEvm(amount : Nat) : [Types.PaymentRequirement] {
+      let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size());
+      for (chain in config.evmChains.vals()) {
+        let expiry = Time.now() + 300_000_000_000;
+        let nonce = nonceManager.generate(expiry);
+        let token = if (chain.tokens.size() > 0) { chain.tokens[0].address } else { "" };
+        buf.add({
+          scheme = "exact";
+          network = "eip155:" # Nat.toText(chain.chainId);
+          token;
+          amount;
+          recipient = chain.recipient;
+          nonce;
+          expiry;
+        });
+      };
+      Buffer.toArray(buf);
     };
 
     /// Check if a network identifier is an EVM chain (eip155:*).
@@ -282,15 +289,10 @@ module {
         case (null) { return #networkNotSupported };
       };
 
-      // Get the Avalanche config
-      let avaxConfig = switch (config.avalanche) {
-        case (?ac) { ac };
+      // Find the EVM chain config for this chain ID
+      let chainConfig = switch (findEvmChain(chainId)) {
+        case (?cc) { cc };
         case (null) { return #networkNotSupported };
-      };
-
-      // Verify chain ID matches config
-      if (avaxConfig.chainId != chainId) {
-        return #networkNotSupported;
       };
 
       // The signature blob contains the tx hash as UTF-8 text
@@ -300,8 +302,8 @@ module {
       };
 
       // Find the expected token address (first configured Avalanche token)
-      let expectedToken = if (avaxConfig.tokens.size() > 0) {
-        avaxConfig.tokens[0].address;
+      let expectedToken = if (chainConfig.tokens.size() > 0) {
+        chainConfig.tokens[0].address;
       } else {
         return #tokenNotAccepted;
       };
@@ -312,7 +314,7 @@ module {
           txHash,
           chainId,
           expectedToken,
-          avaxConfig.recipient,
+          chainConfig.recipient,
         );
 
         switch (result) {
@@ -322,7 +324,7 @@ module {
               amount = 0; // amount verified on-chain
               token = expectedToken;
               sender = signature.sender;
-              recipient = avaxConfig.recipient;
+              recipient = chainConfig.recipient;
               network = signature.network;
               timestamp = Time.now();
               txHash = ?txHash;

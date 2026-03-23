@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <rect width="200" height="200" rx="40" fill="#0f172a"/>
+  <text x="16" y="118" text-anchor="middle" dominant-baseline="central"
+        font-family="'SF Mono', monospace"
+        font-weight="400" font-size="56" fill="#6366f1">{</text>
+  <text x="100" y="118" text-anchor="middle" dominant-baseline="central"
+        font-family="'SF Mono', 'Fira Code', monospace"
+        font-weight="900" font-size="48" fill="white"
+        letter-spacing="-2">ic402</text>
+  <text x="184" y="118" text-anchor="middle" dominant-baseline="central"
+        font-family="'SF Mono', monospace"
+        font-weight="400" font-size="56" fill="#6366f1">}</text>
+</svg>

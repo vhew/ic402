@@ -12,6 +12,7 @@ import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
+import Array "mo:base/Array";
 
 persistent actor KnowledgeBase {
 
@@ -32,28 +33,45 @@ persistent actor KnowledgeBase {
         decimals = 6;
       }];
 
-      // ── Avalanche cross-chain payments ──
+      // ── EVM cross-chain payments ──
       //
-      // Accept USDC on Avalanche C-Chain in addition to ICP ckUSDC.
-      // Requires tECDSA for cross-chain settlement verification.
+      // Accept USDC on 5 EVM chains in addition to ICP ckUSDC.
+      // The canister verifies payments via HTTPS outcalls to each chain's RPC.
+      // All recipients use the same tECDSA-derived address.
       //
-      // Settlement flow:
-      //   1. Client gets PaymentRequirement with network = "eip155:43113"
-      //   2. Client sends USDC on Avalanche to the recipient address
-      //   3. Client retries with PaymentSignature containing the tx hash
-      //   4. Canister verifies the Avalanche tx via tECDSA + RPC
-      //
-      // Fuji testnet (chainId 43113, USDC 0x5425890298aed601595a70AB815c96711a31Bc65)
-      // Mainnet values: chainId 43114, USDC 0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
-      avalanche = ?{
-        chainId = 43113;  // Avalanche Fuji testnet
-        recipient = "0xf029Dd535f674a8B081Ef5f5759462c4Ea682165"; // placeholder — replace with your address
-        tokens = [{
-          address = "0x5425890298aed601595a70AB815c96711a31Bc65"; // USDC on Fuji
-          symbol = "USDC";
-          decimals = 6 : Nat8;
-        }];
-      };
+      // Testnet config (replace addresses with mainnet values for production):
+      //   Ethereum mainnet USDC: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+      //   Base mainnet USDC:     0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+      //   Avalanche mainnet USDC:0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E
+      //   Optimism mainnet USDC: 0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85
+      //   Arbitrum mainnet USDC: 0xaf88d065e77c8cC2239327C5EDb3A432268e5831
+      evmChains = [
+        { // Base Sepolia (primary — identity registration chain)
+          chainId = 84532;
+          recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; symbol = "USDC"; decimals = 6 : Nat8 }];
+        },
+        { // Ethereum Sepolia
+          chainId = 11155111;
+          recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"; symbol = "USDC"; decimals = 6 : Nat8 }];
+        },
+        { // Avalanche Fuji
+          chainId = 43113;
+          recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x5425890298aed601595a70AB815c96711a31Bc65"; symbol = "USDC"; decimals = 6 : Nat8 }];
+        },
+        { // Optimism Sepolia
+          chainId = 11155420;
+          recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x5fd84259d66Cd46123540766Be93DFE6D43130D7"; symbol = "USDC"; decimals = 6 : Nat8 }];
+        },
+        { // Arbitrum Sepolia
+          chainId = 421614;
+          recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"; symbol = "USDC"; decimals = 6 : Nat8 }];
+        },
+      ];
     },
     Principal.fromActor(KnowledgeBase),
   );
@@ -92,7 +110,7 @@ persistent actor KnowledgeBase {
   //   This lets you restrict high-value endpoints to trusted agents only.
 
   transient let identity = Ic402.Identity({
-    chain = #avalanche;
+    chain = #base;
     card = {
       name = "KnowledgeBase";
       description = "Paid knowledge base — search, Q&A, and encrypted content delivery via ic402";
@@ -176,10 +194,7 @@ persistent actor KnowledgeBase {
       case (null) {
         // Return both ICP and Avalanche payment options
         let icpReq = gate.require(icpPrice);
-        let options = switch (gate.requireAvax(amount)) {
-          case (?avaxReq) { [icpReq, avaxReq] };
-          case (null) { [icpReq] };
-        };
+        let options = Array.append([icpReq], gate.requireEvm(amount));
         #paymentRequired(options);
       };
       case (?sig) {
@@ -292,10 +307,7 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) {
         let icpReq = gate.require(icpPrice);
-        let options = switch (gate.requireAvax(amount)) {
-          case (?avaxReq) { [icpReq, avaxReq] };
-          case (null) { [icpReq] };
-        };
+        let options = Array.append([icpReq], gate.requireEvm(amount));
         #paymentRequired(options);
       };
       case (?sig) {
@@ -403,10 +415,7 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) {
         let icpReq = gate.require(icpPrice);
-        let options = switch (gate.requireAvax(amount)) {
-          case (?avaxReq) { [icpReq, avaxReq] };
-          case (null) { [icpReq] };
-        };
+        let options = Array.append([icpReq], gate.requireEvm(amount));
         #paymentRequired(options);
       };
       case (?sig) {
@@ -502,10 +511,7 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) {
         let icpReq = gate.require(icpPrice);
-        let options = switch (gate.requireAvax(amount)) {
-          case (?avaxReq) { [icpReq, avaxReq] };
-          case (null) { [icpReq] };
-        };
+        let options = Array.append([icpReq], gate.requireEvm(amount));
         #paymentRequired(options);
       };
       case (?sig) {
@@ -596,7 +602,7 @@ persistent actor KnowledgeBase {
   /// Get the canister's tECDSA public key for Avalanche.
   /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
   /// Use scripts/register-agent.ts to derive the AVAX address and register.
-  public func getAvalanchePublicKey() : async Blob {
+  public func getEvmPublicKey() : async Blob {
     await identity.getPublicKey("dfx_test_key"); // "key_1" on mainnet IC
   };
 
@@ -611,7 +617,7 @@ persistent actor KnowledgeBase {
   /// Controller-only.
   ///
   /// Current flow (hackathon):
-  ///   1. Call getAvalanchePublicKey() to get the canister's secp256k1 key
+  ///   1. Call getEvmPublicKey() to get the canister's secp256k1 key
   ///   2. Run scripts/register-agent.ts to deploy contract + register on Fuji
   ///   3. Script calls setAgentRegistration() to store the token ID
   ///
@@ -673,10 +679,7 @@ persistent actor KnowledgeBase {
         network = "icp:1";
       };
       let icpReq = gate.require(icpPrice);
-      let options = switch (gate.requireAvax(amount)) {
-        case (?avaxReq) { [icpReq, avaxReq] };
-        case (null) { [icpReq] };
-      };
+      let options = Array.append([icpReq], gate.requireEvm(amount));
       return Http.http402(options);
     };
 
@@ -696,10 +699,7 @@ persistent actor KnowledgeBase {
         network = "icp:1";
       };
       let icpReq = gate.require(icpPrice);
-      let options = switch (gate.requireAvax(amount)) {
-        case (?avaxReq) { [icpReq, avaxReq] };
-        case (null) { [icpReq] };
-      };
+      let options = Array.append([icpReq], gate.requireEvm(amount));
       return Http.http402(options);
     };
 
@@ -780,7 +780,7 @@ persistent actor KnowledgeBase {
   func doSearch(q : Text) : [Text] {
     [
       "ic402: drop-in payment library for ICP canisters — x402 charges, streaming sessions, encrypted content.",
-      "Supports ckUSDC (ICRC-2) on ICP and USDC on Avalanche C-Chain via tECDSA cross-chain settlement.",
+      "Supports ckUSDC (ICRC-2) on ICP and USDC on 5 EVM chains (Ethereum, Avalanche, Base, Optimism, Arbitrum) via tECDSA.",
       "Sessions reduce settlement overhead 5,000x: deposit once, stream vouchers, settle on close.",
       "Query: " # q,
     ]

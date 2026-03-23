@@ -1,7 +1,8 @@
-/// ic402 — Avalanche/EVM transaction verification via HTTPS outcalls.
+/// ic402 — EVM transaction verification via HTTPS outcalls.
 ///
-/// Verifies that an ERC-20 transfer happened on an EVM chain by calling
-/// eth_getTransactionReceipt via the chain's JSON-RPC endpoint.
+/// Verifies that an ERC-20 transfer happened on any supported EVM chain
+/// by calling eth_getTransactionReceipt via the chain's JSON-RPC endpoint.
+/// Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum.
 ///
 /// Used by Gateway.settle() when the payment network is "eip155:*".
 
@@ -28,15 +29,22 @@ module {
     #failed : Text;
   };
 
-  /// Avalanche RPC endpoints by chain ID.
+  /// RPC endpoints by chain ID (mainnet + testnet).
   public func rpcUrl(chainId : Nat) : Text {
-    if (chainId == 43113) {
-      "https://api.avax-test.network/ext/bc/C/rpc";
-    } else if (chainId == 43114) {
-      "https://api.avax.network/ext/bc/C/rpc";
-    } else {
-      "https://api.avax-test.network/ext/bc/C/rpc"; // default to Fuji
-    };
+    // Mainnets
+    if (chainId == 1)          { "https://ethereum-rpc.publicnode.com" }
+    else if (chainId == 43114) { "https://api.avax.network/ext/bc/C/rpc" }
+    else if (chainId == 8453)  { "https://mainnet.base.org" }
+    else if (chainId == 10)    { "https://mainnet.optimism.io" }
+    else if (chainId == 42161) { "https://arb1.arbitrum.io/rpc" }
+    // Testnets
+    else if (chainId == 11155111) { "https://ethereum-sepolia-rpc.publicnode.com" }
+    else if (chainId == 43113)    { "https://api.avax-test.network/ext/bc/C/rpc" }
+    else if (chainId == 84532)    { "https://sepolia.base.org" }
+    else if (chainId == 11155420) { "https://sepolia.optimism.io" }
+    else if (chainId == 421614)   { "https://sepolia-rollup.arbitrum.io/rpc" }
+    // Fallback
+    else { "https://ethereum-rpc.publicnode.com" };
   };
 
   let ic : IC.Service = actor "aaaaa-aa";
