@@ -332,7 +332,6 @@ Production-ready. All core features are implemented and tested.
 - Auto-approval (ICRC-2 approve before payment) not yet implemented in the TypeScript SDK
 - Agent discovery (`discoverAgents`) is stubbed in the TypeScript SDK
 
-See [docs/SPEC.md](docs/SPEC.md) for the full specification.
 
 ## Contributing
 
