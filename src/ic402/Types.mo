@@ -242,7 +242,7 @@ module {
   };
 
   public type StableNonceState = {
-    nonces : [(Blob, Int)];
+    nonces : [(Blob, (Int, Nat))]; // (expiry, bound amount)
     counter : Nat;
   };
 

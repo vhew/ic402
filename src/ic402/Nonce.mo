@@ -1,4 +1,8 @@
 /// ic402 — Deterministic nonce generation and replay protection.
+///
+/// Each nonce is bound to a payment amount at generation time.
+/// Settlement uses a lock/consume/unlock pattern to prevent
+/// nonce waste on failed payments while blocking double-spend.
 import Types "Types";
 import HashMap "mo:base/HashMap";
 import Blob "mo:base/Blob";
@@ -17,61 +21,81 @@ module {
   public class NonceManager(canisterPrincipal : Principal) {
 
     var counter : Nat = 0;
-    // nonce -> expiry timestamp
-    var nonces = HashMap.HashMap<Blob, Int>(64, Blob.equal, Blob.hash);
+    // nonce -> (expiry, bound amount)
+    var nonces = HashMap.HashMap<Blob, (Int, Nat)>(64, Blob.equal, Blob.hash);
+    // nonces currently locked for settlement (transient, not persisted)
+    let locked = HashMap.HashMap<Blob, Bool>(16, Blob.equal, Blob.hash);
 
-    /// Generate a deterministic nonce via sha256(canisterPrincipal ++ counter).
-    public func generate(expiry : Int) : Blob {
+    /// Generate a deterministic nonce bound to a specific payment amount.
+    /// nonce = sha256(canisterPrincipal ++ counter)
+    public func generate(expiry : Int, amount : Nat) : Blob {
       let counterBytes = natToBytes(counter);
       let principalBytes = Blob.toArray(Principal.toBlob(canisterPrincipal));
       let input = Array.append(principalBytes, counterBytes);
       let nonce = SHA256.fromArray(#sha256, input);
       counter += 1;
 
-      // Enforce bounded set — GC expired before adding
       if (nonces.size() >= MAX_NONCES) {
         gcExpired();
       };
 
-      nonces.put(nonce, expiry);
+      nonces.put(nonce, (expiry, amount));
       nonce;
     };
 
-    /// Consume a nonce: returns true if valid and not expired, removes it.
-    public func consume(nonce : Blob) : Bool {
+    /// Lock a nonce for settlement. Returns the bound amount if valid,
+    /// not expired, and not already locked. The nonce stays in the map
+    /// but cannot be locked again until unlocked or consumed.
+    public func lock(nonce : Blob) : ?Nat {
+      switch (locked.get(nonce)) {
+        case (?_) { return null }; // already in use
+        case (null) {};
+      };
       switch (nonces.get(nonce)) {
-        case (null) { false };
-        case (?expiry) {
+        case (null) { null };
+        case (?(expiry, amount)) {
           if (Time.now() > expiry) {
             nonces.delete(nonce);
-            false;
+            null;
           } else {
-            nonces.delete(nonce);
-            true;
+            locked.put(nonce, true);
+            ?amount;
           };
         };
       };
     };
 
-    /// Check if a nonce exists (without consuming).
+    /// Permanently consume a locked nonce (call after successful settlement).
+    public func consumeLocked(nonce : Blob) {
+      nonces.delete(nonce);
+      locked.delete(nonce);
+    };
+
+    /// Unlock a nonce (call after failed settlement, allowing client retry).
+    public func unlock(nonce : Blob) {
+      locked.delete(nonce);
+    };
+
+    /// Check if a nonce exists and is valid (without consuming or locking).
     public func exists(nonce : Blob) : Bool {
       switch (nonces.get(nonce)) {
         case (null) { false };
-        case (?expiry) { Time.now() <= expiry };
+        case (?(expiry, _)) { Time.now() <= expiry };
       };
     };
 
-    /// Remove expired nonces.
+    /// Remove expired nonces and their locks.
     public func gcExpired() {
       let now = Time.now();
       let toRemove = Iter.toArray(
-        Iter.filter<(Blob, Int)>(
+        Iter.filter<(Blob, (Int, Nat))>(
           nonces.entries(),
-          func((_, expiry)) { now > expiry },
+          func((_, (expiry, _))) { now > expiry },
         )
       );
       for ((nonce, _) in toRemove.vals()) {
         nonces.delete(nonce);
+        locked.delete(nonce);
       };
     };
 
@@ -83,14 +107,14 @@ module {
     };
 
     public func loadStable(data : Types.StableNonceState) {
-      nonces := HashMap.fromIter<Blob, Int>(
+      nonces := HashMap.fromIter<Blob, (Int, Nat)>(
         data.nonces.vals(), data.nonces.size(), Blob.equal, Blob.hash,
       );
       counter := data.counter;
+      // locked is transient — fresh on every upgrade
     };
   };
 
-  // Convert Nat to big-endian bytes (8 bytes)
   func natToBytes(n : Nat) : [Nat8] {
     var value = n;
     let bytes = Array.init<Nat8>(8, 0);

@@ -19,6 +19,7 @@ import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
 import Char "mo:base/Char";
 import SHA256 "mo:sha2/Sha256";
+import Ed25519 "mo:ed25519";
 import EvmVerify "EvmVerify";
 
 module {
@@ -60,6 +61,67 @@ module {
     };
     bytes[0] := Nat8.fromNat(value % 256);
     Array.freeze(bytes);
+  };
+
+  /// Encode a voucher payload as CBOR for Ed25519 signature verification.
+  /// Must match the client-side encodeVoucherPayload() exactly:
+  /// CBOR array(3): [text(sessionId), uint(cumulativeAmount), uint(sequence)]
+  func encodeVoucherPayload(sessionId : Text, cumulativeAmount : Nat, sequence : Nat) : [Nat8] {
+    // Manual CBOR encoding to avoid dependency on exact CBOR library API:
+    // Array of 3 items: 0x83
+    // Text string: 0x78 <len> <bytes> (for short strings: 0x60+len <bytes>)
+    // Unsigned int: CBOR major type 0
+    let sessionBytes = Blob.toArray(Text.encodeUtf8(sessionId));
+    let buf = Buffer.Buffer<Nat8>(100);
+
+    // CBOR array of 3 items
+    buf.add(0x83);
+
+    // Text string (sessionId)
+    let sLen = sessionBytes.size();
+    if (sLen < 24) {
+      buf.add(Nat8.fromNat(0x60 + sLen));
+    } else if (sLen < 256) {
+      buf.add(0x78);
+      buf.add(Nat8.fromNat(sLen));
+    } else {
+      buf.add(0x79);
+      buf.add(Nat8.fromNat(sLen / 256));
+      buf.add(Nat8.fromNat(sLen % 256));
+    };
+    for (b in sessionBytes.vals()) { buf.add(b) };
+
+    // Unsigned integer (cumulativeAmount)
+    encodeCborUint(buf, cumulativeAmount);
+
+    // Unsigned integer (sequence)
+    encodeCborUint(buf, sequence);
+
+    Buffer.toArray(buf);
+  };
+
+  /// Encode a Nat as a CBOR unsigned integer (major type 0).
+  func encodeCborUint(buf : Buffer.Buffer<Nat8>, n : Nat) {
+    if (n < 24) {
+      buf.add(Nat8.fromNat(n));
+    } else if (n < 256) {
+      buf.add(0x18);
+      buf.add(Nat8.fromNat(n));
+    } else if (n < 65536) {
+      buf.add(0x19);
+      buf.add(Nat8.fromNat(n / 256));
+      buf.add(Nat8.fromNat(n % 256));
+    } else if (n < 4294967296) {
+      buf.add(0x1a);
+      buf.add(Nat8.fromNat((n / 16777216) % 256));
+      buf.add(Nat8.fromNat((n / 65536) % 256));
+      buf.add(Nat8.fromNat((n / 256) % 256));
+      buf.add(Nat8.fromNat(n % 256));
+    } else {
+      buf.add(0x1b);
+      let bytes = natToBytes8(n);
+      for (b in bytes.vals()) { buf.add(b) };
+    };
   };
 
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
@@ -143,7 +205,7 @@ module {
     /// Generate a 402 payment requirement for a given price.
     public func require(price : Types.Price) : Types.PaymentRequirement {
       let expiry = Time.now() + 300_000_000_000; // 5 minutes
-      let nonce = nonceManager.generate(expiry);
+      let nonce = nonceManager.generate(expiry, price.amount);
       {
         scheme = "exact";
         network = price.network;
@@ -168,7 +230,7 @@ module {
       let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size());
       for (chain in config.evmChains.vals()) {
         let expiry = Time.now() + 300_000_000_000;
-        let nonce = nonceManager.generate(expiry);
+        let nonce = nonceManager.generate(expiry, amount);
         let token = if (chain.tokens.size() > 0) { chain.tokens[0].address } else { "" };
         buf.add({
           scheme = "exact";
@@ -204,44 +266,45 @@ module {
     };
 
     /// Verify and settle a charge payment.
-    /// Dispatches to ICRC-2 (ICP) or HTTPS outcall verification (Avalanche/EVM).
+    /// Uses lock/consume/unlock pattern: nonce is locked during settlement,
+    /// consumed on success, unlocked on failure (allowing client retry).
+    /// Dispatches to ICRC-2 (ICP) or HTTPS outcall verification (EVM).
     public func settle(signature : Types.PaymentSignature) : async Types.PaymentResult {
-      // Verify nonce
-      if (not nonceManager.consume(signature.nonce)) {
-        return #expired;
+      // Lock nonce and extract the bound payment amount
+      let amount = switch (nonceManager.lock(signature.nonce)) {
+        case (null) { return #expired };
+        case (?a) { a };
       };
 
-      // Check if this is an EVM payment (Avalanche, etc.)
+      // Dispatch to EVM settlement if eip155:* network
       if (isEvmNetwork(signature.network)) {
-        return await settleEvm(signature);
+        let evmResult = await settleEvm(signature, amount);
+        switch (evmResult) {
+          case (#ok(_)) { nonceManager.consumeLocked(signature.nonce) };
+          case (_) { nonceManager.unlock(signature.nonce) };
+        };
+        return evmResult;
       };
 
       // ── ICP settlement via ICRC-2 ──
 
-      // Find the token config
       let tokenConfig = switch (findLedger(signature.network)) {
         case (?tc) { tc };
         case (null) {
-          // Try to match by iterating tokens
           switch (config.tokens.size()) {
-            case (0) { return #tokenNotAccepted };
-            case (_) { config.tokens[0] }; // default to first token
+            case (0) { nonceManager.unlock(signature.nonce); return #tokenNotAccepted };
+            case (_) { config.tokens[0] };
           };
         };
       };
 
-      // Parse sender principal
       let senderPrincipal = Principal.fromText(signature.sender);
 
-      // Check policy
-      let amount = 0 : Nat;
-
       switch (policy.checkCharge(senderPrincipal, amount)) {
-        case (#denied(r)) { return #policyDenied(r) };
+        case (#denied(r)) { nonceManager.unlock(signature.nonce); return #policyDenied(r) };
         case (#ok) {};
       };
 
-      // Construct ledger actor and execute icrc2_transfer_from
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
       try {
@@ -249,7 +312,7 @@ module {
           spender_subaccount = null;
           from = { owner = senderPrincipal; subaccount = null };
           to = recipientAccount();
-          amount = 0;
+          amount; // actual bound amount
           fee = null;
           memo = null;
           created_at_time = null;
@@ -257,9 +320,10 @@ module {
 
         switch (result) {
           case (#Ok(blockIndex)) {
+            nonceManager.consumeLocked(signature.nonce);
             let receipt : Types.PaymentReceipt = {
               id = nextReceiptId();
-              amount = 0;
+              amount;
               token = Principal.toText(tokenConfig.ledger);
               sender = signature.sender;
               recipient = recipientText();
@@ -272,56 +336,59 @@ module {
             policy.recordSpend(senderPrincipal, receipt.amount);
             #ok(receipt);
           };
-          case (#Err(#InsufficientFunds(_))) { #insufficientFunds };
-          case (#Err(#InsufficientAllowance(_))) { #insufficientFunds };
-          case (#Err(err)) { #settlementFailed("ICRC-2 error: " # debug_show(err)) };
+          case (#Err(err)) {
+            nonceManager.unlock(signature.nonce);
+            switch (err) {
+              case (#InsufficientFunds(_)) { #insufficientFunds };
+              case (#InsufficientAllowance(_)) { #insufficientFunds };
+              case (_) { #settlementFailed("ICRC-2 error: " # debug_show(err)) };
+            };
+          };
         };
       } catch (e) {
+        nonceManager.unlock(signature.nonce);
         #settlementFailed("Ledger call failed: " # Error.message(e));
       };
     };
 
     /// Settle an EVM payment by verifying the transaction on-chain via HTTPS outcall.
-    func settleEvm(signature : Types.PaymentSignature) : async Types.PaymentResult {
-      // Extract chain ID from network (e.g. "eip155:43113" → 43113)
+    /// Nonce locking/consuming is handled by the caller (settle).
+    func settleEvm(signature : Types.PaymentSignature, amount : Nat) : async Types.PaymentResult {
       let chainId = switch (extractChainId(signature.network)) {
         case (?id) { id };
         case (null) { return #networkNotSupported };
       };
 
-      // Find the EVM chain config for this chain ID
       let chainConfig = switch (findEvmChain(chainId)) {
         case (?cc) { cc };
         case (null) { return #networkNotSupported };
       };
 
-      // The signature blob contains the tx hash as UTF-8 text
       let txHash = switch (Text.decodeUtf8(signature.signature)) {
         case (?h) { h };
         case (null) { return #invalidSignature };
       };
 
-      // Find the expected token address (first configured Avalanche token)
       let expectedToken = if (chainConfig.tokens.size() > 0) {
         chainConfig.tokens[0].address;
       } else {
         return #tokenNotAccepted;
       };
 
-      // Verify the transaction on-chain
       try {
         let result = await EvmVerify.verifyTransaction(
           txHash,
           chainId,
           expectedToken,
           chainConfig.recipient,
+          amount,
         );
 
         switch (result) {
-          case (#ok(_verified)) {
+          case (#ok(verified)) {
             let receipt : Types.PaymentReceipt = {
               id = nextReceiptId();
-              amount = 0; // amount verified on-chain
+              amount = verified.amount;
               token = expectedToken;
               sender = signature.sender;
               recipient = chainConfig.recipient;
@@ -331,6 +398,7 @@ module {
               sessionId = null;
               refunded = null;
             };
+            policy.recordSpend(Principal.fromText(signature.sender), receipt.amount);
             #ok(receipt);
           };
           case (#failed(reason)) {
@@ -484,8 +552,16 @@ module {
       };
 
       // Ed25519 signature verification
-      // INSECURE: MVP stub — accepts all signatures.
-      // Production should verify: Ed25519.verify(session.payerPublicKey, cbor(sessionId, cumulativeAmount, sequence), voucher.signature)
+      let payload = encodeVoucherPayload(voucher.sessionId, voucher.cumulativeAmount, voucher.sequence);
+      let sigBytes = Blob.toArray(voucher.signature);
+      let pubKeyBytes = Blob.toArray(session.payerPublicKey);
+
+      if (sigBytes.size() != 64) { return #invalidSignature };
+      if (pubKeyBytes.size() != 32) { return #invalidSignature };
+
+      if (not Ed25519.ED25519.verify(sigBytes, payload, pubKeyBytes)) {
+        return #invalidSignature;
+      };
 
       // Update session state
       session.consumed := voucher.cumulativeAmount;
