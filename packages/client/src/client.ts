@@ -383,14 +383,27 @@ export class Ic402Client {
     }
 
     if ('httpUrl' in method) {
-      const response = await fetch(method.httpUrl);
+      // M-4: Validate URL scheme before fetching
+      const httpUrl = method.httpUrl;
+      if (!/^https?:\/\//i.test(httpUrl)) {
+        throw new Error(`Invalid httpUrl: must use http(s) scheme`);
+      }
+      const response = await fetch(httpUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       return new Uint8Array(await response.arrayBuffer());
     }
 
     if ('assetCanister' in method) {
       const { canisterId, path } = method.assetCanister;
-      const url = `https://${canisterId}.icp0.io${path}`;
+      // M-4: Validate canisterId format (ICP principal) and path (no traversal)
+      const cidStr = String(canisterId);
+      if (!/^[a-z0-9-]+$/.test(cidStr)) {
+        throw new Error(`Invalid canisterId format: ${cidStr}`);
+      }
+      if (typeof path !== 'string' || !path.startsWith('/') || path.includes('..')) {
+        throw new Error(`Invalid asset path: must start with / and not contain ..`);
+      }
+      const url = `https://${cidStr}.icp0.io${path}`;
       const response = await fetch(url);
       if (!response.ok)
         throw new Error(`Asset canister ${response.status}: ${response.statusText}`);

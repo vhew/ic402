@@ -20,6 +20,7 @@ import Blob "mo:base/Blob";
 import Error "mo:base/Error";
 import CBOR "mo:cbor";
 import Ed25519 "mo:ed25519";
+import Debug "mo:base/Debug";
 
 module {
 
@@ -141,8 +142,8 @@ module {
     /// Generate a session offer for 402 response.
     /// Validates the intent (deposit > 0, expiry in the future) and returns it.
     public func offerSession(intent : Types.SessionIntent) : Types.SessionIntent {
-      assert(intent.suggestedDeposit > 0);
-      assert(intent.expiry > Time.now());
+      if (intent.suggestedDeposit == 0) { Debug.trap("ic402: offerSession() called with suggestedDeposit = 0") };
+      if (intent.expiry <= Time.now()) { Debug.trap("ic402: offerSession() called with expired intent") };
       intent;
     };
 
@@ -153,6 +154,12 @@ module {
       clientConfig : Types.SessionConfig,
       sig : Types.PaymentSignature,
     ) : async { #ok : Types.SessionState; #err : Types.PaymentResult } {
+      // M-3: Rate-limit session open attempts (uses policy engine's per-caller rate limiter)
+      switch (policy.checkCharge(caller, 0)) {
+        case (#denied(r)) { return #err(#policyDenied(r)) };
+        case (#ok) {};
+      };
+
       // M-2: Check intent expiry before processing
       if (Time.now() > intent.expiry) {
         return #err(#expired("Session intent expired"));
@@ -310,6 +317,12 @@ module {
       clientConfig : Types.SessionConfig,
       sig : Types.PaymentSignature,
     ) : async { #ok : Types.SessionState; #err : Types.PaymentResult } {
+      // M-3: Rate-limit session open attempts
+      switch (policy.checkCharge(caller, 0)) {
+        case (#denied(r)) { return #err(#policyDenied(r)) };
+        case (#ok) {};
+      };
+
       let deposit = Nat.min(intent.suggestedDeposit, clientConfig.maxDeposit);
 
       // Check minimum deposit
@@ -368,20 +381,22 @@ module {
       let tokenAddr = intent.token;
       var tokenName : ?Text = null;
       var tokenVersion : ?Text = null;
-      // Look up per-chain token name/version for EIP-712 domain separator
-      let evmChain : ?Types.EvmChainConfig = do {
+      // M-5: Look up per-chain token name/version for EIP-712 domain separator.
+      // Return error if chain not configured (wrong defaults cause silent sig failure).
+      let evmChain : Types.EvmChainConfig = do {
         var found : ?Types.EvmChainConfig = null;
         for (c in config.evmChains.vals()) { if (c.chainId == chainId) found := ?c };
-        found;
-      };
-      switch (evmChain) {
-        case (?chain) {
-          if (chain.tokens.size() > 0) {
-            tokenName := chain.tokens[0].name;
-            tokenVersion := chain.tokens[0].version;
+        switch (found) {
+          case (?chain) { chain };
+          case (null) {
+            sessionOpenLocks.delete(caller);
+            return #err(#networkNotSupported("No EVM chain config for chainId " # Nat.toText(chainId)));
           };
         };
-        case (null) {};
+      };
+      if (evmChain.tokens.size() > 0) {
+        tokenName := evmChain.tokens[0].name;
+        tokenVersion := evmChain.tokens[0].version;
       };
       let verified = Eip712.verifyAuthorization(
         chainId, EvmUtils.hexToBytes(tokenAddr),
@@ -503,6 +518,20 @@ module {
       // Check session is open
       if (session.status != #open) return #sessionNotOpen;
 
+      // H-3: Reject vouchers on sessions past their expiry (closes gap between timer runs)
+      switch (session.maxDuration) {
+        case (?maxDur) {
+          if (Time.now() - session.openedAt > maxDur) return #sessionNotOpen;
+        };
+        case (null) {};
+      };
+      switch (session.idleTimeout) {
+        case (?timeout) {
+          if (Time.now() - session.lastActivityAt > timeout) return #sessionNotOpen;
+        };
+        case (null) {};
+      };
+
       // Check sequence monotonicity
       if (voucher.sequence <= session.lastSequence) return #invalidSequence;
 
@@ -588,6 +617,8 @@ module {
       };
 
       let wasExpired = (session.status == #expired);
+      // H-4: Setting #closing BEFORE any async operations freezes session.consumed —
+      // consumeVoucher rejects vouchers when status != #open, preventing TOCTOU on arithmetic.
       session.status := #closing;
 
       // Find ledger
@@ -723,6 +754,24 @@ module {
       Array.freeze(resultBuf);
     };
 
+    /// H-1: Remove closed/expired sessions older than the retention period from memory.
+    /// Called after closeExpiredSessions to prevent unbounded HashMap growth.
+    public func gcClosedSessions() {
+      let retentionNanos = 24 * 60 * 60 * 1_000_000_000; // 24 hours
+      let now = Time.now();
+      let toRemove = Iter.toArray(
+        Iter.filter<(Text, Types.InternalSessionState)>(
+          sessions.entries(),
+          func((_, s)) {
+            (s.status == #closed or s.status == #expired) and (now - s.lastActivityAt > retentionNanos);
+          },
+        )
+      );
+      for ((id, _) in toRemove.vals()) {
+        sessions.delete(id);
+      };
+    };
+
     // ── EVM session close ──
 
     /// Close an EVM session: settle consumed to recipient, refund remainder to payer.
@@ -824,7 +873,9 @@ module {
             return #err("Not authorized: only session payer can recover escrow");
           };
         };
-        case (null) {}; // Allow recovery if session not found (cleanup)
+        case (null) {
+          return #err("Session not found: cannot authorize escrow recovery without session record");
+        };
       };
       let subaccount = escrowManager.deriveSubaccount(sessionId);
       await escrowManager.refund(ledger, subaccount, recipient, amount);

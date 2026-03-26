@@ -25,6 +25,7 @@ import EvmEscrow "EvmEscrow";
 import EvmSender "EvmSender";
 import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
+import Debug "mo:base/Debug";
 
 module {
 
@@ -77,9 +78,12 @@ module {
         canister_id = null;
         derivation_path = [];
       });
+      // H-2: Surface error instead of silently swallowing — operators can see this in canister logs
       switch (EvmAddress.fromCompressedPublicKey(Blob.toArray(result.public_key))) {
         case (#ok(addr)) { evmRecipient := ?addr };
-        case (#err(_)) {};
+        case (#err(msg)) {
+          Debug.print("ic402 CRITICAL: EVM address derivation failed: " # msg # ". EVM payments will be unavailable.");
+        };
       };
     };
 
@@ -173,9 +177,9 @@ module {
     // ── Charge (x402 "exact") ──
 
     /// Generate a 402 payment requirement for a given price.
-    /// Asserts amount > 0 to prevent free-payment attacks.
+    /// Traps if amount is 0 to prevent free-payment attacks.
     public func require(price : Types.Price) : Types.PaymentRequirement {
-      assert(price.amount > 0);
+      if (price.amount == 0) { Debug.trap("ic402: require() called with amount = 0; payment amount must be positive") };
       let expiry = Time.now() + nonceExpiryNanos();
       let tokenText = Principal.toText(price.token);
       let nonce = nonceManager.generate(expiry, price.amount, price.network, tokenText);
@@ -209,9 +213,9 @@ module {
     };
 
     /// Generate 402 payment requirements for all configured EVM chains.
-    /// M-7: Asserts amount > 0 to prevent free-payment attacks.
+    /// M-7: Traps if amount is 0 to prevent free-payment attacks.
     public func requireEvm(amount : Nat) : [Types.PaymentRequirement] {
-      assert(amount > 0);
+      if (amount == 0) { Debug.trap("ic402: requireEvm() called with amount = 0; payment amount must be positive") };
       let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size());
       for (chain in config.evmChains.vals()) {
         // Skip chains with no tokens configured
@@ -301,7 +305,10 @@ module {
           };
         };
 
-        // M-1: Derive deterministic Principal from EVM sender for policy tracking
+        // M-1: Derive deterministic Principal from EVM sender for policy tracking.
+        // M-2: Uses 29 bytes of SHA-256 (232 bits) — collision probability ~2^-116.
+        // Two EVM addresses mapping to the same Principal would share policy buckets.
+        // This is acceptable for policy tracking (not for authentication).
         let evmSenderBytes = Blob.toArray(Text.encodeUtf8("evm:" # authz.from));
         let evmSenderHash = SHA256.fromArray(#sha256, evmSenderBytes);
         let hashArray = Blob.toArray(evmSenderHash);
@@ -327,8 +334,8 @@ module {
           case (null) { nonceManager.unlock(signature.nonce); return #networkNotSupported("Invalid network: " # signature.network) };
         };
         let tokenAddr = resolveTokenForNonce(signature.network);
-        // Look up per-chain token name/version for the EIP-712 domain separator.
-        // Testnets use different names (e.g. "USDC" on Base Sepolia vs "USD Coin" on mainnet).
+        // M-5: Look up per-chain token name/version for the EIP-712 domain separator.
+        // Return error if chain not configured (wrong defaults cause silent sig failure).
         var tokenName : ?Text = null;
         var tokenVersion : ?Text = null;
         switch (findEvmChain(chainId)) {
@@ -338,7 +345,10 @@ module {
               tokenVersion := chain.tokens[0].version;
             };
           };
-          case (null) {};
+          case (null) {
+            nonceManager.unlock(signature.nonce);
+            return #networkNotSupported("No EVM chain config for chainId " # Nat.toText(chainId));
+          };
         };
         let verified = Eip712.verifyAuthorization(
           chainId,
@@ -568,10 +578,11 @@ module {
     /// Also auto-initializes HMAC seed and derives EVM address if ecdsaKeyName is set.
     /// Must be called from actor context (requires <system> capability).
     public func startTimers<system>() {
-      // Close expired sessions every 60 seconds
+      // Close expired sessions every 60 seconds, then GC stale entries
       ignore Timer.recurringTimer<system>(#seconds 60, func() : async () {
         let _results = await sessionsMgr.closeExpiredSessions();
-        // TOB-IC402-8: results are now captured (not ignored)
+        // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
+        sessionsMgr.gcClosedSessions();
       });
       // Garbage-collect stale policy data every hour
       ignore Timer.recurringTimer<system>(#seconds 3600, func() : async () {

@@ -92,6 +92,41 @@ scripts/            Dev tooling (setup, deployment, version bump)
 | **mops** | Motoko package manager. `mops add ic402` is like `npm install`. |
 | **Candid** | ICP's interface description language (like ABI for Ethereum). `.did` files define the canister API. |
 
+## Rollback Procedure
+
+ICP canisters support in-place upgrades with stable memory preservation. If a deployment introduces a regression:
+
+1. **Check canister status:** `icp canister status example -e ic`
+2. **Redeploy the previous version:**
+   ```bash
+   git checkout <previous-tag>
+   pnpm install && icp build
+   icp canister install example --mode upgrade -e ic
+   ```
+3. **Verify:** call `getAgentCard()` or hit the HTTP endpoint to confirm rollback.
+4. **If the canister is stuck (trap loop):** use the recovery controller to reinstall:
+   ```bash
+   icp canister install example --mode reinstall -e ic  # WARNING: clears stable memory
+   ```
+
+**Stable state compatibility:** all stateful modules (`Gateway`, `Sessions`, `Policy`, `ContentStore`, `Identity`, `EvmEscrow`) use `toStable()`/`loadStable()`. Upgrades preserve state automatically. If a new version changes the stable state schema, document it as a breaking change in `CHANGELOG.md` and provide migration steps.
+
+## Production Monitoring
+
+After deploying to mainnet, monitor:
+
+| What | How | Frequency |
+|------|-----|-----------|
+| Canister status & cycles | `icp canister status example -e ic` | Daily |
+| HTTP endpoint health | `curl -s -o /dev/null -w '%{http_code}' https://<id>.raw.icp0.io/` | Every 5 min |
+| Cycles burn rate | Compare cycles balance over 24h | Daily |
+| EVM address derived | Call `getEvmRecipient()` — should return non-null | After deploy |
+| Session cleanup | Check canister logs for `closeExpiredSessions` activity | Weekly |
+
+**Cycle top-up:** `icp canister top-up example --amount 1t -e ic`
+
+**Alerting:** configure a cron job or external monitor to check the HTTP endpoint and cycles balance. If cycles drop below 1T, top up immediately to prevent canister freeze.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache 2.0](LICENSE) license.

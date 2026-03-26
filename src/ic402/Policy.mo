@@ -10,6 +10,7 @@ import Int "mo:base/Int";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
 import Char "mo:base/Char";
+import Debug "mo:base/Debug";
 
 module {
 
@@ -230,6 +231,12 @@ module {
         case (#ok) {};
       };
 
+      // M-3: Rate-limit session open attempts to prevent DoS
+      switch (checkRateLimit(policy, caller)) {
+        case (#denied(r)) { return #denied(r) };
+        case (#ok) {};
+      };
+
       // Check concurrent sessions
       switch (policy.maxConcurrentSessions) {
         case (?max) {
@@ -277,17 +284,21 @@ module {
       getDailySpend(caller);
     };
 
-    /// Validate policy invariants. Traps with a descriptive message on invalid configuration.
+    /// M-1: Validate policy invariants. Traps with a descriptive message on invalid configuration.
     func validatePolicy(p : SpendingPolicy) {
       switch (p.maxPerTransaction, p.maxPerDay) {
         case (?txMax, ?dayMax) {
-          assert(txMax <= dayMax); // maxPerTransaction must not exceed maxPerDay
+          if (txMax > dayMax) {
+            Debug.trap("ic402: invalid policy — maxPerTransaction (" # Nat.toText(txMax) # ") must not exceed maxPerDay (" # Nat.toText(dayMax) # ")");
+          };
         };
         case (_, _) {};
       };
       switch (p.maxSessionDeposit, p.maxPerDay) {
         case (?sessMax, ?dayMax) {
-          assert(sessMax <= dayMax); // maxSessionDeposit must not exceed maxPerDay
+          if (sessMax > dayMax) {
+            Debug.trap("ic402: invalid policy — maxSessionDeposit (" # Nat.toText(sessMax) # ") must not exceed maxPerDay (" # Nat.toText(dayMax) # ")");
+          };
         };
         case (_, _) {};
       };

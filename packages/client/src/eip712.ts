@@ -35,15 +35,17 @@ export interface TransferAuthorizationParams {
   validBefore?: number; // unix timestamp (default: now + 5 minutes)
 }
 
-/** Generate a random bytes32 hex string for the EIP-3009 nonce. */
+/** Generate a random bytes32 hex string for the EIP-3009 nonce.
+ *  C-2: Requires Web Crypto API — no insecure Math.random() fallback. */
 export function randomNonce(): string {
-  const bytes = new Uint8Array(32);
-  if (typeof globalThis.crypto !== 'undefined') {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    // Fallback for environments without Web Crypto
-    for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256);
+  if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
+    throw new Error(
+      'ic402: Web Crypto API required for secure nonce generation. ' +
+        'Ensure globalThis.crypto.getRandomValues is available (Node.js >= 19, modern browsers, or polyfill).',
+    );
   }
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
   return (
     '0x' +
     Array.from(bytes)

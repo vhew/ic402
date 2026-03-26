@@ -13,6 +13,7 @@ import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
 import HMAC "mo:hmac";
 import Utils "Utils";
+import Debug "mo:base/Debug";
 
 module {
 
@@ -65,14 +66,17 @@ module {
     };
 
     /// Issue an access grant after successful payment.
-    /// Traps if HMAC seed has not been initialized (fail-safe).
+    /// Traps with descriptive message if HMAC seed has not been initialized.
     public func issueGrant(
       contentRef : Types.ContentRef,
       grantee : Principal,
       receiptId : Text,
       ttlNanos : Int,
     ) : Types.AccessGrant {
-      assert(hmacSeedInitialized); // H-1: Reject grants before seed is set
+      // M-1: Descriptive trap instead of bare assert
+      if (not hmacSeedInitialized) {
+        Debug.trap("ic402: issueGrant() called before HMAC seed initialized. Ensure startTimers() was called after deployment.");
+      };
       grantCounter += 1;
       let grantId = "grant-" # Nat.toText(grantCounter);
       let now = Time.now();

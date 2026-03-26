@@ -102,19 +102,33 @@ server.tool(
         if (pem.includes('BEGIN EC PRIVATE KEY')) {
           identity = Secp256k1KeyIdentity.fromPem(pem);
         } else if (pem.includes('BEGIN PRIVATE KEY')) {
-          // PKCS#8 DER: extract the 32-byte secp256k1 secret key
+          // H-5: PKCS#8 DER — validate structure before extracting secp256k1 secret key.
           const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
           const der = Buffer.from(b64, 'base64');
-          // secp256k1 PKCS#8 key: the raw 32-byte key starts at offset 33
-          // (after ASN.1 SEQUENCE + INTEGER + OID headers)
-          const secretKey = der.slice(33, 65);
-          if (secretKey.length === 32) {
-            identity = Secp256k1KeyIdentity.fromSecretKey(new Uint8Array(secretKey));
+          // Validate minimum length for secp256k1 PKCS#8 (header + 32-byte key)
+          if (der.length < 65) {
+            throw new Error('PKCS#8 DER too short: expected at least 65 bytes');
           }
+          // Validate secp256k1 OID (1.3.132.0.10) is present in the DER
+          const secp256k1Oid = Buffer.from([0x2b, 0x81, 0x04, 0x00, 0x0a]);
+          if (!der.includes(secp256k1Oid)) {
+            throw new Error(
+              'PKCS#8 key does not contain secp256k1 OID — expected secp256k1 identity',
+            );
+          }
+          const secretKey = der.slice(33, 65);
+          if (secretKey.length !== 32) {
+            throw new Error(`Expected 32-byte secret key, got ${secretKey.length}`);
+          }
+          identity = Secp256k1KeyIdentity.fromSecretKey(new Uint8Array(secretKey));
+        } else {
+          throw new Error('Unsupported PEM format: expected EC PRIVATE KEY or PRIVATE KEY');
         }
       } catch (e) {
-        // Log error but fall back to anonymous
-        console.error('Identity load failed:', e instanceof Error ? e.message : String(e));
+        // Surface error clearly — do NOT silently fall back to anonymous for PEM files
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error('Identity load failed:', msg);
+        throw new Error(`Failed to load identity from ${pemPath}: ${msg}`);
       }
     }
 
@@ -248,16 +262,27 @@ server.tool(
       .describe('Max deposit in token units (defaults to canister suggestion)'),
     evmTxHash: z
       .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, 'Must be a 0x-prefixed 32-byte hex hash')
       .optional()
       .describe('EVM tx hash proving USDC deposit (for EVM sessions)'),
     evmNetwork: z
       .string()
+      .regex(/^eip155:\d+$/, 'Must be CAIP-2 format: eip155:<chainId>')
       .optional()
       .describe('CAIP-2 network, e.g., "eip155:84532" (for EVM sessions)'),
-    evmSender: z.string().optional().describe('Payer EVM address for refund (for EVM sessions)'),
-    evmToken: z.string().optional().describe('ERC-20 token contract address (for EVM sessions)'),
+    evmSender: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
+      .optional()
+      .describe('Payer EVM address for refund (for EVM sessions)'),
+    evmToken: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
+      .optional()
+      .describe('ERC-20 token contract address (for EVM sessions)'),
     evmRecipient: z
       .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
       .optional()
       .describe('Canister EVM address for settlement (for EVM sessions)'),
   },
@@ -430,7 +455,13 @@ server.tool(
       .describe('Canister ID for canisterQuery delivery (defaults to configured canister)'),
   },
   async ({ delivery: deliveryJson, canisterId }) => {
-    const parsed = JSON.parse(deliveryJson);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let parsed: any;
+    try {
+      parsed = JSON.parse(deliveryJson);
+    } catch {
+      throw new Error('Invalid JSON in delivery parameter');
+    }
     const grant = parsed.grant;
     const del = parsed.delivery;
 
@@ -505,7 +536,13 @@ server.tool(
     requireAgent();
 
     const actor = actorFactory(cid);
-    const parsedArgs = JSON.parse(args);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let parsedArgs: any;
+    try {
+      parsedArgs = JSON.parse(args);
+    } catch {
+      throw new Error('Invalid JSON in args parameter');
+    }
     const result = await actor[method](...(Array.isArray(parsedArgs) ? parsedArgs : [parsedArgs]));
 
     return {
