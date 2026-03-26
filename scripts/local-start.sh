@@ -27,9 +27,19 @@ echo "→ Starting local replica..."
 if icp network status >/dev/null 2>&1; then
   echo "  Local replica already running."
 else
-  icp network start --background
-  echo "  Waiting for replica to start..."
-  sleep 3
+  icp network start --background >/dev/null 2>&1
+  echo "  Waiting for replica..."
+  for i in $(seq 1 15); do
+    if icp network status >/dev/null 2>&1; then
+      echo "  Started (ready after ${i}s)."
+      break
+    fi
+    if [ "$i" -eq 15 ]; then
+      echo "  ERROR: Replica did not become ready within 15 seconds."
+      exit 1
+    fi
+    sleep 1
+  done
 fi
 
 # ── Deploy canisters ──

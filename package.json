@@ -11,10 +11,10 @@
   "scripts": {
     "build:client": "pnpm --filter @ic402/client build",
     "build:mcp": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build",
-    "build:mcp-client": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build && pnpm --filter @ic402/mcp-client build",
-    "predemo": "[ -f .env.development ] && . .env.development; EXAMPLE_ID=$(icp canister status example -e local --id-only 2>/dev/null); icp identity export test-payer > /tmp/ic402-test-payer.pem 2>/dev/null; icp canister call $EXAMPLE_ID closeExpiredSessions '()' -e local >/dev/null 2>&1; icp canister call ckusdc_ledger icrc1_transfer \"(record { to = record { owner = principal \\\"bjqoy-pqyjc-56hrv-i7iz3-ikzte-wuzmd-iyzzr-uxnvt-nibgn-cl3jc-aqe\\\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })\" -e local >/dev/null 2>&1; icp canister call ckusdc_ledger icrc2_approve \"(record { spender = record { owner = principal \\\"$EXAMPLE_ID\\\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null; expected_allowance = null; expires_at = null })\" -e local --identity test-payer >/dev/null 2>&1",
-    "demo": "pnpm predemo; [ -f .env.development ] && . .env.development; export ICP_IDENTITY_PEM=/tmp/ic402-test-payer.pem; node integration/mcp-client/dist/index.js --env local",
-    "demo:prod": "[ -f deploy/.env.production ] && . deploy/.env.production; icp identity export ${DEMO_IDENTITY:-ic402-demo} > /tmp/ic402-demo.pem 2>/dev/null; export ICP_IDENTITY_PEM=/tmp/ic402-demo.pem; node integration/mcp-client/dist/index.js --env ic",
+    "build:demo": "pnpm --filter @ic402/client build && pnpm --filter @ic402/mcp build && pnpm --filter @ic402/example-client build",
+    "predemo": "./scripts/predemo.sh",
+    "demo": "pnpm predemo; [ -f .env.development ] && . .env.development; export ICP_IDENTITY_PEM=.local/test-payer.pem; node example/client/dist/index.js --env local",
+    "demo:prod": "[ -f .env.production ] && . .env.production; icp identity export ${DEMO_IDENTITY:-ic402-demo} > .local/demo.pem 2>/dev/null; export ICP_IDENTITY_PEM=.local/demo.pem; node example/client/dist/index.js --env ic",
     "build:integrations": "pnpm --filter @ic402/client build && pnpm --filter './integration/*' build",
     "build": "icp build",
     "test:client": "pnpm --filter @ic402/client test",
@@ -23,25 +23,24 @@
     "lint:fix": "eslint --fix packages/client",
     "format": "prettier --write \"**/*.{ts,js,mjs,json,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,js,mjs,json,yaml}\"",
-    "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/mcp/node_modules integration/mcp/dist .pnpm-store .mops .icp/cache *.wasm",
+    "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integration/mcp/node_modules integration/mcp/dist example/client/node_modules example/client/dist .pnpm-store .mops .icp/cache *.wasm",
     "local:start": "./scripts/local-start.sh",
-    "setup": "./scripts/setup.sh",
+    "setup:local": "./scripts/setup.sh",
     "local:stop": "icp network stop",
     "version:bump": "./scripts/version.sh",
-    "register-agent": "tsx scripts/register-agent.ts",
     "prepare": "husky"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
-    "@icp-sdk/core": "^5.0.0",
-    "@icp-sdk/icp-cli": "^0.1.0",
-    "eslint": "^9.0.0",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.2.7",
-    "prettier": "^3.0.0",
-    "tsx": "^4.21.0",
-    "typescript-eslint": "^8.0.0",
-    "vitest": "^4.0.0"
+    "@eslint/js": "9.39.4",
+    "@icp-sdk/core": "5.1.0",
+    "@icp-sdk/icp-cli": "0.1.0",
+    "eslint": "9.39.4",
+    "husky": "9.1.7",
+    "lint-staged": "16.4.0",
+    "prettier": "3.8.1",
+    "tsx": "4.21.0",
+    "typescript-eslint": "8.57.1",
+    "vitest": "4.1.0"
   },
   "lint-staged": {
     "packages/client/**/*.ts": [
@@ -53,7 +52,7 @@
   },
   "pnpm": {
     "overrides": {
-      "@icp-sdk/core": "^5.0.0"
+      "@icp-sdk/core": "5.1.0"
     }
   }
 }

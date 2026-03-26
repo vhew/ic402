@@ -1,22 +1,18 @@
 {
-  "name": "@ic402/mcp",
+  "name": "@ic402/example-client",
   "version": "0.1.0",
-  "description": "MCP server for ic402 — exposes x402 charges and streaming sessions as tools",
+  "description": "Interactive demo client for the ic402 example canister",
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "ic402-mcp": "dist/index.js"
-  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@ic402/client": "workspace:*",
-    "@icp-sdk/core": "5.1.0",
     "@modelcontextprotocol/sdk": "1.27.1",
-    "zod": "3.25.76"
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.7.2"
   },
   "devDependencies": {
     "@types/node": "22.19.15",

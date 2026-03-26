@@ -20,6 +20,16 @@ export interface SessionPreferences {
   maxDeposit?: bigint;
   autoClose?: boolean;
   idleTimeout?: bigint;
+  /** For EVM sessions: the tx hash proving the USDC deposit on-chain. */
+  evmTxHash?: string;
+  /** For EVM sessions: the CAIP-2 network (e.g., "eip155:84532"). Overrides config.network. */
+  evmNetwork?: string;
+  /** For EVM sessions: the payer's EVM address (for refund on close). */
+  evmSender?: string;
+  /** For EVM sessions: the ERC-20 token contract address. */
+  evmToken?: string;
+  /** For EVM sessions: the canister's EVM address (settlement recipient). */
+  evmRecipient?: string;
 }
 
 export interface Ic402ClientConfig {
@@ -35,6 +45,13 @@ export interface Ic402ClientConfig {
   sessions?: SessionPreferences;
   /** Callback when budget alert threshold is hit */
   onBudgetAlert?: (spent: bigint, limit: bigint) => Promise<void>;
+  /** Ledger canister ID for ICRC-2 auto-approval */
+  ledger?: string;
+  /** Default target canister ID (spender for ICRC-2 approval) */
+  canisterId?: string;
+  /** Factory to create a ledger actor for ICRC-2 calls. Required for autoPayment. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ledgerActorFactory?: (ledgerCanisterId: string) => any;
 }
 
 export interface SessionHandle {
@@ -107,11 +124,49 @@ export class Ic402Client {
         throw new Error('Total budget exceeded');
       }
 
-      // TODO: icrc2_approve for the amount, then construct PaymentSignature and retry
-      // For MVP, the caller must handle approval externally
-      throw new Error(
-        'Auto-approval not yet implemented — approve ICRC-2 externally and pass signature',
-      );
+      if (!this.config.ledger || !this.config.ledgerActorFactory) {
+        throw new Error('Auto-approval requires ledger and ledgerActorFactory in config');
+      }
+
+      // ICRC-2 approve: allow the target canister to spend the required amount
+      const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
+      const approveResult = await ledgerActor.icrc2_approve({
+        spender: { owner: canisterId, subaccount: [] },
+        amount: requirement.amount,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+
+      if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
+        throw new Error(`ICRC-2 approve failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+
+      this.totalSpent += requirement.amount;
+
+      // Construct PaymentSignature from the requirement's nonce and retry
+      const sig = {
+        scheme: 'exact',
+        network: this.config.network,
+        signature: requirement.nonce,
+        publicKey: [],
+        sender: '',
+        nonce: requirement.nonce,
+        authorization: [],
+      };
+
+      // Retry: replace the last arg (optional PaymentSignature) with our sig
+      const retryArgs = [...args];
+      retryArgs[retryArgs.length - 1] = [sig];
+      const retryResult = await actor[method](...retryArgs);
+
+      if (retryResult && typeof retryResult === 'object' && 'ok' in retryResult) {
+        return retryResult.ok;
+      }
+      return retryResult;
     }
 
     if (result && typeof result === 'object' && 'ok' in result) {
@@ -138,7 +193,17 @@ export class Ic402Client {
     }
 
     const actor = actorFactory(canisterId);
-    const intent: SessionIntent = await actor.requestSession();
+    let intent: SessionIntent = await actor.requestSession();
+
+    // For EVM sessions, override the intent's network, token, and recipient
+    if (config?.evmNetwork) {
+      intent = {
+        ...intent,
+        network: config.evmNetwork,
+        ...(config.evmToken ? { token: config.evmToken } : {}),
+        ...(config.evmRecipient ? { recipient: config.evmRecipient } : {}),
+      };
+    }
 
     const maxDeposit =
       config?.maxDeposit ?? this.config.sessions?.maxDeposit ?? intent.suggestedDeposit;
@@ -155,8 +220,27 @@ export class Ic402Client {
       );
     }
 
-    // TODO: icrc2_approve for deposit amount
-    // For MVP, caller must approve externally before calling openSession
+    const isEvm = !!config?.evmTxHash;
+    const network = config?.evmNetwork ?? this.config.network;
+
+    // ICRC-2 approve deposit amount (ICP sessions only)
+    if (!isEvm && this.config.autoPayment && this.config.ledger && this.config.ledgerActorFactory) {
+      const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
+      const approveResult = await ledgerActor.icrc2_approve({
+        spender: { owner: canisterId, subaccount: [] },
+        amount: maxDeposit,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+
+      if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
+        throw new Error(`ICRC-2 approve failed: ${JSON.stringify(approveResult.Err)}`);
+      }
+    }
 
     const sessionConfig = {
       maxDeposit,
@@ -165,20 +249,24 @@ export class Ic402Client {
     };
 
     // Construct a payment signature.
-    // signature field must contain the payer's 32-byte Ed25519 public key
-    // for voucher verification during the session.
-    const pubKey = new Uint8Array(32);
+    // publicKey: Ed25519 public key for voucher verification (both ICP and EVM).
+    // signature: empty for ICP, EVM tx hash bytes for EVM.
+    // sender: empty for ICP (filled by identity), payer's EVM address for EVM.
+    let pubKey: Uint8Array = new Uint8Array(32);
     if (signer) {
-      // TODO: get public key from signer
-      // pubKey = await signer.getPublicKey();
+      pubKey = new Uint8Array(await signer.getPublicKey());
     }
 
     const sig = {
       scheme: 'exact',
-      network: this.config.network,
-      signature: pubKey,
-      sender: '', // Will be filled from identity
+      network,
+      signature: isEvm
+        ? Array.from(new TextEncoder().encode(config!.evmTxHash!))
+        : new Uint8Array(0),
+      publicKey: [Array.from(pubKey)],
+      sender: config?.evmSender ?? '',
       nonce: new Uint8Array(32),
+      authorization: [],
     };
 
     const result = await actor.openSession(sessionConfig, sig);
@@ -203,7 +291,14 @@ export class Ic402Client {
 
       async call(method: string, callArgs: unknown[]): Promise<unknown> {
         // Calculate new cumulative amount (costPerCall from intent, or 1 unit)
-        const cost = intent.costPerCall ?? 1n;
+        // costPerCall is opt nat — Candid decodes as [bigint] or []
+        const rawCost = intent.costPerCall;
+        const cost =
+          Array.isArray(rawCost) && rawCost.length > 0
+            ? BigInt(rawCost[0])
+            : typeof rawCost === 'bigint'
+              ? rawCost
+              : 1n;
         consumed += cost;
         sequence += 1n;
 
@@ -329,7 +424,11 @@ export class Ic402Client {
 
   /**
    * Discover agents via ERC-8004 registries.
-   * Stub: returns empty array (registries are sparse).
+   *
+   * Stub: returns empty array. ERC-8004 IdentityRegistry and ReputationRegistry
+   * contracts are deployed but registries are sparse — no real agent data to
+   * query yet. When registries are populated, this will use viem to query
+   * on-chain agent cards filtered by chain, skills, and reputation.
    */
   async discoverAgents(_query: {
     chain: string;
@@ -337,7 +436,6 @@ export class Ic402Client {
     x402Support?: boolean;
     minReputation?: number;
   }): Promise<Array<{ agentId: number; name: string; endpoint: string; reputation: number }>> {
-    // TODO: query ERC-8004 IdentityRegistry + ReputationRegistry via viem
     return [];
   }
 }

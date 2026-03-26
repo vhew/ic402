@@ -52,6 +52,31 @@ export interface Voucher {
   signature: Uint8Array;
 }
 
+// ── EIP-3009 Authorization (standard x402 EVM payments) ──
+
+export interface Eip3009Authorization {
+  from: string; // payer EVM address (0x-prefixed)
+  to: string; // recipient EVM address
+  value: bigint; // USDC amount
+  validAfter: bigint; // unix timestamp
+  validBefore: bigint;
+  nonce: Uint8Array; // random bytes32
+  v: number;
+  r: Uint8Array; // 32 bytes
+  s: Uint8Array; // 32 bytes
+}
+
+// x402 v1 payment requirement (from 402 response)
+export interface X402PaymentRequirement {
+  scheme: string;
+  network: string;
+  asset: string; // token contract address
+  maxAmountRequired: string; // amount as decimal string
+  payTo: string; // recipient address
+  maxTimeoutSeconds: number;
+  extra?: { name: string; version: string };
+}
+
 // ── Content Delivery ──
 
 export interface ContentRef {

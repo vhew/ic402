@@ -15,6 +15,20 @@ module {
     network : Text; // CAIP-2: "icp:1" or "eip155:43114"
   };
 
+  // ── EIP-3009 Authorization (standard x402 EVM payments) ──
+
+  public type Eip3009Authorization = {
+    from : Text;       // payer EVM address (0x-prefixed)
+    to : Text;         // recipient EVM address (0x-prefixed)
+    value : Nat;       // USDC amount
+    validAfter : Nat;  // unix timestamp (seconds)
+    validBefore : Nat; // unix timestamp (seconds)
+    nonce : Blob;      // random bytes32
+    v : Nat8;          // ECDSA recovery id
+    r : Blob;          // 32 bytes
+    s : Blob;          // 32 bytes
+  };
+
   // ── Charge (x402 "exact") ──
 
   public type PaymentRequirement = {
@@ -25,20 +39,29 @@ module {
     recipient : Text;
     nonce : Blob;
     expiry : Int;
+    tokenName : ?Text;    // EIP-712 domain name for 402 extra field. Null = "USD Coin".
+    tokenVersion : ?Text; // EIP-712 domain version for 402 extra field. Null = "2".
   };
 
   /// Payment signature for x402 settlement.
   /// For charges: `signature` contains the cryptographic signature (ICP) or tx hash (EVM).
-  /// For sessions: `signature` contains the payer's 32-byte Ed25519 public key
+  ///              `publicKey` should be null.
+  /// For sessions: `publicKey` contains the payer's 32-byte Ed25519 public key
   ///               (used to verify voucher signatures during the session).
+  ///               `signature` is unused (set to empty blob).
   public type PaymentSignature = {
     scheme : Text;
     network : Text;
     signature : Blob;
+    publicKey : ?Blob; // Ed25519 public key for sessions. Null for charges.
     sender : Text;
     nonce : Blob;
+    authorization : ?Eip3009Authorization; // EIP-3009 for standard x402 EVM payments. Null for ICP.
   };
 
+  /// Receipt issued after successful payment settlement.
+  /// `txHash` is the on-chain proof: ICP block index (charges), EVM tx hash (EVM charges),
+  /// or null (session close receipts where settlement is internal).
   public type PaymentReceipt = {
     id : Text;
     amount : Nat;
@@ -54,12 +77,12 @@ module {
 
   public type PaymentResult = {
     #ok : PaymentReceipt;
-    #insufficientFunds;
-    #invalidSignature;
-    #expired;
+    #insufficientFunds : Text;
+    #invalidSignature : Text;
+    #expired : Text;
     #policyDenied : Text;
-    #tokenNotAccepted;
-    #networkNotSupported;
+    #tokenNotAccepted : Text;
+    #networkNotSupported : Text;
     #settlementFailed : Text;
     #reputationTooLow : Nat;
     #depositBelowMinimum : Nat;
@@ -110,17 +133,24 @@ module {
     signature : Blob;
   };
 
+  /// Result of voucher consumption.
+  /// `#ok(delta)` returns the incremental amount consumed by this voucher
+  /// (cumulativeAmount - previousCumulativeAmount).
   public type VoucherResult = {
-    #ok : Nat; // delta
+    #ok : Nat;
     #insufficientDeposit;
     #invalidSignature;
     #invalidSequence;
     #sessionNotOpen;
     #policyDenied : Text;
+    #payloadOverflow; // Cumulative amount or sequence exceeds Nat64 maximum
   };
 
   // ── Policy ──
 
+  /// Spending limits and access control.
+  /// Set a field to `null` to disable that limit (no restriction).
+  /// Set a field to `?value` to enforce it.
   public type SpendingPolicy = {
     maxPerTransaction : ?Nat;
     maxPerDay : ?Nat;
@@ -219,6 +249,7 @@ module {
     autoClose : Bool;
     maxDuration : ?Int;
     idleTimeout : ?Int;
+    evmDeposit : ?EvmSessionDeposit;
   };
 
   // ── Stable state types ──
@@ -243,11 +274,13 @@ module {
     autoClose : Bool;
     maxDuration : ?Int;
     idleTimeout : ?Int;
+    evmDeposit : ?EvmSessionDeposit;
   };
 
   public type StableNonceState = {
-    nonces : [(Blob, (Int, Nat))]; // (expiry, bound amount)
+    nonces : [(Blob, (Int, Nat, Text, Text))]; // (expiry, amount, network, token)
     counter : Nat;
+    lockedNonces : ?[Blob]; // C-1: Persist locked nonces across upgrades
   };
 
   public type StablePolicyState = {
@@ -263,6 +296,10 @@ module {
     policy : StablePolicyState;
     receiptCounter : Nat;
     accessGrants : ?StableAccessGrantState;
+    consumedTxHashes : ?[Text];  // C-1: EVM tx replay prevention
+    sessionCounter : ?Nat;        // M-3: session counter persistence
+    evmRecipient : ?Text;         // Self-derived EVM address from tECDSA key
+    evmAllocations : ?[StableEvmAllocation]; // EVM session deposit allocations
   };
 
   // ── Ledger actor type ──
@@ -279,6 +316,8 @@ module {
     address : Text;
     symbol : Text;
     decimals : Nat8;
+    name : ?Text;    // EIP-712 domain name (e.g. "USD Coin" mainnet, "USDC" Base Sepolia). Null = "USD Coin".
+    version : ?Text; // EIP-712 domain version. Null = "2".
   };
 
   public type EvmChainConfig = {
@@ -287,9 +326,25 @@ module {
     tokens : [EvmTokenConfig];
   };
 
+  public type GasConfig = {
+    maxFeePerGas : ?Nat;
+    maxPriorityFeePerGas : ?Nat;
+    gasLimit : ?Nat;
+  };
+
   public type ERC8004Config = {
     chain : { #base; #ethereum; #avalanche; #optimism; #arbitrum };
     card : AgentCard;
+    ecdsaKeyName : Text;
+    evmRpcCanister : ?Text;
+    registryAddress : Text;
+    chainId : Nat;
+    gasConfig : ?GasConfig;
+  };
+
+  public type RegisterAgentResult = {
+    #ok : { tokenId : Nat; txHash : Text };
+    #err : Text;
   };
 
   public type AgentCard = {
@@ -311,7 +366,9 @@ module {
     recipient : { owner : Principal; subaccount : ?Blob };
     tokens : [TokenConfig];
     evmChains : [EvmChainConfig];
-    evmRpcCanister : ?Text; // Override EVM RPC canister principal (default: mainnet 7hfb6-...)
+    evmRpcCanister : ?Text; // Override EVM RPC canister principal. Null = use default (mainnet 7hfb6-...).
+    ecdsaKeyName : ?Text; // "dfx_test_key" (local) or "key_1" (mainnet). Null = disable auto EVM address derivation.
+    nonceExpirySeconds : ?Nat; // Nonce validity window. Null = use default (300 seconds / 5 minutes).
   };
 
   // ── Content Delivery ──
@@ -335,9 +392,9 @@ module {
 
   public type AccessGrantResult = {
     #ok;
-    #expired;
-    #invalidGrant;
-    #revoked;
+    #expired : Text;
+    #invalidGrant : Text;
+    #revoked : Text;
   };
 
   public type DeliveryMethod = {
@@ -388,10 +445,27 @@ module {
     entries : [StableContentEntry];
   };
 
+  // ── EVM Session Deposits ──
+
+  public type EvmSessionDeposit = {
+    txHash : Text;
+    chainId : Nat;
+    payerEvmAddress : Text;
+    tokenAddress : Text;
+  };
+
+  public type StableEvmAllocation = {
+    sessionId : Text;
+    chainId : Nat;
+    token : Text;
+    amount : Nat;
+  };
+
   // ── Identity ──
 
   public type StableIdentityState = {
     agentId : ?Nat;
+    evmAddress : ?Text;
   };
 
   // ── HTTP (canister HTTP serving) ──

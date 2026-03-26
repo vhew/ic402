@@ -14,6 +14,14 @@ import EscrowMod "Escrow";
 import ContentStoreMod "ContentStore";
 import IdentityMod "Identity";
 import HttpHandlerMod "HttpHandler";
+import EvmAddressMod "EvmAddress";
+import IC "mo:ic";
+import EvmUtilsMod "EvmUtils";
+import EvmRpcMod "EvmRpc";
+import EvmEscrowMod "EvmEscrow";
+import EvmSenderMod "EvmSender";
+import Eip712Mod "Eip712";
+import X402ClientMod "X402Client";
 
 module {
 
@@ -55,6 +63,8 @@ module {
   // ── Identity (optional) ──
 
   public type ERC8004Config = Types.ERC8004Config;
+  public type GasConfig = Types.GasConfig;
+  public type RegisterAgentResult = Types.RegisterAgentResult;
   public type AgentCard = Types.AgentCard;
   public type ServiceEntry = Types.ServiceEntry;
   public type StableIdentityState = Types.StableIdentityState;
@@ -74,4 +84,15 @@ module {
   public let EscrowManager = EscrowMod.EscrowManager;
   public let ContentStore = ContentStoreMod.ContentStore;
   public let Identity = IdentityMod.Identity;
+  public let EvmAddress = EvmAddressMod;
+  public let EvmUtils = EvmUtilsMod;
+  public let EvmRpc = EvmRpcMod;
+  public let EvmEscrow = EvmEscrowMod;
+  public let EvmSender = EvmSenderMod;
+  public let Eip712 = Eip712Mod;
+  public let X402Client = X402ClientMod;
+
+  // ── New types (x402 standard) ──
+  public type Eip3009Authorization = Types.Eip3009Authorization;
+  public type HttpResponse_ = IC.HttpRequestResult; // IC HTTPS outcall response (for transform functions)
 };

@@ -14,6 +14,8 @@ import Nat32 "mo:base/Nat32";
 import Array "mo:base/Array";
 import Iter "mo:base/Iter";
 import Char "mo:base/Char";
+import EvmAddress "EvmAddress";
+import EvmRpc "EvmRpc";
 
 module {
 
@@ -31,198 +33,37 @@ module {
     #failed : Text;
   };
 
-  // ── EVM RPC Canister types (from evm_rpc.did) ──
+  // ── EVM RPC types (re-exported from EvmRpc for backward compat) ──
 
-  public type LogEntry = {
-    transactionHash : ?Text;
-    blockNumber : ?Nat;
-    data : Text;
-    blockHash : ?Text;
-    transactionIndex : ?Nat;
-    topics : [Text];
-    address : Text;
-    logIndex : ?Nat;
-    removed : Bool;
-  };
-
-  public type TransactionReceipt = {
-    to : ?Text;
-    status : ?Nat;
-    root : ?Text;
-    transactionHash : Text;
-    blockNumber : Nat;
-    from : Text;
-    logs : [LogEntry];
-    blockHash : Text;
-    // "type" is a reserved word in Motoko; Candid maps it as-is
-    // but we omit it here since we don't need it for verification.
-    transactionIndex : Nat;
-    effectiveGasPrice : Nat;
-    logsBloom : Text;
-    contractAddress : ?Text;
-    gasUsed : Nat;
-    cumulativeGasUsed : Nat;
-  };
-
-  public type RpcError = {
-    #ProviderError : { code : Int32; message : Text };
-    #HttpOutcallError : { code : Int32; message : Text };
-    #JsonRpcError : { code : Int64; message : Text };
-    #ValidationError : Text;
-  };
-
-  public type GetTransactionReceiptResult = {
-    #Ok : ?TransactionReceipt;
-    #Err : RpcError;
-  };
-
-  public type EthMainnetService = {
-    #Alchemy;
-    #Ankr;
-    #BlockPi;
-    #Cloudflare;
-    #PublicNode;
-    #Llama;
-  };
-
-  public type EthSepoliaService = {
-    #Alchemy;
-    #Ankr;
-    #BlockPi;
-    #PublicNode;
-    #Sepolia;
-  };
-
-  public type L2MainnetService = {
-    #Alchemy;
-    #Ankr;
-    #BlockPi;
-    #PublicNode;
-    #Llama;
-  };
-
-  public type RpcApi = {
-    url : Text;
-    headers : ?[{ name : Text; value : Text }];
-  };
-
-  public type RpcServices = {
-    #Custom : { chainId : Nat64; services : [RpcApi] };
-    #EthSepolia : ?[EthSepoliaService];
-    #EthMainnet : ?[EthMainnetService];
-    #ArbitrumOne : ?[L2MainnetService];
-    #BaseMainnet : ?[L2MainnetService];
-    #OptimismMainnet : ?[L2MainnetService];
-  };
-
-  public type RpcService = {
-    #Provider : Nat64;
-    #Custom : RpcApi;
-    #EthSepolia : EthSepoliaService;
-    #EthMainnet : EthMainnetService;
-    #ArbitrumOne : L2MainnetService;
-    #BaseMainnet : L2MainnetService;
-    #OptimismMainnet : L2MainnetService;
-  };
-
-  public type ConsensusStrategy = {
-    #Equality;
-    #Threshold : { total : ?Nat8; min : Nat8 };
-  };
-
-  public type RpcConfig = {
-    responseSizeEstimate : ?Nat64;
-    responseConsensus : ?ConsensusStrategy;
-  };
-
-  public type MultiGetTransactionReceiptResult = {
-    #Consistent : GetTransactionReceiptResult;
-    #Inconsistent : [(RpcService, GetTransactionReceiptResult)];
-  };
-
-  /// Actor interface for the EVM RPC Canister.
-  public type EvmRpcService = actor {
-    eth_getTransactionReceipt : (RpcServices, ?RpcConfig, Text) -> async MultiGetTransactionReceiptResult;
-  };
+  public type LogEntry = EvmRpc.LogEntry;
+  public type TransactionReceipt = EvmRpc.TransactionReceipt;
+  public type RpcError = EvmRpc.RpcError;
+  public type GetTransactionReceiptResult = EvmRpc.GetTransactionReceiptResult;
+  public type EthMainnetService = EvmRpc.EthMainnetService;
+  public type EthSepoliaService = EvmRpc.EthSepoliaService;
+  public type L2MainnetService = EvmRpc.L2MainnetService;
+  public type RpcApi = EvmRpc.RpcApi;
+  public type RpcServices = EvmRpc.RpcServices;
+  public type RpcService = EvmRpc.RpcService;
+  public type ConsensusStrategy = EvmRpc.ConsensusStrategy;
+  public type RpcConfig = EvmRpc.RpcConfig;
+  public type MultiGetTransactionReceiptResult = EvmRpc.MultiGetTransactionReceiptResult;
+  public type EvmRpcService = EvmRpc.EvmRpcCanister;
 
   /// Default EVM RPC Canister principal (mainnet).
-  /// Override via evmRpcCanister in Config for local development.
-  public let DEFAULT_EVM_RPC_CANISTER : Text = "7hfb6-caaaa-aaaar-qadga-cai";
+  public let DEFAULT_EVM_RPC_CANISTER : Text = EvmRpc.DEFAULT_CANISTER;
 
   /// ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
-  /// Lowercase with 0x prefix for comparison against RPC canister response topics.
-  let TRANSFER_TOPIC = "0xddf252ad1be2c4dbc95581d3b0f4f22d3e4cadc6b89216b6b02654fec70f965c";
+  /// Computed dynamically to avoid hardcoded hash errors.
+  func transferTopic() : Text {
+    EvmAddress.toHex(EvmAddress.keccak256Text("Transfer(address,address,uint256)"));
+  };
 
-  /// Cycles to attach for EVM RPC calls.
-  /// 10 billion cycles covers eth_getTransactionReceipt with consensus across 3+ providers.
-  /// The EVM RPC canister refunds unused cycles.
-  let RPC_CYCLES : Nat = 10_000_000_000;
+  let RPC_CYCLES : Nat = EvmRpc.RPC_CYCLES;
 
   /// Map a chain ID to the appropriate RpcServices variant.
-  /// Returns null for unsupported chains (e.g. Avalanche, which the EVM RPC
-  /// canister does not have built-in support for).
   func rpcServices(chainId : Nat) : ?RpcServices {
-    // Ethereum Mainnet
-    if (chainId == 1) { return ?#EthMainnet(null) };
-    // Base Mainnet
-    if (chainId == 8453) { return ?#BaseMainnet(null) };
-    // Optimism Mainnet
-    if (chainId == 10) { return ?#OptimismMainnet(null) };
-    // Arbitrum One
-    if (chainId == 42161) { return ?#ArbitrumOne(null) };
-    // Ethereum Sepolia
-    if (chainId == 11155111) { return ?#EthSepolia(null) };
-
-    // Avalanche C-Chain (mainnet: 43114, testnet: 43113) — use Custom with public RPC
-    if (chainId == 43114) {
-      return ?#Custom({
-        chainId = 43114 : Nat64;
-        services = [{
-          url = "https://api.avax.network/ext/bc/C/rpc";
-          headers = null;
-        }];
-      });
-    };
-    if (chainId == 43113) {
-      return ?#Custom({
-        chainId = 43113 : Nat64;
-        services = [{
-          url = "https://api.avax-test.network/ext/bc/C/rpc";
-          headers = null;
-        }];
-      });
-    };
-
-    // Testnet L2s — use Custom with public RPC endpoints
-    if (chainId == 84532) {
-      return ?#Custom({
-        chainId = 84532 : Nat64;
-        services = [{
-          url = "https://sepolia.base.org";
-          headers = null;
-        }];
-      });
-    };
-    if (chainId == 11155420) {
-      return ?#Custom({
-        chainId = 11155420 : Nat64;
-        services = [{
-          url = "https://sepolia.optimism.io";
-          headers = null;
-        }];
-      });
-    };
-    if (chainId == 421614) {
-      return ?#Custom({
-        chainId = 421614 : Nat64;
-        services = [{
-          url = "https://sepolia-rollup.arbitrum.io/rpc";
-          headers = null;
-        }];
-      });
-    };
-
-    null;
+    EvmRpc.rpcServices(chainId);
   };
 
   /// Verify an EVM transaction receipt via the EVM RPC Canister.
@@ -264,16 +105,9 @@ module {
       case (#Consistent(#Err(err))) {
         return #failed("RPC error: " # rpcErrorToText(err));
       };
-      case (#Inconsistent(results)) {
-        // Try to find any successful result among inconsistent responses.
-        // This can happen when providers return the same receipt but with
-        // minor formatting differences that the canister deems inconsistent.
-        switch (firstOkReceipt(results)) {
-          case (?r) { r };
-          case (null) {
-            return #failed("Inconsistent RPC responses from providers");
-          };
-        };
+      // H-3: Reject inconsistent responses entirely — cannot verify safely
+      case (#Inconsistent(_)) {
+        return #failed("Inconsistent RPC responses — cannot verify safely");
       };
     };
 
@@ -303,7 +137,7 @@ module {
 
     // Find the ERC-20 Transfer event in structured logs
     let normalizedRecipient = toLower(expectedRecipient);
-    switch (findTransferLog(receipt.logs, normalizedRecipient)) {
+    switch (findTransferLog(receipt.logs, normalizedExpected, normalizedRecipient)) {
       case (null) {
         return #failed("No Transfer event found to recipient " # expectedRecipient);
       };
@@ -331,17 +165,17 @@ module {
   // ── Transfer event log parsing (structured, no JSON) ──
 
   /// Search the structured log entries for an ERC-20 Transfer event
-  /// where the recipient (topics[2]) matches expectedRecipient.
+  /// where the log is from the expected token contract and the
+  /// recipient (topics[2]) matches expectedRecipient.
   /// Returns (recipientAddress, amount) if found.
-  func findTransferLog(logs : [LogEntry], expectedRecipient : Text) : ?(Text, Nat) {
+  public func findTransferLog(logs : [LogEntry], expectedToken : Text, expectedRecipient : Text) : ?(Text, Nat) {
     for (log in logs.vals()) {
-      // Transfer events have exactly 3 topics:
-      //   [0] = Transfer event signature hash
-      //   [1] = from address (zero-padded)
-      //   [2] = to address (zero-padded)
-      if (log.topics.size() >= 3) {
+      // C-2: Only consider logs from the expected token contract
+      if (toLower(log.address) != expectedToken) {
+        // skip — this log is from a different contract
+      } else if (log.topics.size() >= 3) {
         let topic0 = toLower(log.topics[0]);
-        if (topic0 == TRANSFER_TOPIC) {
+        if (topic0 == transferTopic()) {
           let topic2 = log.topics[2];
           // topic2 is a 32-byte zero-padded address: "0x" + 64 hex chars
           if (topic2.size() >= 66) {
@@ -364,7 +198,7 @@ module {
   // ── Helpers ──
 
   /// Extract the last 40 hex chars from a 64-char hex value -> 0x-prefixed address.
-  func hexToAddress(hex : Text) : Text {
+  public func hexToAddress(hex : Text) : Text {
     let chars = Iter.toArray(hex.chars());
     var start = 0;
     if (chars.size() >= 2 and chars[0] == '0' and (chars[1] == 'x' or chars[1] == 'X')) {
@@ -385,7 +219,7 @@ module {
   /// Parse a hex string (with or without 0x prefix) to Nat.
   /// ERC-20 amounts are uint256, max 2^256-1. We cap at 64 hex digits.
   /// Non-hex characters after the prefix cause the parse to stop (returns value so far).
-  func hexToNat(hex : Text) : Nat {
+  public func hexToNat(hex : Text) : Nat {
     var result : Nat = 0;
     var hexDigits : Nat = 0;
     var pastPrefix = false;
@@ -412,7 +246,7 @@ module {
   };
 
   /// Convert ASCII upper-case letters to lower-case.
-  func toLower(t : Text) : Text {
+  public func toLower(t : Text) : Text {
     Text.map(t, func(c : Char) : Char {
       if (c >= 'A' and c <= 'Z') {
         Char.fromNat32(Char.toNat32(c) + 32);
@@ -420,24 +254,8 @@ module {
     });
   };
 
-  /// Format an RpcError as human-readable text.
   func rpcErrorToText(err : RpcError) : Text {
-    switch (err) {
-      case (#ProviderError({ message })) { "Provider: " # message };
-      case (#HttpOutcallError({ message })) { "HTTP outcall: " # message };
-      case (#JsonRpcError({ message })) { "JSON-RPC: " # message };
-      case (#ValidationError(msg)) { "Validation: " # msg };
-    };
+    EvmRpc.rpcErrorToText(err);
   };
 
-  /// Extract the first successful receipt from inconsistent provider results.
-  func firstOkReceipt(results : [(RpcService, GetTransactionReceiptResult)]) : ?TransactionReceipt {
-    for ((_, result) in results.vals()) {
-      switch (result) {
-        case (#Ok(?r)) { return ?r };
-        case (_) {};
-      };
-    };
-    null;
-  };
 };

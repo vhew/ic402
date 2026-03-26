@@ -227,9 +227,9 @@ service : {
       paymentRequired: vec PaymentRequirement;
     });
   /// Get the canister's tECDSA public key for EVM chains.
-  /// Returns the SEC1 compressed secp256k1 public key (33 bytes).
-  /// Use scripts/register-agent.ts to derive the EVM address and register.
   getEvmPublicKey: () -> (blob);
+  /// Get the canister's self-derived EVM address.
+  getEvmAddress: () -> (text);
   getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;
@@ -245,19 +245,9 @@ service : {
       ok: SessionState;
     });
   /// Register this canister as an agent on Base's IdentityRegistry.
-  /// Controller-only.
-  ///
-  /// Current flow:
-  ///   1. Call getEvmPublicKey() to get the canister's secp256k1 key
-  ///   2. Run scripts/register-agent.ts to register on Base Sepolia
-  ///   3. Script calls setAgentRegistration() to store the token ID
-  ///
-  /// Future flow (on-canister EVM signing):
-  ///   1. Canister encodes EVM tx calling IdentityRegistry.register(card)
-  ///   2. Signs via tECDSA (Keccak-256 + RLP encoding in Motoko)
-  ///   3. Submits to Base via HTTPS outcall
-  ///   4. Returns the minted ERC-721 token ID
-  registerAgent: () -> (nat);
+  /// Signs and submits the EVM tx autonomously via tECDSA.
+  /// Requires the canister's EVM address to have ETH for gas.
+  registerAgent: () -> (variant { ok: record { tokenId: nat; txHash: text }; err: text });
   requestSession: () -> (SessionIntent);
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
    (variant {
@@ -270,9 +260,6 @@ service : {
       error: text;
       ok: text;
     });
-  /// Set the agent registration after external registration via
-  /// scripts/register-agent.ts. Controller-only.
-  setAgentRegistration: (agentTokenId: nat) -> ();
   setPolicy: (p: SpendingPolicy) -> ();
   uploadContent: (id: text, mimeType: text, data: blob) ->
    (ContentStoreResult);

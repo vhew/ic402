@@ -4,8 +4,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
+import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Ic402Client, exampleIdlFactory } from '@ic402/client';
-import type { SessionHandle, PaymentReceipt } from '@ic402/client';
+import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 
@@ -238,24 +239,53 @@ server.tool(
 
 server.tool(
   'open_session',
-  'Open a streaming micropayment session with escrow deposit. Returns a session ID for subsequent calls.',
+  'Open a streaming micropayment session. For ICP: uses ICRC-2 escrow. For EVM: pass evmTxHash proving the USDC deposit.',
   {
     canisterId: z.string().optional().describe('Canister to open session on'),
     maxDeposit: z
       .string()
       .optional()
       .describe('Max deposit in token units (defaults to canister suggestion)'),
+    evmTxHash: z
+      .string()
+      .optional()
+      .describe('EVM tx hash proving USDC deposit (for EVM sessions)'),
+    evmNetwork: z
+      .string()
+      .optional()
+      .describe('CAIP-2 network, e.g., "eip155:84532" (for EVM sessions)'),
+    evmSender: z.string().optional().describe('Payer EVM address for refund (for EVM sessions)'),
+    evmToken: z.string().optional().describe('ERC-20 token contract address (for EVM sessions)'),
+    evmRecipient: z
+      .string()
+      .optional()
+      .describe('Canister EVM address for settlement (for EVM sessions)'),
   },
-  async ({ canisterId, maxDeposit }) => {
+  async ({ canisterId, maxDeposit, evmTxHash, evmNetwork, evmSender, evmToken, evmRecipient }) => {
     const c = requireClient();
     const cid = canisterId ?? defaultCanisterId;
     if (!cid) throw new Error('No canister ID.');
 
-    const session = await c.openSession(
-      cid,
-      maxDeposit ? { maxDeposit: BigInt(maxDeposit) } : {},
-      actorFactory,
-    );
+    const prefs: Record<string, unknown> = {};
+    if (maxDeposit) prefs.maxDeposit = BigInt(maxDeposit);
+    if (evmTxHash) prefs.evmTxHash = evmTxHash;
+    if (evmNetwork) prefs.evmNetwork = evmNetwork;
+    if (evmSender) prefs.evmSender = evmSender;
+    if (evmToken) prefs.evmToken = evmToken;
+    if (evmRecipient) prefs.evmRecipient = evmRecipient;
+
+    // Generate Ed25519 keypair for voucher signing
+    const voucherIdentity = Ed25519KeyIdentity.generate();
+    const voucherSigner: VoucherSigner = {
+      async sign(payload: Uint8Array): Promise<Uint8Array> {
+        return new Uint8Array(await voucherIdentity.sign(payload));
+      },
+      async getPublicKey(): Promise<Uint8Array> {
+        return new Uint8Array(voucherIdentity.getPublicKey().toRaw());
+      },
+    };
+
+    const session = await c.openSession(cid, prefs, actorFactory, voucherSigner);
 
     activeSessions.set(session.id, session);
 

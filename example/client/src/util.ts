@@ -11,6 +11,9 @@ export async function mcpCall(
     res.content && Array.isArray(res.content) && res.content.length > 0
       ? ((res.content[0] as { text?: string }).text ?? '')
       : '';
+  if (res.isError) {
+    throw new Error(text || `MCP tool ${tool} failed`);
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -32,6 +35,11 @@ const BOLD = '\x1b[1m';
 const RESET = '\x1b[0m';
 
 export function header(text: string): void {
+  // Push previous content up (scrollable) rather than erasing it
+  const rows = process.stdout.rows || 40;
+  console.log('\n'.repeat(rows));
+  // Move cursor to top of the visible area
+  process.stdout.write(`\x1b[${rows}A`);
   console.log(`\n${BOLD}${CYAN}${'═'.repeat(60)}${RESET}`);
   console.log(`${BOLD}${CYAN}  ${text}${RESET}`);
   console.log(`${BOLD}${CYAN}${'═'.repeat(60)}${RESET}\n`);

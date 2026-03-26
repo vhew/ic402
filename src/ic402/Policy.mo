@@ -51,6 +51,7 @@ module {
     // ── Policy getters/setters ──
 
     public func setGlobalPolicy(policy : SpendingPolicy) {
+      validatePolicy(policy);
       globalPolicy := policy;
     };
 
@@ -59,6 +60,7 @@ module {
     };
 
     public func setCallerPolicy(caller : Principal, policy : SpendingPolicy) {
+      validatePolicy(policy);
       callerPolicies.put(caller, policy);
     };
 
@@ -273,6 +275,22 @@ module {
     /// Get current daily spend for a caller.
     public func getDailySpendAmount(caller : Principal) : Nat {
       getDailySpend(caller);
+    };
+
+    /// Validate policy invariants. Traps with a descriptive message on invalid configuration.
+    func validatePolicy(p : SpendingPolicy) {
+      switch (p.maxPerTransaction, p.maxPerDay) {
+        case (?txMax, ?dayMax) {
+          assert(txMax <= dayMax); // maxPerTransaction must not exceed maxPerDay
+        };
+        case (_, _) {};
+      };
+      switch (p.maxSessionDeposit, p.maxPerDay) {
+        case (?sessMax, ?dayMax) {
+          assert(sessMax <= dayMax); // maxSessionDeposit must not exceed maxPerDay
+        };
+        case (_, _) {};
+      };
     };
 
     // ── Stable state ──

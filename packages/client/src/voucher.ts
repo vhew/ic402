@@ -17,6 +17,7 @@ function encodeVoucherPayload(
 
 export interface VoucherSigner {
   sign(payload: Uint8Array): Promise<Uint8Array>;
+  getPublicKey(): Promise<Uint8Array>;
 }
 
 /**

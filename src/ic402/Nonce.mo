@@ -1,6 +1,6 @@
 /// ic402 — Deterministic nonce generation and replay protection.
 ///
-/// Each nonce is bound to a payment amount at generation time.
+/// Each nonce is bound to a payment amount, network, and token at generation time.
 /// Settlement uses a lock/consume/unlock pattern to prevent
 /// nonce waste on failed payments while blocking double-spend.
 import Types "Types";
@@ -21,14 +21,14 @@ module {
   public class NonceManager(canisterPrincipal : Principal) {
 
     var counter : Nat = 0;
-    // nonce -> (expiry, bound amount)
-    var nonces = HashMap.HashMap<Blob, (Int, Nat)>(64, Blob.equal, Blob.hash);
-    // nonces currently locked for settlement (transient, not persisted)
-    let locked = HashMap.HashMap<Blob, Bool>(16, Blob.equal, Blob.hash);
+    // nonce -> (expiry, bound amount, network, token)
+    var nonces = HashMap.HashMap<Blob, (Int, Nat, Text, Text)>(64, Blob.equal, Blob.hash);
+    // C-1: nonces currently locked for settlement (persisted across upgrades)
+    var locked = HashMap.HashMap<Blob, Bool>(16, Blob.equal, Blob.hash);
 
-    /// Generate a deterministic nonce bound to a specific payment amount.
+    /// Generate a deterministic nonce bound to a specific payment context.
     /// nonce = sha256(canisterPrincipal ++ counter)
-    public func generate(expiry : Int, amount : Nat) : Blob {
+    public func generate(expiry : Int, amount : Nat, network : Text, token : Text) : Blob {
       let counterBytes = Utils.natToBytes8(counter);
       let principalBytes = Blob.toArray(Principal.toBlob(canisterPrincipal));
       let input = Array.append(principalBytes, counterBytes);
@@ -39,24 +39,26 @@ module {
         gcExpired();
       };
 
-      nonces.put(nonce, (expiry, amount));
+      nonces.put(nonce, (expiry, amount, network, token));
       nonce;
     };
 
     /// Lock a nonce for settlement. Returns the bound amount if valid,
-    /// not expired, and not already locked. The nonce stays in the map
-    /// but cannot be locked again until unlocked or consumed.
-    public func lock(nonce : Blob) : ?Nat {
+    /// not expired, not already locked, and the network+token match.
+    /// The nonce stays in the map but cannot be locked again until unlocked or consumed.
+    public func lock(nonce : Blob, network : Text, token : Text) : ?Nat {
       switch (locked.get(nonce)) {
         case (?_) { return null }; // already in use
         case (null) {};
       };
       switch (nonces.get(nonce)) {
         case (null) { null };
-        case (?(expiry, amount)) {
+        case (?(expiry, amount, boundNetwork, boundToken)) {
           if (Time.now() > expiry) {
             nonces.delete(nonce);
             null;
+          } else if (boundNetwork != network or boundToken != token) {
+            null; // H-2: network/token mismatch — reject cross-network replay
           } else {
             locked.put(nonce, true);
             ?amount;
@@ -80,7 +82,7 @@ module {
     public func exists(nonce : Blob) : Bool {
       switch (nonces.get(nonce)) {
         case (null) { false };
-        case (?(expiry, _)) { Time.now() <= expiry };
+        case (?(expiry, _, _, _)) { Time.now() <= expiry };
       };
     };
 
@@ -88,9 +90,9 @@ module {
     public func gcExpired() {
       let now = Time.now();
       let toRemove = Iter.toArray(
-        Iter.filter<(Blob, (Int, Nat))>(
+        Iter.filter<(Blob, (Int, Nat, Text, Text))>(
           nonces.entries(),
-          func((_, (expiry, _))) { now > expiry },
+          func((_, (expiry, _, _, _))) { now > expiry },
         )
       );
       for ((nonce, _) in toRemove.vals()) {
@@ -103,15 +105,31 @@ module {
       {
         nonces = Iter.toArray(nonces.entries());
         counter;
+        // C-1: Persist locked nonces across upgrades
+        lockedNonces = ?Iter.toArray(
+          Iter.map<(Blob, Bool), Blob>(
+            locked.entries(),
+            func((nonce, _)) { nonce },
+          )
+        );
       };
     };
 
     public func loadStable(data : Types.StableNonceState) {
-      nonces := HashMap.fromIter<Blob, (Int, Nat)>(
+      nonces := HashMap.fromIter<Blob, (Int, Nat, Text, Text)>(
         data.nonces.vals(), data.nonces.size(), Blob.equal, Blob.hash,
       );
       counter := data.counter;
-      // locked is transient — fresh on every upgrade
+      // C-1: Restore locked nonces if present
+      switch (data.lockedNonces) {
+        case (?locks) {
+          locked := HashMap.HashMap<Blob, Bool>(locks.size(), Blob.equal, Blob.hash);
+          for (nonce in locks.vals()) {
+            locked.put(nonce, true);
+          };
+        };
+        case (null) {};
+      };
     };
   };
 };

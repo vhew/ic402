@@ -74,15 +74,15 @@ async function main(): Promise<void> {
         }).trim();
       } catch {
         console.error('ERROR: Could not detect local canister ID.');
-        console.error('  Run: pnpm setup');
+        console.error('  Run: pnpm setup:local');
         process.exit(1);
       }
     }
   }
 
-  // Resolve the MCP server entry point (sibling package)
+  // Resolve the MCP server entry point
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const serverPath = resolve(__dirname, '../../mcp/dist/index.js');
+  const serverPath = resolve(__dirname, '../../../integration/mcp/dist/index.js');
 
   console.log('\x1b[1m\x1b[36m');
   console.log('  ic402 Interactive Demo');

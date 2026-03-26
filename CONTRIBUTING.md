@@ -12,7 +12,7 @@
 
 ```bash
 git clone https://github.com/vhew/ic402.git && cd ic402
-pnpm setup    # installs deps, starts local replica, deploys canisters, funds test accounts
+pnpm setup:local    # installs deps, starts local replica, deploys canisters, funds test accounts
 ```
 
 This starts a local ICP replica, deploys the example canister and a local ckUSDC ledger, creates test identities, and funds them with ckUSDC.
@@ -23,7 +23,7 @@ This starts a local ICP replica, deploys the example canister and a local ckUSDC
 mops test                 # Motoko unit tests
 icp build                 # build the canister
 pnpm build:client         # TypeScript client SDK
-pnpm build:mcp-client     # MCP server + demo client
+pnpm build:demo           # MCP server + demo client
 pnpm demo                 # interactive demo (requires local replica)
 ```
 
@@ -31,14 +31,15 @@ pnpm demo                 # interactive demo (requires local replica)
 
 ```
 src/ic402/          Motoko library — the core package published to mops
-example/            Example canister using the library
+example/            Example canister + interactive demo
+  main.mo           Reference implementation (all features)
+  client/           Interactive demo client
 packages/client/    TypeScript SDK published to npm as @ic402/client
 integration/mcp/    MCP server for AI agent access
-integration/mcp-client/  Interactive demo client
 contracts/src/      IdentityRegistry.sol (ERC-8004 on Base)
 test/               Motoko unit tests + TypeScript integration tests
-scripts/            Dev tooling (setup, register-agent, version bump)
-deploy/             Deployment scripts and environment configs (gitignored)
+scripts/            Dev tooling (setup, version bump)
+scripts/            Dev tooling (setup, deployment, version bump)
 ```
 
 ## Making Changes
@@ -46,7 +47,7 @@ deploy/             Deployment scripts and environment configs (gitignored)
 1. Create a branch from `master`
 2. Make your changes
 3. Run `mops test` — all Motoko tests must pass
-4. Run `pnpm build:mcp-client` — all TypeScript must compile
+4. Run `pnpm build:demo` — all TypeScript must compile
 5. Run `icp build` — canister must build
 6. If you changed Solidity: `cd contracts && forge test`
 7. Test the demo if you changed anything user-facing: `pnpm demo`

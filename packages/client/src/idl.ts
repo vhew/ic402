@@ -10,14 +10,30 @@ const PaymentRequirement = IDL.Record({
   recipient: IDL.Text,
   nonce: IDL.Vec(IDL.Nat8),
   expiry: IDL.Int,
+  tokenName: IDL.Opt(IDL.Text),
+  tokenVersion: IDL.Opt(IDL.Text),
+});
+
+const Eip3009Authorization = IDL.Record({
+  from: IDL.Text,
+  to: IDL.Text,
+  value: IDL.Nat,
+  validAfter: IDL.Nat,
+  validBefore: IDL.Nat,
+  nonce: IDL.Vec(IDL.Nat8),
+  v: IDL.Nat8,
+  r: IDL.Vec(IDL.Nat8),
+  s: IDL.Vec(IDL.Nat8),
 });
 
 const PaymentSignature = IDL.Record({
   scheme: IDL.Text,
   network: IDL.Text,
   signature: IDL.Vec(IDL.Nat8),
+  publicKey: IDL.Opt(IDL.Vec(IDL.Nat8)),
   sender: IDL.Text,
   nonce: IDL.Vec(IDL.Nat8),
+  authorization: IDL.Opt(Eip3009Authorization),
 });
 
 const PaymentReceipt = IDL.Record({
@@ -221,8 +237,49 @@ export const exampleIdlFactory = () =>
     getAgentCard: IDL.Func([], [AgentCard], ['query']),
     getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
     getEvmPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
-    setAgentRegistration: IDL.Func([IDL.Nat], [], []),
-    registerAgent: IDL.Func([], [IDL.Nat], []),
+    getEvmAddress: IDL.Func([], [IDL.Text], []),
+    registerAgent: IDL.Func(
+      [],
+      [IDL.Variant({ ok: IDL.Record({ tokenId: IDL.Nat, txHash: IDL.Text }), err: IDL.Text })],
+      [],
+    ),
+    // x402 Client
+    fetchX402: IDL.Func(
+      [IDL.Text],
+      [
+        IDL.Variant({
+          ok: IDL.Record({
+            status: IDL.Nat,
+            body: IDL.Text,
+            paidAmount: IDL.Nat,
+            txHash: IDL.Text,
+          }),
+          free: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
+          paymentFailed: IDL.Text,
+          httpError: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
+          transientError: IDL.Text,
+        }),
+      ],
+      [],
+    ),
+    fetchX402Post: IDL.Func(
+      [IDL.Text, IDL.Text, IDL.Text],
+      [
+        IDL.Variant({
+          ok: IDL.Record({
+            status: IDL.Nat,
+            body: IDL.Text,
+            paidAmount: IDL.Nat,
+            txHash: IDL.Text,
+          }),
+          free: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
+          paymentFailed: IDL.Text,
+          httpError: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
+          transientError: IDL.Text,
+        }),
+      ],
+      [],
+    ),
     // Admin
     verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),

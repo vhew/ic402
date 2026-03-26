@@ -5,42 +5,61 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@icp-sdk/core': ^5.0.0
+  '@icp-sdk/core': 5.1.0
 
 importers:
 
   .:
     devDependencies:
       '@eslint/js':
-        specifier: ^9.0.0
+        specifier: 9.39.4
         version: 9.39.4
       '@icp-sdk/core':
-        specifier: ^5.0.0
+        specifier: 5.1.0
         version: 5.1.0
       '@icp-sdk/icp-cli':
-        specifier: ^0.1.0
+        specifier: 0.1.0
         version: 0.1.0
       eslint:
-        specifier: ^9.0.0
+        specifier: 9.39.4
         version: 9.39.4
       husky:
-        specifier: ^9.1.7
+        specifier: 9.1.7
         version: 9.1.7
       lint-staged:
-        specifier: ^16.2.7
+        specifier: 16.4.0
         version: 16.4.0
       prettier:
-        specifier: ^3.0.0
+        specifier: 3.8.1
         version: 3.8.1
       tsx:
-        specifier: ^4.21.0
+        specifier: 4.21.0
         version: 4.21.0
       typescript-eslint:
-        specifier: ^8.0.0
+        specifier: 8.57.1
         version: 8.57.1(eslint@9.39.4)(typescript@5.9.3)
       vitest:
-        specifier: ^4.0.0
+        specifier: 4.1.0
         version: 4.1.0(@types/node@22.19.15)(vite@8.0.1(@types/node@22.19.15)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.2))
+
+  example/client:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: 1.27.1
+        version: 1.27.1(zod@3.25.76)
+      '@noble/curves':
+        specifier: 1.9.1
+        version: 1.9.1
+      '@noble/hashes':
+        specifier: 1.7.2
+        version: 1.7.2
+    devDependencies:
+      '@types/node':
+        specifier: 22.19.15
+        version: 22.19.15
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   integration/mcp:
     dependencies:
@@ -48,67 +67,48 @@ importers:
         specifier: workspace:*
         version: link:../../packages/client
       '@icp-sdk/core':
-        specifier: ^5.0.0
+        specifier: 5.1.0
         version: 5.1.0
       '@modelcontextprotocol/sdk':
-        specifier: ^1.12.1
+        specifier: 1.27.1
         version: 1.27.1(zod@3.25.76)
       zod:
-        specifier: ^3.24.0
+        specifier: 3.25.76
         version: 3.25.76
     devDependencies:
       '@types/node':
-        specifier: ^22.0.0
+        specifier: 22.19.15
         version: 22.19.15
       typescript:
-        specifier: ^5.0.0
-        version: 5.9.3
-
-  integration/mcp-client:
-    dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.12.1
-        version: 1.27.1(zod@3.25.76)
-      '@noble/curves':
-        specifier: ^2.0.1
-        version: 2.0.1
-      '@noble/hashes':
-        specifier: ^2.0.1
-        version: 2.0.1
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.15
-      typescript:
-        specifier: ^5.0.0
+        specifier: 5.9.3
         version: 5.9.3
 
   packages/client:
     dependencies:
       '@canister-software/x402-icp':
-        specifier: ^0.1.0
+        specifier: 0.1.1
         version: 0.1.1(@x402/core@2.7.0)
       '@icp-sdk/core':
-        specifier: ^5.0.0
+        specifier: 5.1.0
         version: 5.1.0
       '@x402/core':
-        specifier: ^2.4.0
+        specifier: 2.7.0
         version: 2.7.0
       '@x402/fetch':
-        specifier: ^2.0.0
+        specifier: 2.7.0
         version: 2.7.0(typescript@5.9.3)
       cborg:
-        specifier: ^4.5.8
+        specifier: 4.5.8
         version: 4.5.8
       viem:
-        specifier: ^2.0.0
+        specifier: 2.47.5
         version: 2.47.5(typescript@5.9.3)(zod@3.25.76)
     devDependencies:
       typescript:
-        specifier: ^5.0.0
+        specifier: 5.9.3
         version: 5.9.3
       vitest:
-        specifier: ^4.0.0
+        specifier: 4.1.0
         version: 4.1.0(@types/node@22.19.15)(vite@8.0.1(@types/node@22.19.15)(esbuild@0.27.4)(tsx@4.21.0)(yaml@2.8.2))
 
 packages:
@@ -439,17 +439,13 @@ packages:
     resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
     engines: {node: ^14.21.3 || >=16}
 
-  '@noble/curves@2.0.1':
-    resolution: {integrity: sha512-vs1Az2OOTBiP4q0pwjW5aF0xp9n4MxVrmkFBxc6EKZc6ddYx5gaZiAsZoq0uRRXWbi3AT/sBqn05eRPtn1JCPw==}
-    engines: {node: '>= 20.19.0'}
+  '@noble/hashes@1.7.2':
+    resolution: {integrity: sha512-biZ0NUSxyjLLqo6KxEJ1b+C2NAx0wtDoFvCaXHGgUkeHzf3Xc1xKumFKREuT7f7DARNZ/slvYUwFG6B0f2b6hQ==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
-
-  '@noble/hashes@2.0.1':
-    resolution: {integrity: sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw==}
-    engines: {node: '>= 20.19.0'}
 
   '@oxc-project/types@0.120.0':
     resolution: {integrity: sha512-k1YNu55DuvAip/MGE1FTsIuU3FUCn6v/ujG9V7Nq5Df/kX2CWb13hhwD0lmJGMGqE+bE1MXvv9SZVnMzEXlWcg==}
@@ -2097,13 +2093,9 @@ snapshots:
     dependencies:
       '@noble/hashes': 1.8.0
 
-  '@noble/curves@2.0.1':
-    dependencies:
-      '@noble/hashes': 2.0.1
+  '@noble/hashes@1.7.2': {}
 
   '@noble/hashes@1.8.0': {}
-
-  '@noble/hashes@2.0.1': {}
 
   '@oxc-project/types@0.120.0': {}
 

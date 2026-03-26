@@ -1,18 +1,21 @@
 /// ic402 — Optional encrypted in-canister content storage.
 ///
-/// Encrypts all content at rest using SHA-256-CTR. The encryption key
-/// is derived from the canister's own principal — only the canister's
-/// code can decrypt. This protects against subnet node operators
-/// inspecting canister memory.
+/// Encrypts all content at rest using ChaCha20-Poly1305 (RFC 8439).
+/// The encryption key is derived from the canister's own principal —
+/// only the canister's code can decrypt. Authenticated encryption
+/// prevents both eavesdropping and tampering.
 import Types "Types";
 import SHA256 "mo:sha2/Sha256";
+import ChaCha "mo:chacha";
 import Array "mo:base/Array";
 import Blob "mo:base/Blob";
 import Buffer "mo:base/Buffer";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
+import Int "mo:base/Int";
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
+import Order "mo:base/Order";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
@@ -30,59 +33,52 @@ module {
     createdAt : Int;
   };
 
-  // ── Encryption helpers ──
+  // ── Encryption helpers (ChaCha20-Poly1305 AEAD) ──
 
-  /// SHA-256(masterKey ++ contentId)
-  func deriveContentKey(masterKey : [Nat8], contentId : Text) : [Nat8] {
-    let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
-    Blob.toArray(SHA256.fromArray(#sha256, Array.append(masterKey, idBytes)));
-  };
-
-  /// SHA-256(contentKey ++ chunkIndex) — unique key per chunk
+  /// Derive a 32-byte ChaCha20 key for a specific chunk.
+  /// key = SHA-256(masterKey || contentId || chunkIndex)
   func deriveChunkKey(masterKey : [Nat8], contentId : Text, chunkIndex : Nat) : [Nat8] {
-    let contentKey = deriveContentKey(masterKey, contentId);
+    let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
     let indexBytes = Utils.natToBytes8(chunkIndex);
-    Blob.toArray(SHA256.fromArray(#sha256, Array.append(contentKey, indexBytes)));
+    Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(masterKey, idBytes), indexBytes)));
   };
 
-  /// SHA-256(chunkKey ++ blockIndex) — one 32-byte keystream block
-  func generateKeystream(chunkKey : [Nat8], blockIndex : Nat) : [Nat8] {
-    let indexBytes = Utils.natToBytes8(blockIndex);
-    Blob.toArray(SHA256.fromArray(#sha256, Array.append(chunkKey, indexBytes)));
+  /// Derive a 12-byte nonce from contentId + chunkIndex.
+  /// nonce = SHA-256(contentId || chunkIndex)[0..12]
+  func deriveNonce(contentId : Text, chunkIndex : Nat) : [Nat8] {
+    let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
+    let indexBytes = Utils.natToBytes8(chunkIndex);
+    let hash = Blob.toArray(SHA256.fromArray(#sha256, Array.append(idBytes, indexBytes)));
+    Array.subArray(hash, 0, 12);
   };
 
-  /// XOR data with keystream blocks (CTR mode).
-  func xorEncrypt(chunkKey : [Nat8], data : [Nat8]) : [Nat8] {
-    if (data.size() == 0) return [];
-    let result = Array.init<Nat8>(data.size(), 0 : Nat8);
-    var blockIndex : Nat = 0;
-    var keystream = generateKeystream(chunkKey, blockIndex);
-    var ksOffset : Nat = 0;
-
-    var i : Nat = 0;
-    while (i < data.size()) {
-      if (ksOffset >= 32) {
-        blockIndex += 1;
-        keystream := generateKeystream(chunkKey, blockIndex);
-        ksOffset := 0;
-      };
-      result[i] := data[i] ^ keystream[ksOffset];
-      ksOffset += 1;
-      i += 1;
-    };
-
-    Array.freeze(result);
-  };
-
-  /// Encrypt a single chunk (uses contentId + chunkIndex for unique keystream).
+  /// Encrypt a chunk with ChaCha20-Poly1305 AEAD.
+  /// Returns ciphertext || tag (16-byte auth tag appended).
   func encryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : Blob {
-    let chunkKey = deriveChunkKey(masterKey, contentId, chunkIndex);
-    Blob.fromArray(xorEncrypt(chunkKey, Blob.toArray(data)));
+    let key = deriveChunkKey(masterKey, contentId, chunkIndex);
+    let nonce = deriveNonce(contentId, chunkIndex);
+    let (ciphertext, tag) = ChaCha.aeadEncryptWithNonce(
+      Blob.toArray(data),
+      [], // no additional authenticated data
+      key,   // 32-byte key
+      nonce, // 12-byte nonce
+    );
+    Blob.fromArray(Array.append<Nat8>(ciphertext, tag));
   };
 
-  /// Decrypt a single chunk — XOR is symmetric, same operation as encrypt.
+  /// Decrypt a chunk with ChaCha20-Poly1305 AEAD.
+  /// Input is ciphertext || tag (last 16 bytes are tag).
   func decryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : Blob {
-    encryptChunkData(masterKey, contentId, chunkIndex, data);
+    let bytes = Blob.toArray(data);
+    if (bytes.size() < 16) return Blob.fromArray([]);
+    let ciphertext = Array.subArray(bytes, 0, bytes.size() - 16);
+    let tag = Array.subArray(bytes, bytes.size() - 16, 16);
+    let key = deriveChunkKey(masterKey, contentId, chunkIndex);
+    let nonce = deriveNonce(contentId, chunkIndex);
+    switch (ChaCha.aeadDecryptWithNonce(ciphertext, tag, [], key, nonce)) {
+      case (?plaintext) { Blob.fromArray(plaintext) };
+      case (null) { Blob.fromArray([]) }; // auth failed — return empty
+    };
   };
 
   /// Optional encrypted in-canister blob storage.
@@ -95,10 +91,28 @@ module {
   public class ContentStore(selfPrincipal : Principal) {
 
     // Master key: SHA-256(principal ++ "ic402-content-key")
-    let masterKey : [Nat8] = do {
+    // M-6: Changed to var so it can be re-keyed with external randomness
+    var masterKey : [Nat8] = do {
       let principalBytes = Blob.toArray(Principal.toBlob(selfPrincipal));
       let suffix = Blob.toArray(Text.encodeUtf8("ic402-content-key"));
       Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, suffix)));
+    };
+
+    var seedInitialized : Bool = false;
+
+    /// M-6: Initialize master key with external randomness.
+    /// Derives key: SHA-256(seed ++ principal ++ "ic402-content-key").
+    /// Call once on first deployment with raw_rand() output.
+    /// Returns true if initialized, false if already initialized (idempotent).
+    /// WARNING: Cannot be called again after initialization — re-keying invalidates all encrypted content.
+    public func initExternalSeed(seed : Blob) : Bool {
+      if (seedInitialized) { return false };
+      let seedBytes = Blob.toArray(seed);
+      let principalBytes = Blob.toArray(Principal.toBlob(selfPrincipal));
+      let suffix = Blob.toArray(Text.encodeUtf8("ic402-content-key"));
+      masterKey := Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(seedBytes, principalBytes), suffix)));
+      seedInitialized := true;
+      true;
     };
 
     var entries = HashMap.HashMap<Text, InternalEntry>(16, Text.equal, Text.hash);
@@ -208,9 +222,9 @@ module {
       };
     };
 
-    /// List all entries (metadata only).
+    /// List all entries (metadata only), sorted by createdAt ascending.
     public func list() : [Types.ContentEntry] {
-      Iter.toArray(
+      let items = Iter.toArray(
         Iter.map<(Text, InternalEntry), Types.ContentEntry>(
           entries.entries(),
           func((_, entry)) : Types.ContentEntry {
@@ -224,6 +238,9 @@ module {
           },
         )
       );
+      Array.sort<Types.ContentEntry>(items, func(a, b) {
+        Int.compare(a.createdAt, b.createdAt);
+      });
     };
 
     /// Remove an entry.

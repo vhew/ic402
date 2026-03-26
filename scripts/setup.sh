@@ -54,9 +54,9 @@ for f in icrc1-ledger.wasm.gz icrc1-ledger.did ckusdc-ledger-init.candid; do
   [ -f ".icp/$f" ] || PREBUILT_MISSING=true
 done
 if [ "$PREBUILT_MISSING" = true ]; then
-  if [ -f deploy/fetch-prebuilt.sh ]; then
+  if [ -f "$PROJECT_ROOT/scripts/fetch-prebuilt.sh" ]; then
     echo "  Fetching prebuilt ledger artifacts..."
-    deploy/fetch-prebuilt.sh
+    "$PROJECT_ROOT/scripts/fetch-prebuilt.sh"
   else
     echo "  WARNING: Prebuilt ledger WASMs not found and fetch script not available."
     echo "  The ckUSDC ledger may not deploy. Sessions and ICP payments won't work."
@@ -85,7 +85,7 @@ else
   echo "  test-payer: OK"
 fi
 
-icp identity default local-dev
+icp identity default local-dev >/dev/null 2>&1
 MY_PRINCIPAL=$(icp identity principal)
 PAYER_PRINCIPAL=$(icp identity principal --identity test-payer 2>/dev/null || echo "")
 echo "  Deployer: $MY_PRINCIPAL"
@@ -99,9 +99,19 @@ echo ""
 if icp network status >/dev/null 2>&1; then
   echo "  Already running."
 else
-  icp network start --background
-  sleep 3
-  echo "  Started."
+  icp network start --background >/dev/null 2>&1
+  echo "  Waiting for replica..."
+  for i in $(seq 1 15); do
+    if icp network status >/dev/null 2>&1; then
+      echo "  Started (ready after ${i}s)."
+      break
+    fi
+    if [ "$i" -eq 15 ]; then
+      echo "  ERROR: Replica did not become ready within 15 seconds."
+      exit 1
+    fi
+    sleep 1
+  done
 fi
 echo ""
 
@@ -119,9 +129,19 @@ else
 fi
 echo "  ckUSDC ledger: $CKUSDC_ID"
 
+# Deploy EVM RPC canister (needed for cross-chain EVM payments)
+if icp canister status evm_rpc -e local >/dev/null 2>&1; then
+  EVM_RPC_ID=$(icp canister status evm_rpc -e local --id-only)
+else
+  icp deploy evm_rpc -e local >/dev/null 2>&1
+  EVM_RPC_ID=$(icp canister status evm_rpc -e local --id-only)
+fi
+echo "  EVM RPC:       $EVM_RPC_ID"
+
 # Patch and deploy example canister (shared logic in scripts/patch-local.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/patch-local.sh"
+register_patch_trap
 
 patch_for_local "$CKUSDC_ID"
 
@@ -145,28 +165,39 @@ echo ""
 
 # Add test-payer as controller (so MCP can upload content)
 if [ -n "$PAYER_PRINCIPAL" ]; then
-  icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local 2>/dev/null || true
-  echo "  test-payer: controller"
+  if icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local >/dev/null 2>&1; then
+    echo "  test-payer: added as controller"
+  else
+    echo "  test-payer: already a controller"
+  fi
+else
+  echo "  WARNING: test-payer principal is empty — cannot add as controller"
 fi
 
 # Mint ckUSDC to test-payer
-icp canister call ckusdc_ledger icrc1_transfer \
+if icp canister call ckusdc_ledger icrc1_transfer \
   "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
-  -e local >/dev/null 2>&1 || true
-echo "  test-payer: 1 ckUSDC minted"
+  -e local >/dev/null 2>&1; then
+  echo "  test-payer: 1 ckUSDC minted"
+else
+  echo "  WARNING: Failed to mint ckUSDC to test-payer"
+fi
 
 # Approve canister to spend
-icp canister call ckusdc_ledger icrc2_approve \
+if icp canister call ckusdc_ledger icrc2_approve \
   "(record { spender = record { owner = principal \"$EXAMPLE_ID\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null; expected_allowance = null; expires_at = null })" \
-  -e local --identity test-payer >/dev/null 2>&1 || true
-echo "  test-payer: ICRC-2 approval set"
+  -e local --identity test-payer >/dev/null 2>&1; then
+  echo "  test-payer: ICRC-2 approval set"
+else
+  echo "  WARNING: Failed to set ICRC-2 approval"
+fi
 echo ""
 
 # ── Build ──
 
 echo "--- Building ---"
 echo ""
-pnpm build:mcp-client 2>/dev/null
+pnpm build:demo >/dev/null 2>&1
 echo "  Built: client SDK + MCP server + demo client"
 echo ""
 

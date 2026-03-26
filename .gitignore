@@ -24,6 +24,7 @@ Thumbs.db
 # Identity / keys
 *.pem
 *.key
+.local/
 
 # Deploy (local-only tooling, not part of the library)
 deploy/

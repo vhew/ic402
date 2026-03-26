@@ -11,35 +11,10 @@ import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
+import HMAC "mo:hmac";
 import Utils "Utils";
 
 module {
-
-  // HMAC-SHA256(key, message) -> Blob
-  func hmacSha256(key : [Nat8], message : [Nat8]) : Blob {
-    let blockSize = 64;
-
-    let effectiveKey : [Nat8] = if (key.size() > blockSize) {
-      Blob.toArray(SHA256.fromArray(#sha256, key));
-    } else {
-      key;
-    };
-
-    let paddedKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
-      if (i < effectiveKey.size()) { effectiveKey[i] } else { 0 : Nat8 };
-    });
-
-    let ipadKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
-      paddedKey[i] ^ (0x36 : Nat8);
-    });
-
-    let opadKey = Array.tabulate<Nat8>(blockSize, func(i) : Nat8 {
-      paddedKey[i] ^ (0x5c : Nat8);
-    });
-
-    let inner = SHA256.fromArray(#sha256, Array.append(ipadKey, message));
-    SHA256.fromArray(#sha256, Array.append(opadKey, Blob.toArray(inner)));
-  };
 
   public class Grants(canisterPrincipal : Principal) {
 
@@ -55,36 +30,54 @@ module {
     };
 
     /// Initialize HMAC seed from randomness. Call once on first deployment.
-    /// If already initialized (from stable state), this is a no-op.
-    public func initHmacSeed(randomBlob : Blob) {
-      if (not hmacSeedInitialized) {
-        let bytes = Blob.toArray(randomBlob);
-        var seed : Nat = 0;
-        for (b in bytes.vals()) {
-          seed := seed * 256 + Nat8.toNat(b);
-        };
-        hmacSeed := seed;
-        hmacSeedInitialized := true;
+    /// Returns true if the seed was initialized, false if already set (from stable state or prior call).
+    public func initHmacSeed(randomBlob : Blob) : Bool {
+      if (hmacSeedInitialized) { return false };
+      let bytes = Blob.toArray(randomBlob);
+      var seed : Nat = 0;
+      for (b in bytes.vals()) {
+        seed := seed * 256 + Nat8.toNat(b);
       };
+      hmacSeed := seed;
+      hmacSeedInitialized := true;
+      true;
     };
 
-    func computeGrantHmac(grantId : Text, grantee : Principal, expiresAt : Int) : Blob {
-      let message = grantId # "|" # Principal.toText(grantee) # "|" # Int.toText(expiresAt);
-      hmacSha256(hmacSecret(), Blob.toArray(Text.encodeUtf8(message)));
+    // M-9: Constant-time comparison to prevent timing side-channels on HMAC
+    func constantTimeEqual(a : Blob, b : Blob) : Bool {
+      let aBytes = Blob.toArray(a);
+      let bBytes = Blob.toArray(b);
+      if (aBytes.size() != bBytes.size()) return false;
+      var acc : Nat8 = 0;
+      var i = 0;
+      while (i < aBytes.size()) {
+        acc := acc | (aBytes[i] ^ bBytes[i]);
+        i += 1;
+      };
+      acc == 0;
+    };
+
+    // C-2: Include contentRefId in HMAC to bind grant to specific content
+    func computeGrantHmac(grantId : Text, contentRefId : Text, grantee : Principal, expiresAt : Int) : Blob {
+      let message = grantId # "|" # contentRefId # "|" # Principal.toText(grantee) # "|" # Int.toText(expiresAt);
+      let msgBytes = Blob.toArray(Text.encodeUtf8(message));
+      HMAC.generate(hmacSecret(), msgBytes.vals(), #sha256);
     };
 
     /// Issue an access grant after successful payment.
+    /// Traps if HMAC seed has not been initialized (fail-safe).
     public func issueGrant(
       contentRef : Types.ContentRef,
       grantee : Principal,
       receiptId : Text,
       ttlNanos : Int,
     ) : Types.AccessGrant {
+      assert(hmacSeedInitialized); // H-1: Reject grants before seed is set
       grantCounter += 1;
       let grantId = "grant-" # Nat.toText(grantCounter);
       let now = Time.now();
       let expiresAt = now + ttlNanos;
-      let hmac = computeGrantHmac(grantId, grantee, expiresAt);
+      let hmac = computeGrantHmac(grantId, contentRef.id, grantee, expiresAt);
 
       {
         grantId;
@@ -100,17 +93,17 @@ module {
     /// Verify an access grant (stateless HMAC check + expiry + revocation).
     public func verifyGrant(grant : Types.AccessGrant) : Types.AccessGrantResult {
       switch (revokedGrants.get(grant.grantId)) {
-        case (?_) { return #revoked };
+        case (?_) { return #revoked("Grant " # grant.grantId # " has been revoked") };
         case (null) {};
       };
 
       if (Time.now() > grant.expiresAt) {
-        return #expired;
+        return #expired("Grant " # grant.grantId # " expired");
       };
 
-      let expected = computeGrantHmac(grant.grantId, grant.grantee, grant.expiresAt);
-      if (expected != grant.hmac) {
-        return #invalidGrant;
+      let expected = computeGrantHmac(grant.grantId, grant.contentRef.id, grant.grantee, grant.expiresAt);
+      if (not constantTimeEqual(expected, grant.hmac)) {
+        return #invalidGrant("HMAC mismatch for grant " # grant.grantId);
       };
 
       #ok;
