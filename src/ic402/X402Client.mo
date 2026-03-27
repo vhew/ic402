@@ -158,6 +158,7 @@ module {
         headers = [];
         body = null;
         transform = ?{ function = tfn; context = Blob.fromArray([]) };
+        is_replicated = null;
       });
       var result = "status=" # Nat.toText(response.status) # " headers=" # Nat.toText(response.headers.size()) # " body=" # Nat.toText(response.body.size());
       for (h in response.headers.vals()) {
@@ -230,6 +231,7 @@ module {
               headers = extraHeaders;
               body = requestBody;
               transform;
+              is_replicated = null;
             });
           } catch (probeErr) {
             let msg = Error.message(probeErr);
@@ -243,6 +245,7 @@ module {
                   headers = extraHeaders;
                   body = requestBody;
                   transform;
+                  is_replicated = null;
                 });
               } catch (probe64Err) {
                 let msg64 = Error.message(probe64Err);
@@ -256,6 +259,7 @@ module {
                       headers = extraHeaders;
                       body = requestBody;
                       transform;
+                      is_replicated = null;
                     });
                   } catch (retryProbeErr) {
                     let retryMsg = Error.message(retryProbeErr);
@@ -403,6 +407,7 @@ module {
                 headers = retryHeaders;
                 body = requestBody;
                 transform;
+                is_replicated = null;
               });
             } catch (retryErr) {
               let errMsg = Error.message(retryErr);
@@ -415,6 +420,7 @@ module {
                   headers = retryHeaders;
                   body = requestBody;
                   transform;
+                  is_replicated = null;
                 });
               } else if (isTransientError(errMsg)) {
                 return #transientError("Paid retry failed: " # errMsg);

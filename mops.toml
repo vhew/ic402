@@ -4,11 +4,12 @@ version = "0.1.1"
 description = "Drop-in payment library for ICP canisters. x402 charges, MPP-style sessions, ERC-8004 agent identity."
 repository = "https://github.com/vhew/ic402"
 license = "Apache-2.0"
+keywords = [ "payment", "x402", "evm", "icrc2", "micropayment", "session", "eip-3009", "erc-8004" ]
 files = [ "src/ic402/**/*.mo" ]
 
 [dependencies]
 base = "0.16.0"
-ic = "2.1.0"
+ic = "3.2.0"
 cbor = "4.1.0"
 ed25519 = "0.1.0"
 sha2 = "0.1.14"
@@ -19,7 +20,7 @@ chacha = "1.0.1"
 ic-vetkeys = "0.4.0"
 
 [dev-dependencies]
-test = "2.0.0"
+test = "2.1.2"
 
 [toolchain]
 moc = "1.3.0"
