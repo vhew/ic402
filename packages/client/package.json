@@ -3,14 +3,44 @@
   "version": "0.1.1",
   "description": "TypeScript client SDK for ic402-enabled ICP canisters",
   "license": "Apache-2.0",
+  "author": "ic402 contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vhew/ic402.git",
+    "directory": "packages/client"
+  },
+  "keywords": [
+    "ic402",
+    "x402",
+    "payment",
+    "icp",
+    "internet-computer",
+    "typescript",
+    "sdk",
+    "evm",
+    "icrc2",
+    "micropayment",
+    "streaming",
+    "eip-3009"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=19.0.0"
   },
   "scripts": {
     "build": "tsc",
@@ -18,13 +48,16 @@
   },
   "dependencies": {
     "@canister-software/x402-icp": "0.1.1",
-    "@icp-sdk/core": "5.1.0",
     "@x402/core": "2.7.0",
     "@x402/fetch": "2.7.0",
     "cborg": "4.5.8",
     "viem": "2.47.5"
   },
+  "peerDependencies": {
+    "@icp-sdk/core": ">=5.1.0"
+  },
   "devDependencies": {
+    "@icp-sdk/core": "5.1.0",
     "typescript": "5.9.3",
     "vitest": "4.1.0"
   }
