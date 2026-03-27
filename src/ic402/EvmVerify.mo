@@ -1,12 +1,12 @@
-/// ic402 — EVM transaction verification via the DFINITY EVM RPC Canister.
+// ic402 — EVM transaction verification via the DFINITY EVM RPC Canister.
 ///
-/// Verifies ERC-20 transfers on any supported EVM chain by calling
-/// eth_getTransactionReceipt through the EVM RPC Canister (7hfb6-caaaa-aaaar-qadga-cai),
-/// which proxies JSON-RPC calls to multiple providers with consensus verification.
+// Verifies ERC-20 transfers on any supported EVM chain by calling
+// eth_getTransactionReceipt through the EVM RPC Canister (7hfb6-caaaa-aaaar-qadga-cai),
+// which proxies JSON-RPC calls to multiple providers with consensus verification.
 ///
-/// Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum (mainnet + testnet).
+// Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum (mainnet + testnet).
 ///
-/// Used by Gateway.settle() when the payment network is "eip155:*".
+// Used by Gateway.settle() when the payment network is "eip155:*".
 
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";
@@ -19,7 +19,7 @@ import EvmRpc "EvmRpc";
 
 module {
 
-  /// Result of verifying an EVM transaction.
+  // Result of verifying an EVM transaction.
   public type VerifyResult = {
     #ok : {
       txHash : Text;
@@ -35,40 +35,54 @@ module {
 
   // ── EVM RPC types (re-exported from EvmRpc for backward compat) ──
 
+  // Re-export: LogEntry from EvmRpc.
   public type LogEntry = EvmRpc.LogEntry;
+  // Re-export: TransactionReceipt from EvmRpc.
   public type TransactionReceipt = EvmRpc.TransactionReceipt;
+  // Re-export: RpcError from EvmRpc.
   public type RpcError = EvmRpc.RpcError;
+  // Re-export: GetTransactionReceiptResult from EvmRpc.
   public type GetTransactionReceiptResult = EvmRpc.GetTransactionReceiptResult;
+  // Re-export: EthMainnetService from EvmRpc.
   public type EthMainnetService = EvmRpc.EthMainnetService;
+  // Re-export: EthSepoliaService from EvmRpc.
   public type EthSepoliaService = EvmRpc.EthSepoliaService;
+  // Re-export: L2MainnetService from EvmRpc.
   public type L2MainnetService = EvmRpc.L2MainnetService;
+  // Re-export: RpcApi from EvmRpc.
   public type RpcApi = EvmRpc.RpcApi;
+  // Re-export: RpcServices from EvmRpc.
   public type RpcServices = EvmRpc.RpcServices;
+  // Re-export: RpcService from EvmRpc.
   public type RpcService = EvmRpc.RpcService;
+  // Re-export: ConsensusStrategy from EvmRpc.
   public type ConsensusStrategy = EvmRpc.ConsensusStrategy;
+  // Re-export: RpcConfig from EvmRpc.
   public type RpcConfig = EvmRpc.RpcConfig;
+  // Re-export: MultiGetTransactionReceiptResult from EvmRpc.
   public type MultiGetTransactionReceiptResult = EvmRpc.MultiGetTransactionReceiptResult;
+  // Re-export: EvmRpcCanister from EvmRpc.
   public type EvmRpcService = EvmRpc.EvmRpcCanister;
 
-  /// Default EVM RPC Canister principal (mainnet).
+  // Default EVM RPC Canister principal (mainnet).
   public let DEFAULT_EVM_RPC_CANISTER : Text = EvmRpc.DEFAULT_CANISTER;
 
-  /// ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
-  /// Computed dynamically to avoid hardcoded hash errors.
+  // ERC-20 Transfer event topic: keccak256("Transfer(address,address,uint256)")
+  // Computed dynamically to avoid hardcoded hash errors.
   func transferTopic() : Text {
     EvmAddress.toHex(EvmAddress.keccak256Text("Transfer(address,address,uint256)"));
   };
 
   let RPC_CYCLES : Nat = EvmRpc.RPC_CYCLES;
 
-  /// Map a chain ID to the appropriate RpcServices variant.
+  // Map a chain ID to the appropriate RpcServices variant.
   func rpcServices(chainId : Nat) : ?RpcServices {
     EvmRpc.rpcServices(chainId);
   };
 
-  /// Verify an EVM transaction receipt via the EVM RPC Canister.
-  /// Checks: tx succeeded, sent to correct token contract,
-  /// Transfer event log shows correct recipient and sufficient amount.
+  // Verify an EVM transaction receipt via the EVM RPC Canister.
+  // Checks: tx succeeded, sent to correct token contract,
+  // Transfer event log shows correct recipient and sufficient amount.
   public func verifyTransaction(
     txHash : Text,
     chainId : Nat,
@@ -164,10 +178,10 @@ module {
 
   // ── Transfer event log parsing (structured, no JSON) ──
 
-  /// Search the structured log entries for an ERC-20 Transfer event
-  /// where the log is from the expected token contract and the
-  /// recipient (topics[2]) matches expectedRecipient.
-  /// Returns (recipientAddress, amount) if found.
+  // Search the structured log entries for an ERC-20 Transfer event
+  // where the log is from the expected token contract and the
+  // recipient (topics[2]) matches expectedRecipient.
+  // Returns (recipientAddress, amount) if found.
   public func findTransferLog(logs : [LogEntry], expectedToken : Text, expectedRecipient : Text) : ?(Text, Nat) {
     for (log in logs.vals()) {
       // C-2: Only consider logs from the expected token contract
@@ -197,7 +211,7 @@ module {
 
   // ── Helpers ──
 
-  /// Extract the last 40 hex chars from a 64-char hex value -> 0x-prefixed address.
+  // Extract the last 40 hex chars from a 64-char hex value -> 0x-prefixed address.
   public func hexToAddress(hex : Text) : Text {
     let chars = Iter.toArray(hex.chars());
     var start = 0;
@@ -216,9 +230,9 @@ module {
     toLower(addr);
   };
 
-  /// Parse a hex string (with or without 0x prefix) to Nat.
-  /// ERC-20 amounts are uint256, max 2^256-1. We cap at 64 hex digits.
-  /// Non-hex characters after the prefix cause the parse to stop (returns value so far).
+  // Parse a hex string (with or without 0x prefix) to Nat.
+  // ERC-20 amounts are uint256, max 2^256-1. We cap at 64 hex digits.
+  // Non-hex characters after the prefix cause the parse to stop (returns value so far).
   public func hexToNat(hex : Text) : Nat {
     var result : Nat = 0;
     var hexDigits : Nat = 0;
@@ -245,7 +259,7 @@ module {
     result;
   };
 
-  /// Convert ASCII upper-case letters to lower-case.
+  // Convert ASCII upper-case letters to lower-case.
   public func toLower(t : Text) : Text {
     Text.map(t, func(c : Char) : Char {
       if (c >= 'A' and c <= 'Z') {

@@ -29,6 +29,7 @@ import Debug "mo:base/Debug";
 
 module {
 
+  /// Main payment gateway. Orchestrates charges, sessions, grants, escrow, and policy.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
 
     let policy = Policy.Engine();
@@ -286,6 +287,7 @@ module {
       };
     };
 
+    /// Verify and settle a charge payment (ICP via ICRC-2 or EVM via EIP-3009).
     public func settle(signature : Types.PaymentSignature) : async Types.PaymentResult {
       // H-2: Resolve token to verify nonce is bound to the correct network+token
       let resolvedToken = resolveTokenForNonce(signature.network);
@@ -609,6 +611,7 @@ module {
 
     // ── Policy ──
 
+    /// Set spending policy: global (caller=null) or per-caller override.
     public func setPolicy(caller : ?Principal, p : Types.SpendingPolicy) {
       switch (caller) {
         case (null) { policy.setGlobalPolicy(p) };
@@ -616,10 +619,12 @@ module {
       };
     };
 
+    /// Get the effective spending policy for a caller.
     public func getPolicy(caller : Principal) : Types.SpendingPolicy {
       policy.getEffectivePolicy(caller);
     };
 
+    /// Get the current daily spend total for a caller.
     public func dailySpend(caller : Principal) : Nat {
       policy.getDailySpendAmount(caller);
     };
@@ -654,6 +659,7 @@ module {
 
     // ── Stable state (composes sub-module states) ──
 
+    /// Serialize all gateway state for stable storage.
     public func toStable() : Types.StableGatewayState {
       {
         sessions = sessionsMgr.toStable();
@@ -671,6 +677,7 @@ module {
       };
     };
 
+    /// Restore all gateway state from stable storage.
     public func loadStable(data : Types.StableGatewayState) {
       nonceManager.loadStable(data.nonces);
       policy.loadStable(data.policy);

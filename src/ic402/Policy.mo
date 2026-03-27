@@ -1,4 +1,4 @@
-/// ic402 — Policy engine for spending limits, rate limiting, and access control.
+// ic402 — Policy engine for spending limits, rate limiting, and access control.
 import Types "Types";
 import Time "mo:base/Time";
 import HashMap "mo:base/HashMap";
@@ -14,6 +14,7 @@ import Debug "mo:base/Debug";
 
 module {
 
+  // Spending and access control policy configuration.
   public type SpendingPolicy = Types.SpendingPolicy;
 
   // Day number from nanosecond timestamp (86400 seconds per day)
@@ -26,6 +27,7 @@ module {
     Int.toText(day) # ":" # Principal.toText(caller);
   };
 
+  // Policy engine enforcing spending limits, rate limiting, and access control.
   public class Engine() {
 
     var globalPolicy : SpendingPolicy = {
@@ -51,20 +53,24 @@ module {
 
     // ── Policy getters/setters ──
 
+    /// Replace the global spending policy (validates invariants first).
     public func setGlobalPolicy(policy : SpendingPolicy) {
       validatePolicy(policy);
       globalPolicy := policy;
     };
 
+    /// Return the current global spending policy.
     public func getGlobalPolicy() : SpendingPolicy {
       globalPolicy;
     };
 
+    /// Set a per-caller policy override (validates invariants first).
     public func setCallerPolicy(caller : Principal, policy : SpendingPolicy) {
       validatePolicy(policy);
       callerPolicies.put(caller, policy);
     };
 
+    /// Remove a per-caller policy override, reverting to the global policy.
     public func removeCallerPolicy(caller : Principal) {
       callerPolicies.delete(caller);
     };
@@ -145,6 +151,7 @@ module {
       };
     };
 
+    /// Record a spend against the caller's daily total.
     public func recordSpend(caller : Principal, amount : Nat) {
       let day = dayNumber(Time.now());
       let key = dailyKey(caller, day);
@@ -192,6 +199,7 @@ module {
 
     // ── Charge checks ──
 
+    /// Check whether a one-time charge is permitted (access, rate, tx limit, daily limit).
     public func checkCharge(caller : Principal, amount : Nat) : { #ok; #denied : Text } {
       let policy = getEffectivePolicy(caller);
 
@@ -223,6 +231,7 @@ module {
 
     // ── Session checks ──
 
+    /// Check whether opening a session is permitted (access, rate, concurrency, deposit, daily limit).
     public func checkSessionOpen(caller : Principal, deposit : Nat, activeCount : Nat) : { #ok; #denied : Text } {
       let policy = getEffectivePolicy(caller);
 
@@ -263,6 +272,7 @@ module {
 
     // ── Voucher checks ──
 
+    /// Check whether a voucher spend delta is permitted (rate, daily limit).
     public func checkVoucher(caller : Principal, delta : Nat) : { #ok; #denied : Text } {
       let policy = getEffectivePolicy(caller);
 
@@ -306,6 +316,7 @@ module {
 
     // ── Stable state ──
 
+    /// Serialize policy state for stable storage.
     public func toStable() : Types.StablePolicyState {
       {
         globalPolicy;
@@ -315,6 +326,7 @@ module {
       };
     };
 
+    /// Restore policy state from stable storage.
     public func loadStable(data : Types.StablePolicyState) {
       globalPolicy := data.globalPolicy;
       callerPolicies := HashMap.fromIter<Principal, SpendingPolicy>(
@@ -334,7 +346,7 @@ module {
 
   // ── Helpers ──
 
-  /// Extract the day number prefix from a key like "12345:principalText".
+  // Extract the day number prefix from a key like "12345:principalText".
   func extractDayPrefix(key : Text) : Text {
     var result = "";
     for (c in key.chars()) {

@@ -3,12 +3,14 @@ module {
 
   // ── Token & Pricing ──
 
+  /// Token ledger configuration (principal, symbol, decimals).
   public type TokenConfig = {
     ledger : Principal;
     symbol : Text;
     decimals : Nat8;
   };
 
+  /// Payment price: token, amount, and CAIP-2 network.
   public type Price = {
     token : Principal;
     amount : Nat;
@@ -17,6 +19,7 @@ module {
 
   // ── EIP-3009 Authorization (standard x402 EVM payments) ──
 
+  /// EIP-3009 TransferWithAuthorization parameters for EVM USDC payments.
   public type Eip3009Authorization = {
     from : Text;       // payer EVM address (0x-prefixed)
     to : Text;         // recipient EVM address (0x-prefixed)
@@ -31,6 +34,7 @@ module {
 
   // ── Charge (x402 "exact") ──
 
+  /// 402 payment requirement returned to clients (scheme, amount, nonce, expiry).
   public type PaymentRequirement = {
     scheme : Text;
     network : Text;
@@ -75,6 +79,7 @@ module {
     refunded : ?Nat;
   };
 
+  /// Result of a charge or session close settlement.
   public type PaymentResult = {
     #ok : PaymentReceipt;
     #insufficientFunds : Text;
@@ -90,6 +95,7 @@ module {
 
   // ── Session (escrow + cumulative vouchers) ──
 
+  /// Session offer describing deposit, cost, and expiry for the client.
   public type SessionIntent = {
     network : Text;
     token : Text;
@@ -101,12 +107,14 @@ module {
     description : ?Text;
   };
 
+  /// Client-side session preferences (max deposit, auto-close, idle timeout).
   public type SessionConfig = {
     maxDeposit : Nat;
     autoClose : Bool;
     idleTimeout : ?Int;
   };
 
+  /// Lifecycle state of a streaming session.
   public type SessionStatus = {
     #open;
     #closing;
@@ -114,6 +122,7 @@ module {
     #expired;
   };
 
+  /// Public view of a session's state (read-only snapshot).
   public type SessionState = {
     id : Text;
     payer : Principal;
@@ -126,6 +135,7 @@ module {
     lastActivityAt : Int;
   };
 
+  /// Cumulative payment voucher signed by the session payer.
   public type Voucher = {
     sessionId : Text;
     cumulativeAmount : Nat;
@@ -163,6 +173,7 @@ module {
     blockedCallers : ?[Principal];
   };
 
+  /// Minimum reputation and required tags for access control.
   public type TrustRequirements = {
     minReputation : Nat;
     requiredTags : [Text];
@@ -170,11 +181,13 @@ module {
 
   // ── ICRC-1/2 ──
 
+  /// ICRC-1 account (owner principal + optional subaccount).
   public type Account = {
     owner : Principal;
     subaccount : ?Blob;
   };
 
+  /// ICRC-1 transfer arguments.
   public type TransferArg = {
     from_subaccount : ?Blob;
     to : Account;
@@ -184,6 +197,7 @@ module {
     created_at_time : ?Nat64;
   };
 
+  /// ICRC-1 transfer error variants.
   public type TransferError = {
     #BadFee : { expected_fee : Nat };
     #BadBurn : { min_burn_amount : Nat };
@@ -195,11 +209,13 @@ module {
     #GenericError : { error_code : Nat; message : Text };
   };
 
+  /// ICRC-1 transfer result.
   public type TransferResult = {
     #Ok : Nat;
     #Err : TransferError;
   };
 
+  /// ICRC-2 transferFrom arguments.
   public type TransferFromArg = {
     spender_subaccount : ?Blob;
     from : Account;
@@ -210,6 +226,7 @@ module {
     created_at_time : ?Nat64;
   };
 
+  /// ICRC-2 transferFrom error variants.
   public type TransferFromError = {
     #BadFee : { expected_fee : Nat };
     #BadBurn : { min_burn_amount : Nat };
@@ -222,6 +239,7 @@ module {
     #GenericError : { error_code : Nat; message : Text };
   };
 
+  /// ICRC-2 transferFrom result.
   public type TransferFromResult = {
     #Ok : Nat;
     #Err : TransferFromError;
@@ -229,6 +247,7 @@ module {
 
   // ── Internal session state (extends public SessionState) ──
 
+  /// Internal mutable session state (not exposed to clients).
   public type InternalSessionState = {
     id : Text;
     payer : Principal;
@@ -254,6 +273,7 @@ module {
 
   // ── Stable state types ──
 
+  /// Stable storage format for sessions (canister upgrades).
   public type StableSession = {
     id : Text;
     payer : Principal;
@@ -277,12 +297,14 @@ module {
     evmDeposit : ?EvmSessionDeposit;
   };
 
+  /// Stable storage format for nonce manager state.
   public type StableNonceState = {
     nonces : [(Blob, (Int, Nat, Text, Text))]; // (expiry, amount, network, token)
     counter : Nat;
     lockedNonces : ?[Blob]; // C-1: Persist locked nonces across upgrades
   };
 
+  /// Stable storage format for policy engine state.
   public type StablePolicyState = {
     globalPolicy : SpendingPolicy;
     callerPolicies : [(Principal, SpendingPolicy)];
@@ -290,6 +312,7 @@ module {
     rateLimitEntries : [(Text, [Int])];
   };
 
+  /// Stable storage format for the entire gateway (top-level persist).
   public type StableGatewayState = {
     sessions : [StableSession];
     nonces : StableNonceState;
@@ -304,6 +327,7 @@ module {
 
   // ── Ledger actor type ──
 
+  /// Actor interface for ICRC-1/2 ledger canisters.
   public type LedgerActor = actor {
     icrc1_transfer : (TransferArg) -> async TransferResult;
     icrc1_fee : () -> async Nat;
@@ -312,6 +336,7 @@ module {
 
   // ── Configuration ──
 
+  /// EVM ERC-20 token configuration (address, symbol, EIP-712 domain).
   public type EvmTokenConfig = {
     address : Text;
     symbol : Text;
@@ -320,18 +345,21 @@ module {
     version : ?Text; // EIP-712 domain version. Null = "2".
   };
 
+  /// EVM chain configuration (chain ID, recipient, tokens).
   public type EvmChainConfig = {
     chainId : Nat;
     recipient : Text;
     tokens : [EvmTokenConfig];
   };
 
+  /// Gas fee overrides for EVM transactions.
   public type GasConfig = {
     maxFeePerGas : ?Nat;
     maxPriorityFeePerGas : ?Nat;
     gasLimit : ?Nat;
   };
 
+  /// Configuration for ERC-8004 agent identity registration.
   public type ERC8004Config = {
     chain : { #base; #ethereum; #avalanche; #optimism; #arbitrum };
     card : AgentCard;
@@ -342,11 +370,13 @@ module {
     gasConfig : ?GasConfig;
   };
 
+  /// Result of ERC-8004 agent registration.
   public type RegisterAgentResult = {
     #ok : { tokenId : Nat; txHash : Text };
     #err : Text;
   };
 
+  /// ERC-8004 agent metadata (name, description, services).
   public type AgentCard = {
     name : Text;
     description : Text;
@@ -354,6 +384,7 @@ module {
     x402Support : Bool;
   };
 
+  /// Service endpoint in an ERC-8004 agent card.
   public type ServiceEntry = {
     name : Text;
     endpoint : Text;
@@ -362,6 +393,7 @@ module {
     domains : [Text];
   };
 
+  /// Top-level gateway configuration (tokens, EVM chains, ECDSA key).
   public type Config = {
     recipient : { owner : Principal; subaccount : ?Blob };
     tokens : [TokenConfig];
@@ -373,6 +405,7 @@ module {
 
   // ── Content Delivery ──
 
+  /// Reference to stored content (id, mime type, size, metadata).
   public type ContentRef = {
     id : Text;
     mimeType : ?Text;
@@ -380,6 +413,7 @@ module {
     metadata : ?[(Text, Text)];
   };
 
+  /// HMAC-signed access grant for content delivery.
   public type AccessGrant = {
     grantId : Text;
     contentRef : ContentRef;
@@ -390,6 +424,7 @@ module {
     hmac : Blob;
   };
 
+  /// Result of access grant verification.
   public type AccessGrantResult = {
     #ok;
     #expired : Text;
@@ -397,6 +432,7 @@ module {
     #revoked : Text;
   };
 
+  /// How content is delivered (inline, HTTP, asset canister, query).
   public type DeliveryMethod = {
     #inline : Blob;
     #canisterQuery : { method : Text; chunkCount : Nat };
@@ -404,11 +440,13 @@ module {
     #assetCanister : { canisterId : Principal; path : Text };
   };
 
+  /// Access grant paired with its delivery method.
   public type ContentDelivery = {
     grant : AccessGrant;
     delivery : DeliveryMethod;
   };
 
+  /// Stable storage format for grant subsystem state.
   public type StableAccessGrantState = {
     revokedGrantIds : [Text];
     grantCounter : Nat;
@@ -417,6 +455,7 @@ module {
 
   // ── Content Store ──
 
+  /// Metadata for a stored content item.
   public type ContentEntry = {
     id : Text;
     mimeType : Text;
@@ -425,6 +464,7 @@ module {
     createdAt : Int;
   };
 
+  /// Result of content store operations.
   public type ContentStoreResult = {
     #ok;
     #contentNotFound;
@@ -433,6 +473,7 @@ module {
     #chunkTooLarge : Nat;
   };
 
+  /// Stable storage format for a content entry with chunks.
   public type StableContentEntry = {
     id : Text;
     mimeType : Text;
@@ -441,12 +482,14 @@ module {
     createdAt : Int;
   };
 
+  /// Stable storage format for the content store.
   public type StableContentStoreState = {
     entries : [StableContentEntry];
   };
 
   // ── EVM Session Deposits ──
 
+  /// EVM deposit metadata for a session (tx hash, chain, payer, token).
   public type EvmSessionDeposit = {
     txHash : Text;
     chainId : Nat;
@@ -454,6 +497,7 @@ module {
     tokenAddress : Text;
   };
 
+  /// Stable storage format for EVM escrow allocations.
   public type StableEvmAllocation = {
     sessionId : Text;
     chainId : Nat;
@@ -463,6 +507,7 @@ module {
 
   // ── Identity ──
 
+  /// Stable storage format for identity module state.
   public type StableIdentityState = {
     agentId : ?Nat;
     evmAddress : ?Text;
@@ -470,6 +515,7 @@ module {
 
   // ── HTTP (canister HTTP serving) ──
 
+  /// IC HTTP gateway request (method, url, headers, body).
   public type HttpRequest = {
     method : Text;
     url : Text;
@@ -477,6 +523,7 @@ module {
     body : Blob;
   };
 
+  /// IC HTTP gateway response (status, headers, body).
   public type HttpResponse = {
     status_code : Nat16;
     headers : [(Text, Text)];

@@ -1,4 +1,4 @@
-/// ic402 — Escrow manager for session deposits using ICRC-2 subaccounts.
+// ic402 — Escrow manager for session deposits using ICRC-2 subaccounts.
 import Types "Types";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
@@ -7,6 +7,7 @@ import SHA256 "mo:sha2/Sha256";
 
 module {
 
+  // ICRC-2 escrow manager using deterministic subaccounts for session deposits.
   public class EscrowManager(canisterPrincipal : Principal) {
 
     /// Derive a deterministic 32-byte subaccount for a session.

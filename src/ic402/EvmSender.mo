@@ -1,7 +1,7 @@
-/// ic402 — EVM transaction sender via tECDSA.
+// ic402 — EVM transaction sender via tECDSA.
 ///
-/// Signs and submits EVM transactions using the canister's threshold ECDSA key.
-/// Provides both generic transaction sending and ERC-20 transfer helpers.
+// Signs and submits EVM transactions using the canister's threshold ECDSA key.
+// Provides both generic transaction sending and ERC-20 transfer helpers.
 
 import EvmUtils "EvmUtils";
 import EvmRpc "EvmRpc";
@@ -16,7 +16,7 @@ import Call "mo:ic/Call";
 
 module {
 
-  /// EVM transaction sender with tECDSA signing.
+  // EVM transaction sender with tECDSA signing.
   public class EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) {
 
     var cachedPubKey : ?[Nat8] = null;

@@ -1,4 +1,4 @@
-/// ic402 — Access grant subsystem (HMAC-based content delivery tokens).
+// ic402 — Access grant subsystem (HMAC-based content delivery tokens).
 import Types "Types";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
@@ -17,6 +17,7 @@ import Debug "mo:base/Debug";
 
 module {
 
+  // HMAC-based access grant manager for content delivery tokens.
   public class Grants(canisterPrincipal : Principal) {
 
     var grantCounter : Nat = 0;
@@ -126,6 +127,7 @@ module {
 
     // ── Stable state ──
 
+    /// Serialize grant state for stable storage.
     public func toStable() : Types.StableAccessGrantState {
       {
         revokedGrantIds = Iter.toArray(
@@ -139,6 +141,7 @@ module {
       };
     };
 
+    /// Restore grant state from stable storage.
     public func loadStable(data : Types.StableAccessGrantState) {
       grantCounter := data.grantCounter;
       hmacSeed := data.hmacSeed;

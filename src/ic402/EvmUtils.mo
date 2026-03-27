@@ -251,6 +251,7 @@ module {
   // EIP-1559 (Type 2) Transaction Construction
   // ═══════════════════════════════════════════════════════════════════════
 
+  /// Parameters for constructing an EIP-1559 (Type 2) transaction.
   public type TxParams = {
     chainId : Nat;
     nonce : Nat;

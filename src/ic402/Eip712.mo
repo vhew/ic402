@@ -1,12 +1,12 @@
-/// ic402 — EIP-712 typed data hashing for EIP-3009 TransferWithAuthorization.
+// ic402 — EIP-712 typed data hashing for EIP-3009 TransferWithAuthorization.
 ///
-/// Implements the EIP-712 signature verification needed for standard x402
-/// payment settlement. The canister verifies that a payer's signature
-/// authorizes a USDC transfer, then executes it on-chain.
+// Implements the EIP-712 signature verification needed for standard x402
+// payment settlement. The canister verifies that a payer's signature
+// authorizes a USDC transfer, then executes it on-chain.
 ///
-/// References:
-///   EIP-712: https://eips.ethereum.org/EIPS/eip-712
-///   EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
+// References:
+//   EIP-712: https://eips.ethereum.org/EIPS/eip-712
+//   EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
 
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
@@ -19,7 +19,7 @@ module {
   // Constants (precomputed keccak256 hashes)
   // ═══════════════════════════════════════════════════════════════════════
 
-  /// keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+  // keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
   let EIP712_DOMAIN_TYPEHASH : [Nat8] = [
     0x8b, 0x73, 0xc3, 0xc6, 0x9b, 0xb8, 0xfe, 0x3d,
     0x51, 0x2e, 0xcc, 0x4c, 0xf7, 0x59, 0xcc, 0x79,
@@ -27,7 +27,7 @@ module {
     0xa9, 0xa7, 0x5d, 0x52, 0x2b, 0x39, 0x40, 0x0f,
   ];
 
-  /// keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
+  // keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)")
   let TRANSFER_WITH_AUTH_TYPEHASH : [Nat8] = [
     0x7c, 0x7c, 0x6c, 0xdb, 0x67, 0xa1, 0x87, 0x43,
     0xf4, 0x9e, 0xc6, 0xfa, 0x9b, 0x35, 0xf5, 0x0d,
@@ -35,7 +35,7 @@ module {
     0xe1, 0x3b, 0x44, 0x50, 0x1c, 0x1a, 0x22, 0x67,
   ];
 
-  /// keccak256("USD Coin")
+  // keccak256("USD Coin")
   let USDC_NAME_HASH : [Nat8] = [
     0x52, 0x87, 0x8b, 0x20, 0x7a, 0xad, 0xdb, 0xfc,
     0x15, 0xea, 0x7b, 0xeb, 0xcd, 0xa6, 0x81, 0xeb,
@@ -43,7 +43,7 @@ module {
     0xef, 0x68, 0x50, 0x5c, 0x8c, 0x05, 0x63, 0x41,
   ];
 
-  /// keccak256("2")
+  // keccak256("2")
   let USDC_VERSION_HASH : [Nat8] = [
     0xad, 0x7c, 0x5b, 0xef, 0x02, 0x78, 0x16, 0xa8,
     0x00, 0xda, 0x17, 0x36, 0x44, 0x4f, 0xb5, 0x8a,
@@ -55,8 +55,8 @@ module {
   // Public API
   // ═══════════════════════════════════════════════════════════════════════
 
-  /// Compute the EIP-712 domain separator for a USDC contract.
-  /// USDC uses name="USD Coin", version="2" across all chains.
+  // Compute the EIP-712 domain separator for a USDC contract.
+  // USDC uses name="USD Coin", version="2" across all chains.
   public func usdcDomainSeparator(chainId : Nat, tokenAddress : [Nat8]) : [Nat8] {
     // keccak256(abi.encode(typeHash, nameHash, versionHash, chainId, verifyingContract))
     let encoded = abiEncodeWords([
@@ -69,7 +69,7 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  /// Compute the EIP-712 domain separator from custom name/version (non-USDC tokens).
+  // Compute the EIP-712 domain separator from custom name/version (non-USDC tokens).
   public func domainSeparator(name : Text, version : Text, chainId : Nat, tokenAddress : [Nat8]) : [Nat8] {
     let nameHash = EvmAddress.keccak256Text(name);
     let versionHash = EvmAddress.keccak256Text(version);
@@ -83,7 +83,7 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  /// Hash the TransferWithAuthorization struct.
+  // Hash the TransferWithAuthorization struct.
   public func hashTransferWithAuthorization(
     from : [Nat8],    // 20 bytes
     to : [Nat8],      // 20 bytes
@@ -104,21 +104,21 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  /// Compute the full EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
+  // Compute the full EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
   public func digest(domainSep : [Nat8], structHash : [Nat8]) : [Nat8] {
     let prefix : [Nat8] = [0x19, 0x01];
     let middle = Array.append<Nat8>(prefix, domainSep);
     EvmAddress.keccak256(Array.append<Nat8>(middle, structHash));
   };
 
-  /// Get the TransferWithAuthorization type hash.
+  // Get the TransferWithAuthorization type hash.
   public func transferWithAuthorizationTypeHash() : [Nat8] {
     TRANSFER_WITH_AUTH_TYPEHASH;
   };
 
-  /// Recover the signer of a TransferWithAuthorization EIP-712 signature.
-  /// Uses custom token name/version for the domain separator (handles testnet USDC).
-  /// Returns the recovered signer address (20 bytes) or null if verification fails.
+  // Recover the signer of a TransferWithAuthorization EIP-712 signature.
+  // Uses custom token name/version for the domain separator (handles testnet USDC).
+  // Returns the recovered signer address (20 bytes) or null if verification fails.
   public func recoverAuthorizationSigner(
     chainId : Nat,
     tokenAddress : [Nat8],
@@ -155,8 +155,8 @@ module {
     };
   };
 
-  /// Verify that the authorization is signed by the `from` address.
-  /// Accepts optional token name/version for testnet USDC domain separators.
+  // Verify that the authorization is signed by the `from` address.
+  // Accepts optional token name/version for testnet USDC domain separators.
   public func verifyAuthorization(
     chainId : Nat,
     tokenAddress : [Nat8],
@@ -178,7 +178,7 @@ module {
     };
   };
 
-  /// Function selector for transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)
+  // Function selector for transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)
   public func transferWithAuthorizationSelector() : [Nat8] {
     // 0xe3ee160e
     [0xe3, 0xee, 0x16, 0x0e];
@@ -188,7 +188,7 @@ module {
   // Internal helpers
   // ═══════════════════════════════════════════════════════════════════════
 
-  /// Concatenate 32-byte words into a single byte array.
+  // Concatenate 32-byte words into a single byte array.
   func abiEncodeWords(words : [[Nat8]]) : [Nat8] {
     var result : [Nat8] = [];
     for (w in words.vals()) {
@@ -198,13 +198,13 @@ module {
     result;
   };
 
-  /// Left-pad a 20-byte address to 32 bytes.
+  // Left-pad a 20-byte address to 32 bytes.
   func leftPadAddress(addr : [Nat8]) : [Nat8] {
     assert(addr.size() == 20);
     Array.append(Array.freeze(Array.init<Nat8>(12, 0 : Nat8)), addr);
   };
 
-  /// Constant-time byte array comparison.
+  // Constant-time byte array comparison.
   func equalBytes(a : [Nat8], b : [Nat8]) : Bool {
     if (a.size() != b.size()) return false;
     var acc : Nat8 = 0;
