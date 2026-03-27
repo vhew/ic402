@@ -1,6 +1,6 @@
 {
   "name": "@ic402/client",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "TypeScript client SDK for ic402-enabled ICP canisters",
   "license": "Apache-2.0",
   "author": "ic402 contributors",
