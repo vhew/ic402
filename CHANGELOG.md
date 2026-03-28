@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.4 — 2026-03-28
+
+### API
+
+- Trim public API surface ~60% — only Gateway, ContentStore, Identity, X402Client, and HttpHandler exported from `lib.mo`. Internal modules (Sessions, Nonce, Escrow, Grants, Policy, EvmSender, EvmEscrow, EvmRpc, EvmAddress, Eip712) are no longer re-exported.
+- Add `///` doc comments to all 44 public types and all exported APIs.
+
+### Dependencies
+
+- `ic` 2.1.0 → 3.2.0 (adds `is_replicated` field to HTTP outcalls)
+- `test` 2.0.0 → 2.1.2
+
+### Package Metadata
+
+- Add `keywords` to `mops.toml` for registry discoverability
+- Add CHANGELOG entry for mops release notes
+
+---
+
 ## v0.1.3 — 2026-03-27
 
 ### Security Hardening
