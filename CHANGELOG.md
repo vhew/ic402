@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.5 — 2026-03-28
+
+### Documentation
+
+- Add `///` doc comments to all remaining public declarations across 13 internal modules (EvmRpc, Eip712, EvmVerify, Sessions, Policy, Nonce, Escrow, Grants, EvmEscrow, EvmSender, Utils, HttpHandler, Identity) — targets 100% mops documentation coverage.
+
+### Project Structure
+
+- Rename `integration/` → `integrations/` for consistency with engramx convention. Update all references in workspace config, package.json scripts, version.sh, docs, and example client.
+- Untrack `deploy/deploy.sh` — was force-added but belongs to gitignored local-only tooling.
+
+---
+
 ## v0.1.4 — 2026-03-28
 
 ### API
