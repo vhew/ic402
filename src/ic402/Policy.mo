@@ -1,4 +1,4 @@
-// ic402 — Policy engine for spending limits, rate limiting, and access control.
+/// ic402 — Policy engine for spending limits, rate limiting, and access control.
 import Types "Types";
 import Time "mo:base/Time";
 import HashMap "mo:base/HashMap";
@@ -14,7 +14,7 @@ import Debug "mo:base/Debug";
 
 module {
 
-  // Spending and access control policy configuration.
+  /// Spending and access control policy configuration.
   public type SpendingPolicy = Types.SpendingPolicy;
 
   // Day number from nanosecond timestamp (86400 seconds per day)
@@ -27,7 +27,7 @@ module {
     Int.toText(day) # ":" # Principal.toText(caller);
   };
 
-  // Policy engine enforcing spending limits, rate limiting, and access control.
+  /// Policy engine enforcing spending limits, rate limiting, and access control.
   public class Engine() {
 
     var globalPolicy : SpendingPolicy = {

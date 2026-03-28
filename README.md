@@ -290,7 +290,7 @@ example/                 Example canister + interactive demo
   main.mo                Reference implementation (all features)
   client/                Interactive demo client (drives the example)
 packages/client/         TypeScript SDK (@ic402/client)
-integration/mcp/         MCP server (@ic402/mcp)
+integrations/mcp/        MCP server (@ic402/mcp)
 scripts/                 Dev tooling (setup, deployment, version bump)
 ```
 

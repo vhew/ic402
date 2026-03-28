@@ -1,8 +1,8 @@
-// ic402 — Virtual escrow accounting for EVM session deposits.
+/// ic402 — Virtual escrow accounting for EVM session deposits.
 ///
-// Tracks how much of the canister's shared EVM address balance is
-// allocated to active sessions. Prevents over-allocation when multiple
-// EVM sessions are open concurrently.
+/// Tracks how much of the canister's shared EVM address balance is
+/// allocated to active sessions. Prevents over-allocation when multiple
+/// EVM sessions are open concurrently.
 
 import Types "Types";
 import HashMap "mo:base/HashMap";
@@ -17,7 +17,7 @@ module {
     amount : Nat;
   };
 
-  // Virtual escrow tracker for EVM session deposits on the canister's shared address.
+  /// Virtual escrow tracker for EVM session deposits on the canister's shared address.
   public class EvmEscrowManager() {
 
     var allocations = HashMap.HashMap<Text, Allocation>(8, Text.equal, Text.hash);

@@ -1,12 +1,12 @@
-// ic402 — EIP-712 typed data hashing for EIP-3009 TransferWithAuthorization.
+/// ic402 — EIP-712 typed data hashing for EIP-3009 TransferWithAuthorization.
 ///
-// Implements the EIP-712 signature verification needed for standard x402
-// payment settlement. The canister verifies that a payer's signature
-// authorizes a USDC transfer, then executes it on-chain.
+/// Implements the EIP-712 signature verification needed for standard x402
+/// payment settlement. The canister verifies that a payer's signature
+/// authorizes a USDC transfer, then executes it on-chain.
 ///
-// References:
-//   EIP-712: https://eips.ethereum.org/EIPS/eip-712
-//   EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
+/// References:
+///   EIP-712: https://eips.ethereum.org/EIPS/eip-712
+///   EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
 
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
@@ -55,8 +55,8 @@ module {
   // Public API
   // ═══════════════════════════════════════════════════════════════════════
 
-  // Compute the EIP-712 domain separator for a USDC contract.
-  // USDC uses name="USD Coin", version="2" across all chains.
+  /// Compute the EIP-712 domain separator for a USDC contract.
+  /// USDC uses name="USD Coin", version="2" across all chains.
   public func usdcDomainSeparator(chainId : Nat, tokenAddress : [Nat8]) : [Nat8] {
     // keccak256(abi.encode(typeHash, nameHash, versionHash, chainId, verifyingContract))
     let encoded = abiEncodeWords([
@@ -69,7 +69,7 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  // Compute the EIP-712 domain separator from custom name/version (non-USDC tokens).
+  /// Compute the EIP-712 domain separator from custom name/version (non-USDC tokens).
   public func domainSeparator(name : Text, version : Text, chainId : Nat, tokenAddress : [Nat8]) : [Nat8] {
     let nameHash = EvmAddress.keccak256Text(name);
     let versionHash = EvmAddress.keccak256Text(version);
@@ -83,7 +83,7 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  // Hash the TransferWithAuthorization struct.
+  /// Hash the TransferWithAuthorization struct.
   public func hashTransferWithAuthorization(
     from : [Nat8],    // 20 bytes
     to : [Nat8],      // 20 bytes
@@ -104,21 +104,21 @@ module {
     EvmAddress.keccak256(encoded);
   };
 
-  // Compute the full EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
+  /// Compute the full EIP-712 digest: keccak256("\x19\x01" || domainSeparator || structHash)
   public func digest(domainSep : [Nat8], structHash : [Nat8]) : [Nat8] {
     let prefix : [Nat8] = [0x19, 0x01];
     let middle = Array.append<Nat8>(prefix, domainSep);
     EvmAddress.keccak256(Array.append<Nat8>(middle, structHash));
   };
 
-  // Get the TransferWithAuthorization type hash.
+  /// Get the TransferWithAuthorization type hash.
   public func transferWithAuthorizationTypeHash() : [Nat8] {
     TRANSFER_WITH_AUTH_TYPEHASH;
   };
 
-  // Recover the signer of a TransferWithAuthorization EIP-712 signature.
-  // Uses custom token name/version for the domain separator (handles testnet USDC).
-  // Returns the recovered signer address (20 bytes) or null if verification fails.
+  /// Recover the signer of a TransferWithAuthorization EIP-712 signature.
+  /// Uses custom token name/version for the domain separator (handles testnet USDC).
+  /// Returns the recovered signer address (20 bytes) or null if verification fails.
   public func recoverAuthorizationSigner(
     chainId : Nat,
     tokenAddress : [Nat8],
@@ -155,8 +155,8 @@ module {
     };
   };
 
-  // Verify that the authorization is signed by the `from` address.
-  // Accepts optional token name/version for testnet USDC domain separators.
+  /// Verify that the authorization is signed by the `from` address.
+  /// Accepts optional token name/version for testnet USDC domain separators.
   public func verifyAuthorization(
     chainId : Nat,
     tokenAddress : [Nat8],
@@ -178,7 +178,7 @@ module {
     };
   };
 
-  // Function selector for transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)
+  /// Function selector for transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)
   public func transferWithAuthorizationSelector() : [Nat8] {
     // 0xe3ee160e
     [0xe3, 0xee, 0x16, 0x0e];

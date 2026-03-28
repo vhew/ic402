@@ -21,5 +21,5 @@ pnpm setup:local                      # deploy locally (full setup)
 - `example/main.mo` — Example canister using the library
 - `example/client/` — Interactive demo client
 - `packages/client/` — TypeScript client SDK (@ic402/client)
-- `integration/mcp/` — MCP server for AI agent access
+- `integrations/mcp/` — MCP server for AI agent access
 - `scripts/` — Dev tooling (setup, version bump, deployment)

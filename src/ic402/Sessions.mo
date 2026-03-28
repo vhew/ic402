@@ -1,4 +1,4 @@
-// ic402 — Session subsystem (escrow deposits, cumulative vouchers, lifecycle).
+/// ic402 — Session subsystem (escrow deposits, cumulative vouchers, lifecycle).
 import Types "Types";
 import Policy "Policy";
 import Escrow "Escrow";
@@ -24,10 +24,10 @@ import Debug "mo:base/Debug";
 
 module {
 
-  // Encode a voucher payload as CBOR for Ed25519 signature verification.
-  // Must match the client-side encodeVoucherPayload() exactly:
-  // CBOR array(3): [text(sessionId), uint(cumulativeAmount), uint(sequence)]
-  // H-2: Returns null if cumulativeAmount or sequence exceeds Nat64 range.
+  /// Encode a voucher payload as CBOR for Ed25519 signature verification.
+  /// Must match the client-side encodeVoucherPayload() exactly:
+  /// CBOR array(3): [text(sessionId), uint(cumulativeAmount), uint(sequence)]
+  /// H-2: Returns null if cumulativeAmount or sequence exceeds Nat64 range.
   public func encodeVoucherPayload(sessionId : Text, cumulativeAmount : Nat, sequence : Nat) : ?[Nat8] {
     // H-2: Bounds check before Nat64 conversion to prevent trap
     let maxNat64 : Nat = 18_446_744_073_709_551_615;
@@ -63,7 +63,7 @@ module {
     ?result;
   };
 
-  // Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
+  /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
   public class Sessions(
     canisterPrincipal : Principal,
     config : Types.Config,

@@ -35,7 +35,7 @@ example/            Example canister + interactive demo
   main.mo           Reference implementation (all features)
   client/           Interactive demo client
 packages/client/    TypeScript SDK published to npm as @ic402/client
-integration/mcp/    MCP server for AI agent access
+integrations/mcp/   MCP server for AI agent access
 contracts/src/      IdentityRegistry.sol (ERC-8004 on Base)
 test/               Motoko unit tests + TypeScript integration tests
 scripts/            Dev tooling (setup, version bump)

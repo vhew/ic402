@@ -1,4 +1,4 @@
-// ic402 — Access grant subsystem (HMAC-based content delivery tokens).
+/// ic402 — Access grant subsystem (HMAC-based content delivery tokens).
 import Types "Types";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
@@ -17,7 +17,7 @@ import Debug "mo:base/Debug";
 
 module {
 
-  // HMAC-based access grant manager for content delivery tokens.
+  /// HMAC-based access grant manager for content delivery tokens.
   public class Grants(canisterPrincipal : Principal) {
 
     var grantCounter : Nat = 0;

@@ -1,4 +1,4 @@
-// ic402 — Shared internal utilities (not exported via lib.mo).
+/// ic402 — Shared internal utilities (not exported via lib.mo).
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
@@ -10,7 +10,7 @@ import Iter "mo:base/Iter";
 
 module {
 
-  // Encode a Nat as a big-endian 8-byte array.
+  /// Encode a Nat as a big-endian 8-byte array.
   public func natToBytes8(n : Nat) : [Nat8] {
     var value = n;
     let bytes = Array.init<Nat8>(8, 0);
@@ -24,7 +24,7 @@ module {
     Array.freeze(bytes);
   };
 
-  // Convert ASCII upper-case letters to lower-case.
+  /// Convert ASCII upper-case letters to lower-case.
   public func toLower(t : Text) : Text {
     Text.map(t, func(c : Char) : Char {
       if (c >= 'A' and c <= 'Z') {
@@ -33,8 +33,8 @@ module {
     });
   };
 
-  // Escape special characters for embedding in a JSON string value.
-  // Prevents JSON injection when user-controlled data is interpolated into JSON.
+  /// Escape special characters for embedding in a JSON string value.
+  /// Prevents JSON injection when user-controlled data is interpolated into JSON.
   public func escapeJsonString(s : Text) : Text {
     var result = "";
     for (c in s.chars()) {
@@ -56,8 +56,8 @@ module {
     result;
   };
 
-  // Extract a JSON string field value by key.
-  // Handles escaped quotes inside values.
+  /// Extract a JSON string field value by key.
+  /// Handles escaped quotes inside values.
   public func extractJsonField(json : Text, field : Text) : Text {
     let needle = "\"" # field # "\":\"";
     let chars = Iter.toArray(json.chars());
@@ -111,8 +111,8 @@ module {
     "";
   };
 
-  // Extract a JSON numeric field value by key (unquoted number).
-  // Handles both "field":123 and "field":"123" (quoted number string).
+  /// Extract a JSON numeric field value by key (unquoted number).
+  /// Handles both "field":123 and "field":"123" (quoted number string).
   public func extractJsonNatField(json : Text, field : Text) : Nat {
     // Try unquoted: "field":123
     let needle1 = "\"" # field # "\":";
@@ -161,7 +161,7 @@ module {
     else { 255 : Nat8 };             // padding or invalid
   };
 
-  // Decode a base64-encoded string to bytes. Returns empty on invalid input.
+  /// Decode a base64-encoded string to bytes. Returns empty on invalid input.
   public func base64Decode(encoded : Text) : [Nat8] {
     let chars = Iter.toArray(encoded.chars());
     let buf = Buffer.Buffer<Nat8>(chars.size() * 3 / 4);
@@ -185,7 +185,7 @@ module {
     Buffer.toArray(buf);
   };
 
-  // Encode bytes as base64.
+  /// Encode bytes as base64.
   public func base64Encode(data : [Nat8]) : Text {
     let b64 = Iter.toArray(base64Chars.chars());
     var result = "";

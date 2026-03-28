@@ -1,8 +1,8 @@
-// ic402 — Deterministic nonce generation and replay protection.
+/// ic402 — Deterministic nonce generation and replay protection.
 ///
-// Each nonce is bound to a payment amount, network, and token at generation time.
-// Settlement uses a lock/consume/unlock pattern to prevent
-// nonce waste on failed payments while blocking double-spend.
+/// Each nonce is bound to a payment amount, network, and token at generation time.
+/// Settlement uses a lock/consume/unlock pattern to prevent
+/// nonce waste on failed payments while blocking double-spend.
 import Types "Types";
 import HashMap "mo:base/HashMap";
 import Blob "mo:base/Blob";
@@ -18,7 +18,7 @@ module {
 
   let MAX_NONCES : Nat = 10_000;
 
-  // Deterministic nonce generator with lock/consume/unlock replay protection.
+  /// Deterministic nonce generator with lock/consume/unlock replay protection.
   public class NonceManager(canisterPrincipal : Principal) {
 
     var counter : Nat = 0;

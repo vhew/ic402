@@ -5,7 +5,7 @@ set -euo pipefail
 # version.sh — Bump the ic402 version across all packages
 #
 # mops.toml is the single source of truth. This script bumps it and syncs
-# the version to packages/client/package.json and integration/mcp/package.json.
+# the version to packages/client/package.json and integrations/mcp/package.json.
 #
 # Usage:
 #   ./scripts/version.sh patch          # 0.1.0 → 0.1.1
@@ -65,11 +65,11 @@ npm version "$NEW" --no-git-tag-version --allow-same-version >/dev/null 2>&1
 cd "$PROJECT_ROOT"
 echo "  packages/client/package.json:      $NEW"
 
-# 3. integration/mcp/package.json
-cd integration/mcp
+# 3. integrations/mcp/package.json
+cd integrations/mcp
 npm version "$NEW" --no-git-tag-version --allow-same-version >/dev/null 2>&1
 cd "$PROJECT_ROOT"
-echo "  integration/mcp/package.json:      $NEW"
+echo "  integrations/mcp/package.json:      $NEW"
 
 echo ""
 echo "  Version bumped to $NEW."
