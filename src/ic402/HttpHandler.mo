@@ -55,14 +55,17 @@ module {
   };
 
   /// Build a 402 Payment Required HTTP response.
+  /// Includes both x402 v1 (JSON body) and x402 v2 (base64 payment-required header).
   public func http402(requirements : [Types.PaymentRequirement]) : Types.HttpResponse {
     let body = paymentRequiredJson(requirements);
+    let base64Header = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(body)));
     {
       status_code = 402;
       headers = [
         ("Content-Type", "application/json"),
         ("Access-Control-Allow-Origin", "*"),
         ("WWW-Authenticate", "Payment realm=\"ic402\", method=\"x402\""),
+        ("payment-required", base64Header),
       ];
       body = Text.encodeUtf8(body);
       upgrade = null;
@@ -115,6 +118,19 @@ module {
       headers = [];
       body = Blob.fromArray([]);
       upgrade = ?true;
+    };
+  };
+
+  /// Build a 202 Accepted JSON response (for async service requests).
+  public func http202Json(json : Text) : Types.HttpResponse {
+    {
+      status_code = 202;
+      headers = [
+        ("Content-Type", "application/json"),
+        ("Access-Control-Allow-Origin", "*"),
+      ];
+      body = Text.encodeUtf8(json);
+      upgrade = null;
     };
   };
 
