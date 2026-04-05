@@ -1,0 +1,26 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"convert\", \"default\", \"self_authenticating\", \"serde\"]",
+  "declared_features": "[\"all\", \"arbitrary\", \"convert\", \"default\", \"rangemap\", \"self_authenticating\", \"serde\"]",
+  "target": 16029448000508814330,
+  "profile": 12287431604082418282,
+  "path": 10562780246302002229,
+  "deps": [
+    [557536748061756522, "data_encoding", false, 14593920606241023992],
+    [7312356825837975969, "crc32fast", false, 17847207539199973356],
+    [8008191657135824715, "thiserror", false, 16224842334583236554],
+    [9857275760291862238, "sha2", false, 13122431557288661306],
+    [13548984313718623784, "serde", false, 3771124155442493973]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/ic_principal-938e4495eb4db8eb/dep-lib-ic_principal",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

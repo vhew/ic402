@@ -1,0 +1,23 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"archive\", \"coff\", \"elf\", \"macho\", \"pe\", \"read\", \"read_core\", \"std\", \"unaligned\", \"xcoff\"]",
+  "declared_features": "[\"all\", \"alloc\", \"archive\", \"build\", \"build_core\", \"cargo-all\", \"coff\", \"compression\", \"core\", \"default\", \"doc\", \"elf\", \"macho\", \"pe\", \"read\", \"read_core\", \"rustc-dep-of-std\", \"std\", \"unaligned\", \"unstable\", \"unstable-all\", \"wasm\", \"write\", \"write_core\", \"write_std\", \"xcoff\"]",
+  "target": 5743048264439000431,
+  "profile": 3045928984058890527,
+  "path": 16388517272220636485,
+  "deps": [
+    [1363051979936526615, "memchr", false, 15190941138140573123],
+    [16932210417220992785, "build_script_build", false, 7335808878599573872]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/object-9625adcbd90abcf3/dep-lib-object",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

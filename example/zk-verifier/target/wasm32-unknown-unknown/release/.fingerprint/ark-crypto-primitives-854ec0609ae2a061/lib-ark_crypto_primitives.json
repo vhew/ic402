@@ -1,0 +1,34 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"merlin\", \"snark\", \"sponge\"]",
+  "declared_features": "[\"ark-r1cs-std\", \"commitment\", \"crh\", \"default\", \"encryption\", \"hashbrown\", \"merkle_tree\", \"merlin\", \"parallel\", \"prf\", \"print-trace\", \"r1cs\", \"rayon\", \"signature\", \"snark\", \"sponge\", \"std\", \"tracing\"]",
+  "target": 12232848036435804882,
+  "profile": 12693162527509728243,
+  "path": 8545511268423071555,
+  "deps": [
+    [647417929892486539, "ark_serialize", false, 8021129336766807601],
+    [966925859616469517, "ahash", false, 8753713252125795780],
+    [5502062331616315784, "ark_ff", false, 7870018034066841097],
+    [8700459469608572718, "blake2", false, 13210230924597446620],
+    [9234201994497484447, "merlin", false, 5777430006890737937],
+    [9857275760291862238, "sha2", false, 13122431557288661306],
+    [9889883805127379877, "ark_relations", false, 15045568473764887964],
+    [13859769749131231458, "derivative", false, 13550936499156119637],
+    [14614447123944235085, "ark_crypto_primitives_macros", false, 9691853187425740674],
+    [15175849579008230926, "ark_std", false, 5124121494838903626],
+    [16201565495264925093, "ark_snark", false, 16966575987305582359],
+    [17475753849556516473, "digest", false, 2630741504303762576],
+    [17532637862849517517, "ark_ec", false, 14398049302552866492]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/ark-crypto-primitives-854ec0609ae2a061/dep-lib-ark_crypto_primitives",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

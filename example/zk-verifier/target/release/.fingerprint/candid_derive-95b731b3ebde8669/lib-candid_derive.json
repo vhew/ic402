@@ -1,0 +1,25 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 16264136799188349570,
+  "profile": 11618883924899499041,
+  "path": 11878698893743001207,
+  "deps": [
+    [4289358735036141001, "proc_macro2", false, 18336094310294962678],
+    [10420560437213941093, "syn", false, 7463211751775463153],
+    [13111758008314797071, "quote", false, 17730237820858193237],
+    [17917672826516349275, "lazy_static", false, 18111238364269837164]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/candid_derive-95b731b3ebde8669/dep-lib-candid_derive",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

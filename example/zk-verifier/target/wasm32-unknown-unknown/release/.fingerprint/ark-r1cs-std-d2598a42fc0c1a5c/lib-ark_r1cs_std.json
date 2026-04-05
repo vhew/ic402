@@ -1,0 +1,30 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[\"default\", \"parallel\", \"std\"]",
+  "target": 4105438903574170562,
+  "profile": 4111207465590325724,
+  "path": 4089551715139157247,
+  "deps": [
+    [213085045802986828, "educe", false, 13608840060440046158],
+    [5157631553186200874, "num_traits", false, 6846767177931627119],
+    [5502062331616315784, "ark_ff", false, 870336493226176561],
+    [9889883805127379877, "ark_relations", false, 17441297937404195543],
+    [12528732512569713347, "num_bigint", false, 4919361385472507722],
+    [14757622794040968908, "tracing", false, 1624395890043442907],
+    [15175849579008230926, "ark_std", false, 12180289774998714431],
+    [16795989132585092538, "num_integer", false, 7770963668112629369],
+    [17532637862849517517, "ark_ec", false, 10669912249627532201]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/ark-r1cs-std-d2598a42fc0c1a5c/dep-lib-ark_r1cs_std",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

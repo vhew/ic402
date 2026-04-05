@@ -1,0 +1,24 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 12104906487068842759,
+  "profile": 3033921117576893,
+  "path": 7135000446201114035,
+  "deps": [
+    [4289358735036141001, "proc_macro2", false, 16038926369204446424],
+    [10420560437213941093, "syn", false, 17083916017249948019],
+    [13111758008314797071, "quote", false, 16507903515669698841]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/ark-serialize-derive-b9a4643e10d8df2b/dep-lib-ark_serialize_derive",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

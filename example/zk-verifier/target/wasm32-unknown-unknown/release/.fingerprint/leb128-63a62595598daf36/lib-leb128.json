@@ -1,0 +1,20 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[\"nightly\"]",
+  "target": 3068380888435669025,
+  "profile": 12693162527509728243,
+  "path": 16420772195252372631,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/leb128-63a62595598daf36/dep-lib-leb128",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

@@ -1,0 +1,25 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"debug_template\"]",
+  "declared_features": "[\"debug_template\"]",
+  "target": 3601570495064455120,
+  "profile": 3033921117576893,
+  "path": 14219635573413157467,
+  "deps": [
+    [2713742371683562785, "syn", false, 728829424510049775],
+    [4289358735036141001, "proc_macro2", false, 16038926369204446424],
+    [12170264697963848012, "either", false, 11238666054186528669],
+    [13111758008314797071, "quote", false, 16507903515669698841]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/binread_derive-3bbf3e619549dfaf/dep-lib-binread_derive",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

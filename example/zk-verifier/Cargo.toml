@@ -1,0 +1,35 @@
+[package]
+name = "zk-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Reference Groth16 ZK proof verifier for ic402 service marketplace"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+ic-cdk = "0.17"
+ic-cdk-macros = "0.17"
+candid = "0.10"
+serde = "1"
+ark-groth16 = { version = "0.5", default-features = false }
+ark-bn254 = { version = "0.5", default-features = false, features = ["curve"] }
+ark-serialize = { version = "0.5", default-features = false }
+ark-ec = { version = "0.5", default-features = false }
+ark-ff = { version = "0.5", default-features = false }
+ark-relations = { version = "0.5", default-features = false }
+ark-std = { version = "0.5" }
+ark-snark = { version = "0.5", default-features = false }
+ark-crypto-primitives = { version = "0.5", default-features = false, features = ["r1cs"] }
+
+[[example]]
+name = "gen_fixtures"
+path = "examples/gen_fixtures.rs"
+
+[profile.release]
+opt-level = "z"       # optimize for size
+lto = true
+strip = true
+codegen-units = 1

@@ -1,0 +1,20 @@
+/// ic402 Reference ZK Verifier — Candid Interface
+///
+/// Deploy this canister and pass its principal to ic402's ServiceRegistry
+/// when registering a service with #ZkGroth16 verification.
+
+type VerifyResult = variant {
+  ok;
+  err : text;
+};
+
+service : {
+  /// Verify a Groth16 proof over the BN254 curve.
+  /// proof: arkworks-serialized compressed Groth16 proof (~192 bytes)
+  /// public_inputs: vec of arkworks-serialized Fr field elements (~32 bytes each)
+  /// verification_key: arkworks-serialized compressed VerifyingKey
+  verify_groth16 : (proof : blob, public_inputs : vec blob, verification_key : blob) -> (VerifyResult);
+
+  /// Health check.
+  get_info : () -> (text) query;
+}

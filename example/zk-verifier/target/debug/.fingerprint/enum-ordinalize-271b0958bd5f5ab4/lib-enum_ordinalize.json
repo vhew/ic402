@@ -1,0 +1,20 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"derive\"]",
+  "declared_features": "[\"default\", \"derive\", \"nightly-test\", \"traits\"]",
+  "target": 12130211267597522862,
+  "profile": 3033921117576893,
+  "path": 2188495469878788855,
+  "deps": [[8086632271208085971, "enum_ordinalize_derive", false, 12648688159931239160]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/enum-ordinalize-271b0958bd5f5ab4/dep-lib-enum_ordinalize",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

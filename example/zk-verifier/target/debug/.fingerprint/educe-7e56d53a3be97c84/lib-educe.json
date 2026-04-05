@@ -1,0 +1,25 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"Clone\", \"Copy\", \"Debug\", \"Default\", \"Deref\", \"DerefMut\", \"Eq\", \"Hash\", \"Into\", \"Ord\", \"PartialEq\", \"PartialOrd\", \"default\"]",
+  "declared_features": "[\"Clone\", \"Copy\", \"Debug\", \"Default\", \"Deref\", \"DerefMut\", \"Eq\", \"Hash\", \"Into\", \"Ord\", \"PartialEq\", \"PartialOrd\", \"default\", \"full\"]",
+  "target": 9536858342250534546,
+  "profile": 3033921117576893,
+  "path": 14495917728578141990,
+  "deps": [
+    [754835383512246836, "enum_ordinalize", false, 11393633947922806564],
+    [4289358735036141001, "proc_macro2", false, 16038926369204446424],
+    [10420560437213941093, "syn", false, 17083916017249948019],
+    [13111758008314797071, "quote", false, 16507903515669698841]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/educe-7e56d53a3be97c84/dep-lib-educe",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

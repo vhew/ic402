@@ -1,0 +1,27 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[\"default\", \"parallel\", \"rayon\", \"std\"]",
+  "target": 5534083630978003525,
+  "profile": 5347358027863023418,
+  "path": 17823490080563045639,
+  "deps": [
+    [213085045802986828, "educe", false, 4475097086024493058],
+    [647417929892486539, "ark_serialize", false, 2378208679046743706],
+    [966925859616469517, "ahash", false, 8994693016019519992],
+    [5502062331616315784, "ark_ff", false, 202039095427539780],
+    [8921336173939679069, "hashbrown", false, 15937955079639158916],
+    [15175849579008230926, "ark_std", false, 9645753328032289719]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/ark-poly-134b89c5739897c3/dep-lib-ark_poly",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

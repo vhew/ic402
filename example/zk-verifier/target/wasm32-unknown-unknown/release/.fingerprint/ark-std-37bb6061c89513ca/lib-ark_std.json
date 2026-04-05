@@ -1,0 +1,23 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"default\", \"std\"]",
+  "declared_features": "[\"colored\", \"default\", \"getrandom\", \"parallel\", \"print-trace\", \"rayon\", \"std\"]",
+  "target": 12663305301696838408,
+  "profile": 12693162527509728243,
+  "path": 17949003527087756368,
+  "deps": [
+    [5157631553186200874, "num_traits", false, 6846767177931627119],
+    [13208667028893622512, "rand", false, 5047125005490306599]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/ark-std-37bb6061c89513ca/dep-lib-ark_std",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

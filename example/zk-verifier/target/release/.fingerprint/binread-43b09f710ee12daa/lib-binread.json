@@ -1,0 +1,24 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[\"debug_template\", \"default\", \"lazy_static\", \"std\"]",
+  "declared_features": "[\"array-init\", \"const_generics\", \"debug_template\", \"default\", \"lazy_static\", \"std\"]",
+  "target": 10459563856041922329,
+  "profile": 17984201634715228204,
+  "path": 7482774215251390488,
+  "deps": [
+    [14156967978702956262, "rustversion", false, 2226040271332197599],
+    [15154758032736283129, "binread_derive", false, 15819868080668934914],
+    [17917672826516349275, "lazy_static", false, 18111238364269837164]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/binread-43b09f710ee12daa/dep-lib-binread",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

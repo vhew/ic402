@@ -1,0 +1,23 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 2076610149121731521,
+  "profile": 17984201634715228204,
+  "path": 9273368707897440834,
+  "deps": [
+    [10420560437213941093, "syn", false, 7256486797029443515],
+    [13111758008314797071, "quote", false, 17730237820858193237]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/ark-ff-asm-89979d31927dd375/dep-lib-ark_ff_asm",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

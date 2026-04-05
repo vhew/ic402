@@ -1,0 +1,20 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 1824572432972038870,
+  "profile": 12693162527509728243,
+  "path": 5848032968321761938,
+  "deps": [[10387476471412473778, "build_script_build", false, 13473098773425442899]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "wasm32-unknown-unknown/release/.fingerprint/ic-cdk-executor-cfdb8751d1581689/dep-lib-ic_cdk_executor",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 14682669768258224367
+}

@@ -1,0 +1,24 @@
+{
+  "rustc": 17940977064402226622,
+  "features": "[]",
+  "declared_features": "[\"termcolor\"]",
+  "target": 15181268938956577436,
+  "profile": 5347358027863023418,
+  "path": 9956799956224875494,
+  "deps": [
+    [10192538278433647957, "typed_arena", false, 12722703351775068333],
+    [11279921689796057170, "arrayvec", false, 298473763523257914],
+    [16173631546844793784, "unicode_width", false, 5800744407270024902]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/pretty-41a251072f7bea64/dep-lib-pretty",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}
