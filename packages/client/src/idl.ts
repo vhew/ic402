@@ -212,6 +212,98 @@ const ContentStoreResult = IDL.Variant({
   chunkTooLarge: IDL.Nat,
 });
 
+// ── Remote Signer (sign-only mode) ──
+
+const SignedTransaction = IDL.Record({
+  rawTx: IDL.Text,
+  txHash: IDL.Text,
+});
+
+const SignedAuthorizationFields = IDL.Record({
+  from: IDL.Text,
+  to: IDL.Text,
+  value: IDL.Nat,
+  validAfter: IDL.Nat,
+  validBefore: IDL.Nat,
+  nonce: IDL.Text,
+  signature: IDL.Text,
+});
+
+const SignedAuthorization = IDL.Record({
+  header: IDL.Text,
+  paidAmount: IDL.Nat,
+  authorization: SignedAuthorizationFields,
+});
+
+const SignedTxResult = IDL.Variant({ ok: SignedTransaction, err: IDL.Text });
+const SignedAuthResult = IDL.Variant({ ok: SignedAuthorization, err: IDL.Text });
+
+const SignedTypedDataRecord = IDL.Record({
+  signature: IDL.Text,
+  signer: IDL.Text,
+  digest: IDL.Text,
+  v: IDL.Nat8,
+  r: IDL.Text,
+  s: IDL.Text,
+});
+const SignedTypedDataResult = IDL.Variant({ ok: SignedTypedDataRecord, err: IDL.Text });
+
+// ── Service Marketplace ──
+
+const ServiceType = IDL.Variant({ Sync: IDL.Null, Async: IDL.Null });
+const PricingScheme = IDL.Variant({ Exact: IDL.Nat, Upto: IDL.Nat, Session: IDL.Null });
+const VerificationMethod = IDL.Variant({
+  ZkGroth16: IDL.Record({ verificationKey: IDL.Vec(IDL.Nat8), verifierCanister: IDL.Principal }),
+  HashMatch: IDL.Null,
+  BuyerConfirm: IDL.Record({ disputeWindowSeconds: IDL.Nat }),
+  AutoSettle: IDL.Null,
+});
+const ServiceDeliveryMethod = IDL.Variant({ Poll: IDL.Null, Callback: IDL.Null, Both: IDL.Null });
+
+const ServiceDef = IDL.Record({
+  id: IDL.Text,
+  name: IDL.Text,
+  description: IDL.Text,
+  serviceType: ServiceType,
+  pricing: PricingScheme,
+  verification: VerificationMethod,
+  delivery: ServiceDeliveryMethod,
+  timeout: IDL.Nat,
+  operatorId: IDL.Principal,
+  enabled: IDL.Bool,
+  createdAt: IDL.Int,
+});
+
+const JobStatusVariant = IDL.Variant({
+  Pending: IDL.Null,
+  Assigned: IDL.Null,
+  Computing: IDL.Null,
+  Submitted: IDL.Null,
+  Verified: IDL.Null,
+  Settled: IDL.Null,
+  Disputed: IDL.Null,
+  Expired: IDL.Null,
+  Refunded: IDL.Null,
+});
+
+const JobRecord = IDL.Record({
+  id: IDL.Text,
+  serviceId: IDL.Text,
+  buyer: IDL.Text,
+  operator: IDL.Opt(IDL.Principal),
+  params: IDL.Vec(IDL.Nat8),
+  paymentReceiptId: IDL.Text,
+  amount: IDL.Nat,
+  actualCost: IDL.Opt(IDL.Nat),
+  status: JobStatusVariant,
+  result: IDL.Opt(IDL.Vec(IDL.Nat8)),
+  proof: IDL.Opt(IDL.Vec(IDL.Nat8)),
+  createdAt: IDL.Int,
+  expiresAt: IDL.Int,
+  completedAt: IDL.Opt(IDL.Int),
+  deliveryCallback: IDL.Opt(IDL.Text),
+});
+
 export const exampleIdlFactory = () =>
   IDL.Service({
     // Paid service
@@ -238,52 +330,71 @@ export const exampleIdlFactory = () =>
     getAgentId: IDL.Func([], [IDL.Opt(IDL.Nat)], ['query']),
     getEvmPublicKey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
     getEvmAddress: IDL.Func([], [IDL.Text], []),
-    registerAgent: IDL.Func(
-      [],
-      [IDL.Variant({ ok: IDL.Record({ tokenId: IDL.Nat, txHash: IDL.Text }), err: IDL.Text })],
-      [],
-    ),
-    // x402 Client
-    fetchX402: IDL.Func(
-      [IDL.Text],
-      [
-        IDL.Variant({
-          ok: IDL.Record({
-            status: IDL.Nat,
-            body: IDL.Text,
-            paidAmount: IDL.Nat,
-            txHash: IDL.Text,
-          }),
-          free: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
-          paymentFailed: IDL.Text,
-          httpError: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
-          transientError: IDL.Text,
-        }),
-      ],
-      [],
-    ),
-    fetchX402Post: IDL.Func(
-      [IDL.Text, IDL.Text, IDL.Text],
-      [
-        IDL.Variant({
-          ok: IDL.Record({
-            status: IDL.Nat,
-            body: IDL.Text,
-            paidAmount: IDL.Nat,
-            txHash: IDL.Text,
-          }),
-          free: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
-          paymentFailed: IDL.Text,
-          httpError: IDL.Record({ status: IDL.Nat, body: IDL.Text }),
-          transientError: IDL.Text,
-        }),
-      ],
-      [],
-    ),
     // Admin
     verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
+    // Remote signer: sign-only endpoints (client broadcasts)
+    signX402Payment: IDL.Func(
+      [IDL.Nat, IDL.Text, IDL.Text, IDL.Nat, IDL.Text, IDL.Text],
+      [SignedAuthResult],
+      [],
+    ),
+    signErc20Transfer: IDL.Func(
+      [IDL.Nat, IDL.Text, IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat, IDL.Nat],
+      [SignedTxResult],
+      [],
+    ),
+    signEthTransfer: IDL.Func(
+      [IDL.Nat, IDL.Text, IDL.Nat, IDL.Nat, IDL.Nat, IDL.Nat, IDL.Nat],
+      [SignedTxResult],
+      [],
+    ),
+    signAgentRegistration: IDL.Func([IDL.Nat, IDL.Nat, IDL.Nat], [SignedTxResult], []),
+    // EIP-712 generic signing
+    signTypedData: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [SignedTypedDataResult], []),
+    keccak256: IDL.Func([IDL.Vec(IDL.Nat8)], [IDL.Vec(IDL.Nat8)], ['query']),
+    // Service marketplace
+    registerService: IDL.Func(
+      [
+        IDL.Text,
+        IDL.Text,
+        ServiceType,
+        PricingScheme,
+        IDL.Text,
+        IDL.Opt(IDL.Text),
+        IDL.Opt(IDL.Vec(IDL.Nat8)),
+        ServiceDeliveryMethod,
+        IDL.Nat,
+      ],
+      [IDL.Variant({ ok: IDL.Text, err: IDL.Text })],
+      [],
+    ),
+    enableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
+    disableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
+    listServices: IDL.Func([], [IDL.Vec(ServiceDef)], ['query']),
+    submitServiceRequest: IDL.Func(
+      [IDL.Text, IDL.Vec(IDL.Nat8), IDL.Opt(PaymentSignature)],
+      [
+        IDL.Variant({
+          paymentRequired: IDL.Vec(PaymentRequirement),
+          ok: IDL.Record({ jobId: IDL.Text }),
+          error: IDL.Text,
+        }),
+      ],
+      [],
+    ),
+    claimJob: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
+    submitJobResult: IDL.Func(
+      [IDL.Text, IDL.Vec(IDL.Nat8), IDL.Opt(IDL.Vec(IDL.Nat8)), IDL.Opt(IDL.Nat)],
+      [IDL.Variant({ ok: IDL.Null, err: IDL.Text })],
+      [],
+    ),
+    confirmJob: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
+    disputeJob: IDL.Func([IDL.Text, IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
+    getJobStatus: IDL.Func([IDL.Text], [IDL.Opt(JobStatusVariant)], ['query']),
+    getJob: IDL.Func([IDL.Text], [IDL.Opt(JobRecord)], ['query']),
+    getJobResult: IDL.Func([IDL.Text], [IDL.Opt(IDL.Vec(IDL.Nat8))], ['query']),
   });
 
 export {
@@ -306,4 +417,8 @@ export {
   ContentStoreResult,
   ServiceEntry,
   AgentCard,
+  SignedTransaction,
+  SignedAuthorization,
+  SignedTxResult,
+  SignedAuthResult,
 };

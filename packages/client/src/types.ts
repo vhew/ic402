@@ -129,3 +129,92 @@ export type ContentStoreResult =
   | { chunkNotFound: bigint }
   | { contentAlreadyExists: null }
   | { chunkTooLarge: bigint };
+
+// ── Remote Signer (sign-only mode) ──
+
+export interface SignedTransaction {
+  rawTx: string; // 0x-prefixed hex RLP-encoded signed tx
+  txHash: string; // 0x-prefixed hash for tracking
+}
+
+export interface SignedAuthorization {
+  header: string; // Base64-encoded x402 v2 payment header
+  paidAmount: bigint;
+  authorization: {
+    from: string;
+    to: string;
+    value: bigint;
+    validAfter: bigint;
+    validBefore: bigint;
+    nonce: string; // hex
+    signature: string; // hex (r || s || v)
+  };
+}
+
+// ── EIP-712 Generic Signing ──
+
+export interface SignedTypedData {
+  signature: string; // 0x-prefixed hex (r || s || v)
+  signer: string; // signer's EVM address
+  digest: string; // the EIP-712 digest that was signed
+  v: number;
+  r: string; // 0x-prefixed hex, 32 bytes
+  s: string; // 0x-prefixed hex, 32 bytes
+}
+
+// ── Service Marketplace ──
+
+export type ServiceType = { Sync: null } | { Async: null };
+
+export type PricingScheme = { Exact: bigint } | { Upto: bigint } | { Session: null };
+
+export type VerificationMethod =
+  | { ZkGroth16: { verificationKey: Uint8Array; verifierCanister: string } }
+  | { HashMatch: null }
+  | { BuyerConfirm: { disputeWindowSeconds: bigint } }
+  | { AutoSettle: null };
+
+export type ServiceDeliveryMethod = { Poll: null } | { Callback: null } | { Both: null };
+
+export interface ServiceDefinition {
+  id: string;
+  name: string;
+  description: string;
+  serviceType: ServiceType;
+  pricing: PricingScheme;
+  verification: VerificationMethod;
+  delivery: ServiceDeliveryMethod;
+  timeout: bigint;
+  operatorId: string;
+  enabled: boolean;
+  createdAt: bigint;
+}
+
+export type JobStatus =
+  | { Pending: null }
+  | { Assigned: null }
+  | { Computing: null }
+  | { Submitted: null }
+  | { Verified: null }
+  | { Settled: null }
+  | { Disputed: null }
+  | { Expired: null }
+  | { Refunded: null };
+
+export interface Job {
+  id: string;
+  serviceId: string;
+  buyer: string;
+  operator: [] | [string];
+  params: Uint8Array;
+  paymentReceiptId: string;
+  amount: bigint;
+  actualCost: [] | [bigint];
+  status: JobStatus;
+  result: [] | [Uint8Array];
+  proof: [] | [Uint8Array];
+  createdAt: bigint;
+  expiresAt: bigint;
+  completedAt: [] | [bigint];
+  deliveryCallback: [] | [string];
+}
