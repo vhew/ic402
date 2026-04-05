@@ -151,7 +151,18 @@ describe('ic402 integration', () => {
     it('upload and list content', async () => {
       if (skip) return;
       const data = new TextEncoder().encode('integration test content');
-      const uploadResult = await actor.uploadContent('int-test-doc', 'text/plain', data);
+      // ContentStore requires encryption seed initialization (async timer).
+      // Poll until ready (seed init depends on raw_rand() which can be slow on local replica).
+      let uploadResult;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          uploadResult = await actor.uploadContent('int-test-doc', 'text/plain', data);
+          break;
+        } catch (e) {
+          if (attempt === 9) throw e;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
       // ok or contentAlreadyExists (from previous run)
       expect('ok' in uploadResult || 'contentAlreadyExists' in uploadResult).toBe(true);
 
@@ -467,8 +478,16 @@ describe('ic402 integration', () => {
 
     it('/content/<id> returns 402 with payment options', async () => {
       if (skip) return;
-      // Upload content first
-      await actor.uploadContent('http-test', 'text/plain', new TextEncoder().encode('test'));
+      // Upload content first (poll until seed initialized)
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await actor.uploadContent('http-test', 'text/plain', new TextEncoder().encode('test'));
+          break;
+        } catch (e) {
+          if (attempt === 9) throw e;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
 
       const response = await fetch(`http://${exampleId}.raw.localhost:4944/content/http-test`);
       expect(response.status).toBe(402);
