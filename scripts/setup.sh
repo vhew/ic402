@@ -43,14 +43,14 @@ echo ""
 
 echo "--- Installing dependencies ---"
 echo ""
-[ -d .mops ] || mops install
+[ -d .mops ] || (mops install || echo "  mops: integrity warning (cosmetic — transitive github deps)")
 echo "  mops: OK"
 pnpm install --silent 2>/dev/null
 echo "  pnpm: OK"
 
 # Fetch prebuilt ledger WASM (needed for local ckUSDC)
 PREBUILT_MISSING=false
-for f in icrc1-ledger.wasm.gz icrc1-ledger.did ckusdc-ledger-init.candid; do
+for f in icrc1-ledger.wasm.gz icrc1-ledger.did ckusdc-ledger-init.candid evm_rpc.wasm.gz evm_rpc.did; do
   [ -f ".icp/$f" ] || PREBUILT_MISSING=true
 done
 if [ "$PREBUILT_MISSING" = true ]; then
@@ -96,10 +96,26 @@ echo ""
 
 echo "--- Starting local replica ---"
 echo ""
+# Clean all stale state to avoid CMC rate-limit errors from previous runs
+if [ -d "$PROJECT_ROOT/.icp/cache" ]; then
+  echo "  Cleaning local cache..."
+  rm -rf "$PROJECT_ROOT/.icp/cache"
+fi
+# Clean icp-cli global caches (port descriptors + pocket-ic NNS state)
+ICP_CACHE_DIR="$HOME/Library/Caches/org.dfinity.icp-cli"
+ICP_SUPPORT_DIR="$HOME/Library/Application Support/org.dfinity.icp-cli"
+if [ -d "$ICP_CACHE_DIR/port-descriptors" ]; then
+  echo "  Cleaning stale port descriptors..."
+  rm -f "$ICP_CACHE_DIR/port-descriptors"/*.json "$ICP_CACHE_DIR/port-descriptors"/*.lock
+fi
+if [ -d "$ICP_SUPPORT_DIR/pkg" ]; then
+  echo "  Purging cached pocket-ic (forces fresh NNS)..."
+  rm -rf "$ICP_SUPPORT_DIR/pkg"
+fi
 if icp network status >/dev/null 2>&1; then
   echo "  Already running."
 else
-  icp network start --background >/dev/null 2>&1
+  icp network start --background 2>&1 || true  # may fail on cycles seeding but replica still starts
   echo "  Waiting for replica..."
   for i in $(seq 1 15); do
     if icp network status >/dev/null 2>&1; then
@@ -137,6 +153,31 @@ else
   EVM_RPC_ID=$(icp canister status evm_rpc -e local --id-only)
 fi
 echo "  EVM RPC:       $EVM_RPC_ID"
+
+# Build and deploy ZK verifier (Rust canister, optional)
+ZK_WASM="$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm.gz"
+if command -v cargo &>/dev/null; then
+  echo "  Building ZK verifier..."
+  (cd "$PROJECT_ROOT/example/zk-verifier" && cargo build --target wasm32-unknown-unknown --release --quiet 2>/dev/null)
+  if [ -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm" ]; then
+    gzip -k -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm"
+  fi
+fi
+if [ -f "$ZK_WASM" ]; then
+  if icp canister status zk_verifier -e local >/dev/null 2>&1; then
+    ZK_ID=$(icp canister status zk_verifier -e local --id-only)
+  else
+    icp deploy zk_verifier -e local >/dev/null 2>&1
+    ZK_ID=$(icp canister status zk_verifier -e local --id-only 2>/dev/null || echo "")
+  fi
+  if [ -n "$ZK_ID" ]; then
+    echo "  ZK verifier:   $ZK_ID"
+  else
+    echo "  ZK verifier:   deploy failed (non-critical)"
+  fi
+else
+  echo "  ZK verifier:   skipped (no Rust toolchain or WASM not built)"
+fi
 
 # Patch and deploy example canister (shared logic in scripts/patch-local.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

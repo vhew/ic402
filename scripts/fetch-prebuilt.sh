@@ -19,9 +19,11 @@ ICP_DIR="$PROJECT_ROOT/.icp"
 
 # --- Version pin (bump when upgrading) ----------------------------------------
 LEDGER_RELEASE="ledger-suite-icrc-2026-02-02"
+EVM_RPC_VERSION="evm_rpc-v2.8.0"
 
 # --- URLs ---------------------------------------------------------------------
 LEDGER_BASE="https://github.com/dfinity/ic/releases/download/${LEDGER_RELEASE}"
+EVM_RPC_BASE="https://github.com/dfinity/evm-rpc-canister/releases/download/${EVM_RPC_VERSION}"
 
 # --- Parse arguments ----------------------------------------------------------
 FORCE=false
@@ -64,7 +66,28 @@ fetch "$LEDGER_BASE/ledger.did" \
       "$ICP_DIR/icrc1-ledger.did" \
       "icrc1-ledger.did"
 
-# --- 2. Ledger init args ------------------------------------------------------
+# --- 2. EVM RPC Canister ------------------------------------------------------
+echo ""
+echo "Fetching EVM RPC Canister (${EVM_RPC_VERSION})..."
+fetch "$EVM_RPC_BASE/evm_rpc.wasm.gz" \
+      "$ICP_DIR/evm_rpc.wasm.gz" \
+      "evm_rpc.wasm.gz"
+fetch "$EVM_RPC_BASE/evm_rpc.did" \
+      "$ICP_DIR/evm_rpc.did" \
+      "evm_rpc.did"
+
+# Generate EVM RPC init args
+EVM_INIT_FILE="$ICP_DIR/evm-rpc-init.candid"
+if [ "$FORCE" = false ] && [ -f "$EVM_INIT_FILE" ]; then
+  echo "  evm-rpc-init.candid: already exists"
+else
+  cat > "$EVM_INIT_FILE" <<'EOF'
+(record { nodesInSubnet = 28 })
+EOF
+  echo "  evm-rpc-init.candid: OK"
+fi
+
+# --- 3. Ledger init args ------------------------------------------------------
 echo ""
 echo "Generating ledger init args..."
 

@@ -27,6 +27,13 @@ canisters:
         candid: .icp/evm_rpc.did
     init_args: .icp/evm-rpc-init.candid
 
+  - name: zk_verifier
+    recipe:
+      type: '@dfinity/prebuilt@v2.0.0'
+      configuration:
+        path: example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm.gz
+        candid: example/zk-verifier/zk_verifier.did
+
 networks:
   - name: local
     mode: managed
@@ -40,7 +47,7 @@ networks:
 environments:
   - name: local
     network: local
-    canisters: [example, ckusdc_ledger, evm_rpc]
+    canisters: [example, ckusdc_ledger, evm_rpc, zk_verifier]
 
   - name: ic
     network: mainnet

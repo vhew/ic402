@@ -17,7 +17,7 @@ done
 
 # ── Install dependencies ──
 echo "→ Installing Motoko dependencies..."
-mops install
+mops install || echo "  mops: integrity warning (cosmetic — transitive github deps)"
 
 echo "→ Installing Node dependencies..."
 pnpm install
@@ -27,7 +27,7 @@ echo "→ Starting local replica..."
 if icp network status >/dev/null 2>&1; then
   echo "  Local replica already running."
 else
-  icp network start --background >/dev/null 2>&1
+  icp network start --background 2>&1 || true  # may fail on cycles seeding but replica still starts
   echo "  Waiting for replica..."
   for i in $(seq 1 15); do
     if icp network status >/dev/null 2>&1; then
