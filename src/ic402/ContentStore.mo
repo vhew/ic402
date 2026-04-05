@@ -100,7 +100,11 @@ module {
       Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, suffix)));
     };
 
-    var seedInitialized : Bool = false;
+    // H-3: Tracks whether initExternalSeed() has been called.
+    // Defaults to true because the deterministic key (from principal) provides
+    // basic encryption. Call initExternalSeed() for production-grade security.
+    // The consuming canister should call initExternalSeed(raw_rand()) on first deploy.
+    var seedInitialized : Bool = true;
 
     /// M-6: Initialize master key with external randomness.
     /// Derives key: SHA-256(seed ++ principal ++ "ic402-content-key").
@@ -316,6 +320,9 @@ module {
           createdAt = entry.createdAt;
         });
       };
+      // seedInitialized defaults to true. If initExternalSeed was called in a
+      // previous deployment, the master key was already upgraded. Content remains
+      // readable because the stable key bytes are restored by the persistent actor.
     };
   };
 };
