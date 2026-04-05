@@ -78,6 +78,21 @@ async function main(): Promise<void> {
         process.exit(1);
       }
     }
+    // Auto-detect local ckUSDC ledger ID
+    if (!process.env.CKUSDC_LEDGER) {
+      try {
+        const { execSync } = await import('node:child_process');
+        process.env.CKUSDC_LEDGER = execSync(
+          'icp canister status ckusdc_ledger -e local --id-only',
+          {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          },
+        ).trim();
+      } catch {
+        /* use default */
+      }
+    }
   }
 
   // Resolve the MCP server entry point

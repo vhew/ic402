@@ -6,7 +6,6 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { keccak_256 } from '@noble/hashes/sha3';
 import type { StepDef } from './runner.js';
-import { confirm } from './runner.js';
 import {
   mcpCall,
   header,
@@ -18,14 +17,12 @@ import {
   highlight,
   state,
   divider,
-  versus,
   section,
 } from './util.js';
 
 const BASE_CHAIN = 'Base Sepolia testnet (chainId 84532)';
 const BASE_EXPLORER = 'https://sepolia.basescan.org';
 const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
-const CKUSDC_LEDGER = 'xevnm-gaaaa-aaaar-qafnq-cai';
 const EVM_CHAINS = [
   { name: 'Base Sepolia', chainId: 84532, usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
   {
@@ -55,7 +52,70 @@ function pubkeyToEvmAddress(compressedHex: string): string | null {
   }
 }
 
+/**
+ * Call an MCP tool and render the result using standard ic402 status/error format.
+ * All ic402 MCP tools return `{ status: 'ok'|'free'|'error', ... }`.
+ * This function handles display so individual steps don't interpret errors.
+ */
+async function mcpCallAndRender(
+  client: Client,
+  tool: string,
+  args: Record<string, unknown>,
+  timeoutMs = 30_000,
+): Promise<Record<string, unknown> | null> {
+  let res: Record<string, unknown>;
+  try {
+    const raw = await mcpCall(client, tool, args, timeoutMs);
+    res = raw as Record<string, unknown>;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    warn(`${tool}: ${msg}`);
+    return null;
+  }
+
+  if (res?.status === 'ok') {
+    success(`${tool} succeeded`);
+    // Render known fields
+    if (res.paidAmount != null)
+      state(
+        'Paid',
+        `${res.paidAmount} USDC units ($${(Number(res.paidAmount) / 1_000_000).toFixed(6)})`,
+      );
+    if (res.body != null)
+      state(
+        'Response',
+        String(res.body).slice(0, 120) + (String(res.body).length > 120 ? '...' : ''),
+      );
+    if (res.txHash != null) state('Tx', String(res.txHash));
+    if (res.tokenId != null) success(`ERC-721 #${res.tokenId}`);
+    else if (res.txHash != null && !res.tokenId) info('Awaiting confirmation — check explorer.');
+    return res;
+  }
+
+  if (res?.status === 'free') {
+    success(`Free response — HTTP ${res.code}`);
+    if (res.body != null) state('Body', String(res.body).slice(0, 120));
+    return res;
+  }
+
+  if (res?.status === 'error') {
+    const err = res.error as Record<string, unknown> | undefined;
+    const kind = String(err?.kind ?? 'unknown');
+    const msg = String(err?.message ?? 'Unknown error');
+    const retryable = err?.retryable === true;
+    warn(`${kind}: ${msg}`);
+    if (retryable) info('This error is retryable.');
+    return res;
+  }
+
+  // Fallback: unrecognized shape
+  info(`Result: ${JSON.stringify(res).slice(0, 200)}`);
+  return res;
+}
+
 export function buildSteps(client: Client, canisterId: string, host: string): StepDef[] {
+  // Read at call time (after index.ts sets the env var), not at import time
+  const CKUSDC_LEDGER = process.env.CKUSDC_LEDGER || 'xevnm-gaaaa-aaaar-qafnq-cai';
   const port = new URL(host).port || '4944';
   const rawHttpUrl = host.includes('localhost')
     ? `http://${canisterId}.raw.localhost:${port}`
@@ -74,18 +134,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: 'Connect to the canister, derive its EVM address, set budget',
       run: async (_rl: ReadlineInterface) => {
         header('Step 1: Configure');
-        versus(
-          ['Express/Cloudflare server + Coinbase facilitator + separate wallet'],
-          [
-            'The canister IS the server, the wallet, AND the payment processor.',
-            'One Motoko import. One deploy. No external infrastructure.',
-          ],
-        );
+        info('The canister IS the server, the wallet, AND the payment processor.');
+        info('One Motoko import. One deploy. No external infrastructure.');
 
         const configArgs: Record<string, string> = {
           canisterId,
           host,
           network: 'icp:1',
+          ledger: CKUSDC_LEDGER,
           maxPerRequest: '50000',
           maxPerDay: '500000',
         };
@@ -136,20 +192,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 2: Upload Content
+    // Step 2: ADD Encrypted Content
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'Upload Encrypted Content',
+      name: 'ADD Encrypted Content',
       description: 'Upload content via MCP — encrypted at rest, gated by payment',
       run: async (_rl: ReadlineInterface) => {
-        header('Step 2: Upload Content');
-        versus(
-          ['Content lives outside the protocol. You just gate a URL.'],
-          [
-            'Built-in encrypted content store. Upload, encrypt, deliver —',
-            'all inside the canister. Three delivery backends supported.',
-          ],
-        );
+        header('Step 2: ADD Encrypted Content');
+        info('Built-in encrypted content store. Upload, encrypt, deliver —');
+        info('all inside the canister. Three delivery backends supported.');
 
         const __dirname = dirname(fileURLToPath(import.meta.url));
         const logoPath = resolve(__dirname, '../logo.png');
@@ -204,20 +255,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 3: x402 over HTTP
+    // Step 3: SELL Content over x402
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'x402 Payment over HTTP',
+      name: 'SELL Content over x402',
       description: "Hit the canister's HTTP endpoint — get a 402, pay on ICP or any EVM chain",
       run: async (rl: ReadlineInterface) => {
-        header('Step 3: x402 Payment over HTTP');
-        versus(
-          ['Single chain (usually Base). Facilitator verifies payment.'],
-          [
-            'Multi-chain in ONE response. Client chooses ICP or any of 5 EVM chains.',
-            'Canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.',
-          ],
-        );
+        header('Step 3: SELL Content over x402');
+        info('Multi-chain in ONE response. Client chooses ICP or any of 5 EVM chains.');
+        info('Canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.');
 
         section('Live HTTP endpoints');
         state('Content (paid)', `${rawHttpUrl}/content/ic402-logo`);
@@ -612,13 +658,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 4: Delete Content
+    // Step 4: DELETE Content
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'Delete Content',
+      name: 'DELETE Content',
       description: 'Remove content and verify the catalog updates',
       run: async (_rl: ReadlineInterface) => {
-        header('Step 4: Delete Content');
+        header('Step 4: DELETE Content');
 
         info('Listing content before delete...');
         const beforeList = (await mcpCall(client, 'call', {
@@ -741,122 +787,276 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 5: x402 Client (canister pays external API)
+    // Step 5: SELL Services over x402
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'x402 Client (Canister Pays External API)',
-      description: 'The canister acts as an x402 client — pays for external content autonomously',
+      name: 'SELL Services over x402',
+      description: 'Register a service, accept payment, compute off-chain, verify, settle',
       run: async (_rl: ReadlineInterface) => {
-        header('Step 5: x402 Client');
+        header('Step 5: SELL Services over x402');
+        info('You register services on your canister. Buyers pay via x402.');
+        info('Your client does the computation off-chain. Your canister verifies and settles.');
 
-        section('Role reversal');
-        info('In steps 2-3, external clients paid THIS canister for content.');
-        info('Now the canister acts as an x402 CLIENT — paying an external x402 API.');
+        section('How it works');
+        state(
+          '1. Register',
+          'You register a service on your canister with pricing and verification',
+        );
+        state('2. Pay', 'Buyer submits request + x402 payment → canister escrows funds');
+        state('3. Compute', 'Your client claims the job, computes off-chain, submits result');
+        state('4. Verify', 'Canister verifies (ZK Groth16, hash match, buyer confirm, or auto)');
+        state('5. Settle', 'Payment settles to your canister, remainder refunded to buyer');
+
+        section('Verification methods');
+        state('#AutoSettle', 'Settle immediately on result submission');
+        state('#HashMatch', 'SHA-256 of result must match buyer-provided hash');
+        state('#BuyerConfirm', 'Buyer approves or disputes within a time window');
+        state('#ZkGroth16', 'Canister calls a Rust verifier canister (~$0.005, trustless)');
         info('');
-        info('The canister:');
-        state('1. HTTPS outcall', 'Calls an external x402 endpoint, gets HTTP 402');
-        state('2. Parse 402', 'Extracts payment requirements (amount, asset, payTo)');
-        state('3. Sign EIP-3009', 'Signs a TransferWithAuthorization via tECDSA');
-        state('4. Retry', 'Sends X-PAYMENT header with the signed authorization');
-        state('5. Receive', 'Gets the paid content back');
-        info('');
-        info('No external wallet. No gas. The facilitator executes the USDC transfer.');
+        info('ZK verification: your client generates a Groth16 proof off-chain (expensive).');
+        info(
+          'The canister verifies it on-chain via inter-canister call (cheap, ~1-5B instructions).',
+        );
+        info('See example/zk-verifier/ for the reference arkworks verifier.');
 
-        section('Live x402 client request');
-        const queryAddr = evmAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
-        const x402Url = `https://x402.goldrush.dev/v1/base-mainnet/address/${queryAddr}/balances_native/`;
-        info('Calling GoldRush blockchain data API (paid via Base Sepolia USDC)...');
-        info(`Endpoint: ${x402Url}`);
-        info('Price: $0.0001 per request (100 USDC units)');
-        info('');
-
-        const callX402 = async () => {
-          const result = await mcpCall(client, 'call', {
-            method: 'fetchX402',
-            args: JSON.stringify([x402Url]),
-          });
-          return result as Record<string, unknown>;
-        };
-
-        const showResult = (res: Record<string, unknown>): boolean => {
-          if (res && 'ok' in res) {
-            const ok = res.ok as Record<string, unknown>;
-            success('x402 payment successful!');
-            state('Status', String(ok.status ?? '?'));
-            state(
-              'Paid',
-              `${ok.paidAmount ?? '?'} USDC units ($${(Number(ok.paidAmount ?? 0) / 1_000_000).toFixed(6)})`,
-            );
-            state('Response', String(ok.body ?? '').slice(0, 100) + '...');
-            return true;
-          } else if (res && 'free' in res) {
-            const free = res.free as Record<string, unknown>;
-            success('Response received (no payment needed)');
-            state('Status', String(free.status ?? '?'));
-            state('Body', String(free.body ?? '').slice(0, 100));
-            return true;
-          }
-          return false;
-        };
-
-        const isRetryable = (res: Record<string, unknown>): boolean => {
-          if (res && 'paymentFailed' in res) {
-            return String(res.paymentFailed).startsWith('SETTLEMENT_FAILED:');
-          }
-          return res != null && 'transientError' in res;
-        };
-
-        const showError = (res: Record<string, unknown>) => {
-          if (res && 'paymentFailed' in res) {
-            const msg = String(res.paymentFailed);
-            if (msg.startsWith('SETTLEMENT_FAILED:')) {
-              warn('Facilitator settlement failed.');
-              info(`Details: ${msg.slice(19).trim()}`);
-            } else if (msg.startsWith('NO_MATCH:')) {
-              warn('No compatible payment option.');
-              info(`Details: ${msg.slice(10).trim()}`);
-            } else if (msg.startsWith('SERVER_ERROR:')) {
-              warn(`Server error after payment. ${msg.slice(14).trim()}`);
-            } else if (msg.startsWith('SIGN_ERROR:')) {
-              warn(`Payment signing failed. ${msg.slice(12).trim()}`);
-            } else {
-              warn(`Payment failed: ${msg}`);
-            }
-          } else if (res && 'transientError' in res) {
-            warn(`Transient error: ${String(res.transientError)}`);
-          } else if (res && 'httpError' in res) {
-            const err = res.httpError as Record<string, unknown>;
-            warn(`HTTP error ${err.status}: ${String(err.body ?? '').slice(0, 100)}`);
-          } else {
-            warn(`Unexpected: ${JSON.stringify(res).slice(0, 200)}`);
-          }
-        };
-
+        section('Register service');
+        info('Registering a hash-computation service...');
+        let svcId = 'svc-1';
         try {
-          let res = await callX402();
-          let ok = showResult(res);
-          if (!ok && isRetryable(res)) {
-            info('Retrying (facilitator settlement can be intermittent)...');
-            res = await callX402();
-            ok = showResult(res);
+          const regResult = await mcpCall(client, 'call', {
+            method: 'registerService',
+            args: JSON.stringify([
+              'Hash Computation',
+              'Compute SHA-256 hash of input data',
+              { Async: null },
+              { Exact: 1000 },
+              'AutoSettle',
+              [],
+              [],
+              { Poll: null },
+              300,
+            ]),
+          });
+          const reg = regResult as Record<string, unknown>;
+          if (reg && 'ok' in reg) {
+            svcId = String(reg.ok);
+            success(`Service registered: ${svcId}`);
+          } else if (reg && 'err' in reg) {
+            if (String(reg.err).includes('already exists')) {
+              success('Service already registered (previous run)');
+            } else {
+              warn(`Register: ${reg.err}`);
+            }
           }
-          if (!ok) showError(res);
         } catch (e) {
-          warn(`x402 client error: ${e instanceof Error ? e.message : String(e)}`);
+          warn(`Register: ${e instanceof Error ? e.message : String(e)}`);
         }
 
-        highlight('The canister is both an x402 server AND client — fully autonomous commerce.');
+        try {
+          await mcpCall(client, 'call', { method: 'enableService', args: JSON.stringify([svcId]) });
+          success('Service enabled');
+        } catch (e) {
+          info(`Enable: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        info('');
+        info('Available services:');
+        await mcpCallAndRender(client, 'list_services', {});
+
+        section('Submit request');
+        info('Buyer submits request with x402 payment...');
+        let jobId = '';
+        const submitResult = await mcpCallAndRender(client, 'submit_request', {
+          serviceId: svcId,
+          params: 'Hello, ic402 services!',
+        });
+        if (submitResult?.status === 'ok' && submitResult.jobId) {
+          jobId = String(submitResult.jobId);
+        }
+
+        if (jobId) {
+          section('Client computes + submits');
+          info('Your client claims the job, computes off-chain, submits result...');
+
+          try {
+            await mcpCall(client, 'call', {
+              method: 'claimJob',
+              args: JSON.stringify([jobId]),
+            });
+            success('Job claimed');
+
+            const mockResult = Array.from(
+              new TextEncoder().encode(
+                'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+              ),
+            );
+            await mcpCall(client, 'call', {
+              method: 'submitJobResult',
+              args: JSON.stringify([jobId, mockResult, [], []]),
+            });
+            success('Result submitted → verified → payment settled');
+          } catch (e) {
+            warn(`Fulfill: ${e instanceof Error ? e.message : String(e)}`);
+          }
+
+          section('Buyer retrieves result');
+          info('Buyer polls for the completed result...');
+          await mcpCallAndRender(client, 'get_job_result', { jobId });
+        }
+
+        section('ZK-verified service (Groth16)');
+        info('Now registering a service with trustless ZK verification.');
+        info('Circuit: prove knowledge of x such that x² = 25 (x=5).');
+        info('');
+
+        const ZK_PROOF =
+          'ce1c3b68ad050a11000cdcccf333e6fb79dcaf0cfc41e027beb9edf1addff307051b6da69d91940012b82a6c877761624e5ca7a443b97013e79065ccd5b52d203d1b85b75ecfcb4c35228c511d11345f7c3b604104cb110683d5c88a0a7ad48c238f4a1984b8c2a527bcf637ee748f98d14b6309398d8ec7f1d5d7644a5da326';
+        const ZK_VK =
+          'fbbcda2ed91e46826da705bdaa656f9ccf172aaf09e1e1d57707242d67e7cd968083f9cf87359056b1f6bee4ea162474eb7862a131dedee463444eb83028a32febd26ac16f97b2c7dd656b8f6e10373b5767ac6a833f978e6799cc08eb105413e74eba28ef0d72a90006fa8610ba307a11a6b5cff5421eb70503ece937bbf22ca9d436b67b6a89f2acfc2f4f2d92691e02626bda2639aa9e6f4bfc6a64c1be2b7e9a9bf1611dffb594ccf6a8343fe043c09421bfc22756a29c2247c0a95f1301a22a2ce175eed043ba8d6aac5f2336aafe00ec01c96bbbd0b5cf5178d91e392302000000000000008d4becb19bf8f54d7080253255b43696cd69dde5129ec5c607486d1273ac75a2e0ec6b4db7ee2a6f9ac6ae4d092109e048d58b2333895457c1fb26e834d45981';
+        const ZK_INPUT = '1900000000000000000000000000000000000000000000000000000000000000';
+
+        let zkVerifierId = '';
+        try {
+          zkVerifierId = process.env.ZK_VERIFIER_ID || '';
+        } catch {
+          /* ignore */
+        }
+        if (!zkVerifierId) {
+          try {
+            const { execSync } = await import('node:child_process');
+            zkVerifierId = execSync('icp canister status zk_verifier -e local --id-only', {
+              encoding: 'utf-8',
+              timeout: 5000,
+            }).trim();
+          } catch {
+            /* not deployed */
+          }
+        }
+
+        if (zkVerifierId) {
+          success(`ZK verifier canister: ${zkVerifierId}`);
+          const vkBytes = Array.from(Buffer.from(ZK_VK, 'hex'));
+          try {
+            const zkReg = await mcpCall(client, 'call', {
+              method: 'registerService',
+              args: JSON.stringify([
+                'ZK Square Root',
+                'Prove knowledge of square root (Groth16/BN254)',
+                { Async: null },
+                { Exact: 2000 },
+                'ZkGroth16',
+                [zkVerifierId],
+                [vkBytes],
+                { Poll: null },
+                300,
+              ]),
+            });
+            const zr = zkReg as Record<string, unknown>;
+            const zkSvcId = zr?.ok ? String(zr.ok) : 'svc-2';
+            if (zr?.ok) success(`ZK service registered: ${zkSvcId}`);
+            else if (String(zr?.err ?? '').includes('already exists'))
+              success('ZK service already registered');
+            else warn(`ZK register: ${zr?.err ?? JSON.stringify(zr)}`);
+
+            await mcpCall(client, 'call', {
+              method: 'enableService',
+              args: JSON.stringify([zkSvcId]),
+            });
+
+            info('');
+            info('Buyer submits request: "what is the square root of 25?"');
+            const inputBytes = Array.from(Buffer.from(ZK_INPUT, 'hex'));
+            const zkSubmit = await mcpCallAndRender(client, 'submit_request', {
+              serviceId: zkSvcId,
+              params: String.fromCharCode(...inputBytes),
+            });
+            const zkJobId = zkSubmit?.status === 'ok' ? String(zkSubmit.jobId) : '';
+
+            if (zkJobId) {
+              info('');
+              info('Client computes x=5, generates Groth16 proof off-chain...');
+              await mcpCall(client, 'call', {
+                method: 'claimJob',
+                args: JSON.stringify([zkJobId]),
+              });
+
+              const proofBytes = Array.from(Buffer.from(ZK_PROOF, 'hex'));
+              const resultBytes = Array.from(new TextEncoder().encode('x = 5'));
+              try {
+                await mcpCall(client, 'call', {
+                  method: 'submitJobResult',
+                  args: JSON.stringify([zkJobId, resultBytes, [proofBytes], []]),
+                });
+                success('Proof verified by ZK canister → payment settled');
+                state('Proof size', `${proofBytes.length} bytes (Groth16/BN254)`);
+                state('Verification cost', '~$0.005 (~1-5B ICP instructions)');
+              } catch (e) {
+                warn(`ZK verification: ${e instanceof Error ? e.message : String(e)}`);
+                info("This is expected if the proof format doesn't match the verifier.");
+              }
+
+              info('');
+              info('Buyer retrieves result...');
+              await mcpCallAndRender(client, 'get_job_result', { jobId: zkJobId });
+            }
+          } catch (e) {
+            warn(`ZK service: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else {
+          info('ZK verifier canister not deployed — showing the flow description.');
+          info('Deploy with: icp deploy zk_verifier -e local');
+          info('');
+          state('Flow', 'Register with #ZkGroth16 → submit proof → canister verifies → settles');
+          state('Cost', '~$0.005 per Groth16 verification (100-1000x cheaper than Ethereum)');
+          state('Reference', 'example/zk-verifier/ — arkworks Groth16/BN254 verifier');
+        }
+
+        highlight('x402 services: register, pay, compute, verify, settle.');
       },
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 6: Sessions
+    // Step 6: BUY over x402
+    // ══════════════════════════════════════════════════════════════════
+    {
+      name: 'BUY over x402',
+      description: 'Canister signs EVM transactions via tECDSA — client broadcasts',
+      run: async (_rl: ReadlineInterface) => {
+        header('Step 6: BUY over x402');
+        info('The canister signs EVM payments via tECDSA. The client library handles');
+        info(
+          'everything else: probing the URL, parsing the 402, and retrying with the signed header.',
+        );
+
+        section('Live x402 payment');
+        const queryAddr = evmAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
+        const x402Url = `https://x402.goldrush.dev/v1/base-mainnet/address/${queryAddr}/balances_native/`;
+        info(`URL: ${x402Url}`);
+        info('');
+        info('Flow: client probes URL → parses 402 → canister signs → client retries with header.');
+        info('GoldRush serves mainnet data but accepts Base Sepolia USDC ($0.0001/request).');
+        info('');
+
+        info('Probing → signing → paying...');
+        const res = await mcpCallAndRender(
+          client,
+          'fetch_x402',
+          { url: x402Url, chainId: 84532 },
+          60_000,
+        );
+
+        highlight('One call: probe → canister signs → pay → content. All in the client library.');
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════════
+    // Step 7: Sessions
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Streaming Micropayments (Sessions)',
       description: 'Deposit once, stream vouchers, settle on close — 5,000x cheaper',
       run: async (rl: ReadlineInterface) => {
-        header('Step 6: Streaming Micropayments');
+        header('Step 7: Streaming Micropayments');
 
         section('What sessions are for');
         info("Sessions let a client pay for repeated access to THIS canister's services.");
@@ -875,14 +1075,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('', 'Requires ic402 client SDK (Ed25519 voucher signing, Candid RPC)');
         state('', 'NOT accessible via HTTP or x402 browsers — designed for agents/backends');
 
-        versus(
-          ['Every call = one on-chain transaction. No session support.'],
-          [
-            'Deposit once. Stream signed vouchers (free). Settle on close.',
-            '10,000 calls = 2 on-chain transactions. 5,000x reduction.',
-            'No other x402 implementation has sessions.',
-          ],
-        );
+        info('Deposit once. Stream signed vouchers (free). Settle on close.');
+        info('10,000 calls = 2 on-chain transactions.');
 
         section('Economics');
         state('Per-call model', '10K calls/day × $0.001/tx = $10/day settlement overhead');
@@ -1217,29 +1411,23 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 7: Agent Discovery
+    // Step 8: Agent Identity (ERC-8004)
     // ══════════════════════════════════════════════════════════════════
     {
-      name: 'Agent Discovery (ERC-8004 on Base)',
-      description: 'Cross-chain identity — other agents find this canister on Base',
-      run: async (rl: ReadlineInterface) => {
-        header('Step 7: Agent Discovery');
-        versus(
-          ['No discovery. You need to already know the endpoint URL.'],
-          [
-            'Agent card registered as ERC-721 on Base.',
-            'Other agents query IdentityRegistry by skill/domain.',
-            'They find this ICP canister without a centralized directory.',
-          ],
-        );
+      name: 'Agent Identity (ERC-8004 on Base)',
+      description: 'Cross-chain identity — canister signs registration tx, client broadcasts',
+      run: async (_rl: ReadlineInterface) => {
+        header('Step 8: Agent Identity');
+        info('Agent card registered as ERC-721 on Base via IdentityRegistry.');
+        info('Other agents query by skill, domain, or x402Support to discover this canister.');
 
         section('How it works');
         state('Key derivation', 'ICP tECDSA → secp256k1 → native EVM address');
-        state('Registration', 'ERC-721 on IdentityRegistry (Base)');
-        state('Discovery', 'Query by skill, domain, or x402Support');
+        state('Registration', 'Client calls signAgentRegistration, broadcasts the signed tx');
+        state('Discovery', 'Query IdentityRegistry by skill, domain, or x402Support');
 
         info('');
-        info('Fetching agent card...');
+        info('Fetching agent card metadata...');
         try {
           const card = await mcpCall(client, 'call', { method: 'getAgentCard', args: '[]' });
           const c = card as Record<string, unknown>;
@@ -1258,70 +1446,28 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
 
         // Check if already registered
+        info('');
         info('Checking Base registration...');
         const agentIdResult = await mcpCall(client, 'call', { method: 'getAgentId', args: '[]' });
         const agentIdArr = agentIdResult as unknown[];
-        let agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0 ? agentIdArr[0] : null;
+        const agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0 ? agentIdArr[0] : null;
 
         if (agentId != null) {
           success(`Already registered — ERC-721 #${agentId} on Base Sepolia`);
           state('Verify', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
         } else {
-          // Show EVM address
-          let evmAddr = '';
-          try {
-            evmAddr = String(
-              await mcpCall(client, 'call', { method: 'getEvmAddress', args: '[]' }),
-            );
-            state('Canister EVM address', evmAddr);
-          } catch {
-            warn('Could not derive EVM address');
-          }
+          state('Status', 'Not yet registered on Base Sepolia');
+        }
 
-          section('On-canister EVM signing');
-          info(
-            'The canister signs its own EVM transactions via tECDSA — no external wallet needed.',
-          );
-          info(
-            'It builds an EIP-1559 tx, signs with threshold ECDSA, and submits via the EVM RPC canister.',
-          );
-          info('');
-          state('Canister EVM address', evmAddr);
-          state('Gas funding', `Base Sepolia ETH deposited to canister EVM address`);
-          state('Faucet', 'https://www.alchemy.com/faucets/base-sepolia');
-          info('');
+        section('Register on Base Sepolia');
+        info('The client library handles the full flow:');
+        info('nonce + gas → canister signs → broadcast → poll receipt → parse event.');
+        info('');
 
-          if (await confirm(rl, 'Try registering on Base Sepolia?')) {
-            info('Registering agent on Base Sepolia...');
-
-            try {
-              const regResult = await mcpCall(client, 'call', {
-                method: 'registerAgent',
-                args: '[]',
-              });
-              const reg = regResult as Record<string, unknown>;
-
-              if (reg && typeof reg === 'object' && 'ok' in reg) {
-                const okVal = reg.ok as Record<string, unknown>;
-                agentId = okVal?.tokenId;
-                success(`Registered — ERC-721 #${agentId} on Base Sepolia`);
-                if (okVal?.txHash) {
-                  state('Tx', `${BASE_EXPLORER}/tx/${String(okVal.txHash)}`);
-                }
-                state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
-              } else if (reg && typeof reg === 'object' && 'err' in reg) {
-                warn(`Registration failed: ${String(reg.err)}`);
-                if (String(reg.err).includes('Insufficient ETH')) {
-                  info(`Fund ${evmAddr} with Base Sepolia ETH and try again.`);
-                }
-              }
-            } catch (e) {
-              warn(`Registration error: ${e instanceof Error ? e.message : String(e)}`);
-              info('This is expected if the EVM address has no ETH for gas.');
-              info(
-                `Fund ${evmAddr} and run: icp canister call example registerAgent '()' -e local`,
-              );
-            }
+        const reg = await mcpCallAndRender(client, 'register_agent', {});
+        if (reg?.status === 'ok') {
+          if (reg.tokenId) {
+            state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
           }
         }
 
@@ -1330,61 +1476,215 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     },
 
     // ══════════════════════════════════════════════════════════════════
-    // Step 8: Policy + Summary
+    // Step 9: EIP-712 Delegate Signing
+    // ══════════════════════════════════════════════════════════════════
+    {
+      name: 'EIP-712 Delegate Signing',
+      description: 'Generic EIP-712 signing — the building block for DEX agent wallets',
+      run: async (_rl: ReadlineInterface) => {
+        header('Step 9: EIP-712 Delegate Signing');
+        info('The canister signs arbitrary EIP-712 typed data via tECDSA.');
+        info('This is the foundation for DEX agent wallets (Hyperliquid, Vertex, Aevo),');
+        info('ERC-2612 permit signatures, and any protocol using EIP-712.');
+
+        section('1. Build domain separator (client-side)');
+        info('Domain: { name: "TestExchange", version: "1", chainId: 84532 }');
+        info('The client computes EIP-712 hashes locally using keccak256.');
+        info('Only the final signing call goes to the canister.');
+        info('');
+
+        // Use @noble/hashes for client-side keccak256 (already a dependency)
+        const k256 = (data: Uint8Array) => keccak_256(data);
+        const enc = (s: string) => new TextEncoder().encode(s);
+        const pad32 = (bytes: Uint8Array, offset = 12) => {
+          const out = new Uint8Array(32);
+          out.set(bytes, offset);
+          return out;
+        };
+        const uint256 = (n: number) => {
+          const b = new Uint8Array(32);
+          let v = n;
+          for (let i = 31; i >= 0 && v > 0; i--) {
+            b[i] = v & 0xff;
+            v = Math.floor(v / 256);
+          }
+          return b;
+        };
+        const concat = (...arrays: Uint8Array[]) => {
+          const out = new Uint8Array(arrays.reduce((s, a) => s + a.length, 0));
+          let off = 0;
+          for (const a of arrays) {
+            out.set(a, off);
+            off += a.length;
+          }
+          return out;
+        };
+        const toHex = (b: Uint8Array) =>
+          Array.from(b)
+            .map((x) => x.toString(16).padStart(2, '0'))
+            .join('');
+
+        const domainTypeHash = k256(
+          enc('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+        );
+        const nameHash = k256(enc('TestExchange'));
+        const versionHash = k256(enc('1'));
+        const domainSep = k256(
+          concat(domainTypeHash, nameHash, versionHash, uint256(84532), new Uint8Array(32)),
+        );
+
+        success(`Domain separator: 0x${toHex(domainSep).slice(0, 16)}...`);
+
+        section('2. Sign a delegate approval');
+        info('Type: ApproveAgent(address agent, uint256 expiry)');
+        info('');
+
+        const evmAddr = (await mcpCall(client, 'call', {
+          method: 'getEvmAddress',
+          args: '[]',
+        })) as string;
+        const addrBytes = new Uint8Array(20);
+        const addrClean = evmAddr.replace('0x', '');
+        for (let i = 0; i < 20; i++) addrBytes[i] = parseInt(addrClean.slice(i * 2, i * 2 + 2), 16);
+
+        const expiry = Math.floor(Date.now() / 1000) + 86400;
+        const approveTypeHash = k256(enc('ApproveAgent(address agent,uint256 expiry)'));
+        const approveStructHash = k256(concat(approveTypeHash, pad32(addrBytes), uint256(expiry)));
+
+        state('Agent', evmAddr);
+        state('Expiry', `${new Date(expiry * 1000).toISOString()} (24h)`);
+
+        try {
+          const signResult = await mcpCall(client, 'call', {
+            method: 'signTypedData',
+            args: JSON.stringify([Array.from(domainSep), Array.from(approveStructHash)]),
+          });
+          const sig = signResult as Record<string, unknown>;
+          if (sig && 'ok' in sig) {
+            const ok = sig.ok as Record<string, unknown>;
+            success('Delegate approval signed');
+            state('Signature', `${String(ok.signature ?? '').slice(0, 30)}...`);
+            state('Signer', String(ok.signer ?? ''));
+            state('v', String(ok.v ?? ''));
+          } else if (sig && 'err' in sig) {
+            warn(`Sign failed: ${sig.err}`);
+          }
+        } catch (e) {
+          warn(`signTypedData: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        section('3. Sign a trading action');
+        info('Type: PlaceOrder(string asset, uint256 size, uint256 price, bool isBuy)');
+        info('');
+
+        const orderTypeHash = k256(
+          enc('PlaceOrder(string asset,uint256 size,uint256 price,bool isBuy)'),
+        );
+        const assetHash = k256(enc('BTC-PERP'));
+        const orderStructHash = k256(
+          concat(orderTypeHash, assetHash, uint256(100000), uint256(68000000000), uint256(1)),
+        );
+
+        try {
+          const orderSig = await mcpCall(client, 'call', {
+            method: 'signTypedData',
+            args: JSON.stringify([Array.from(domainSep), Array.from(orderStructHash)]),
+          });
+          const sig = orderSig as Record<string, unknown>;
+          if (sig && 'ok' in sig) {
+            const ok = sig.ok as Record<string, unknown>;
+            success('Trading action signed');
+            state('Action', 'BUY 0.1 BTC-PERP @ $68,000');
+            state('Signature', `${String(ok.signature ?? '').slice(0, 30)}...`);
+            state('Signer', String(ok.signer ?? ''));
+          } else if (sig && 'err' in sig) {
+            warn(`Sign failed: ${sig.err}`);
+          }
+        } catch (e) {
+          warn(`signTypedData: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        section('Use cases');
+        state('Hyperliquid', 'Agent wallet registration + phantom agent order signing');
+        state('Vertex', 'Linked signer + order signing');
+        state('Aevo', 'Signing key registration + order signing');
+        state('ERC-2612', 'Permit signatures for gasless token approvals');
+        state('Any EIP-712', 'The canister signs, your client submits');
+
+        highlight('Generic EIP-712 signing. One primitive, every protocol.');
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════════
+    // Step 10: Policy + Summary
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Policy Engine + Summary',
       description: 'Dual-sided spending limits + UVP recap',
       run: async (_rl: ReadlineInterface) => {
-        header('Step 8: Policy Engine + Summary');
-        versus(
-          [
-            'No spending limits. No rate limiting. No session caps.',
-            'A misconfigured agent can drain its wallet.',
-          ],
-          [
-            'Dual-sided policy engine. Both client and canister enforce.',
-            'Budget limits, rate limits, session caps, idle timeouts.',
-            'Evaluated in-canister, zero ledger calls, constant time.',
-          ],
-        );
+        header('Step 10: Policy + Summary');
+        info('Dual-sided policy engine. Both client and canister enforce.');
+        info('Budget limits, rate limits, session caps, idle timeouts.');
+        info('Evaluated in-canister, zero ledger calls, constant time.');
 
-        section('Client-side (AI agent protects itself)');
+        section('Client-side (your agent protects itself)');
         state('Max per request', '$0.05 — reject before sending if too expensive');
         state('Max per day', '$0.50 — rolling 24h spending cap');
         state('Max session deposit', 'Configurable — cap escrow exposure');
-        highlight('The AI agent controls its own budget — can never be drained.');
+        highlight('Your agent controls its own budget — can never be drained.');
 
-        section('Canister-side (service operator protects the service)');
+        section('Canister-side (your canister protects your service)');
         state('Max per tx', '$0.05');
         state('Max per day', '$0.50');
         state('Rate limit', '120 req/min per caller');
         state('Session deposit cap', '$0.10');
         state('Concurrent sessions', '1 per caller');
         state('Idle timeout', '1h — auto-close + refund remainder');
-        state('Per-caller overrides', 'Trusted agents get higher limits');
-        highlight('The service can never be abused. Idle sessions auto-refund.');
+        state('Per-caller overrides', 'Trusted callers get higher limits');
+        highlight('Your service can never be abused. Idle sessions auto-refund.');
 
-        section('Full infrastructure');
+        section('What ic402 provides');
+        state('SELL content', 'Upload encrypted content, gate with x402, deliver on payment');
+        state(
+          'SELL services',
+          'Register services, accept payment, your client computes, canister verifies (ZK/hash/confirm), settles',
+        );
+        state(
+          'BUY over x402',
+          'Canister signs EVM payments via tECDSA, your client handles HTTP + RPC',
+        );
+        state(
+          'Sessions',
+          'Deposit once, stream Ed25519 vouchers, settle on close — 5,000x cheaper',
+        );
+        state(
+          'EIP-712 signing',
+          'Generic typed data signing — DEX agent wallets (Hyperliquid, Vertex, Aevo), permits',
+        );
+        state(
+          'Remote signing',
+          'Canister signs, client broadcasts — no EVM RPC in the canister for outbound',
+        );
+        state(
+          'ZK verification',
+          'Groth16/BN254 via Rust canister — ~$0.005, 100-1000x cheaper than Ethereum',
+        );
+        state('Policy', 'Dual-sided spending limits, rate limits, per-caller overrides');
+        state('Identity', `ERC-8004 on Base — cross-chain agent discovery`);
+
+        section('Infrastructure');
         state('Canister', canisterId);
         state('HTTP x402', `${rawHttpUrl}/`);
-        state('ICP payment', 'ckUSDC via ICRC-2');
-        state('EVM payment', 'USDC on 5 chains — verified via HTTPS outcall');
-        state('Cross-chain', 'eth_getTransactionReceipt — no bridge, no facilitator');
-        state('Sessions', '5,000x settlement reduction — unique to ic402');
-        state('Content', 'Encrypted (SHA-256-CTR), 3 delivery patterns');
-        state('Identity', `ERC-8004 on Base (${BASE_REGISTRY})`);
-        state('Policy', 'Dual-sided — no other x402 has this');
+        state('Inbound', 'ICP (ICRC-2) + 5 EVM chains (HTTPS outcall verification)');
+        state('Outbound', 'Canister signs (tECDSA), client broadcasts');
+        state('Content', 'Encrypted (ChaCha20-Poly1305), 3 delivery patterns');
+        state('Services', 'Async coordinator — escrow, compute, verify, settle');
 
         info('');
         success('Demo complete.');
         highlight('ic402: one Motoko import, one deploy.');
-        highlight(
-          'Upload content, encrypt it, gate with x402, accept payment on ICP or any EVM chain.',
-        );
-        highlight(
-          'The canister is the server, the wallet, the HTTP endpoint, and the EVM address.',
-        );
+        highlight('Sell content and services over x402. Buy from other x402 APIs.');
+        highlight('The canister is the server, the wallet, the marketplace, and the EVM address.');
         highlight('No facilitator. No bridge. No external infrastructure.');
       },
     },

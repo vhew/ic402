@@ -5,8 +5,10 @@ export async function mcpCall(
   client: Client,
   tool: string,
   args: Record<string, unknown> = {},
+  timeoutMs?: number,
 ): Promise<unknown> {
-  const res = await client.callTool({ name: tool, arguments: args });
+  const options = timeoutMs ? { timeout: timeoutMs } : undefined;
+  const res = await client.callTool({ name: tool, arguments: args }, undefined, options);
   const text =
     res.content && Array.isArray(res.content) && res.content.length > 0
       ? ((res.content[0] as { text?: string }).text ?? '')
