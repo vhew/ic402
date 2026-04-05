@@ -1,5 +1,12 @@
 /// ic402 — Drop-in payment library for ICP canisters.
 ///
+/// - **Inbound**: `Gateway` handles payment settlement (ICP via ICRC-2,
+///   EVM via EvmSender internally).
+/// - **Outbound**: `EvmSigner` signs EVM transactions; the client broadcasts.
+/// - **Content**: `ContentStore` provides encrypted storage and delivery.
+/// - **Identity**: `Identity` holds ERC-8004 agent metadata and derives
+///   the canister's EVM key pair via threshold ECDSA.
+///
 /// ```motoko
 /// import Ic402 "mo:ic402";
 /// let gate = Ic402.Gateway({ ... }, Principal.fromActor(self));
@@ -11,7 +18,11 @@ import ContentStoreMod "ContentStore";
 import IdentityMod "Identity";
 import HttpHandlerMod "HttpHandler";
 import IC "mo:ic";
-import X402ClientMod "X402Client";
+import EvmSignerMod "EvmSigner";
+import Eip712Mod "Eip712";
+import EvmAddressMod "EvmAddress";
+import EvmUtilsMod "EvmUtils";
+import ServiceRegistryMod "ServiceRegistry";
 
 module {
 
@@ -95,6 +106,15 @@ module {
   /// Service endpoint in an agent card.
   public type ServiceEntry = Types.ServiceEntry;
 
+  // ── EVM Signer (sign-only mode) ──
+
+  /// Signed EVM transaction ready for client-side broadcast.
+  public type SignedTransaction = EvmSignerMod.SignedTransaction;
+  /// Signed EIP-3009 authorization for x402 payment headers.
+  public type SignedAuthorization = EvmSignerMod.SignedAuthorization;
+  /// Signed EIP-712 typed data (generic — works for any EIP-712 protocol).
+  public type SignedTypedData = EvmSignerMod.SignedTypedData;
+
   // ── HTTP ──
 
   /// IC HTTP gateway request.
@@ -112,8 +132,29 @@ module {
   public let Gateway = GatewayModule.Gateway;
   /// Encrypted content store with chunked upload.
   public let ContentStore = ContentStoreMod.ContentStore;
-  /// ERC-8004 agent identity registration.
+  /// ERC-8004 agent identity: metadata and key derivation.
   public let Identity = IdentityMod.Identity;
-  /// x402 outbound payment client (HTTPS outcalls with auto-pay).
-  public let X402Client = X402ClientMod;
+  /// EIP-712 typed data hashing utilities (domain separators, struct hashes, digest).
+  public let Eip712 = Eip712Mod;
+  /// EVM address derivation and keccak256 hashing.
+  public let EvmAddress = EvmAddressMod;
+  /// EVM ABI encoding, hex conversion, and byte utilities.
+  public let EvmUtils = EvmUtilsMod;
+  /// EVM remote signer: canister signs, client broadcasts.
+  public let EvmSigner = EvmSignerMod;
+  /// Service marketplace: register services, manage jobs, verify and settle.
+  public let ServiceRegistry = ServiceRegistryMod.ServiceRegistry;
+
+  // ── Service marketplace types ──
+
+  public type ServiceType = Types.ServiceType;
+  public type PricingScheme = Types.PricingScheme;
+  public type VerificationMethod = Types.VerificationMethod;
+  public type ServiceDeliveryMethod = Types.ServiceDeliveryMethod;
+  public type ServiceDefinition = Types.ServiceDefinition;
+  public type JobStatus = Types.JobStatus;
+  public type Job = Types.Job;
+  public type ServiceConfig = ServiceRegistryMod.ServiceConfig;
+  public type StableServiceRegistryState = Types.StableServiceRegistryState;
+  public type ZkVerifierActor = Types.ZkVerifierActor;
 };
