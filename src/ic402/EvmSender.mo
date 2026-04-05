@@ -22,6 +22,8 @@ module {
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
     var localNonce : ?Nat = null;
+    // H-1: Serialize EVM transactions to prevent nonce desync on concurrent calls.
+    var txInProgress : Bool = false;
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -64,7 +66,12 @@ module {
       calldata : [Nat8],
       gasLimit : Nat,
     ) : async { #ok : Text; #err : Text } {
-      try {
+      // H-1: Reject concurrent transactions to prevent nonce desync.
+      if (txInProgress) {
+        return #err("Transaction in progress, retry later");
+      };
+      txInProgress := true;
+      let result : { #ok : Text; #err : Text } = try {
         let pubKey = await getPublicKey();
         let senderAddr = await getEvmAddress();
 
@@ -75,19 +82,25 @@ module {
         let evmRpc : EvmRpc.EvmRpcCanister = actor (rpcPrincipal);
         let services = switch (EvmRpc.rpcServices(chainId)) {
           case (?s) { s };
-          case (null) { return #err("Unsupported chain ID: " # Nat.toText(chainId)) };
+          case (null) {
+            txInProgress := false;
+            return #err("Unsupported chain ID: " # Nat.toText(chainId));
+          };
         };
 
         // Get nonce
         let nonce = switch (localNonce) {
           case (?n) { n };
           case (null) {
-            let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
+            let rpcResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
               services, null, { address = senderAddr; block = #Latest },
             );
-            switch (result) {
+            switch (rpcResult) {
               case (#Consistent(#Ok(n))) { n };
-              case (_) { return #err("Failed to get EVM nonce") };
+              case (_) {
+                txInProgress := false;
+                return #err("Failed to get EVM nonce");
+              };
             };
           };
         };
@@ -146,6 +159,8 @@ module {
       } catch (e) {
         #err("EVM tx failed: " # Error.message(e));
       };
+      txInProgress := false;
+      result;
     };
 
     /// Send an ERC-20 `transfer(address,uint256)` transaction.

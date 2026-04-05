@@ -8,6 +8,8 @@ import {
   createPublicClient,
   http,
   defineChain,
+  keccak256,
+  toHex,
   type Hash,
   type TransactionReceipt,
   type PublicClient,
@@ -453,10 +455,10 @@ export async function pollReceipt(
  * event AgentRegistered(uint256 indexed tokenId, address indexed owner, ...)
  */
 export function parseAgentRegisteredEvent(receipt: TransactionReceipt): bigint | null {
-  const eventSig = '0x' + 'AgentRegistered(uint256,address,string,string,bool)';
-  // keccak256 of the event signature — compute at runtime
+  // M-8: Hash the event signature and compare against topics[0]
+  const eventSigHash = keccak256(toHex('AgentRegistered(uint256,address,string,string,bool)'));
   for (const log of receipt.logs) {
-    if (log.topics.length >= 2 && log.topics[0]) {
+    if (log.topics.length >= 2 && log.topics[0] === eventSigHash) {
       // topics[1] is the indexed tokenId
       const tokenId = log.topics[1];
       if (tokenId) {

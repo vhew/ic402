@@ -824,8 +824,11 @@ module {
         );
         switch (refundResult) {
           case (#err(msg)) {
-            session.status := if (wasExpired) { #expired } else { #closed };
-            return #settlementFailed("EVM refund: " # msg);
+            // C-1: Settlement succeeded but refund failed — leave session in #closing
+            // so the unconsumed funds are not lost. The payer (or admin) can call
+            // recoverEscrow() to retrieve the stuck refund amount.
+            // DO NOT mark as #closed — that would silently discard the refund.
+            return #settlementFailed("EVM refund failed (settle succeeded, session left in #closing): " # msg);
           };
           case (#ok(hash)) { refundTxHash := ?hash };
         };
@@ -859,27 +862,44 @@ module {
     };
 
     /// M-8: Recover funds from an escrow subaccount.
-    /// Caller must be the session payer (if session exists).
+    /// H-5: Hardened — always refunds to payer, caps at unconsumed amount,
+    /// and only allows recovery for sessions in #closed, #expired, or #closing status.
     public func recoverEscrow(
       caller : Principal,
       ledger : Types.LedgerActor,
       sessionId : Text,
-      recipient : Types.Account,
       amount : Nat,
     ) : async { #ok : Nat; #err : Text } {
-      // M-8: Check authorization — only session payer can recover
+      // Check authorization — only session payer can recover
       switch (sessions.get(sessionId)) {
         case (?session) {
           if (not Principal.equal(caller, session.payer)) {
             return #err("Not authorized: only session payer can recover escrow");
           };
+          // H-5: Only allow recovery for terminal or stuck sessions
+          switch (session.status) {
+            case (#closed or #expired or #closing) {};
+            case (#open) {
+              return #err("Cannot recover escrow from an open session — close it first");
+            };
+          };
+          // H-5: Cap recovery amount to unconsumed portion
+          let maxRecoverable = if (session.deposited > session.consumed) {
+            session.deposited - session.consumed;
+          } else { 0 };
+          let cappedAmount = if (amount > maxRecoverable) { maxRecoverable } else { amount };
+          if (cappedAmount == 0) {
+            return #err("No recoverable funds: deposit fully consumed");
+          };
+          // H-5: Always refund to the payer's own account (no arbitrary recipient)
+          let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
+          let subaccount = escrowManager.deriveSubaccount(sessionId);
+          await escrowManager.refund(ledger, subaccount, payerAccount, cappedAmount);
         };
         case (null) {
           return #err("Session not found: cannot authorize escrow recovery without session record");
         };
       };
-      let subaccount = escrowManager.deriveSubaccount(sessionId);
-      await escrowManager.refund(ledger, subaccount, recipient, amount);
     };
 
     // ── Stable state ──

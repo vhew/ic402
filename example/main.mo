@@ -33,7 +33,7 @@ persistent actor KnowledgeBase {
   var stableServices : ?Ic402.StableServiceRegistryState = null; // OPTIONAL
 
   // The ckUSDC ledger principal (mainnet). Deploy scripts patch for testnet.
-  let CKUSDC = "txyno-ch777-77776-aaaaq-cai";
+  let CKUSDC = "xevnm-gaaaa-aaaar-qafnq-cai";
 
   transient let gate = Ic402.Gateway(
     {
@@ -51,26 +51,26 @@ persistent actor KnowledgeBase {
       // Deploy scripts patch recipient address and chain IDs for testnet.
       // Source has MAINNET values.
       evmChains = [
-        { chainId = 84532;  recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; symbol = "USDC"; decimals = 6 : Nat8; name = ?"USDC"; version = null }] },
-        { chainId = 11155111;     recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
-        { chainId = 43113; recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x5425890298aed601595a70AB815c96711a31Bc65"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
-        { chainId = 11155420;    recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x5fd84259d66Cd46123540766Be93DFE6D43130D7"; symbol = "USDC"; decimals = 6 : Nat8; name = ?"USDC"; version = null }] },
-        { chainId = 421614; recipient = "0x0000000000000000000000000000000000000000";
-          tokens = [{ address = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
+        { chainId = 8453;  recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
+        { chainId = 1;     recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
+        { chainId = 43114; recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
+        { chainId = 10;    recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
+        { chainId = 42161; recipient = "0x0000000000000000000000000000000000000000";
+          tokens = [{ address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"; symbol = "USDC"; decimals = 6 : Nat8; name = null; version = null }] },
       ];
 
       // EVM RPC canister. Null = mainnet default (7hfb6-...).
       // Deploy scripts patch for local dev.
-      evmRpcCanister = ?"t63gs-up777-77776-aaaba-cai";
+      evmRpcCanister = null;
 
       // tECDSA key for auto-deriving the canister's EVM address.
-      // "dfx_test_key" for mainnet. Deploy scripts patch to "dfx_test_key" for local.
+      // "key_1" for mainnet. Deploy scripts patch to "dfx_test_key" for local.
       // Set to null to disable EVM address derivation (ICP-only mode).
-      ecdsaKeyName = ?"dfx_test_key";
+      ecdsaKeyName = ?"key_1";
 
       // Nonce validity window. Null = 300 seconds (5 minutes).
       nonceExpirySeconds = null;
@@ -93,10 +93,10 @@ persistent actor KnowledgeBase {
       }];
       x402Support = true;
     };
-    ecdsaKeyName = "dfx_test_key"; // patched to "dfx_test_key" for local
-    evmRpcCanister = ?"t63gs-up777-77776-aaaba-cai";
+    ecdsaKeyName = "key_1"; // patched to "dfx_test_key" for local
+    evmRpcCanister = null;
     registryAddress = "0x140D228d099367c273fDCD3C4Bfd87342ad7a8D2";
-    chainId = 84532;
+    chainId = 84532; // Base Sepolia — actual registry deployment
     gasConfig = null;
   });
 
@@ -648,7 +648,7 @@ persistent actor KnowledgeBase {
   // Remove this section if you only need ICP payments.
   // ═══════════════════════════════════════════════════════════════════════
 
-  transient let signer = Ic402.EvmSigner.EvmSigner("dfx_test_key");
+  transient let signer = Ic402.EvmSigner.EvmSigner("key_1");
 
   /// Sign an EIP-3009 authorization for x402 payment.
   /// Client probes the URL, extracts chain/token/recipient/amount from the 402, and calls this.
@@ -741,7 +741,7 @@ persistent actor KnowledgeBase {
 
   public query func getAgentCard() : async Ic402.AgentCard { identity.getCard() };
   public query func getAgentId() : async ?Nat { identity.getAgentId() };
-  public func getEvmPublicKey() : async Blob { await identity.getPublicKey("dfx_test_key") };
+  public func getEvmPublicKey() : async Blob { await identity.getPublicKey("key_1") };
   public func getEvmAddress() : async Text { await identity.getEvmAddress() };
 
   // Admin

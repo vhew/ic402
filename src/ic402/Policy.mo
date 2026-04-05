@@ -129,11 +129,18 @@ module {
             };
           };
 
+          // M-2: If all timestamps expired, remove the key to prevent stale accumulation
+          if (existing.size() == 0) {
+            rateLimitLog.delete(key);
+          };
+
           if (existing.size() >= limit) {
             return #denied("Rate limit exceeded: " # Nat.toText(limit) # "/min");
           };
 
           // Record this request
+          // NOTE: Array.append is O(n) per call. Acceptable for typical rate limits
+          // (≤120/min) but would need a ring buffer for very high throughput.
           rateLimitLog.put(key, Array.append(existing, [now]));
           #ok;
         };

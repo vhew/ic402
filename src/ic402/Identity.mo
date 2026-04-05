@@ -18,6 +18,7 @@
 import Types "Types";
 import EvmAddress "EvmAddress";
 import Blob "mo:base/Blob";
+import Debug "mo:base/Debug";
 import IC "mo:ic";
 
 module {
@@ -73,7 +74,7 @@ module {
           let pk = await getPublicKey(config.ecdsaKeyName);
           let addr = switch (EvmAddress.fromCompressedPublicKey(Blob.toArray(pk))) {
             case (#ok(a)) { a };
-            case (#err(e)) { assert(false); "" }; // should never happen
+            case (#err(_)) { Debug.trap("ic402: EVM address derivation failed") };
           };
           evmAddress := ?addr;
           addr;

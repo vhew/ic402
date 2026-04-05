@@ -449,6 +449,7 @@ module {
   /// Stable storage format for grant subsystem state.
   public type StableAccessGrantState = {
     revokedGrantIds : [Text];
+    revokedGrantTimestamps : ?[(Text, Int)]; // M-1: grant ID → revocation timestamp
     grantCounter : Nat;
     hmacSeed : Nat;
   };

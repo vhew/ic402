@@ -438,6 +438,27 @@ module {
         };
       };
 
+      // M-5: Remove terminal jobs (Settled/Refunded) older than 24 hours
+      let gcCutoff = now - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
+      let staleJobs = Buffer.Buffer<Text>(8);
+      for ((id, job) in jobs.entries()) {
+        switch (job.status) {
+          case (#Settled or #Refunded) {
+            let completedTime = switch (job.completedAt) {
+              case (?t) { t };
+              case (null) { job.createdAt }; // fallback if completedAt not set
+            };
+            if (completedTime < gcCutoff) {
+              staleJobs.add(id);
+            };
+          };
+          case (_) {};
+        };
+      };
+      for (id in staleJobs.vals()) {
+        jobs.delete(id);
+      };
+
       Buffer.toArray(expired);
     };
 

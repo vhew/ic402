@@ -19,6 +19,7 @@ import Order "mo:base/Order";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
+import Debug "mo:base/Debug";
 import Utils "Utils";
 
 module {
@@ -68,16 +69,17 @@ module {
 
   /// Decrypt a chunk with ChaCha20-Poly1305 AEAD.
   /// Input is ciphertext || tag (last 16 bytes are tag).
-  func decryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : Blob {
+  /// H-6: Returns null on authentication failure instead of silently returning empty blob.
+  func decryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : ?Blob {
     let bytes = Blob.toArray(data);
-    if (bytes.size() < 16) return Blob.fromArray([]);
+    if (bytes.size() < 16) return null;
     let ciphertext = Array.subArray(bytes, 0, bytes.size() - 16);
     let tag = Array.subArray(bytes, bytes.size() - 16, 16);
     let key = deriveChunkKey(masterKey, contentId, chunkIndex);
     let nonce = deriveNonce(contentId, chunkIndex);
     switch (ChaCha.aeadDecryptWithNonce(ciphertext, tag, [], key, nonce)) {
-      case (?plaintext) { Blob.fromArray(plaintext) };
-      case (null) { Blob.fromArray([]) }; // auth failed — return empty
+      case (?plaintext) { ?Blob.fromArray(plaintext) };
+      case (null) { null }; // authentication failed — tampered or wrong key
     };
   };
 
@@ -119,6 +121,11 @@ module {
 
     /// Store a blob, encrypting and auto-chunking at 1.5 MB.
     public func put(id : Text, mimeType : Text, data : Blob) : Types.ContentStoreResult {
+      // H-3: Refuse writes before external seed initialization — the default key
+      // derived from principal alone is deterministic and weaker.
+      if (not seedInitialized) {
+        Debug.trap("ic402: ContentStore encryption not initialized — call startTimers() or initExternalSeed() first");
+      };
       switch (entries.get(id)) {
         case (?_) { return #contentAlreadyExists };
         case (null) {};
@@ -150,6 +157,10 @@ module {
 
     /// Initialize a multi-chunk upload.
     public func putChunkedInit(id : Text, mimeType : Text, totalSize : Nat, chunkCount : Nat) : Types.ContentStoreResult {
+      // H-3: Refuse writes before external seed initialization.
+      if (not seedInitialized) {
+        Debug.trap("ic402: ContentStore encryption not initialized — call startTimers() or initExternalSeed() first");
+      };
       switch (entries.get(id)) {
         case (?_) { return #contentAlreadyExists };
         case (null) {};
@@ -177,6 +188,7 @@ module {
     };
 
     /// Retrieve and decrypt full blob (reassembles chunks).
+    /// H-6: Returns null if any chunk fails authentication (tampered or wrong key).
     public func get(id : Text) : ?Blob {
       switch (entries.get(id)) {
         case (null) { null };
@@ -184,9 +196,13 @@ module {
           let buf = Buffer.Buffer<Nat8>(entry.totalSize);
           var i : Nat = 0;
           while (i < entry.chunks.size()) {
-            let decrypted = decryptChunkData(masterKey, id, i, entry.chunks[i]);
-            for (byte in Blob.toArray(decrypted).vals()) {
-              buf.add(byte);
+            switch (decryptChunkData(masterKey, id, i, entry.chunks[i])) {
+              case (?decrypted) {
+                for (byte in Blob.toArray(decrypted).vals()) {
+                  buf.add(byte);
+                };
+              };
+              case (null) { return null }; // H-6: decryption authentication failed
             };
             i += 1;
           };
@@ -196,12 +212,13 @@ module {
     };
 
     /// Retrieve and decrypt a single chunk.
+    /// H-6: Returns null if decryption authentication fails (tampered or wrong key).
     public func getChunk(id : Text, index : Nat) : ?Blob {
       switch (entries.get(id)) {
         case (null) { null };
         case (?entry) {
           if (index >= entry.chunks.size()) { return null };
-          ?decryptChunkData(masterKey, id, index, entry.chunks[index]);
+          decryptChunkData(masterKey, id, index, entry.chunks[index]);
         };
       };
     };

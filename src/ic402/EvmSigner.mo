@@ -71,7 +71,9 @@ module {
 
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
-    var nonceCounter : Nat = 0; // For EIP-3009 nonce uniqueness
+    // M-6: nonceCounter removed — was not persisted across upgrades.
+    // Now using Time.now() (nanoseconds) which is monotonically increasing
+    // within a canister (single-threaded execution guarantees uniqueness).
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -209,8 +211,8 @@ module {
         let validAfter = if (now > 600) { now - 600 } else { 0 };
         let validBefore = now + 300;
 
-        nonceCounter += 1;
-        let nonceBytes = EvmUtils.natToBytes(now * 1_000_000 + nonceCounter, 32);
+        // M-6: Use nanosecond timestamp for nonce uniqueness (survives upgrades)
+        let nonceBytes = EvmUtils.natToBytes(Int.abs(Time.now()), 32);
 
         // EIP-712 digest
         let domSep = Eip712.domainSeparator(tokenName, tokenVersion, chainId, tokenAddr);

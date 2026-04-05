@@ -7,6 +7,7 @@ import GrantsMod "Grants";
 import SessionsMod "Sessions";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
+import Int "mo:base/Int";
 import Text "mo:base/Text";
 import Iter "mo:base/Iter";
 import Buffer "mo:base/Buffer";
@@ -307,6 +308,11 @@ module {
           };
         };
 
+        // M-4: Validate EIP-3009 time window before any further processing
+        let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
+        if (nowSeconds < authz.validAfter) { nonceManager.unlock(signature.nonce); return #expired("Authorization not yet valid") };
+        if (nowSeconds > authz.validBefore) { nonceManager.unlock(signature.nonce); return #expired("Authorization expired") };
+
         // M-1: Derive deterministic Principal from EVM sender for policy tracking.
         // M-2: Uses 29 bytes of SHA-256 (232 bits) — collision probability ~2^-116.
         // Two EVM addresses mapping to the same Principal would share policy buckets.
@@ -537,7 +543,11 @@ module {
       };
     };
 
-    /// H-1: Force-close a session without auth (admin/timer use).
+    /// Force-close a session without auth (admin/timer use).
+    /// WARNING: This method performs no access control. The consuming canister
+    /// MUST restrict access (e.g., assert(Principal.isController(msg.caller)))
+    /// before exposing this as a public method. Intended for timer callbacks
+    /// and admin operations only.
     public func forceCloseSession(sessionId : Text) : async Types.PaymentResult {
       let result = await sessionsMgr.closeSessionInternal(sessionId);
       switch (result) {
@@ -565,15 +575,14 @@ module {
     };
 
     /// M-8: Recover funds from an escrow subaccount.
-    /// Caller must be the session payer.
+    /// H-5: Always refunds to payer, caps at unconsumed amount, rejects open sessions.
     public func recoverEscrow(
       caller : Principal,
       ledger : Types.LedgerActor,
       sessionId : Text,
-      recipient : Types.Account,
       amount : Nat,
     ) : async { #ok : Nat; #err : Text } {
-      await sessionsMgr.recoverEscrow(caller, ledger, sessionId, recipient, amount);
+      await sessionsMgr.recoverEscrow(caller, ledger, sessionId, amount);
     };
 
     /// Start recurring timers for session cleanup and policy garbage collection.
@@ -586,9 +595,10 @@ module {
         // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
         sessionsMgr.gcClosedSessions();
       });
-      // Garbage-collect stale policy data every hour
+      // Garbage-collect stale policy data and revoked grants every hour
       ignore Timer.recurringTimer<system>(#seconds 3600, func() : async () {
         policy.gcDailySpend();
+        grants.gcRevokedGrants();
       });
 
       // Auto-init HMAC seed from randomness on first deployment

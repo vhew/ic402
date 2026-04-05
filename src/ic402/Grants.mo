@@ -23,7 +23,8 @@ module {
     var grantCounter : Nat = 0;
     var hmacSeed : Nat = 0;
     var hmacSeedInitialized : Bool = false;
-    var revokedGrants = HashMap.HashMap<Text, Bool>(16, Text.equal, Text.hash);
+    // M-1: Store revocation timestamps so old entries can be garbage-collected.
+    var revokedGrants = HashMap.HashMap<Text, Int>(16, Text.equal, Text.hash);
 
     func hmacSecret() : [Nat8] {
       let principalBytes = Blob.toArray(Principal.toBlob(canisterPrincipal));
@@ -119,9 +120,24 @@ module {
       switch (revokedGrants.get(grantId)) {
         case (?_) { false };
         case (null) {
-          revokedGrants.put(grantId, true);
+          revokedGrants.put(grantId, Time.now());
           true;
         };
+      };
+    };
+
+    /// M-1: Remove revoked grants older than 7 days to prevent unbounded growth.
+    /// Call from a recurring timer (e.g., hourly via Gateway.startTimers).
+    public func gcRevokedGrants() {
+      let cutoff = Time.now() - 7 * 24 * 60 * 60 * 1_000_000_000; // 7 days in nanoseconds
+      let stale = Iter.toArray(
+        Iter.filter<(Text, Int)>(
+          revokedGrants.entries(),
+          func((_, timestamp)) { timestamp < cutoff },
+        )
+      );
+      for ((id, _) in stale.vals()) {
+        revokedGrants.delete(id);
       };
     };
 
@@ -131,11 +147,12 @@ module {
     public func toStable() : Types.StableAccessGrantState {
       {
         revokedGrantIds = Iter.toArray(
-          Iter.map<(Text, Bool), Text>(
+          Iter.map<(Text, Int), Text>(
             revokedGrants.entries(),
             func((id, _)) { id },
           )
         );
+        revokedGrantTimestamps = ?Iter.toArray(revokedGrants.entries());
         grantCounter;
         hmacSeed;
       };
@@ -146,11 +163,25 @@ module {
       grantCounter := data.grantCounter;
       hmacSeed := data.hmacSeed;
       hmacSeedInitialized := (hmacSeed > 0);
-      revokedGrants := HashMap.HashMap<Text, Bool>(
-        data.revokedGrantIds.size(), Text.equal, Text.hash,
-      );
-      for (id in data.revokedGrantIds.vals()) {
-        revokedGrants.put(id, true);
+      // M-1: Prefer timestamped entries; fall back to legacy revokedGrantIds (timestamp = now).
+      switch (data.revokedGrantTimestamps) {
+        case (?entries) {
+          revokedGrants := HashMap.HashMap<Text, Int>(
+            entries.size(), Text.equal, Text.hash,
+          );
+          for ((id, ts) in entries.vals()) {
+            revokedGrants.put(id, ts);
+          };
+        };
+        case (null) {
+          let now = Time.now();
+          revokedGrants := HashMap.HashMap<Text, Int>(
+            data.revokedGrantIds.size(), Text.equal, Text.hash,
+          );
+          for (id in data.revokedGrantIds.vals()) {
+            revokedGrants.put(id, now);
+          };
+        };
       };
     };
   };

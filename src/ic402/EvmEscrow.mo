@@ -47,6 +47,10 @@ module {
     };
 
     /// Total allocated across all sessions for a specific chain+token.
+    /// Consuming canisters SHOULD check `totalAllocated(chainId, token) + newAmount`
+    /// against their known on-chain balance before calling `allocate()`. The library
+    /// cannot verify on-chain balances itself (that would require an EVM RPC call),
+    /// but this method provides the accounting needed to prevent over-allocation.
     public func totalAllocated(chainId : Nat, token : Text) : Nat {
       var total : Nat = 0;
       for ((_, a) in allocations.entries()) {
