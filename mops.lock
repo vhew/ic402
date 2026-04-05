@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "mopsTomlDepsHash": "c8f396d385bbc34b078c64329e65300240b758fd41b0ab7570fde9982ad8ef2e",
+  "mopsTomlDepsHash": "276977330704bcd7248124e3e6d74cd78074fbde4fcf21b692b5d2656dba84ad",
   "deps": {
     "base": "0.16.0",
     "ic": "3.2.0",
@@ -22,7 +22,6 @@
     "hmac": "1.1.0",
     "chacha": "1.0.1",
     "vector": "0.4.1",
-    "ic-vetkeys": "0.4.0",
     "test": "2.1.2"
   },
   "hashes": {
@@ -318,16 +317,6 @@
       "vector@0.4.1/src/Class.mo": "5c5ad6caf6d1c2c38b071eadb6da66fcdc002ab5e8b427ce9827d9ecb4ab78a5",
       "vector@0.4.1/README.md": "4a09aa037e996de272ffe72f5e4f92171a5f1c67e17755e4cf6fdada9778c360",
       "vector@0.4.1/src/lib.mo": "5db47b6aef87a9b39794effb7e3e4cdc4adfab9670d9de80e8735f76ad1876d5"
-    },
-    "ic-vetkeys@0.4.0": {
-      "ic-vetkeys@0.4.0/src/ManagementCanister.mo": "9e2d77fef32fbe76c7dedfed8513a25ab680e3eb1a13b8568231355d8d7c53e4",
-      "ic-vetkeys@0.4.0/README.md": "caa7385ff105fbc70e9875221a85d0e0db1b401f60d959d7b38c345a00311cd5",
-      "ic-vetkeys@0.4.0/src/Types.mo": "dc41da19ba8df04028df590064e0daca0573054f6913108341e69ced61cc045c",
-      "ic-vetkeys@0.4.0/src/lib.mo": "ec087d82cc47dbd4ab75670e26cdf93ddbb932d3d990bfa4de24fbb5c0f1bdd9",
-      "ic-vetkeys@0.4.0/LICENSE": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
-      "ic-vetkeys@0.4.0/mops.toml": "d8323219d0345ea09393235ffbb77235ea60ca330f7e30bc9abf5aa4252044e4",
-      "ic-vetkeys@0.4.0/src/encrypted_maps/EncryptedMaps.mo": "f20eb6fd2d2f500bbb9cf700968cf4392e08ebca931c9cba82473a568dfb7153",
-      "ic-vetkeys@0.4.0/src/key_manager/KeyManager.mo": "d1655daf68ce1f8798fc06e53a24695b50d2ccf9562fa2a284aa3ccf17302ec8"
     },
     "test@2.1.2": {
       "test@2.1.2/LICENSE": "ec415b57f8143746b567c94bfad243f5342f3edf110c94641a1a60e02722db55",
