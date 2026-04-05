@@ -530,4 +530,87 @@ module {
     body : Blob;
     upgrade : ?Bool;
   };
+
+  // ── Service Marketplace ──
+
+  /// Whether the service completes within one HTTP request or requires async delivery.
+  public type ServiceType = { #Sync; #Async };
+
+  /// How the buyer is charged.
+  public type PricingScheme = {
+    #Exact : Nat;   // fixed price per request (USDC e6)
+    #Upto : Nat;    // max authorization; settle at actual cost
+    #Session;       // use existing session deposit
+  };
+
+  /// How the canister verifies the operator's result before settling.
+  public type VerificationMethod = {
+    #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal };
+    #HashMatch;                              // sha256(result) must match buyer-provided hash
+    #BuyerConfirm : { disputeWindowSeconds : Nat }; // buyer approves or disputes
+    #AutoSettle;                             // trust the operator (reputation-gated)
+  };
+
+  /// How the buyer receives the result.
+  public type ServiceDeliveryMethod = { #Poll; #Callback; #Both };
+
+  /// A registered service definition.
+  public type ServiceDefinition = {
+    id : Text;
+    name : Text;
+    description : Text;
+    serviceType : ServiceType;
+    pricing : PricingScheme;
+    verification : VerificationMethod;
+    delivery : ServiceDeliveryMethod;
+    timeout : Nat;           // seconds until auto-refund if not completed
+    operatorId : Principal;  // who does the work
+    enabled : Bool;
+    createdAt : Int;
+  };
+
+  /// Job lifecycle status.
+  public type JobStatus = {
+    #Pending;    // paid, waiting for operator
+    #Assigned;   // operator claimed
+    #Computing;  // operator working (optional status)
+    #Submitted;  // operator submitted result
+    #Verified;   // result verified (ZK, hash, or buyer confirm)
+    #Settled;    // payment transferred to operator
+    #Disputed;   // buyer disputes the result
+    #Expired;    // timed out, refund pending
+    #Refunded;   // funds returned to buyer
+  };
+
+  /// Public view of a job.
+  public type Job = {
+    id : Text;
+    serviceId : Text;
+    buyer : Text;              // principal or EVM address
+    operator : ?Principal;
+    params : Blob;             // job parameters (opaque to canister)
+    paymentReceiptId : Text;   // links to Gateway receipt
+    amount : Nat;              // escrowed amount
+    actualCost : ?Nat;         // for Upto pricing: real cost after completion
+    status : JobStatus;
+    result : ?Blob;            // operator's submission
+    proof : ?Blob;             // ZK proof (if applicable)
+    createdAt : Int;
+    expiresAt : Int;
+    completedAt : ?Int;
+    deliveryCallback : ?Text;  // optional callback URL
+  };
+
+  /// Serializable service registry state for canister upgrades.
+  public type StableServiceRegistryState = {
+    services : [(Text, ServiceDefinition)];
+    jobs : [(Text, Job)];
+    serviceCounter : Nat;
+    jobCounter : Nat;
+  };
+
+  /// Interface for a ZK Groth16 verification canister.
+  public type ZkVerifierActor = actor {
+    verify_groth16 : shared (proof : Blob, public_inputs : [Blob], verification_key : Blob) -> async { #ok; #err : Text };
+  };
 };
