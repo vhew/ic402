@@ -96,11 +96,22 @@ echo ""
 
 echo "--- Starting local replica ---"
 echo ""
-# Clean all stale state to avoid CMC rate-limit errors from previous runs
+
+# Stop any existing network and clean all stale state
+icp network stop >/dev/null 2>&1 || true
+
+# Kill stale processes on port 4944 (survives icp network stop failures)
+if lsof -ti :4944 >/dev/null 2>&1; then
+  echo "  Killing stale processes on port 4944..."
+  lsof -ti :4944 | xargs kill -9 2>/dev/null || true
+fi
+
+# Clean local cache
 if [ -d "$PROJECT_ROOT/.icp/cache" ]; then
   echo "  Cleaning local cache..."
   rm -rf "$PROJECT_ROOT/.icp/cache"
 fi
+
 # Clean icp-cli global caches (port descriptors + pocket-ic NNS state)
 ICP_CACHE_DIR="$HOME/Library/Caches/org.dfinity.icp-cli"
 ICP_SUPPORT_DIR="$HOME/Library/Application Support/org.dfinity.icp-cli"
@@ -112,23 +123,20 @@ if [ -d "$ICP_SUPPORT_DIR/pkg" ]; then
   echo "  Purging cached pocket-ic (forces fresh NNS)..."
   rm -rf "$ICP_SUPPORT_DIR/pkg"
 fi
-if icp network status >/dev/null 2>&1; then
-  echo "  Already running."
-else
-  icp network start --background 2>&1 || true  # may fail on cycles seeding but replica still starts
-  echo "  Waiting for replica..."
-  for i in $(seq 1 15); do
-    if icp network status >/dev/null 2>&1; then
-      echo "  Started (ready after ${i}s)."
-      break
-    fi
-    if [ "$i" -eq 15 ]; then
-      echo "  ERROR: Replica did not become ready within 15 seconds."
-      exit 1
-    fi
-    sleep 1
-  done
-fi
+
+icp network start --background 2>&1 || true  # may fail on cycles seeding but replica still starts
+echo "  Waiting for replica..."
+for i in $(seq 1 15); do
+  if icp network status >/dev/null 2>&1; then
+    echo "  Started (ready after ${i}s)."
+    break
+  fi
+  if [ "$i" -eq 15 ]; then
+    echo "  ERROR: Replica did not become ready within 15 seconds."
+    exit 1
+  fi
+  sleep 1
+done
 echo ""
 
 # ── Deploy canisters ──
