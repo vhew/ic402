@@ -1,5 +1,92 @@
 # Changelog
 
+## v1.0.0 — 2026-04-05
+
+### Breaking Changes
+
+- **X402Client removed**: Outbound x402 payments now use EvmSigner (canister signs) + client library (probes URL, broadcasts tx). The canister no longer makes EVM RPC outcalls for outbound operations, reducing cycles cost 40-85%.
+- **Identity stripped to metadata**: `registerAgent()`, `getEvmNonce()`, `getFeeData()`, `buildRegisterCalldata()`, `parseAgentRegisteredEvent()` removed. Registration now uses `EvmSigner.signRegistration()` + client-side broadcast.
+- **EvmSender is internal-only**: No longer exported from `lib.mo`. Used internally by Gateway for inbound settlement.
+- **Client BudgetConfig removed**: Client-side budget tracking was advisory only (not enforceable by a compromised client). Canister-side SpendingPolicy is the enforcement point.
+- **ServiceRegistry buyer parameter**: `submitRequest`, `confirmJob`, `disputeJob` now take `Principal` instead of `Text`.
+
+### New Modules
+
+- **EvmSigner** (`src/ic402/EvmSigner.mo`): Remote signing module — canister holds tECDSA key and signs; client handles all RPC/HTTP. Methods: `signTransaction`, `signErc20Transfer`, `signEthTransfer`, `signEip3009Authorization`, `signRegistration`, `signTypedData`.
+- **ServiceRegistry** (`src/ic402/ServiceRegistry.mo`): Paid service marketplace coordinator. Canister escrows funds, assigns jobs to operators, verifies results (AutoSettle, HashMatch, BuyerConfirm, ZkGroth16), and settles payment. Full job lifecycle: Pending → Assigned → Submitted → Verified → Settled.
+- **ZK Verifier** (`example/zk-verifier/`): Reference Rust canister implementing Groth16/BN254 verification via arkworks. ~392KB WASM, ~$0.005 per proof.
+
+### New Exports
+
+- `EvmSigner`: the only public EVM module (remote signing)
+- `ServiceRegistry`: paid service marketplace
+- `Eip712`: EIP-712 hashing utilities (domainSeparator, digest)
+- `EvmAddress`: keccak256 hashing
+- `EvmUtils`: ABI encoding, hex conversion
+
+### Features
+
+- **Generic EIP-712 signing** (`signTypedData`): Universal primitive for any EIP-712 protocol — DEX agent wallets (Hyperliquid, Vertex, Aevo), permit signatures, meta-transactions.
+- **HTTP 202 Accepted**: Async service requests return 202 with poll URL. HTTP `/service/*` and `/job/*` routes added.
+- **x402 v2 header**: 402 responses now include base64 `payment-required` header alongside JSON body.
+- **Service pricing models**: Exact (fixed price), Upto (max with refund), Session (streaming).
+- **Service verification methods**: AutoSettle, HashMatch (SHA-256), BuyerConfirm (dispute window), ZkGroth16 (inter-canister Groth16 proof verification).
+- **Timer-based job expiry**: Stale jobs auto-refund. Terminal jobs GC'd after 24h.
+
+### TypeScript Client (`@ic402/client`)
+
+- **New `evm` module**: `probeX402`, `fetchX402`, `findPaymentOption`, `broadcastTransaction`, `pollReceipt`, `registerAgent`, `Ic402Error` with 11 classified error kinds and `retryable` flag.
+- **Service methods**: `listServices()`, `submitServiceRequest()` (ICRC-2 auto-pay with nonce handling), `pollJobResult()`, `disputeJob()`.
+- **EVM methods**: `sendErc20Transfer()`, `sendEthTransfer()`, `registerAgent()`.
+- **Typed config**: `Ic402Identity` interface replaces `unknown`. Options object for `fetchX402`.
+- **Fixes**: session publicKey encoding (Uint8Array), ICRC-2 approve fee buffer, EVM session authorization passthrough.
+
+### MCP Server
+
+- New tools: `list_services`, `submit_request`, `get_job_result`, `dispute_job`, `fetch_x402` (direct probe → sign → pay).
+- ICRC-2 ledger IDL factory for auto-approval.
+- 15s AbortController timeouts on HTTP requests.
+
+### Security
+
+- **C-1**: EVM session close leaves `#closing` (not `#closed`) when refund fails, preserving `recoverEscrow` path.
+- **H-1**: `EvmSender` txInProgress lock serializes concurrent EVM transactions (prevents nonce desync).
+- **H-2**: `forceCloseSession()` has WARNING doc — consuming canister MUST add access control.
+- **H-5**: `recoverEscrow` restricted to unconsumed portion, always refunds to payer (removed arbitrary recipient).
+- **H-6**: `ContentStore.decryptChunkData` returns `?Blob` — propagates auth failures instead of returning empty blobs.
+- **M-1**: Revoked grants store timestamps, GC removes entries >7 days old (hourly timer).
+- **M-2**: Policy rateLimitLog deletes empty keys after filtering.
+- **M-4**: EIP-3009 validAfter/validBefore validated before expensive EVM outcall.
+- **M-5**: `expireJobs()` also GCs terminal jobs >24h old.
+- **M-6**: EIP-3009 nonce uses `Time.now()` nanoseconds (monotonic, survives upgrades).
+- **M-8**: Client `parseAgentRegisteredEvent` checks topics[0] against keccak256 event signature.
+- **CF-1**: Example canister restored to mainnet values; deploy scripts patch for local.
+
+### Refactoring
+
+- `Utils.mo`: extracted `isEvmNetwork()`, `extractChainId()`, `findLedger()` from Gateway/Sessions (~50 LOC dedup).
+- `Policy.mo`: `warnIfInvalid()` validates invariants on `loadStable()`.
+- Removed unused `ic-vetkeys` dependency.
+
+### Testing
+
+- **36 integration tests**: charges (ICP settlement), sessions, content, services, EVM signer, EIP-712, identity, HTTP gateway, ZK verifier, policy.
+- **40 Motoko unit tests**: ServiceRegistry lifecycle, disputes, stable state round-trip, edge cases.
+- **8 escrow unit tests**: subaccount derivation determinism, uniqueness, prefix isolation.
+- **69 client unit tests**: fetchX402, services, polling, error classification, findPaymentOption.
+
+### Demo
+
+- 10-step interactive walkthrough: Configure, ADD Encrypted Content, SELL Content over x402, DELETE Content, SELL Services over x402, BUY over x402, Streaming Micropayments, Agent Identity, EIP-712 Delegate Signing, Policy + Summary.
+
+### Tooling
+
+- `@icp-sdk/icp-cli` upgraded 0.1.0 → 0.2.2 (fixes icp.yaml parse errors when run via pnpm).
+- `icp.yaml` schema updated to v0.2.2. ZK verifier added to local environment.
+- Setup/reset scripts always stop + clean before starting (port kill, cache purge, pocket-ic reset).
+
+---
+
 ## v0.1.5 — 2026-03-28
 
 ### Documentation
