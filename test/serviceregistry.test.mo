@@ -75,7 +75,7 @@ suite("ServiceRegistry", func() {
   func registerEnableSubmit(reg : ServiceRegistry.ServiceRegistry, operator : Principal) : (Text, Text) {
     let svcId = registerAndEnable(reg, operator);
     let jobId = switch (reg.submitRequest(
-      Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+      buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
     )) {
       case (#ok(id)) { id };
       case (#err(e)) { assert false; "" };
@@ -248,7 +248,7 @@ suite("ServiceRegistry", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
       )) {
         case (#ok(jobId)) { assert Text.startsWith(jobId, #text("job-")) };
         case (#err(e)) { assert false };
@@ -263,7 +263,7 @@ suite("ServiceRegistry", func() {
       };
       // Service is disabled by default
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
       )) {
         case (#err(e)) { assert Text.contains(e, #text("disabled")) };
         case (#ok(_)) { assert false };
@@ -273,7 +273,7 @@ suite("ServiceRegistry", func() {
     test("submit to non-existent service returns error", func() {
       let reg = makeRegistry();
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), "no-such-svc", Text.encodeUtf8("params"), mockReceipt(1000), null,
+        buyerPrincipal, "no-such-svc", Text.encodeUtf8("params"), mockReceipt(1000), null,
       )) {
         case (#err(e)) { assert Text.contains(e, #text("not found")) };
         case (#ok(_)) { assert false };
@@ -285,7 +285,7 @@ suite("ServiceRegistry", func() {
       let svcId = registerAndEnable(reg, operatorPrincipal);
       // Service price is 1000, but we pay only 500
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(500), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(500), null,
       )) {
         case (#err(e)) { assert Text.contains(e, #text("Insufficient")) };
         case (#ok(_)) { assert false };
@@ -296,7 +296,7 @@ suite("ServiceRegistry", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
       )) {
         case (#ok(_)) {};
         case (#err(_)) { assert false };
@@ -307,7 +307,7 @@ suite("ServiceRegistry", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(2000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(2000), null,
       )) {
         case (#ok(_)) {};
         case (#err(_)) { assert false };
@@ -484,7 +484,7 @@ suite("ServiceRegistry", func() {
       let (_, jobId) = registerEnableSubmit(reg, operatorPrincipal);
 
       // Job is #Pending, disputeJob requires #Submitted
-      switch (reg.disputeJob(Principal.toText(buyerPrincipal), jobId, "bad result")) {
+      switch (reg.disputeJob(buyerPrincipal, jobId, "bad result")) {
         case (#err(e)) { assert Text.contains(e, #text("not in submitted")) };
         case (#ok) { assert false };
       };
@@ -495,7 +495,7 @@ suite("ServiceRegistry", func() {
       let (_, jobId) = registerEnableSubmit(reg, operatorPrincipal);
 
       // Wrong buyer
-      switch (reg.disputeJob(Principal.toText(operatorPrincipal), jobId, "reason")) {
+      switch (reg.disputeJob(operatorPrincipal, jobId, "reason")) {
         case (#err(e)) { assert Text.contains(e, #text("buyer")) };
         case (#ok) { assert false };
       };
@@ -503,7 +503,7 @@ suite("ServiceRegistry", func() {
 
     test("dispute non-existent job returns error", func() {
       let reg = makeRegistry();
-      switch (reg.disputeJob(Principal.toText(buyerPrincipal), "no-job", "reason")) {
+      switch (reg.disputeJob(buyerPrincipal, "no-job", "reason")) {
         case (#err(e)) { assert Text.contains(e, #text("not found")) };
         case (#ok) { assert false };
       };
@@ -520,10 +520,10 @@ suite("ServiceRegistry", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);
       ignore reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p1"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("p1"), mockReceipt(1000), null,
       );
       ignore reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p2"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("p2"), mockReceipt(1000), null,
       );
 
       let allJobs = reg.listJobs(svcId, null);
@@ -534,13 +534,13 @@ suite("ServiceRegistry", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);
       let j1 = switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p1"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("p1"), mockReceipt(1000), null,
       )) {
         case (#ok(id)) { id };
         case (#err(_)) { assert false; "" };
       };
       ignore reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p2"), mockReceipt(1000), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("p2"), mockReceipt(1000), null,
       );
 
       // Claim first job so it becomes Assigned
@@ -600,7 +600,7 @@ suite("ServiceRegistry", func() {
           assert (job.serviceId == svcId);
           assert (job.status == #Assigned);
           assert (job.operator == ?operatorPrincipal);
-          assert (job.buyer == Principal.toText(buyerPrincipal));
+          assert (job.buyer == buyerPrincipal);
           assert (job.amount == 1000);
         };
         case (null) { assert false };
@@ -701,7 +701,7 @@ suite("ServiceRegistry", func() {
       ignore reg.enableService(operatorPrincipal, svcId);
 
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(0), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(0), null,
       )) {
         case (#err(e)) { assert Text.contains(e, #text("required")) };
         case (#ok(_)) { assert false };
@@ -718,7 +718,7 @@ suite("ServiceRegistry", func() {
       ignore reg.enableService(operatorPrincipal, svcId);
 
       switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1), null,
+        buyerPrincipal, svcId, Text.encodeUtf8("params"), mockReceipt(1), null,
       )) {
         case (#ok(_)) {};
         case (#err(_)) { assert false };
@@ -730,7 +730,7 @@ suite("ServiceRegistry", func() {
       let svcId = registerAndEnable(reg, operatorPrincipal);
       let params = Text.encodeUtf8("my-params");
       let jobId = switch (reg.submitRequest(
-        Principal.toText(buyerPrincipal), svcId, params, mockReceipt(1000), ?"https://cb.example.com",
+        buyerPrincipal, svcId, params, mockReceipt(1000), ?"https://cb.example.com",
       )) {
         case (#ok(id)) { id };
         case (#err(_)) { assert false; "" };
