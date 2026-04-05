@@ -1,6 +1,6 @@
 {
   "name": "@ic402/mcp",
-  "version": "0.1.5",
+  "version": "1.0.0",
   "description": "MCP server for ic402 — exposes x402 charges and streaming sessions as tools",
   "license": "Apache-2.0",
   "type": "module",
