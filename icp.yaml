@@ -17,7 +17,9 @@ canisters:
       configuration:
         path: .icp/icrc1-ledger.wasm.gz
         candid: .icp/icrc1-ledger.did
-    init_args: .icp/ckusdc-ledger-init.candid
+    init_args:
+      path: .icp/ckusdc-ledger-init.candid
+      format: candid
 
   - name: evm_rpc
     recipe:
@@ -25,7 +27,9 @@ canisters:
       configuration:
         path: .icp/evm_rpc.wasm.gz
         candid: .icp/evm_rpc.did
-    init_args: .icp/evm-rpc-init.candid
+    init_args:
+      path: .icp/evm-rpc-init.candid
+      format: candid
 
   - name: zk_verifier
     recipe:
