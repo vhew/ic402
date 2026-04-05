@@ -4,14 +4,13 @@ import Policy "Policy";
 import Escrow "Escrow";
 import EvmEscrow "EvmEscrow";
 import EvmSender "EvmSender";
+import Utils "Utils";
 import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
 import Nat64 "mo:base/Nat64";
-import Nat32 "mo:base/Nat32";
 import Text "mo:base/Text";
-import Char "mo:base/Char";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
@@ -44,23 +43,12 @@ module {
     };
   };
 
-  // Check if a network identifier is an EVM chain (eip155:*).
   func isEvmNetwork(network : Text) : Bool {
-    Text.startsWith(network, #text "eip155:");
+    Utils.isEvmNetwork(network);
   };
 
-  // Extract chain ID from CAIP-2 network string.
   func extractChainId(network : Text) : ?Nat {
-    let parts = Text.split(network, #char ':');
-    let arr = Iter.toArray(parts);
-    if (arr.size() != 2) return null;
-    var result : Nat = 0;
-    for (c in arr[1].chars()) {
-      let d = Nat32.toNat(Char.toNat32(c));
-      if (d < 48 or d > 57) return null;
-      result := result * 10 + (d - 48);
-    };
-    ?result;
+    Utils.extractChainId(network);
   };
 
   /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
@@ -80,11 +68,8 @@ module {
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
     let sessionOpenLocks = HashMap.HashMap<Principal, Int>(8, Principal.equal, Principal.hash);
 
-    func findLedger(tokenPrincipalText : Text) : ?Types.TokenConfig {
-      for (t in config.tokens.vals()) {
-        if (Principal.toText(t.ledger) == tokenPrincipalText) return ?t;
-      };
-      null;
+    func findLedger(identifier : Text) : ?Types.TokenConfig {
+      Utils.findLedger(config.tokens, identifier);
     };
 
     func recipientText() : Text {

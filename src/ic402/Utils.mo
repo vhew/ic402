@@ -1,4 +1,5 @@
 /// ic402 — Shared internal utilities (not exported via lib.mo).
+import Types "Types";
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
@@ -7,6 +8,7 @@ import Buffer "mo:base/Buffer";
 import Text "mo:base/Text";
 import Char "mo:base/Char";
 import Iter "mo:base/Iter";
+import Principal "mo:base/Principal";
 
 module {
 
@@ -214,5 +216,42 @@ module {
       result #= "=";
     };
     result;
+  };
+
+  // ── Shared helpers (used by Gateway and Sessions) ──
+
+  /// Check if a CAIP-2 network string is an EVM network (eip155:*).
+  public func isEvmNetwork(network : Text) : Bool {
+    Text.startsWith(network, #text "eip155:");
+  };
+
+  /// Extract the chain ID from a CAIP-2 EVM network string (e.g., "eip155:8453" -> ?8453).
+  public func extractChainId(network : Text) : ?Nat {
+    let parts = Text.split(network, #char ':');
+    let arr = Iter.toArray(parts);
+    if (arr.size() != 2) return null;
+    // Simple decimal parse
+    var result : Nat = 0;
+    for (c in arr[1].chars()) {
+      let d = Nat32.toNat(Char.toNat32(c));
+      if (d < 48 or d > 57) return null;
+      result := result * 10 + (d - 48);
+    };
+    ?result;
+  };
+
+  /// Find a token config by principal text or CAIP-2 network prefix.
+  /// Accepts both "ryjl3-tyaaa-..." (principal) and "icp:1" (network).
+  /// For ICP networks, returns the first configured token since ICP
+  /// canister configs typically have a single ledger.
+  public func findLedger(tokens : [Types.TokenConfig], identifier : Text) : ?Types.TokenConfig {
+    for (t in tokens.vals()) {
+      if (Principal.toText(t.ledger) == identifier) return ?t;
+    };
+    // CAIP-2 network match: "icp:*" matches any configured ICP token
+    if (Text.startsWith(identifier, #text "icp:")) {
+      if (tokens.size() > 0) return ?tokens[0];
+    };
+    null;
   };
 };

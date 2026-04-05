@@ -20,6 +20,7 @@ import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import HashMap "mo:base/HashMap";
 import SHA256 "mo:sha2/Sha256";
+import Utils "Utils";
 import EvmVerify "EvmVerify";
 import EvmAddress "EvmAddress";
 import EvmEscrow "EvmEscrow";
@@ -110,19 +111,8 @@ module {
       { owner = config.recipient.owner; subaccount = config.recipient.subaccount };
     };
 
-    /// Find ICP token config by ledger principal text or CAIP-2 network.
-    /// Accepts both "ryjl3-tyaaa-..." (principal) and "icp:1" (network).
-    /// For ICP networks, returns the first configured token since ICP
-    /// canister configs typically have a single ledger.
     func findLedger(identifier : Text) : ?Types.TokenConfig {
-      for (t in config.tokens.vals()) {
-        if (Principal.toText(t.ledger) == identifier) return ?t;
-      };
-      // CAIP-2 network match: "icp:*" matches any configured ICP token
-      if (Text.startsWith(identifier, #text "icp:")) {
-        if (config.tokens.size() > 0) return ?config.tokens[0];
-      };
-      null;
+      Utils.findLedger(config.tokens, identifier);
     };
 
     /// Nonce expiry in nanoseconds, from config or default (5 minutes).
@@ -242,24 +232,12 @@ module {
       Buffer.toArray(buf);
     };
 
-    /// Check if a network identifier is an EVM chain (eip155:*).
     func isEvmNetwork(network : Text) : Bool {
-      Text.startsWith(network, #text "eip155:");
+      Utils.isEvmNetwork(network);
     };
 
-    /// Extract chain ID from CAIP-2 network string (e.g. "eip155:43113" -> 43113).
     func extractChainId(network : Text) : ?Nat {
-      let parts = Text.split(network, #char ':');
-      let arr = Iter.toArray(parts);
-      if (arr.size() != 2) return null;
-      // Simple decimal parse
-      var result : Nat = 0;
-      for (c in arr[1].chars()) {
-        let d = Nat32.toNat(Char.toNat32(c));
-        if (d < 48 or d > 57) return null;
-        result := result * 10 + (d - 48);
-      };
-      ?result;
+      Utils.extractChainId(network);
     };
 
     /// Verify and settle a charge payment.

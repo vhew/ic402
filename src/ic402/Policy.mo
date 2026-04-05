@@ -348,6 +348,34 @@ module {
         data.rateLimitEntries.vals(), data.rateLimitEntries.size(),
         Text.equal, Text.hash,
       );
+
+      // Validate restored policies (warn but don't trap — bricking the canister is worse)
+      warnIfInvalid(globalPolicy, "global");
+      for ((caller, p) in callerPolicies.entries()) {
+        warnIfInvalid(p, "caller " # Principal.toText(caller));
+      };
+    };
+
+    /// Log a warning if a policy has invalid invariants.
+    /// Unlike validatePolicy(), this never traps — used only on loadStable
+    /// where trapping would brick the canister.
+    func warnIfInvalid(p : SpendingPolicy, policyLabel : Text) {
+      switch (p.maxPerTransaction, p.maxPerDay) {
+        case (?txMax, ?dayMax) {
+          if (txMax > dayMax) {
+            Debug.print("ic402 WARNING: " # policyLabel # " policy has maxPerTransaction (" # Nat.toText(txMax) # ") > maxPerDay (" # Nat.toText(dayMax) # ") — policy will reject all transactions exceeding daily limit");
+          };
+        };
+        case (_, _) {};
+      };
+      switch (p.maxSessionDeposit, p.maxPerDay) {
+        case (?sessMax, ?dayMax) {
+          if (sessMax > dayMax) {
+            Debug.print("ic402 WARNING: " # policyLabel # " policy has maxSessionDeposit (" # Nat.toText(sessMax) # ") > maxPerDay (" # Nat.toText(dayMax) # ") — sessions near maxSessionDeposit will be rejected by daily limit");
+          };
+        };
+        case (_, _) {};
+      };
     };
   };
 

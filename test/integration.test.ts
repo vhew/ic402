@@ -64,6 +64,52 @@ describe('ic402 integration', () => {
       expect(icpReq).toBeDefined();
       expect(evmReq).toBeDefined();
     });
+
+    it('settles ICP payment and returns search results', async () => {
+      if (skip) return;
+
+      // 1. Get payment requirements (nonce)
+      const reqResult = await actor.search('settlement test', []);
+      expect(reqResult).toHaveProperty('paymentRequired');
+      const reqs = reqResult.paymentRequired;
+      const icpReq = reqs.find((r: { network: string }) => r.network === 'icp:1');
+      expect(icpReq).toBeDefined();
+
+      // 2. ICRC-2 approve the example canister to spend the required amount
+      const approveResult = await ledger.icrc2_approve({
+        spender: {
+          owner: Principal.fromText(exampleId),
+          subaccount: [],
+        },
+        amount: BigInt(icpReq.amount) + 10_000n, // add buffer for fee
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approveResult).toHaveProperty('Ok');
+
+      // 3. Get caller principal from the agent
+      const callerPrincipal = await agent.getPrincipal();
+
+      // 4. Call search with payment signature
+      const paymentSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: callerPrincipal.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const paidResult = await actor.search('settlement test', [paymentSig]);
+
+      // 5. Verify we got actual search results (not paymentRequired)
+      expect(paidResult).toHaveProperty('ok');
+      expect(Array.isArray(paidResult.ok)).toBe(true);
+    });
   });
 
   // ── Sessions ──
