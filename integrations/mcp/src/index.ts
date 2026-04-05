@@ -628,8 +628,15 @@ server.tool(
     if (!cid) throw new Error('No canister ID.');
 
     try {
-      // 1. Probe (client-side HTTP)
-      const probeResult = await probeX402(url, chainId);
+      // 1. Probe (client-side HTTP, with 15s timeout)
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      let probeResult;
+      try {
+        probeResult = await probeX402(url, chainId, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
       if (probeResult.status === 'free') {
         return {
           content: [
@@ -664,12 +671,18 @@ server.tool(
       }
       const signed = signResult.ok as { header: string; paidAmount: bigint };
 
-      // 3. Retry with payment header (client-side HTTP)
-      const headers: Record<string, string> = {
-        'X-Payment': signed.header,
-        'Payment-Signature': signed.header,
-      };
-      const paidResponse = await globalThis.fetch(url, { headers });
+      // 3. Retry with payment header (client-side HTTP, 15s timeout)
+      const retryController = new AbortController();
+      const retryTimeout = setTimeout(() => retryController.abort(), 15_000);
+      let paidResponse: Response;
+      try {
+        paidResponse = await globalThis.fetch(url, {
+          headers: { 'X-Payment': signed.header, 'Payment-Signature': signed.header },
+          signal: retryController.signal,
+        });
+      } finally {
+        clearTimeout(retryTimeout);
+      }
       const body = await paidResponse.text();
 
       if (paidResponse.ok) {
