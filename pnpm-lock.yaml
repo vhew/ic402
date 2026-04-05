@@ -20,6 +20,9 @@ importers:
       '@icp-sdk/icp-cli':
         specifier: 0.1.0
         version: 0.1.0
+      '@noble/hashes':
+        specifier: 1.7.2
+        version: 1.7.2
       eslint:
         specifier: 9.39.4
         version: 9.39.4
@@ -1828,7 +1831,7 @@ snapshots:
       '@dfinity/candid': 2.4.1(@dfinity/principal@2.4.1)
       '@dfinity/principal': 2.4.1
       '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 1.7.2
       base64-arraybuffer: 0.2.0
       borc: 2.1.2
       buffer: 6.0.3
@@ -1844,7 +1847,7 @@ snapshots:
     dependencies:
       '@dfinity/agent': 2.4.1(@dfinity/candid@2.4.1(@dfinity/principal@2.4.1))(@dfinity/principal@2.4.1)
       '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 1.7.2
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
       asn1js: 3.0.7
@@ -1858,12 +1861,12 @@ snapshots:
       '@dfinity/agent': 2.4.1(@dfinity/candid@2.4.1(@dfinity/principal@2.4.1))(@dfinity/principal@2.4.1)
       '@dfinity/principal': 2.4.1
       '@noble/curves': 1.9.7
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 1.7.2
       borc: 2.1.2
 
   '@dfinity/principal@2.4.1':
     dependencies:
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 1.7.2
 
   '@emnapi/core@1.9.1':
     dependencies:
@@ -2436,7 +2439,7 @@ snapshots:
 
   bs58check@3.0.1:
     dependencies:
-      '@noble/hashes': 1.8.0
+      '@noble/hashes': 1.7.2
       bs58: 5.0.0
 
   buffer@5.7.1:
