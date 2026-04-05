@@ -619,13 +619,22 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     );
                   } else if (payObj && 'error' in payObj) {
                     const errMsg = String(payObj.error);
-                    if (errMsg.includes('EIP-3009') || errMsg.includes('signature')) {
-                      warn(`Signature verification failed: ${errMsg}`);
-                      info('The canister verified the EIP-712 signature locally but rejected it.');
-                    } else if (errMsg.includes('settlement') || errMsg.includes('EVM')) {
+                    if (errMsg.includes('insufficient funds') || errMsg.includes('have 0 want')) {
+                      warn(`EVM wallet has no gas funds: ${errMsg}`);
+                      info('The canister verified the EIP-712 signature but the on-chain call');
+                      info('failed because the canister EVM address has no ETH for gas.');
+                      info('Fund the address with testnet ETH to complete settlement.');
+                    } else if (
+                      errMsg.includes('settlement') ||
+                      errMsg.includes('RPC error') ||
+                      errMsg.includes('EVM')
+                    ) {
                       warn(`On-chain settlement failed: ${errMsg}`);
                       info('Signature was valid but the on-chain execution failed.');
                       info('On local replica, the EVM RPC canister is a mock — this is expected.');
+                    } else if (errMsg.includes('EIP-3009') || errMsg.includes('signature')) {
+                      warn(`Signature verification failed: ${errMsg}`);
+                      info('The canister rejected the EIP-712 signature.');
                     } else {
                       warn(`Error: ${errMsg}`);
                     }
@@ -1035,14 +1044,25 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
 
         info('Probing → signing → paying...');
-        const res = await mcpCallAndRender(
-          client,
-          'fetch_x402',
-          { url: x402Url, chainId: 84532 },
-          60_000,
-        );
-
-        highlight('One call: probe → canister signs → pay → content. All in the client library.');
+        try {
+          const res = await mcpCallAndRender(
+            client,
+            'fetch_x402',
+            { url: x402Url, chainId: 84532 },
+            90_000,
+          );
+          highlight('One call: probe → canister signs → pay → content. All in the client library.');
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes('aborted') || msg.includes('timeout')) {
+            warn('Request timed out — GoldRush API may be slow or unreachable.');
+            info('The flow works: probe → canister signs → client retries with payment header.');
+          } else if (msg.includes('insufficient funds') || msg.includes('have 0')) {
+            warn('Canister EVM wallet has no USDC — fund it to complete x402 payments.');
+          } else {
+            warn(`fetch_x402 failed: ${msg}`);
+          }
+        }
       },
     },
 
@@ -1108,23 +1128,16 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
         info('');
 
-        // Shared: stream 10 queries through a session
+        // Shared: stream 3 queries through a session
         async function runSessionQueries(sid: string, deposited: number) {
           info('');
-          info('Streaming 10 queries through the session...');
+          info('Streaming 3 queries through the session...');
           info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
           const costPerCall = 500;
           const questions = [
             'What is ic402?',
             'How do sessions work?',
             'What tokens are accepted?',
-            'How does cross-chain settlement work?',
-            'What is tECDSA?',
-            'How does the policy engine work?',
-            'What is ERC-8004?',
-            'How is content encrypted?',
-            'What delivery patterns are supported?',
-            'How do AccessGrants work?',
           ];
           for (let i = 0; i < questions.length; i++) {
             const cumConsumed = costPerCall * (i + 1);
@@ -1138,7 +1151,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             const q = questions[i].padEnd(42);
             const c = String(cumConsumed).padStart(5);
             const r = String(cumRemaining).padStart(5);
-            state(`  ${String(i + 1).padStart(2)}/10`, `${q} consumed=${c}  remaining=${r}`);
+            state(
+              `  ${String(i + 1).padStart(2)}/${questions.length}`,
+              `${q} consumed=${c}  remaining=${r}`,
+            );
           }
 
           info('');
@@ -1398,8 +1414,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 state('Ledger tx', tx);
               }
             }
-            state('Total on-chain txns', '2 (open + close) for 10 queries');
-            highlight("10 queries, 2 on-chain transactions. That's the 5,000x reduction.");
+            state('Total on-chain txns', '2 (open + close) for 3 queries');
+            highlight('3 queries, 2 on-chain transactions. Scale to thousands with the same cost.');
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -1461,10 +1477,20 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('nonce + gas → canister signs → broadcast → poll receipt → parse event.');
         info('');
 
-        const reg = await mcpCallAndRender(client, 'register_agent', {});
-        if (reg?.status === 'ok') {
-          if (reg.tokenId) {
-            state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
+        try {
+          const reg = await mcpCallAndRender(client, 'register_agent', {});
+          if (reg?.status === 'ok') {
+            if (reg.tokenId) {
+              state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
+            }
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes('insufficient') || msg.includes('have 0')) {
+            warn('Canister EVM wallet has no ETH for gas — fund it to register on Base.');
+            info(`Send Base Sepolia ETH to: ${evmAddress || '(derive with getEvmAddress)'}`);
+          } else {
+            warn(`Registration failed: ${msg}`);
           }
         }
 
