@@ -7,12 +7,13 @@
 ///   1. REQUIRED: Gateway + paid endpoint + HTTP 402 serving
 ///   2. OPTIONAL: Streaming sessions (escrow + vouchers)
 ///   3. OPTIONAL: Encrypted content store (in-canister)
-///   4. OPTIONAL: x402 client (canister pays external APIs)
-///   5. OPTIONAL: ERC-8004 identity (agent discovery on Base)
+///   4. OPTIONAL: EVM remote signer (canister signs, client broadcasts)
+///   5. OPTIONAL: ERC-8004 identity metadata
 
 import Ic402 "../src/ic402/lib";
 import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
+import Int "mo:base/Int";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
 
@@ -29,6 +30,7 @@ persistent actor KnowledgeBase {
   var stableGateway : ?Ic402.StableGatewayState = null;
   var stableContent : ?Ic402.StableContentStoreState = null;  // OPTIONAL
   var stableIdentity : ?Ic402.StableIdentityState = null;     // OPTIONAL
+  var stableServices : ?Ic402.StableServiceRegistryState = null; // OPTIONAL
 
   // The ckUSDC ledger principal (mainnet). Deploy scripts patch for testnet.
   let CKUSDC = "txyno-ch777-77776-aaaaq-cai";
@@ -118,22 +120,35 @@ persistent actor KnowledgeBase {
 
   // ── Stable state lifecycle ──
 
+  // OPTIONAL: Service marketplace (coordinator pattern)
+  transient let registry = Ic402.ServiceRegistry(
+    Principal.fromActor(KnowledgeBase),
+    {
+      recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
+      tokens = [{ ledger = Principal.fromText(CKUSDC); symbol = "ckUSDC"; decimals = 6 : Nat8 }];
+    },
+  );
+  registry.startTimers<system>();
+
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
     switch (stableContent) { case (?d) { store.loadStable(d) }; case (null) {} };
     switch (stableIdentity) { case (?d) { identity.loadStable(d) }; case (null) {} };
+    switch (stableServices) { case (?d) { registry.loadStable(d) }; case (null) {} };
   };
 
   system func preupgrade() {
     stableGateway := ?gate.toStable();
     stableContent := ?store.toStable();
     stableIdentity := ?identity.toStable();
+    stableServices := ?registry.toStable();
   };
 
   system func postupgrade() {
     stableGateway := null;
     stableContent := null;
     stableIdentity := null;
+    stableServices := null;
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -196,6 +211,56 @@ persistent actor KnowledgeBase {
       switch (Http.getHeader(request.headers, "x-payment")) {
         case (?_) { return Http.httpUpgrade() };
         case (null) { return Http.http402(gate.requireAll(1_000)) };
+      };
+    };
+
+    // Paid: service request
+    if (Text.startsWith(path, #text "/service/")) {
+      let serviceId = switch (Text.stripStart(path, #text "/service/")) {
+        case (?id) { id };
+        case (null) { return Http.httpError(400, "Missing service ID") };
+      };
+      switch (registry.getService(serviceId)) {
+        case (null) { return Http.httpError(404, "Service not found") };
+        case (?svc) {
+          if (not svc.enabled) return Http.httpError(404, "Service not available");
+          let amount = switch (svc.pricing) {
+            case (#Exact(p)) { p };
+            case (#Upto(p)) { p };
+            case (#Session) { 0 };
+          };
+          switch (Http.getHeader(request.headers, "x-payment")) {
+            case (?_) { return Http.httpUpgrade() };
+            case (null) { return Http.http402(gate.requireAll(amount)) };
+          };
+        };
+      };
+    };
+
+    // Free: job status polling
+    if (Text.startsWith(path, #text "/job/")) {
+      let jobId = switch (Text.stripStart(path, #text "/job/")) {
+        case (?id) { id };
+        case (null) { return Http.httpError(400, "Missing job ID") };
+      };
+      switch (registry.getJob(jobId)) {
+        case (null) { return Http.httpError(404, "Job not found") };
+        case (?job) {
+          let statusText = switch (job.status) {
+            case (#Pending) { "pending" }; case (#Assigned) { "assigned" };
+            case (#Computing) { "computing" }; case (#Submitted) { "submitted" };
+            case (#Verified) { "verified" }; case (#Settled) { "settled" };
+            case (#Disputed) { "disputed" }; case (#Expired) { "expired" };
+            case (#Refunded) { "refunded" };
+          };
+          var json = "{\"id\":\"" # job.id # "\",\"status\":\"" # statusText # "\"";
+          switch (job.completedAt) {
+            case (?t) { json #= ",\"completedAt\":" # Int.toText(t) };
+            case (null) {};
+          };
+          json #= "}";
+          return Http.http200Json(json);
+        };
       };
     };
 
@@ -263,6 +328,26 @@ persistent actor KnowledgeBase {
       };
     };
 
+    // Service request: settle payment and create job
+    if (Text.startsWith(path, #text "/service/")) {
+      let serviceId = switch (Text.stripStart(path, #text "/service/")) {
+        case (?id) { id };
+        case (null) { return Http.httpError(400, "Missing service ID") };
+      };
+      switch (await gate.settle(sig)) {
+        case (#ok(receipt)) {
+          switch (registry.submitRequest(Principal.fromText(receipt.sender), serviceId, request.body, receipt, null)) {
+            case (#ok(jobId)) {
+              return Http.http202Json("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}");
+            };
+            case (#err(e)) { return Http.httpError(400, e) };
+          };
+        };
+        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
+        case (_) { return Http.httpError(402, "Payment failed") };
+      };
+    };
+
     Http.httpError(404, "Not found");
   };
 
@@ -302,6 +387,11 @@ persistent actor KnowledgeBase {
       case (#ok(state)) { #ok(state) };
       case (#err(#policyDenied(r))) { #err("Policy: " # r) };
       case (#err(#depositBelowMinimum(min))) { #err("Min deposit: " # Nat.toText(min)) };
+      case (#err(#settlementFailed(r))) { #err("Settlement failed: " # r) };
+      case (#err(#expired(r))) { #err("Expired: " # r) };
+      case (#err(#tokenNotAccepted(r))) { #err("Token not accepted: " # r) };
+      case (#err(#insufficientFunds(r))) { #err("Insufficient funds: " # r) };
+      case (#err(#invalidSignature(r))) { #err("Invalid signature: " # r) };
       case (#err(_)) { #err("Failed to open session") };
     };
   };
@@ -399,47 +489,251 @@ persistent actor KnowledgeBase {
   };
 
   // ═══════════════════════════════════════════════════════════════════════
-  // OPTIONAL: x402 Client (canister pays external APIs)
+  // OPTIONAL: Service Marketplace (Coordinator Pattern)
   //
-  // The canister acts as an x402 client — it can pay for content from
-  // external x402-gated APIs using its tECDSA-derived EVM address.
-  // Signs EIP-3009 TransferWithAuthorization, sends via X-Payment header.
+  // The canister coordinates paid services. Operators register services,
+  // buyers pay via x402, operators compute off-chain, canister verifies
+  // results and settles payment. The canister never does the work — it
+  // holds funds and ensures the buyer gets what they paid for.
   //
-  // Requires: USDC at the canister's EVM address on the configured chain.
-  // Remove this section if the canister only receives payments.
+  // Remove this section if you only need content or sync charges.
   // ═══════════════════════════════════════════════════════════════════════
 
-  public query func httpTransform(args : { response : Ic402.HttpResponse_; context : Blob }) : async Ic402.HttpResponse_ {
-    Ic402.X402Client.transformResponse(args.response);
+  // (registry is declared at top for stable state loading)
+
+  // Admin: register and manage services
+  public shared(msg) func registerService(
+    name : Text,
+    description : Text,
+    serviceType : Ic402.ServiceType,
+    pricing : Ic402.PricingScheme,
+    verificationMethod : Text, // "AutoSettle", "HashMatch", "BuyerConfirm:300", "ZkGroth16"
+    verifierCanisterId : ?Text,
+    verificationKey : ?Blob,
+    delivery : Ic402.ServiceDeliveryMethod,
+    timeout : Nat,
+  ) : async { #ok : Text; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    let verification : Ic402.VerificationMethod = switch (verificationMethod) {
+      case ("AutoSettle") { #AutoSettle };
+      case ("HashMatch") { #HashMatch };
+      case ("ZkGroth16") {
+        switch (verifierCanisterId, verificationKey) {
+          case (?cid, ?vk) { #ZkGroth16({ verifierCanister = Principal.fromText(cid); verificationKey = vk }) };
+          case (_, _) { return #err("ZkGroth16 requires verifierCanisterId and verificationKey") };
+        };
+      };
+      case (other) {
+        if (Text.startsWith(other, #text "BuyerConfirm:")) {
+          let seconds = switch (Text.stripStart(other, #text "BuyerConfirm:")) {
+            case (?s) { switch (Nat.fromText(s)) { case (?n) { n }; case (null) { 3600 } } };
+            case (null) { 3600 };
+          };
+          #BuyerConfirm({ disputeWindowSeconds = seconds });
+        } else {
+          #AutoSettle;
+        };
+      };
+    };
+    registry.registerService(msg.caller, {
+      id = "";
+      name;
+      description;
+      serviceType;
+      pricing;
+      verification;
+      delivery;
+      timeout;
+      operatorId = msg.caller;
+      enabled = false;
+      createdAt = 0;
+    });
   };
 
-  transient let x402client = Ic402.X402Client.X402Client(
-    "dfx_test_key",        // tECDSA key name. Deploy scripts patch to "dfx_test_key" for local.
-    84532,          // Base Sepolia. Deploy scripts patch to 84532 (Sepolia) for local.
-    "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base. Patched for testnet.
-    ?httpTransform,
-  );
-
-  /// GET an external x402 endpoint. Controller-only to prevent USDC drain.
-  public shared(msg) func fetchX402(url : Text) : async Ic402.X402Client.FetchResult {
+  public shared(msg) func enableService(id : Text) : async { #ok; #err : Text } {
     assert(Principal.isController(msg.caller));
-    await x402client.fetchWithPayment(url, #get, null, [], null);
+    registry.enableService(msg.caller, id);
   };
 
-  /// POST to an external x402 endpoint (e.g. AI APIs). Controller-only.
-  public shared(msg) func fetchX402Post(url : Text, body : Text, contentType : Text) : async Ic402.X402Client.FetchResult {
+  public shared(msg) func disableService(id : Text) : async { #ok; #err : Text } {
     assert(Principal.isController(msg.caller));
-    await x402client.fetchWithPayment(url, #post, ?Text.encodeUtf8(body), [{ name = "Content-Type"; value = contentType }], null);
+    registry.disableService(msg.caller, id);
+  };
+
+  public query func listServices() : async [Ic402.ServiceDefinition] {
+    registry.listServices(true);
+  };
+
+  // Paid: submit a service request (charge per request, then create job)
+  public shared(msg) func submitServiceRequest(
+    serviceId : Text,
+    params : Blob,
+    paymentSig : ?Ic402.PaymentSignature,
+  ) : async {
+    #paymentRequired : [Ic402.PaymentRequirement];
+    #ok : { jobId : Text };
+    #error : Text;
+  } {
+    let svc = switch (registry.getService(serviceId)) {
+      case (null) { return #error("Service not found") };
+      case (?s) { s };
+    };
+    let amount = switch (svc.pricing) {
+      case (#Exact(p)) { p };
+      case (#Upto(p)) { p };
+      case (#Session) { 0 };
+    };
+    switch (paymentSig) {
+      case (null) { #paymentRequired(gate.requireAll(amount)) };
+      case (?sig) {
+        switch (await gate.settle(sig)) {
+          case (#ok(receipt)) {
+            switch (registry.submitRequest(msg.caller, serviceId, params, receipt, null)) {
+              case (#ok(jobId)) { #ok({ jobId }) };
+              case (#err(e)) { #error(e) };
+            };
+          };
+          case (#policyDenied(r)) { #error("Policy: " # r) };
+          case (#expired(r)) { #error("Nonce expired: " # r) };
+          case (#invalidSignature(r)) { #error("Invalid signature: " # r) };
+          case (#insufficientFunds(r)) { #error("Insufficient funds: " # r) };
+          case (#settlementFailed(r)) { #error("Settlement failed: " # r) };
+          case (#networkNotSupported(r)) { #error("Network not supported: " # r) };
+          case (#tokenNotAccepted(r)) { #error("Token not accepted: " # r) };
+          case (_) { #error("Payment settlement failed") };
+        };
+      };
+    };
+  };
+
+  // Operator: claim and fulfill jobs
+  public shared(msg) func claimJob(jobId : Text) : async { #ok; #err : Text } {
+    registry.claimJob(msg.caller, jobId);
+  };
+
+  public shared(msg) func submitJobResult(jobId : Text, result : Blob, proof : ?Blob, actualCost : ?Nat) : async { #ok; #err : Text } {
+    await registry.submitResult(msg.caller, jobId, result, proof, actualCost);
+  };
+
+  // Buyer: confirm or dispute
+  public shared(msg) func confirmJob(jobId : Text) : async { #ok; #err : Text } {
+    await registry.confirmJob(msg.caller, jobId);
+  };
+
+  public shared(msg) func disputeJob(jobId : Text, reason : Text) : async { #ok; #err : Text } {
+    registry.disputeJob(msg.caller, jobId, reason);
+  };
+
+  // Query: job status and results
+  public query func getJobStatus(jobId : Text) : async ?Ic402.JobStatus {
+    registry.getJobStatus(jobId);
+  };
+
+  public query func getJob(jobId : Text) : async ?Ic402.Job {
+    registry.getJob(jobId);
+  };
+
+  public query func getJobResult(jobId : Text) : async ?Blob {
+    registry.getJobResult(jobId);
   };
 
   // ═══════════════════════════════════════════════════════════════════════
-  // OPTIONAL: ERC-8004 Agent Identity on Base
+  // OPTIONAL: EVM Remote Signer
   //
-  // Registers this canister as a discoverable agent on Base's
-  // IdentityRegistry contract. Other agents find this service by
-  // querying the registry, then pay via x402.
+  // The canister signs EVM transactions using tECDSA. The client handles
+  // RPC submission, receipt polling, and HTTP requests. This eliminates
+  // EVM RPC calls from the canister.
   //
-  // Requires: ETH at the canister's EVM address for gas (registration tx).
+  // Requires: USDC/ETH at the canister's EVM address on the target chain.
+  // Remove this section if you only need ICP payments.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  transient let signer = Ic402.EvmSigner.EvmSigner("dfx_test_key");
+
+  /// Sign an EIP-3009 authorization for x402 payment.
+  /// Client probes the URL, extracts chain/token/recipient/amount from the 402, and calls this.
+  /// Canister signs → returns header → client retries with header.
+  public shared(msg) func signX402Payment(
+    chainId : Nat,
+    tokenAddress : Text,
+    recipient : Text,
+    amount : Nat,
+    tokenName : Text,
+    tokenVersion : Text,
+  ) : async { #ok : Ic402.SignedAuthorization; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await signer.signEip3009Authorization(chainId, tokenAddress, recipient, amount, tokenName, tokenVersion);
+  };
+
+  /// Sign an ERC-20 transfer. Client provides nonce + gas from their RPC.
+  public shared(msg) func signErc20Transfer(
+    chainId : Nat,
+    tokenAddress : Text,
+    recipientAddress : Text,
+    amount : Nat,
+    nonce : Nat,
+    maxFeePerGas : Nat,
+    maxPriorityFeePerGas : Nat,
+  ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await signer.signErc20Transfer(chainId, tokenAddress, recipientAddress, amount, nonce, maxFeePerGas, maxPriorityFeePerGas);
+  };
+
+  /// Sign a native ETH transfer. Client provides nonce + gas from their RPC.
+  public shared(msg) func signEthTransfer(
+    chainId : Nat,
+    recipientAddress : Text,
+    amountWei : Nat,
+    gasLimit : Nat,
+    nonce : Nat,
+    maxFeePerGas : Nat,
+    maxPriorityFeePerGas : Nat,
+  ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await signer.signEthTransfer(chainId, recipientAddress, amountWei, gasLimit, nonce, maxFeePerGas, maxPriorityFeePerGas);
+  };
+
+  /// Sign an ERC-8004 agent registration tx.
+  /// Client provides nonce + gas from their RPC, broadcasts + polls receipt.
+  public shared(msg) func signAgentRegistration(
+    nonce : Nat,
+    maxFeePerGas : Nat,
+    maxPriorityFeePerGas : Nat,
+  ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await signer.signRegistration(
+      "0x140D228d099367c273fDCD3C4Bfd87342ad7a8D2",
+      84532,
+      identity.getCard(),
+      350_000,
+      nonce,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+    );
+  };
+
+  /// Sign arbitrary EIP-712 typed data. The generic primitive for DEX integration.
+  /// The caller provides pre-computed domainSeparator and structHash (32 bytes each).
+  /// The canister computes the EIP-712 digest and signs with tECDSA.
+  public shared(msg) func signTypedData(
+    domainSeparator : [Nat8],
+    structHash : [Nat8],
+  ) : async { #ok : Ic402.SignedTypedData; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await signer.signTypedData(domainSeparator, structHash);
+  };
+
+  /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
+  public query func keccak256(data : [Nat8]) : async [Nat8] {
+    Ic402.EvmAddress.keccak256(data);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // OPTIONAL: ERC-8004 Identity Metadata
+  //
+  // Stores agent metadata for discovery. Registration is done via
+  // signAgentRegistration() + client-side broadcast.
+  //
   // Remove this section if you don't need cross-chain agent discovery.
   // ═══════════════════════════════════════════════════════════════════════
 
@@ -449,11 +743,6 @@ persistent actor KnowledgeBase {
   public query func getAgentId() : async ?Nat { identity.getAgentId() };
   public func getEvmPublicKey() : async Blob { await identity.getPublicKey("dfx_test_key") };
   public func getEvmAddress() : async Text { await identity.getEvmAddress() };
-
-  public shared(msg) func registerAgent() : async Ic402.RegisterAgentResult {
-    assert(Principal.isController(msg.caller));
-    await identity.registerAgent();
-  };
 
   // Admin
   // ═══════════════════════════════════════════════════════════════════════
