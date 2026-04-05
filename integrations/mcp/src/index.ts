@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
-import { Ic402Client, exampleIdlFactory } from '@ic402/client';
+import { Ic402Client, Ic402Error, probeX402, exampleIdlFactory } from '@ic402/client';
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
@@ -36,10 +36,48 @@ function actorFactory(canisterId: string) {
   });
 }
 
-/** Serialize a value for JSON, handling bigint and Uint8Array. */
+// Minimal ICRC-2 ledger IDL for auto-payment (approve + transfer_from)
+import { IDL } from '@icp-sdk/core/candid';
+
+const icrc2LedgerIdl = () => {
+  const Account = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
+  return IDL.Service({
+    icrc2_approve: IDL.Func(
+      [
+        IDL.Record({
+          spender: Account,
+          amount: IDL.Nat,
+          fee: IDL.Opt(IDL.Nat),
+          memo: IDL.Opt(IDL.Vec(IDL.Nat8)),
+          from_subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)),
+          created_at_time: IDL.Opt(IDL.Nat64),
+          expected_allowance: IDL.Opt(IDL.Nat),
+          expires_at: IDL.Opt(IDL.Nat64),
+        }),
+      ],
+      [IDL.Variant({ Ok: IDL.Nat, Err: IDL.Text })],
+      [],
+    ),
+  });
+};
+
+function ledgerActorFactory(ledgerCanisterId: string) {
+  return Actor.createActor(icrc2LedgerIdl, {
+    agent: requireAgent(),
+    canisterId: ledgerCanisterId,
+  });
+}
+
+/** Serialize a value for JSON, handling bigint, Uint8Array, and Error instances. */
 function serialize(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
   if (value instanceof Uint8Array) return Buffer.from(value).toString('hex');
+  if (value instanceof Ic402Error) {
+    return { kind: value.kind, message: value.message, retryable: value.retryable };
+  }
+  if (value instanceof Error) {
+    return { message: value.message };
+  }
   if (Array.isArray(value)) return value.map(serialize);
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
@@ -78,6 +116,10 @@ server.tool(
     maxPerRequest: z.string().optional().describe('Max tokens per charge (e.g. "100000")'),
     maxPerDay: z.string().optional().describe('Max tokens per day'),
     maxTotal: z.string().optional().describe('Max tokens total across all calls'),
+    ledger: z
+      .string()
+      .optional()
+      .describe('ICRC-2 ledger canister ID for auto-payment (e.g. ckUSDC)'),
     maxSessionDeposit: z.string().optional().describe('Max session escrow deposit'),
   },
   async ({
@@ -89,6 +131,7 @@ server.tool(
     maxPerDay,
     maxTotal,
     maxSessionDeposit,
+    ledger,
   }) => {
     // Load identity from PEM if provided, otherwise check env, otherwise anonymous.
     // icp identity export outputs PKCS#8 ("BEGIN PRIVATE KEY"), but
@@ -138,7 +181,11 @@ server.tool(
       identity: identity ?? undefined,
     });
 
+    defaultCanisterId = canisterId;
+
     client = new Ic402Client({
+      canisterId,
+      actorFactory,
       identity,
       network,
       autoPayment: true,
@@ -148,9 +195,9 @@ server.tool(
         maxTotal: maxTotal ? BigInt(maxTotal) : undefined,
         maxSessionDeposit: maxSessionDeposit ? BigInt(maxSessionDeposit) : undefined,
       },
+      ledger: ledger ?? undefined,
+      ledgerActorFactory: ledger ? ledgerActorFactory : undefined,
     });
-
-    defaultCanisterId = canisterId;
 
     return {
       content: [
@@ -285,8 +332,31 @@ server.tool(
       .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
       .optional()
       .describe('Canister EVM address for settlement (for EVM sessions)'),
+    authorization: z
+      .object({
+        from: z.string(),
+        to: z.string(),
+        value: z.number(),
+        validAfter: z.number(),
+        validBefore: z.number(),
+        nonce: z.array(z.number()),
+        v: z.number(),
+        r: z.array(z.number()),
+        s: z.array(z.number()),
+      })
+      .optional()
+      .describe('EIP-3009 authorization for EVM session deposit'),
   },
-  async ({ canisterId, maxDeposit, evmTxHash, evmNetwork, evmSender, evmToken, evmRecipient }) => {
+  async ({
+    canisterId,
+    maxDeposit,
+    evmTxHash,
+    evmNetwork,
+    evmSender,
+    evmToken,
+    evmRecipient,
+    authorization,
+  }) => {
     const c = requireClient();
     const cid = canisterId ?? defaultCanisterId;
     if (!cid) throw new Error('No canister ID.');
@@ -294,10 +364,13 @@ server.tool(
     const prefs: Record<string, unknown> = {};
     if (maxDeposit) prefs.maxDeposit = BigInt(maxDeposit);
     if (evmTxHash) prefs.evmTxHash = evmTxHash;
+    // If authorization is provided, this is an EVM session — set evmTxHash to trigger EVM path
+    if (authorization && !evmTxHash) prefs.evmTxHash = 'eip3009-deposit';
     if (evmNetwork) prefs.evmNetwork = evmNetwork;
     if (evmSender) prefs.evmSender = evmSender;
     if (evmToken) prefs.evmToken = evmToken;
     if (evmRecipient) prefs.evmRecipient = evmRecipient;
+    if (authorization) prefs.authorization = authorization;
 
     // Generate Ed25519 keypair for voucher signing
     const voucherIdentity = Ed25519KeyIdentity.generate();
@@ -310,7 +383,11 @@ server.tool(
       },
     };
 
-    const session = await c.openSession(cid, prefs, actorFactory, voucherSigner);
+    const session = await c.openSession(
+      prefs,
+      voucherSigner,
+      cid !== defaultCanisterId ? cid : undefined,
+    );
 
     activeSessions.set(session.id, session);
 
@@ -512,6 +589,267 @@ server.tool(
         },
       ],
     };
+  },
+);
+
+/** Serialize an Ic402Error (or any error) into a structured result the demo can render. */
+function errorResult(e: unknown): { content: [{ type: 'text'; text: string }] } {
+  if (e instanceof Ic402Error) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(
+            {
+              status: 'error',
+              error: { kind: e.kind, message: e.message, retryable: e.retryable },
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(
+          {
+            status: 'error',
+            error: { kind: 'unknown', message: msg, retryable: false },
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tool: fetch_x402
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'fetch_x402',
+  'Fetch from an x402-gated URL. Full flow: probe URL → canister signs payment → retry with payment header.',
+  {
+    url: z.string().describe('The x402-gated URL to fetch'),
+    chainId: z.number().default(84532).describe('EVM chain ID (default: Base Sepolia 84532)'),
+    canisterId: z.string().optional().describe('Canister to sign with (defaults to configured)'),
+  },
+  async ({ url, chainId, canisterId }) => {
+    requireClient();
+    requireAgent();
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID.');
+
+    try {
+      // 1. Probe (client-side HTTP)
+      const probeResult = await probeX402(url, chainId);
+      if (probeResult.status === 'free') {
+        return {
+          content: [
+            { type: 'text' as const, text: JSON.stringify(serialize(probeResult), null, 2) },
+          ],
+        };
+      }
+      if (probeResult.status === 'error') {
+        return {
+          content: [
+            { type: 'text' as const, text: JSON.stringify(serialize(probeResult), null, 2) },
+          ],
+        };
+      }
+      const opt = probeResult.paymentOption;
+
+      // 2. Sign via canister (direct actor call)
+      const actor = actorFactory(cid);
+      const optionChainId = parseInt(opt.network.replace('eip155:', ''), 10) || chainId;
+      const signResult = (await actor.signX402Payment(
+        optionChainId,
+        opt.asset,
+        opt.recipient,
+        opt.amount,
+        opt.tokenName,
+        opt.tokenVersion,
+      )) as Record<string, unknown>;
+      if (!signResult || 'err' in signResult) {
+        return errorResult(
+          new Ic402Error('sign_failed', String(signResult?.err ?? 'Signing failed')),
+        );
+      }
+      const signed = signResult.ok as { header: string; paidAmount: bigint };
+
+      // 3. Retry with payment header (client-side HTTP)
+      const headers: Record<string, string> = {
+        'X-Payment': signed.header,
+        'Payment-Signature': signed.header,
+      };
+      const paidResponse = await globalThis.fetch(url, { headers });
+      const body = await paidResponse.text();
+
+      if (paidResponse.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'ok',
+                  code: paidResponse.status,
+                  body,
+                  paidAmount: serialize(signed.paidAmount),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+      if (paidResponse.status === 402) {
+        return errorResult(new Ic402Error('settlement_failed', body.slice(0, 200)));
+      }
+      return errorResult(
+        new Ic402Error('http_error', `HTTP ${paidResponse.status}: ${body.slice(0, 200)}`),
+      );
+    } catch (e) {
+      return errorResult(e);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: register_agent
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'register_agent',
+  'Register the canister as an ERC-8004 agent on-chain. Full flow: get nonce+gas → canister signs → broadcast → poll receipt.',
+  {
+    chainId: z.number().default(84532).describe('EVM chain ID (default: Base Sepolia 84532)'),
+    canisterId: z.string().optional().describe('Canister to register (defaults to configured)'),
+    rpcUrl: z.string().optional().describe('Custom EVM RPC URL (defaults to public RPC)'),
+  },
+  async ({ chainId, canisterId, rpcUrl }) => {
+    const c = requireClient();
+    const cid = canisterId ?? defaultCanisterId;
+    if (!cid) throw new Error('No canister ID.');
+
+    try {
+      const result = await c.registerAgent(rpcUrl, chainId);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                status: 'ok',
+                tokenId: result.tokenId?.toString() ?? null,
+                txHash: result.txHash,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (e) {
+      return errorResult(e);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: list_services
+// ---------------------------------------------------------------------------
+
+server.tool('list_services', 'List available paid services from the canister.', {}, async () => {
+  const c = requireClient();
+  const services = await c.listServices();
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(serialize(services), null, 2) }],
+  };
+});
+
+// ---------------------------------------------------------------------------
+// Tool: submit_request
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'submit_request',
+  'Submit a paid service request. Handles x402 payment automatically. Returns a job ID for polling.',
+  {
+    serviceId: z.string().describe('Service ID to request'),
+    params: z.string().default('').describe('Job parameters (UTF-8 string, sent as bytes)'),
+  },
+  async ({ serviceId, params }) => {
+    const c = requireClient();
+    try {
+      const result = await c.submitServiceRequest(serviceId, new TextEncoder().encode(params));
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ status: 'ok', jobId: result.jobId }, null, 2),
+          },
+        ],
+      };
+    } catch (e) {
+      return errorResult(e);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: get_job_result
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'get_job_result',
+  'Poll for a job result. Waits until the job completes or times out.',
+  {
+    jobId: z.string().describe('Job ID from submit_request'),
+    maxAttempts: z.number().default(15).describe('Max poll attempts'),
+  },
+  async ({ jobId, maxAttempts }) => {
+    const c = requireClient();
+    try {
+      const job = await c.pollJobResult(jobId, maxAttempts);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(serialize(job), null, 2) }],
+      };
+    } catch (e) {
+      return errorResult(e);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Tool: dispute_job
+// ---------------------------------------------------------------------------
+
+server.tool(
+  'dispute_job',
+  'Dispute a job result (for BuyerConfirm verification services).',
+  {
+    jobId: z.string().describe('Job ID to dispute'),
+    reason: z.string().describe('Reason for dispute'),
+  },
+  async ({ jobId, reason }) => {
+    const c = requireClient();
+    try {
+      await c.disputeJob(jobId, reason);
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok' }, null, 2) }],
+      };
+    } catch (e) {
+      return errorResult(e);
+    }
   },
 );
 
