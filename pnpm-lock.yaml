@@ -18,8 +18,8 @@ importers:
         specifier: 5.1.0
         version: 5.1.0
       '@icp-sdk/icp-cli':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.2
+        version: 0.2.2
       '@noble/hashes':
         specifier: 1.7.2
         version: 1.7.2
@@ -384,33 +384,33 @@ packages:
   '@icp-sdk/core@5.1.0':
     resolution: {integrity: sha512-rPiC3sDmkEkRj90mgKRcL01bX0Y8L89xqsWXy0zRxGHXwZapuKnN9A0uq6/nz8I1slHNSmCyuqVE/lJ0PtsXMg==}
 
-  '@icp-sdk/icp-cli-darwin-arm64@0.1.0':
-    resolution: {integrity: sha512-gt8WUyS4o+cSbnG7ly/tlY6Ja8D/sGodt8CVn+CPMRdaLYiFRlhTWWP8keagF+t1n0yqXpLG23Du62tRPBn4Yw==}
+  '@icp-sdk/icp-cli-darwin-arm64@0.2.2':
+    resolution: {integrity: sha512-a8GCC4p5T3bSF8SqbPUCTEqQUxfvzQj/P7VpNEry6RqyMievjA5aCqmNvn2mr0e+PNEEhe7knWLg3hcO4SQINw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@icp-sdk/icp-cli-darwin-x64@0.1.0':
-    resolution: {integrity: sha512-pDi0YObS8Mz9UeBVxN0O9bmMekyDWresktnN55nL3jGwFNgx5XFiwY1eDZAUn2YDnJz8o8obJYKX4tN0mtXoPQ==}
+  '@icp-sdk/icp-cli-darwin-x64@0.2.2':
+    resolution: {integrity: sha512-j0VZe7Qai2oX93/OU1Db0Faa2UfONAIkzqAhXXjugQyylQbfsM8rzaglKKjJuarUfS4QhY28uEvLggOEoC7utw==}
     cpu: [x64]
     os: [darwin]
 
-  '@icp-sdk/icp-cli-linux-arm64@0.1.0':
-    resolution: {integrity: sha512-ubl2MX24VlGvYD1py07Wv3quE/9/rfzg56q4wH+iH5Q1NhqvZVFxv3832US/2RqxguvT1cvTZneHS45TzCVrMA==}
+  '@icp-sdk/icp-cli-linux-arm64@0.2.2':
+    resolution: {integrity: sha512-UPpU5eslMYdM+Fs5VAPKEHkKqPjsQodBJi/GTHX6TJisQgWS3aIn/H8mGCGmzhO2d4fUqLOR4uSKmd3Iteuh7A==}
     cpu: [arm64]
     os: [linux]
 
-  '@icp-sdk/icp-cli-linux-x64@0.1.0':
-    resolution: {integrity: sha512-1WWHT1AxY17W39ftpWZl4V1lcyCNTD0gWOro9MGfOBLum/X6vE55mOGLa3IIAC4VTl0K7YQHdYpdVN1g0nh25g==}
+  '@icp-sdk/icp-cli-linux-x64@0.2.2':
+    resolution: {integrity: sha512-71d6D83CDHW2r8ZYPARzHud+DYgEl7Jy585NKO2uFhiks/ETtC9PkTe/IXsGy+ZWM0OFOuyn1bpQbo3308ezkQ==}
     cpu: [x64]
     os: [linux]
 
-  '@icp-sdk/icp-cli-win32-x64@0.1.0':
-    resolution: {integrity: sha512-Q2VTNw6De90ZkBYNikAsmWvnUCNFspc88DJNoB5m/LqC4vTtZ83xAdWiL64ohy30blzg24uKyuV0MNRloaFZmg==}
+  '@icp-sdk/icp-cli-win32-x64@0.2.2':
+    resolution: {integrity: sha512-bQGxdkhS9MhTRxIGjDhOD+j0lIRuf0rSX7Wxgnks5muUAZ//zrPVt59NMcGOh+wpDoRj5fv4PHs0Uxtt3IcUmg==}
     cpu: [x64]
     os: [win32]
 
-  '@icp-sdk/icp-cli@0.1.0':
-    resolution: {integrity: sha512-phNprDEjkl+C9GdNINxf7F4HbrMoI/aQSvUBYhDgffS4svBiFwwMkYsSbwrdCHRfhGM7E/nHsb19lhdk8vqlcw==}
+  '@icp-sdk/icp-cli@0.2.2':
+    resolution: {integrity: sha512-8eemuHvH3r1P6PbGA3OEJRrTrf/7x8KoDVZzhFO6as5J5t0oQhXsrH12rKf7pM3bPxO+8Kwp0S8qud3W33Ax9A==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
@@ -2032,28 +2032,28 @@ snapshots:
       '@scure/bip39': 1.6.0
       asn1js: 3.0.7
 
-  '@icp-sdk/icp-cli-darwin-arm64@0.1.0':
+  '@icp-sdk/icp-cli-darwin-arm64@0.2.2':
     optional: true
 
-  '@icp-sdk/icp-cli-darwin-x64@0.1.0':
+  '@icp-sdk/icp-cli-darwin-x64@0.2.2':
     optional: true
 
-  '@icp-sdk/icp-cli-linux-arm64@0.1.0':
+  '@icp-sdk/icp-cli-linux-arm64@0.2.2':
     optional: true
 
-  '@icp-sdk/icp-cli-linux-x64@0.1.0':
+  '@icp-sdk/icp-cli-linux-x64@0.2.2':
     optional: true
 
-  '@icp-sdk/icp-cli-win32-x64@0.1.0':
+  '@icp-sdk/icp-cli-win32-x64@0.2.2':
     optional: true
 
-  '@icp-sdk/icp-cli@0.1.0':
+  '@icp-sdk/icp-cli@0.2.2':
     optionalDependencies:
-      '@icp-sdk/icp-cli-darwin-arm64': 0.1.0
-      '@icp-sdk/icp-cli-darwin-x64': 0.1.0
-      '@icp-sdk/icp-cli-linux-arm64': 0.1.0
-      '@icp-sdk/icp-cli-linux-x64': 0.1.0
-      '@icp-sdk/icp-cli-win32-x64': 0.1.0
+      '@icp-sdk/icp-cli-darwin-arm64': 0.2.2
+      '@icp-sdk/icp-cli-darwin-x64': 0.2.2
+      '@icp-sdk/icp-cli-linux-arm64': 0.2.2
+      '@icp-sdk/icp-cli-linux-x64': 0.2.2
+      '@icp-sdk/icp-cli-win32-x64': 0.2.2
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
