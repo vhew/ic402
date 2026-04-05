@@ -304,6 +304,15 @@ For services requiring trustless verification, deploy a Groth16 verifier caniste
 - The ic402 library defines the `ZkVerifierActor` interface; you provide the verifier canister
 - Test fixtures included: proof + verification key for circuit "x² = 25, x = 5"
 
+## Known Limitations
+
+- **EVM escrow is virtual accounting.** `EvmEscrowManager` tracks allocations in memory but does not query on-chain balances. The consuming canister should verify `totalAllocated + newDeposit` against the actual token balance before opening EVM sessions.
+- **`forceCloseSession` has no library-level access control.** The consuming canister MUST wrap it with `assert(Principal.isController(msg.caller))` or equivalent before exposing it as a public endpoint.
+- **Ed25519 library (`mo:ed25519`) is unaudited.** Used for session voucher verification. The library is functionally correct in testing but has not undergone a formal cryptographic audit.
+- **`discoverAgents()` returns empty.** ERC-8004 IdentityRegistry contracts are deployed but registries are sparse — no real agent data to query yet.
+- **Client-side budget tracking is advisory.** `BudgetConfig` in the TypeScript SDK is enforced client-side only. Real spending limits are enforced by the canister's `Policy` engine.
+- **EVM payment verification depends on the DFINITY EVM RPC canister.** On local replicas, EVM settlement requires the prebuilt EVM RPC canister and internet access to reach testnet/mainnet RPC endpoints.
+
 ## License
 
 [Apache 2.0](LICENSE)
