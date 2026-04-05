@@ -131,7 +131,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Configure',
-      description: 'Connect to the canister, derive its EVM address, set budget',
+      description: 'Connect to the canister, derive its EVM address',
       run: async (_rl: ReadlineInterface) => {
         header('Step 1: Configure');
         info('The canister IS the server, the wallet, AND the payment processor.');
@@ -142,8 +142,6 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           host,
           network: 'icp:1',
           ledger: CKUSDC_LEDGER,
-          maxPerRequest: '50000',
-          maxPerDay: '500000',
         };
         if (process.env.ICP_IDENTITY_PEM) {
           configArgs.identityPem = process.env.ICP_IDENTITY_PEM;
@@ -187,7 +185,6 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('Canister EVM address', evmAddress);
         state('Base explorer', `${BASE_EXPLORER}/address/${evmAddress}`);
         state('Identity registry', BASE_REGISTRY);
-        state('Client budget', '$0.05/request, $0.50/day');
       },
     },
 
@@ -1620,18 +1617,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Policy Engine + Summary',
-      description: 'Dual-sided spending limits + UVP recap',
+      description: 'Canister spending policy + UVP recap',
       run: async (_rl: ReadlineInterface) => {
         header('Step 10: Policy + Summary');
-        info('Dual-sided policy engine. Both client and canister enforce.');
-        info('Budget limits, rate limits, session caps, idle timeouts.');
+        info('Canister-side policy engine enforces all spending limits.');
+        info('Rate limits, session caps, idle timeouts.');
         info('Evaluated in-canister, zero ledger calls, constant time.');
-
-        section('Client-side (your agent protects itself)');
-        state('Max per request', '$0.05 — reject before sending if too expensive');
-        state('Max per day', '$0.50 — rolling 24h spending cap');
-        state('Max session deposit', 'Configurable — cap escrow exposure');
-        highlight('Your agent controls its own budget — can never be drained.');
 
         section('Canister-side (your canister protects your service)');
         state('Max per tx', '$0.05');

@@ -22,7 +22,6 @@ import type { SignedTransaction, SignedAuthorization } from './types.js';
 export type Ic402ErrorKind =
   | 'transient' // Network timeout, RPC rate limit — safe to retry
   | 'no_match' // No payment option for the requested chain
-  | 'budget_exceeded' // Client-side budget limit hit
   | 'sign_failed' // Canister refused to sign (policy, frozen, etc.)
   | 'settlement_failed' // Server rejected the signed payment
   | 'broadcast_failed' // EVM RPC rejected the transaction

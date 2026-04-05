@@ -323,11 +323,6 @@ describe('Ic402Error', () => {
     expect(err.retryable).toBe(false);
   });
 
-  it('budget_exceeded errors are not retryable', () => {
-    const err = new Ic402Error('budget_exceeded', 'over limit');
-    expect(err.retryable).toBe(false);
-  });
-
   it('config_error errors are not retryable', () => {
     const err = new Ic402Error('config_error', 'missing canisterId');
     expect(err.retryable).toBe(false);

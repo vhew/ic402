@@ -113,26 +113,12 @@ server.tool(
       .string()
       .optional()
       .describe('Path to a secp256k1 PEM file for signing (e.g. identity.pem)'),
-    maxPerRequest: z.string().optional().describe('Max tokens per charge (e.g. "100000")'),
-    maxPerDay: z.string().optional().describe('Max tokens per day'),
-    maxTotal: z.string().optional().describe('Max tokens total across all calls'),
     ledger: z
       .string()
       .optional()
       .describe('ICRC-2 ledger canister ID for auto-payment (e.g. ckUSDC)'),
-    maxSessionDeposit: z.string().optional().describe('Max session escrow deposit'),
   },
-  async ({
-    canisterId,
-    host,
-    network,
-    identityPem,
-    maxPerRequest,
-    maxPerDay,
-    maxTotal,
-    maxSessionDeposit,
-    ledger,
-  }) => {
+  async ({ canisterId, host, network, identityPem, ledger }) => {
     // Load identity from PEM if provided, otherwise check env, otherwise anonymous.
     // icp identity export outputs PKCS#8 ("BEGIN PRIVATE KEY"), but
     // Secp256k1KeyIdentity.fromPem expects SEC1 ("BEGIN EC PRIVATE KEY").
@@ -189,12 +175,6 @@ server.tool(
       identity,
       network,
       autoPayment: true,
-      budget: {
-        maxPerRequest: maxPerRequest ? BigInt(maxPerRequest) : undefined,
-        maxPerDay: maxPerDay ? BigInt(maxPerDay) : undefined,
-        maxTotal: maxTotal ? BigInt(maxTotal) : undefined,
-        maxSessionDeposit: maxSessionDeposit ? BigInt(maxSessionDeposit) : undefined,
-      },
       ledger: ledger ?? undefined,
       ledgerActorFactory: ledger ? ledgerActorFactory : undefined,
     });

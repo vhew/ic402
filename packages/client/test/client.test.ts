@@ -42,74 +42,6 @@ function makeJob(overrides?: Partial<Job>): Job {
 }
 
 describe('Ic402Client', () => {
-  describe('budget enforcement', () => {
-    it('maxPerRequest throws when amount exceeds limit', async () => {
-      const mockActor = {
-        testMethod: async () => ({
-          paymentRequired: { amount: 200n, nonce: new Uint8Array(32) },
-        }),
-      };
-
-      const client = new Ic402Client(
-        makeConfig({
-          autoPayment: true,
-          budget: { maxPerRequest: 100n },
-          actorFactory: mockActorFactory(mockActor),
-        }),
-      );
-
-      await expect(client.call('testMethod', [null])).rejects.toThrow('exceeds maxPerRequest');
-    });
-
-    it('maxTotal throws when cumulative spend exceeds limit', async () => {
-      let callCount = 0;
-      const mockActor = {
-        testMethod: async () => {
-          callCount++;
-          if (callCount === 1) {
-            return { paymentRequired: { amount: 100n, nonce: new Uint8Array(32) } };
-          }
-          return { ok: 'success' };
-        },
-      };
-
-      const client = new Ic402Client(
-        makeConfig({
-          autoPayment: true,
-          budget: { maxTotal: 50n },
-          ledger: 'ledger-id',
-          ledgerActorFactory: () => ({
-            icrc2_approve: async () => ({ Ok: 0n }),
-          }),
-          actorFactory: mockActorFactory(mockActor),
-        }),
-      );
-
-      await expect(client.call('testMethod', [null])).rejects.toThrow('Total budget exceeded');
-    });
-
-    it('maxSessionDeposit throws when deposit exceeds limit', async () => {
-      const mockActor = {
-        requestSession: async () => ({
-          network: 'icp:1',
-          token: 'ledger',
-          recipient: 'recipient',
-          suggestedDeposit: 100n,
-          expiry: 0n,
-        }),
-      };
-
-      const client = new Ic402Client(
-        makeConfig({
-          budget: { maxSessionDeposit: 50n },
-          actorFactory: mockActorFactory(mockActor),
-        }),
-      );
-
-      await expect(client.openSession()).rejects.toThrow('exceeds maxSessionDeposit');
-    });
-  });
-
   describe('call()', () => {
     it('unwraps { ok: ... } result', async () => {
       const mockActor = {
@@ -219,34 +151,6 @@ describe('Ic402Client', () => {
       expect(result.status).toBe('error');
       if (result.status === 'error') {
         expect(result.error.kind).toBe('no_match');
-      }
-    });
-
-    it('budget check rejects over-limit amount', async () => {
-      const paymentBody = JSON.stringify({
-        accepts: [
-          {
-            network: 'eip155:84532',
-            payTo: '0xRecipient',
-            amount: '5000',
-            asset: '0xUSDC',
-          },
-        ],
-      });
-
-      globalThis.fetch = vi.fn().mockResolvedValue(new Response(paymentBody, { status: 402 }));
-
-      const client = new Ic402Client(
-        makeConfig({
-          network: 'eip155:84532',
-          budget: { maxPerRequest: 1000n },
-        }),
-      );
-
-      const result = await client.fetchX402('https://example.com/expensive');
-      expect(result.status).toBe('error');
-      if (result.status === 'error') {
-        expect(result.error.kind).toBe('budget_exceeded');
       }
     });
 
@@ -460,30 +364,6 @@ describe('Ic402Client', () => {
 
       await expect(client.submitServiceRequest('svc-1', new Uint8Array([1]))).rejects.toThrow(
         'Service unavailable',
-      );
-    });
-
-    it('budget check rejects over-limit service request', async () => {
-      const mockActor = {
-        submitServiceRequest: vi.fn().mockResolvedValue({
-          paymentRequired: [{ amount: 500n, nonce: new Uint8Array(32) }],
-        }),
-      };
-
-      const client = new Ic402Client(
-        makeConfig({
-          autoPayment: true,
-          ledger: 'ledger-canister',
-          ledgerActorFactory: () => ({
-            icrc2_approve: vi.fn().mockResolvedValue({ Ok: 0n }),
-          }),
-          budget: { maxPerRequest: 100n },
-          actorFactory: mockActorFactory(mockActor),
-        }),
-      );
-
-      await expect(client.submitServiceRequest('svc-1', new Uint8Array([1]))).rejects.toThrow(
-        'exceeds maxPerRequest',
       );
     });
   });

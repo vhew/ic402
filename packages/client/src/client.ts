@@ -35,14 +35,6 @@ import {
   type FetchX402Result,
 } from './evm.js';
 
-export interface BudgetConfig {
-  maxPerRequest?: bigint;
-  maxPerDay?: bigint;
-  maxTotal?: bigint;
-  maxSessionDeposit?: bigint;
-  alertThreshold?: bigint;
-}
-
 export interface SessionPreferences {
   preferSession?: boolean;
   maxDeposit?: bigint;
@@ -84,12 +76,8 @@ export interface Ic402ClientConfig {
   network: string;
   /** Automatically handle 402 responses (ICP: ICRC-2 approve + retry) */
   autoPayment?: boolean;
-  /** Budget limits (enforced client-side before calling canister) */
-  budget?: BudgetConfig;
   /** Session preferences */
   sessions?: SessionPreferences;
-  /** Callback when spending approaches budget limit */
-  onBudgetAlert?: (spent: bigint, limit: bigint) => Promise<void>;
   /** Ledger canister ID for ICRC-2 auto-approval (ICP payments) */
   ledger?: string;
   /** Factory for ledger actors. Required for ICP auto-payment. */
@@ -119,7 +107,6 @@ export interface SessionHandle {
  */
 export class Ic402Client {
   private config: Ic402ClientConfig;
-  private totalSpent = 0n;
 
   constructor(config: Ic402ClientConfig) {
     this.config = config;
@@ -143,23 +130,6 @@ export class Ic402Client {
 
       const requirement = result.paymentRequired;
 
-      // Check budget limits
-      if (
-        this.config.budget?.maxPerRequest &&
-        requirement.amount > this.config.budget.maxPerRequest
-      ) {
-        throw new Error(
-          `Amount ${requirement.amount} exceeds maxPerRequest ${this.config.budget.maxPerRequest}`,
-        );
-      }
-
-      if (
-        this.config.budget?.maxTotal &&
-        this.totalSpent + requirement.amount > this.config.budget.maxTotal
-      ) {
-        throw new Error('Total budget exceeded');
-      }
-
       if (!this.config.ledger || !this.config.ledgerActorFactory) {
         throw new Error('Auto-approval requires ledger and ledgerActorFactory in config');
       }
@@ -180,8 +150,6 @@ export class Ic402Client {
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
         throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
       }
-
-      this.totalSpent += requirement.amount;
 
       // Construct PaymentSignature from the requirement's nonce and retry
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
@@ -242,16 +210,6 @@ export class Ic402Client {
       config?.maxDeposit ?? this.config.sessions?.maxDeposit ?? intent.suggestedDeposit;
     const autoClose = config?.autoClose ?? this.config.sessions?.autoClose ?? true;
     const idleTimeout = config?.idleTimeout ?? this.config.sessions?.idleTimeout;
-
-    // Check budget
-    if (
-      this.config.budget?.maxSessionDeposit &&
-      maxDeposit > this.config.budget.maxSessionDeposit
-    ) {
-      throw new Error(
-        `Deposit ${maxDeposit} exceeds maxSessionDeposit ${this.config.budget.maxSessionDeposit}`,
-      );
-    }
 
     const isEvm = !!config?.evmTxHash;
     const network = config?.evmNetwork ?? this.config.network;
@@ -523,26 +481,6 @@ export class Ic402Client {
     if (probeResult.status === 'error') return probeResult;
     const { paymentOption } = probeResult;
 
-    // Budget check
-    if (
-      this.config.budget?.maxPerRequest &&
-      paymentOption.amount > this.config.budget.maxPerRequest
-    ) {
-      return {
-        status: 'error',
-        error: new Ic402Error(
-          'budget_exceeded',
-          `Amount ${paymentOption.amount} exceeds maxPerRequest ${this.config.budget.maxPerRequest}`,
-        ),
-      };
-    }
-    if (
-      this.config.budget?.maxTotal &&
-      this.totalSpent + paymentOption.amount > this.config.budget.maxTotal
-    ) {
-      return { status: 'error', error: new Ic402Error('budget_exceeded', 'Total budget exceeded') };
-    }
-
     // 2. Sign via canister
     let signed: SignedAuthorization;
     try {
@@ -563,20 +501,6 @@ export class Ic402Client {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { status: 'error', error: new Ic402Error('sign_failed', msg, e) };
-    }
-
-    this.totalSpent += signed.paidAmount;
-
-    // Alert callback
-    if (
-      this.config.budget?.alertThreshold &&
-      this.config.budget.maxTotal &&
-      this.config.onBudgetAlert
-    ) {
-      const remaining = this.config.budget.maxTotal - this.totalSpent;
-      if (remaining <= this.config.budget.alertThreshold) {
-        await this.config.onBudgetAlert(this.totalSpent, this.config.budget.maxTotal);
-      }
     }
 
     // 3. Retry with payment header
@@ -753,10 +677,6 @@ export class Ic402Client {
       const amount =
         Array.isArray(requirement) && requirement.length > 0 ? requirement[0].amount : 0n;
 
-      if (this.config.budget?.maxPerRequest && amount > this.config.budget.maxPerRequest) {
-        throw new Ic402Error('budget_exceeded', `Amount ${amount} exceeds maxPerRequest`);
-      }
-
       // Approve amount + fee buffer (ICRC-2 transfer_from deducts fee from allowance)
       const approveAmount = amount + (this.config.approvalFeeBuffer ?? 100_000n);
       const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
@@ -799,7 +719,6 @@ export class Ic402Client {
       const retryResult = await actor.submitServiceRequest(serviceId, Array.from(params), [sig]);
 
       if (retryResult && typeof retryResult === 'object' && 'ok' in retryResult) {
-        this.totalSpent += amount;
         return retryResult.ok as { jobId: string };
       }
       if (retryResult && typeof retryResult === 'object' && 'error' in retryResult) {

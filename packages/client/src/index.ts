@@ -3,7 +3,6 @@ export type {
   Ic402Identity,
   Ic402ClientConfig,
   SessionHandle,
-  BudgetConfig,
   SessionPreferences,
 } from './client.js';
 export type {
