@@ -169,10 +169,17 @@ module {
       dailySpend.put(key, current + amount);
     };
 
+    /// The current daily-bucket day number. Capture this at reserve time and pass
+    /// it to releaseDaily so a rollback after the settlement await still targets
+    /// the SAME bucket even if the await crossed the UTC day boundary.
+    public func currentDay() : Int { dayNumber(Time.now()) };
+
     /// H-4 (v2): Roll back a previously reserved daily spend (e.g., when the
-    /// settlement that the reservation guarded fails). Never underflows.
-    public func releaseDaily(caller : Principal, amount : Nat) {
-      let day = dayNumber(Time.now());
+    /// settlement that the reservation guarded fails). `day` MUST be the day the
+    /// reservation was recorded (from currentDay()); releasing against the current
+    /// day instead would hit the wrong bucket for a settlement spanning midnight.
+    /// Never underflows.
+    public func releaseDaily(caller : Principal, day : Int, amount : Nat) {
       let key = dailyKey(caller, day);
       let current = switch (dailySpend.get(key)) { case (null) { 0 }; case (?a) { a } };
       let next : Nat = if (current >= amount) { current - amount } else { 0 };

@@ -278,7 +278,11 @@ module {
             switch (receipt.status) {
               case (?1) { return #confirmed };
               case (?0) { return #reverted };
-              case (_) { return #confirmed }; // pre-Byzantium / missing status: treat as included
+              // A receipt with NO status field is NOT proof of success — do not
+              // mint a "paid" receipt / open a funded session on it. All EIP-1559
+              // chains we support set status; keep polling and ultimately return
+              // #pending (caller must not deliver value on #pending).
+              case (_) { /* missing status — keep polling, do not confirm */ };
             };
           };
           case (#Consistent(#Ok(null))) { /* not yet mined — keep polling */ };

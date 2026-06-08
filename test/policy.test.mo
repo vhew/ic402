@@ -287,4 +287,36 @@ suite("Policy.Engine", func() {
       case (#denied(_)) {};
     };
   });
+
+  // H-4 (v2) reserve/release regression tests.
+  test("reserve then releaseDaily nets to zero (same day)", func() {
+    let engine = Policy.Engine();
+    let day = engine.currentDay();
+    engine.recordSpend(caller1, 40_000);
+    assert(engine.getDailySpendAmount(caller1) == 40_000);
+    engine.releaseDaily(caller1, day, 40_000);
+    assert(engine.getDailySpendAmount(caller1) == 0);
+  });
+
+  test("releaseDaily clamps to 0 and never underflows", func() {
+    let engine = Policy.Engine();
+    let day = engine.currentDay();
+    engine.recordSpend(caller1, 10_000);
+    // Release MORE than was recorded — must clamp to 0, not trap/underflow.
+    engine.releaseDaily(caller1, day, 999_999);
+    assert(engine.getDailySpendAmount(caller1) == 0);
+  });
+
+  test("releaseDaily on the wrong day leaves today's bucket intact (H-4 day-bucket fix)", func() {
+    let engine = Policy.Engine();
+    let day = engine.currentDay();
+    engine.recordSpend(caller1, 50_000);
+    // A release keyed to a DIFFERENT day (e.g. a settlement that crossed midnight
+    // releasing against the current day) must NOT touch the reservation's bucket.
+    engine.releaseDaily(caller1, day + 1, 50_000);
+    assert(engine.getDailySpendAmount(caller1) == 50_000);
+    // Releasing against the correct day clears it.
+    engine.releaseDaily(caller1, day, 50_000);
+    assert(engine.getDailySpendAmount(caller1) == 0);
+  });
 });

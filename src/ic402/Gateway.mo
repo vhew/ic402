@@ -374,7 +374,9 @@ module {
         // H-4 (v2): Reserve the daily spend synchronously BEFORE the value-moving
         // await (this whole prefix runs atomically up to the await, so concurrent
         // charges can no longer each pass a stale daily-limit check). Released on
-        // any settlement failure below.
+        // any settlement failure below — releasing against `evmSpendDay` (captured
+        // now) so a rollback after the await targets the same bucket across midnight.
+        let evmSpendDay = policy.currentDay();
         policy.recordSpend(evmSender, amount);
 
         let execResult = await sender.executeTransferWithAuthorization(
@@ -389,7 +391,7 @@ module {
         switch (execResult) {
           case (#err(msg)) {
             nonceManager.unlock(signature.nonce);
-            policy.releaseDaily(evmSender, amount);
+            policy.releaseDaily(evmSender, evmSpendDay, amount);
             return #settlementFailed("EIP-3009 execution failed: " # msg);
           };
           case (#ok(txHash)) {
@@ -416,18 +418,18 @@ module {
               };
               case (#reverted) {
                 nonceManager.unlock(signature.nonce);
-                policy.releaseDaily(evmSender, amount);
+                policy.releaseDaily(evmSender, evmSpendDay, amount);
                 return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ")");
               };
               case (#pending) {
                 // Keep the nonce locked (GC'd at expiry) so the same challenge is
                 // not re-broadcast; release the daily reservation since no receipt
                 // is issued. Caller MUST NOT deliver value on #settlementPending.
-                policy.releaseDaily(evmSender, amount);
+                policy.releaseDaily(evmSender, evmSpendDay, amount);
                 return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ")");
               };
               case (#err(e)) {
-                policy.releaseDaily(evmSender, amount);
+                policy.releaseDaily(evmSender, evmSpendDay, amount);
                 return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ")");
               };
             };
@@ -467,7 +469,9 @@ module {
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
       // H-4 (v2): Reserve the daily spend synchronously before the transfer await
-      // (closes the concurrent-charge daily-limit race); released on any failure.
+      // (closes the concurrent-charge daily-limit race); released on any failure
+      // against `icpSpendDay` so a rollback after the await hits the same bucket.
+      let icpSpendDay = policy.currentDay();
       policy.recordSpend(senderPrincipal, amount);
 
       try {
@@ -500,7 +504,7 @@ module {
           };
           case (#Err(err)) {
             nonceManager.unlock(signature.nonce);
-            policy.releaseDaily(senderPrincipal, amount);
+            policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
             switch (err) {
               case (#InsufficientFunds({ balance })) { #insufficientFunds("Insufficient funds: balance " # Nat.toText(balance)) };
               case (#InsufficientAllowance({ allowance })) { #insufficientFunds("Insufficient allowance: " # Nat.toText(allowance)) };
@@ -510,7 +514,7 @@ module {
         };
       } catch (e) {
         nonceManager.unlock(signature.nonce);
-        policy.releaseDaily(senderPrincipal, amount);
+        policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
         #settlementFailed("Ledger call failed: " # Error.message(e));
       };
     };

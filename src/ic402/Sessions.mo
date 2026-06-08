@@ -266,6 +266,7 @@ module {
         payer = caller;
         payerPublicKey = sessionPublicKey;
         deposited = deposit;
+        spendDay = policy.currentDay();
         var consumed = 0;
         var remaining = deposit;
         var voucherCount = 0;
@@ -499,6 +500,7 @@ module {
         payer = caller;
         payerPublicKey = sessionPublicKey;
         deposited = deposit;
+        spendDay = policy.currentDay();
         var consumed = 0;
         var remaining = deposit;
         var voucherCount = 0;
@@ -722,7 +724,7 @@ module {
       // M-9 (v2): Credit the unused deposit back against the daily limit (the full
       // deposit was reserved at open; only `consumed` should count as spend).
       if (session.deposited > session.consumed) {
-        policy.releaseDaily(session.payer, session.deposited - session.consumed);
+        policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
       };
 
       // Build txHash from ICRC-1 block indices
@@ -874,7 +876,7 @@ module {
 
       // M-9 (v2): Credit the unused deposit back against the daily limit.
       if (session.deposited > session.consumed) {
-        policy.releaseDaily(session.payer, session.deposited - session.consumed);
+        policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
       };
 
       // Include both tx hashes in the receipt (settle|refund)
@@ -986,6 +988,7 @@ module {
           payer = ss.payer;
           payerPublicKey = ss.payerPublicKey;
           deposited = ss.deposited;
+          spendDay = policy.currentDay();
           var consumed = ss.consumed;
           var remaining = ss.remaining;
           var voucherCount = ss.voucherCount;

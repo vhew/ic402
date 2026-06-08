@@ -291,7 +291,10 @@ export class Ic402Client {
     let sequence = 0n;
     let consumed = 0n;
     // M-7: bind the verifying canister's principal into every voucher signature.
-    const canisterIdText = this.config.canisterId;
+    // M-7: bind to the canister the session was actually opened on (the resolved
+    // `cid`, which honors the per-call canisterId override) — not config.canisterId,
+    // or vouchers would bind to the wrong canister and be rejected on the override path.
+    const canisterIdText = cid;
 
     const handle: SessionHandle = {
       id: state.id,
@@ -342,7 +345,16 @@ export class Ic402Client {
       },
 
       async callForContent(method: string, callArgs: unknown[]): Promise<ContentDelivery> {
-        const cost = intent.costPerCall ?? 1n;
+        // costPerCall is a Candid `opt nat` → decodes to [bigint] (Some) or [] (None),
+        // ALWAYS an array, so `?? 1n` never fires and `consumed += array` would throw
+        // "Cannot mix BigInt and other types". Mirror the guard in call().
+        const rawCost = intent.costPerCall;
+        const cost =
+          Array.isArray(rawCost) && rawCost.length > 0
+            ? BigInt(rawCost[0])
+            : typeof rawCost === 'bigint'
+              ? rawCost
+              : 1n;
         consumed += cost;
         sequence += 1n;
 
@@ -509,12 +521,25 @@ export class Ic402Client {
       return { status: 'error', error: new Ic402Error('sign_failed', msg, e) };
     }
 
-    // 3. Retry with payment header
+    // 3. Retry with payment header.
+    // H-10: echo the ic402 server nonce from the 402 challenge into the payment
+    // payload so the canister can lock the bound amount (otherwise the
+    // EVM-over-HTTP settlement returns #expired). Mirrors evm.ts fetchX402.
+    let headerToSend = signed.header;
+    if (paymentOption.ic402Nonce) {
+      try {
+        const obj = JSON.parse(atob(signed.header));
+        obj.ic402Nonce = paymentOption.ic402Nonce;
+        headerToSend = btoa(JSON.stringify(obj));
+      } catch {
+        headerToSend = signed.header;
+      }
+    }
     let response: Response;
     try {
       const headers = new Headers(init?.headers);
-      headers.set('X-Payment', signed.header);
-      headers.set('Payment-Signature', signed.header);
+      headers.set('X-Payment', headerToSend);
+      headers.set('Payment-Signature', headerToSend);
       response = await fetch(url, { ...init, headers });
     } catch (e) {
       return { status: 'error', error: classifyNetworkError(e) };

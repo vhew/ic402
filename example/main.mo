@@ -273,10 +273,13 @@ persistent actor KnowledgeBase {
             case (null) { return Http.httpError(404, "Service not found") };
             case (?svc) {
               if (not svc.enabled) return Http.httpError(404, "Service not available");
-              let amount = switch (svc.pricing) {
-                case (#Exact(p)) { p }; case (#Upto(p)) { p }; case (#Session) { 0 };
+              switch (svc.pricing) {
+                // #Session is billed against an existing session deposit, not a
+                // per-request 402 charge — requireAll(0) would trap.
+                case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+                case (#Exact(p)) { return Http.http402(gate.requireAll(p)) };
+                case (#Upto(p)) { return Http.http402(gate.requireAll(p)) };
               };
-              return Http.http402(gate.requireAll(amount));
             };
           };
         };
@@ -597,7 +600,13 @@ persistent actor KnowledgeBase {
       case (#Session) { 0 };
     };
     switch (paymentSig) {
-      case (null) { #paymentRequired(gate.requireAll(amount)) };
+      // #Session pricing has amount 0 (billed against a session deposit) — guard
+      // against requireAll(0), which traps.
+      case (null) {
+        if (amount == 0) { #error("Service uses session billing — open a session instead") } else {
+          #paymentRequired(gate.requireAll(amount));
+        };
+      };
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {

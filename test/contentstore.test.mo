@@ -220,4 +220,27 @@ suite("ContentStore", func() {
       case (null) { assert(false) };
     };
   });
+
+  // M-2 (v2): delete + re-put of the SAME id under the SAME plaintext must produce
+  // DIFFERENT ciphertext (a fresh per-entry salt), i.e. no (key, nonce) reuse.
+  test("delete + re-put of same id re-keys (no keystream reuse)", func() {
+    let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
+    let data = Text.encodeUtf8("identical plaintext for both encryptions");
+
+    ignore store.put("dup", "text/plain", data);
+    let ct1 = store.toStable().entries[0].chunks[0];
+
+    switch (store.delete("dup")) { case (#ok) {}; case (_) { assert(false) } };
+    ignore store.put("dup", "text/plain", data);
+    let ct2 = store.toStable().entries[0].chunks[0];
+
+    // Same id + same plaintext, but the per-entry salt differs → ciphertext differs.
+    assert(ct1 != ct2);
+    // And it still decrypts correctly after re-keying.
+    switch (store.get("dup")) {
+      case (?d) { assert(d == data) };
+      case (null) { assert(false) };
+    };
+  });
 });

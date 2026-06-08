@@ -44,7 +44,13 @@ module {
       // (in-flight settlement) nonces are never evicted, so replay protection on
       // active settlements is preserved. Under sustained 402-challenge spam this
       // bounds memory at ~MAX_NONCES instead of growing without limit.
-      if (nonces.size() >= MAX_NONCES) {
+      //
+      // The `insertionOrder` size trigger is essential: consumeLocked()/unlock()
+      // remove a nonce from `nonces` but not from the ring, so on settle-heavy
+      // traffic `nonces` stays small and the MAX_NONCES branch never fires. Firing
+      // gcExpired() once the ring reaches 2*MAX_NONCES compacts it back down to the
+      // live set, bounding the ring (it would otherwise leak one blob per payment).
+      if (nonces.size() >= MAX_NONCES or insertionOrder.size() >= 2 * MAX_NONCES) {
         gcExpired();
         while (nonces.size() >= MAX_NONCES and evictOldestUnlocked()) {};
       };

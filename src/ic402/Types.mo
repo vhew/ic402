@@ -257,6 +257,10 @@ module {
     payer : Principal;
     payerPublicKey : Blob;
     deposited : Nat;
+    // v2: the daily-limit bucket day the deposit was reserved against (from
+    // Policy.currentDay()), so the credit-back on close targets the same bucket
+    // even when close happens on a later UTC day. Transient (not in StableSession).
+    spendDay : Int;
     var consumed : Nat;
     var remaining : Nat;
     var voucherCount : Nat;

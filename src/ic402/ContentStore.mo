@@ -44,7 +44,7 @@ module {
   /// Derive a 32-byte ChaCha20 key for a specific chunk.
   /// key = SHA-256(masterKey || salt || contentId || chunkIndex)
   func deriveChunkKey(masterKey : [Nat8], salt : Nat, contentId : Text, chunkIndex : Nat) : [Nat8] {
-    let saltBytes = Utils.natToBytesBE(salt);
+    let saltBytes = Utils.natToBytes8(salt); // fixed 8 bytes: unambiguous boundary with the variable-length contentId
     let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
     let indexBytes = Utils.natToBytes8(chunkIndex);
     Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(Array.append(masterKey, saltBytes), idBytes), indexBytes)));
@@ -53,7 +53,7 @@ module {
   /// Derive a 12-byte nonce from salt + contentId + chunkIndex.
   /// nonce = SHA-256(salt || contentId || chunkIndex)[0..12]
   func deriveNonce(salt : Nat, contentId : Text, chunkIndex : Nat) : [Nat8] {
-    let saltBytes = Utils.natToBytesBE(salt);
+    let saltBytes = Utils.natToBytes8(salt); // fixed 8 bytes: unambiguous boundary with the variable-length contentId
     let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
     let indexBytes = Utils.natToBytes8(chunkIndex);
     let hash = Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(saltBytes, idBytes), indexBytes)));

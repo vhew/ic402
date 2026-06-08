@@ -132,10 +132,29 @@ module {
       };
     };
 
+    // Best-effort principal-text validation (charset + structure). Not a full
+    // CRC check, but rejects the malformed strings that would otherwise TRAP
+    // Principal.fromText in the refund path / expireJobs timer (Principal.fromText
+    // traps un-catchably on bad input). submitRequest rejects anything that is
+    // neither a 0x address nor principal-shaped, so stored buyers are well-formed.
+    func looksLikePrincipal(t : Text) : Bool {
+      let n = t.size();
+      if (n < 5 or n > 63) return false;
+      var hasDash = false;
+      for (c in t.chars()) {
+        let ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
+        if (not ok) return false;
+        if (c == '-') hasDash := true;
+      };
+      hasDash;
+    };
+
     // C-5 (v2): buyer is Text. Only ICP-principal buyers can receive an ICRC
-    // refund; EVM (0x…) buyers cannot be auto-refunded via the ICP ledger.
+    // refund; EVM (0x…) buyers and any malformed string return null (no refund,
+    // no trap).
     func buyerIcpAccount(buyer : Text) : ?Types.Account {
       if (Text.startsWith(buyer, #text "0x")) { return null };
+      if (not looksLikePrincipal(buyer)) { return null };
       ?{ owner = Principal.fromText(buyer); subaccount = null };
     };
 
@@ -152,6 +171,11 @@ module {
       receipt : Types.PaymentReceipt,
       callback : ?Text,
     ) : { #ok : Text; #err : Text } {
+      // Reject a malformed buyer up front (returnable error) rather than storing
+      // a string that would later TRAP Principal.fromText in the refund timer.
+      if (not Text.startsWith(buyer, #text "0x") and not looksLikePrincipal(buyer)) {
+        return #err("Invalid buyer: must be an ICP principal or a 0x EVM address");
+      };
       let svc = switch (services.get(serviceId)) {
         case (null) { return #err("Service not found: " # serviceId) };
         case (?s) { s };
@@ -362,9 +386,14 @@ module {
       if (refundBuyer) {
         switch (buyerIcpAccount(job.buyer)) {
           case (?acct) {
+            // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY
+            // before the await so the expireJobs timer (which only acts on
+            // #Submitted/#Disputed/#Pending) cannot also refund this same job
+            // during the await — preventing a double refund. Revert on failure.
+            jobs.put(jobId, { job with status = #Settling });
             switch (await payFromMainAccount(acct, job.amount)) {
               case (#ok(_)) { jobs.put(jobId, { job with status = #Refunded }); #ok };
-              case (#err(e)) { #err("Refund failed: " # e) };
+              case (#err(e)) { jobs.put(jobId, job); #err("Refund failed: " # e) };
             };
           };
           case (null) { #err("EVM buyer cannot be refunded via ICRC; refund out-of-band") };
