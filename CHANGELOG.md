@@ -1,5 +1,133 @@
 # Changelog
 
+## v2.0.0 — 2026-06-08
+
+Security release. Fixes all confirmed Critical, High, and Medium findings from the
+full-codebase audit (`AUDIT.md`). **This is a breaking release** — see the
+"Breaking interface changes" section before upgrading. v2 stable state is not
+upgrade-compatible from v1 in all modules; treat as a fresh deploy or migrate
+deliberately (see "Migration").
+
+### Critical fixes
+
+- **C1 — EVM settlement now validates the payment recipient.** `Gateway.settle`
+  and `Sessions.openEvmSession` now require the EIP-3009 `authorization.to` to equal
+  the canister's own derived EVM address. Previously a payer could sign a
+  self-transfer (`to` = an address they control), pass signature verification, have
+  the canister pay gas to broadcast it, and still receive a valid receipt / funded
+  session — a complete payment bypass and (for sessions) a treasury-drain vector.
+- **C2 / C3 — MCP server no longer exposes the controller signing key to the LLM.**
+  The generic `call` tool is restricted to a read-only/query allowlist; `fetch_x402`
+  enforces a URL allowlist (SSRF), per-call + cumulative spend caps, and explicit
+  confirmation before signing. (`integrations/mcp`.)
+- **C4 — Service-marketplace escrow custody fixed.** `ServiceRegistry.settleJob` /
+  `expireJobs` now pay the operator and refund the buyer from the platform recipient
+  account (where the payment actually lands) instead of an unfunded per-job
+  subaccount, so settlements/refunds no longer fail with `InsufficientFunds`.
+- **C5 — EVM service-over-HTTP no longer traps after payment.** The example passes
+  `receipt.sender` to the registry as `Text` instead of `Principal.fromText(...)`,
+  which trapped for 0x EVM senders *after* the on-chain transfer had executed.
+
+### High fixes
+
+- **H1** — EVM settlement waits for on-chain confirmation (`eth_getTransactionReceipt`,
+  status == 1) before issuing a receipt; reverted/never-mined transfers no longer
+  yield a "paid" receipt. New `PaymentResult` variant `#settlementPending`.
+- **H2** — `EvmSender` reads the `#Pending` chain nonce before every send (removed the
+  stale in-memory nonce cache that desynced against `EvmSigner` on the shared address).
+- **H3** — `EvmSender` no longer broadcasts with a fabricated ~0.1 gwei fee when fee
+  data is unavailable; it returns an error so the caller can retry.
+- **H4** — Daily spending limit is reserved *before* the settlement await
+  (`Policy.reserveCharge` / `reserveSessionOpen` + `releaseDaily`), closing the
+  concurrent-charge bypass.
+- **H5** — `ServiceRegistry` settlement uses a synchronous `#Settling` reservation to
+  prevent double-settle/double-refund via racing `confirmJob`.
+- **H6 / H7** — `ContentStore` requires external-randomness seeding (no more
+  deterministic key from the public principal) and persists the key across upgrades.
+- **H8** — Access grants are non-transferable: `verifyGrant` now takes the caller and
+  requires `caller == grant.grantee`.
+- **H9 / H10** — The HTTP x402 flow works end-to-end: paid GETs upgrade to update
+  context so the 402 nonce is persisted, and the 402 response now carries the server
+  nonce (`ic402Nonce`) for EVM clients to echo and bind the amount.
+- **H11 / H12 / H13** — MCP `fetch_content` validates delivery targets (SSRF), and all
+  money-moving tools enforce spend caps + confirmation.
+- **H14** — Prebuilt ledger/EVM-RPC WASMs are verified against pinned SHA-256 hashes
+  before deploy (`scripts/prebuilt.sha256`).
+
+### Medium fixes
+
+- **M1 / M8** — HMAC grant key uses the full 256-bit seed (was truncated to 64 bits).
+- **M2** — `ContentStore` mixes a per-entry salt into key/nonce derivation, so
+  delete + re-put of the same id never reuses a (key, nonce) pair.
+- **M5** — `NonceManager` enforces a hard cap (oldest unlocked nonces evicted),
+  bounding memory under 402-challenge spam.
+- **M6** — `ServiceRegistry` adds `resolveDispute` and auto-expires stuck
+  `#Submitted`/`#Disputed` jobs, so escrow can never be locked permanently.
+- **M7** — Voucher signatures bind the verifying canister's principal (cross-canister
+  replay protection on Ed25519 key reuse).
+- **M9** — Session deposits are counted against the daily limit once and credited back
+  on close (was double-counted: deposit + every voucher delta, never refunded).
+- **M10 / M11** — Deploy scripts can't poison the source backup with testnet-patched
+  content, and backups are gitignored / mainnet markers re-verified after restore.
+
+### Breaking interface changes
+
+**Motoko library API (recompile required):**
+- `Gateway.verifyGrant(grant)` → `verifyGrant(caller : Principal, grant)`.
+- `Grants.verifyGrant(grant)` → `verifyGrant(caller : Principal, grant)`.
+- `Sessions.encodeVoucherPayload(sessionId, amount, sequence)` →
+  `encodeVoucherPayload(canisterId : Text, sessionId, amount, sequence)`.
+- `ServiceRegistry.submitRequest(buyer : Principal, …)` → `submitRequest(buyer : Text, …)`.
+- `ServiceRegistry` no longer settles to an escrow subaccount; new
+  `resolveDispute(jobId, refundBuyer : Bool)`.
+- `EvmSender.getFeeData` is internal and now returns `?(Nat, Nat)`; new public
+  `EvmSender.confirmTransaction(chainId, txHash, maxPolls)`.
+- New `Policy` methods: `reserveCharge`, `reserveSessionOpen`, `releaseDaily`.
+- `ContentStore` requires `initExternalSeed(...)` (or `startTimers()`) before any
+  write — writes trap until seeded.
+
+**Candid / wire / serialized formats (coordinate clients & upgrades):**
+- `PaymentResult` gains `#settlementPending`; `JobStatus` gains `#Settling`
+  (exhaustive matchers must add these variants).
+- Voucher signed payload is now CBOR array(4) `[canisterId, sessionId, cumulativeAmount,
+  sequence]` (was array(3)). **Client and canister must be upgraded together; in-flight
+  vouchers are invalidated.** `@ic402/client` `signVoucher` gains a `canisterId` argument
+  (handled automatically by the session handle).
+- The 402 response JSON now includes `ic402Nonce` and `expiry`; EVM-over-HTTP clients
+  must echo `ic402Nonce` in the X-PAYMENT payload (the `@ic402/client` `fetchX402`
+  helper does this automatically).
+- Stable schemas changed: `StableContentStoreState` (+`masterKey`, `seedInitialized`,
+  `saltCounter`), `StableContentEntry` (+`salt`). New fields are optional so the
+  upgrade decodes, but pre-v2 deterministic-key content is not decryptable under the
+  v2 required-seed model.
+
+**MCP server behavior (intended):**
+- `autoPayment` defaults to **off**; money-moving/signing tools require `confirm: true`
+  and enforce `perCallMaxAtomic` / `sessionMaxAtomic` caps; the generic `call` tool is
+  read-only.
+
+### Dependencies
+
+- `ic` 3.2.0 → **4.0.0** (major). Canister types moved from the top-level `mo:ic`
+  module to `mo:ic/Types`; `lib.mo` updated accordingly (`HttpResponse_` now aliases
+  `ICTypes.HttpRequestResult`).
+- `ecdsa` 7.1.0 → **8.0.0** (major). No source changes required (`mo:ecdsa/Curve` API
+  compatible).
+- `sha2` 0.1.14 → **0.2.1** (minor). No source changes required.
+- **Toolchain:** `moc` 1.3.0 → **1.9.0** (required by `ic@4.0.0` / `ecdsa@8.0.0`, which
+  need moc ≥ 1.4.0). Integrators must build with moc ≥ 1.4.0.
+
+### Migration
+
+- **EVM identity unchanged:** the canister's EVM address is the same (H2 reads the
+  pending nonce rather than changing derivation paths), so no re-funding is needed.
+- **ContentStore:** call `store.startTimers<system>()` (or `initExternalSeed(await
+  raw_rand())`) once after deploy. Content stored under the pre-v2 deterministic key
+  must be re-uploaded.
+- **Sessions/vouchers:** upgrade `@ic402/client` and the canister together.
+- **Service marketplace:** the platform recipient account custodies funds; operator
+  payouts and buyer refunds now transfer from it.
+
 ## v1.0.0 — 2026-04-05
 
 ### Breaking Changes

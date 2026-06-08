@@ -25,14 +25,18 @@ module {
 
   /// Encode a voucher payload as CBOR for Ed25519 signature verification.
   /// Must match the client-side encodeVoucherPayload() exactly:
-  /// CBOR array(3): [text(sessionId), uint(cumulativeAmount), uint(sequence)]
+  /// CBOR array(4): [text(canisterId), text(sessionId), uint(cumulativeAmount), uint(sequence)]
+  /// M-7 (v2): `canisterId` (the verifying canister's principal text) is now bound
+  /// into the signed payload so a voucher signed for canister A cannot be replayed
+  /// against canister B when the payer reuses the same Ed25519 key across canisters.
   /// H-2: Returns null if cumulativeAmount or sequence exceeds Nat64 range.
-  public func encodeVoucherPayload(sessionId : Text, cumulativeAmount : Nat, sequence : Nat) : ?[Nat8] {
+  public func encodeVoucherPayload(canisterId : Text, sessionId : Text, cumulativeAmount : Nat, sequence : Nat) : ?[Nat8] {
     // H-2: Bounds check before Nat64 conversion to prevent trap
     let maxNat64 : Nat = 18_446_744_073_709_551_615;
     if (cumulativeAmount > maxNat64 or sequence > maxNat64) { return null };
 
     let value : CBOR.Value = #majorType4([
+      #majorType3(canisterId),
       #majorType3(sessionId),
       #majorType0(Nat64.fromNat(cumulativeAmount)),
       #majorType0(Nat64.fromNat(sequence)),
@@ -356,6 +360,21 @@ module {
         };
       };
 
+      // C-1 (v2): The EIP-3009 deposit recipient MUST be the canister's own EVM
+      // address. Without this, an attacker signs a self-transfer (to = an address
+      // they control), the canister credits them an escrow `deposit` they never
+      // actually paid in, and on close the refund is drawn from the canister's own
+      // pooled balance — draining everyone else's deposits. The constructor is
+      // passed evmRecipientAddress precisely for this check.
+      let canisterEvmAddr = switch (evmRecipientAddress.get()) {
+        case (?addr) { addr };
+        case (null) { sessionOpenLocks.delete(caller); return #err(#settlementFailed("Canister EVM address not derived")) };
+      };
+      if (not EvmUtils.addressesEqual(authz.to, canisterEvmAddr)) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("EIP-3009 deposit recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")"));
+      };
+
       // Validate authorization amount
       if (authz.value < deposit) {
         sessionOpenLocks.delete(caller);
@@ -425,6 +444,25 @@ module {
         case (#err(msg)) {
           sessionOpenLocks.delete(caller);
           return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
+        };
+      };
+
+      // H-1 (v2): Confirm the deposit transfer actually mined before crediting an
+      // escrow allocation. Otherwise a reverted/never-mined deposit would still
+      // open a funded session whose refund is drawn from the canister's balance.
+      switch (await sender.confirmTransaction(chainId, depositTxHash, 4)) {
+        case (#confirmed) {};
+        case (#reverted) {
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")"));
+        };
+        case (#pending) {
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ")"));
+        };
+        case (#err(e)) {
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ")"));
         };
       };
 
@@ -538,7 +576,8 @@ module {
 
       // Ed25519 signature verification
       // H-2: Handle Nat64 overflow gracefully instead of trapping
-      let payload = switch (encodeVoucherPayload(voucher.sessionId, voucher.cumulativeAmount, voucher.sequence)) {
+      // M-7: Bind the verifying canister's principal into the signed payload.
+      let payload = switch (encodeVoucherPayload(Principal.toText(canisterPrincipal), voucher.sessionId, voucher.cumulativeAmount, voucher.sequence)) {
         case (?p) { p };
         case (null) { return #payloadOverflow };
       };
@@ -560,7 +599,10 @@ module {
       session.lastCumulativeAmount := voucher.cumulativeAmount;
       session.lastActivityAt := Time.now();
 
-      policy.recordSpend(session.payer, delta);
+      // M-9 (v2): Do NOT record per-voucher deltas against the daily limit. The
+      // full deposit is recorded once at openSession; the unused remainder is
+      // credited back on close (releaseDaily). Recording deltas here as well
+      // double-counted spend (deposit + every delta) and was never refunded.
 
       #ok(delta);
     };
@@ -676,6 +718,12 @@ module {
       };
 
       session.status := if (wasExpired) { #expired } else { #closed };
+
+      // M-9 (v2): Credit the unused deposit back against the daily limit (the full
+      // deposit was reserved at open; only `consumed` should count as spend).
+      if (session.deposited > session.consumed) {
+        policy.releaseDaily(session.payer, session.deposited - session.consumed);
+      };
 
       // Build txHash from ICRC-1 block indices
       let closeTxHash : ?Text = switch (settleBlockIndex, refundBlockIndex) {
@@ -823,6 +871,11 @@ module {
       ignore evmEscrowManager.deallocate(session.id);
 
       session.status := if (wasExpired) { #expired } else { #closed };
+
+      // M-9 (v2): Credit the unused deposit back against the daily limit.
+      if (session.deposited > session.consumed) {
+        policy.releaseDaily(session.payer, session.deposited - session.consumed);
+      };
 
       // Include both tx hashes in the receipt (settle|refund)
       let combinedTxHash = switch (settleTxHash, refundTxHash) {

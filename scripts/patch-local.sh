@@ -17,15 +17,52 @@
 MAINNET_LEDGER="xevnm-gaaaa-aaaar-qafnq-cai"
 EVM_PLACEHOLDER="0x0000000000000000000000000000000000000000"
 
-# Backup source before patching
+# Mainnet markers that MUST be present in a pristine example/main.mo.
+# Used to prove a file is unpatched before we trust it as a backup source,
+# and to prove a restore actually brought back the mainnet source.
+assert_mainnet_markers() {
+  local file="$1" context="$2"
+  if ! grep -q 'chainId = 8453;' "$file" 2>/dev/null \
+     || ! grep -q '"key_1"' "$file" 2>/dev/null; then
+    echo "  ERROR: $file is missing expected MAINNET markers ($context)." >&2
+    echo "         Expected both 'chainId = 8453;' and '\"key_1\"' to be present." >&2
+    echo "         The file appears to be testnet-patched or corrupt — refusing to proceed." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Backup source before patching.
+# Guards against poisoning the backup with testnet-patched content:
+#   1. If a backup already exists, a prior run did not restore cleanly. Restore
+#      from it first (the backup is the pristine copy), rather than overwriting
+#      it with whatever — possibly already-patched — content is on disk now.
+#   2. Only treat example/main.mo as a valid backup source if it still contains
+#      the MAINNET markers. If not, abort loudly instead of capturing garbage.
 backup_source() {
+  if [ -f example/main.mo.local-bak ]; then
+    echo "  Existing backup found (a prior run did not restore) — restoring from it first..."
+    mv example/main.mo.local-bak example/main.mo
+  fi
+  if ! assert_mainnet_markers example/main.mo "pre-backup pristine check"; then
+    echo "  Aborting: refusing to back up testnet-patched content as the pristine source." >&2
+    exit 1
+  fi
   cp example/main.mo example/main.mo.local-bak
 }
 
-# Restore source after deploy
+# Restore source after deploy.
+# After restoring, assert the mainnet markers are back so a botched restore
+# (e.g. a half-written backup) can never silently leave a testnet-patched
+# example/main.mo in the working tree.
 restore_source() {
   if [ -f example/main.mo.local-bak ]; then
     mv example/main.mo.local-bak example/main.mo
+  fi
+  if ! assert_mainnet_markers example/main.mo "post-restore verification"; then
+    echo "  CRITICAL: restore did not produce a pristine mainnet example/main.mo." >&2
+    echo "            Do NOT commit. Recover example/main.mo from git before continuing." >&2
+    exit 1
   fi
 }
 

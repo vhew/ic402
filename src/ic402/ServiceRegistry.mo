@@ -11,7 +11,6 @@
 /// ```
 
 import Types "Types";
-import Escrow "Escrow";
 import HashMap "mo:base/HashMap";
 import Buffer "mo:base/Buffer";
 import Iter "mo:base/Iter";
@@ -35,11 +34,9 @@ module {
   };
 
   public class ServiceRegistry(
-    canisterPrincipal : Principal,
+    _canisterPrincipal : Principal,
     config : ServiceConfig,
   ) {
-    let escrowManager = Escrow.EscrowManager(canisterPrincipal);
-
     var services = HashMap.HashMap<Text, Types.ServiceDefinition>(16, Text.equal, Text.hash);
     var jobs = HashMap.HashMap<Text, Types.Job>(64, Text.equal, Text.hash);
     var serviceCounter : Nat = 0;
@@ -112,17 +109,44 @@ module {
 
     // ── Job Lifecycle ──
 
-    /// Derive escrow subaccount for a job (distinct from session escrow).
-    func jobSubaccount(jobId : Text) : Blob {
-      let prefix = Blob.toArray(Text.encodeUtf8("ic402-job-escrow"));
-      let idBytes = Blob.toArray(Text.encodeUtf8(jobId));
-      SHA256.fromArray(#sha256, Array.append(prefix, idBytes));
+    // C-4 (v2): Funds are custodied at the platform recipient account (where
+    // Gateway.settle deposits the buyer's payment), NOT in a per-job escrow
+    // subaccount. The previous code transferred from an unfunded subaccount, so
+    // every settle/refund failed with InsufficientFunds and funds were stranded.
+    // All settlement/refund transfers therefore source from config.recipient.
+    func payFromMainAccount(to : Types.Account, amount : Nat) : async { #ok : Nat; #err : Text } {
+      if (amount == 0) return #ok(0);
+      if (config.tokens.size() == 0) return #err("No token configured");
+      let ledger : Types.LedgerActor = actor (Principal.toText(config.tokens[0].ledger));
+      let result = await ledger.icrc1_transfer({
+        from_subaccount = config.recipient.subaccount;
+        to;
+        amount;
+        fee = null;
+        memo = null;
+        created_at_time = null;
+      });
+      switch (result) {
+        case (#Ok(b)) { #ok(b) };
+        case (#Err(e)) { #err(debug_show(e)) };
+      };
+    };
+
+    // C-5 (v2): buyer is Text. Only ICP-principal buyers can receive an ICRC
+    // refund; EVM (0x…) buyers cannot be auto-refunded via the ICP ledger.
+    func buyerIcpAccount(buyer : Text) : ?Types.Account {
+      if (Text.startsWith(buyer, #text "0x")) { return null };
+      ?{ owner = Principal.fromText(buyer); subaccount = null };
     };
 
     /// Submit a service request. The buyer has already paid (receipt from Gateway).
-    /// The payment is held in escrow until the job is verified and settled.
+    /// The payment is custodied at the platform recipient account until the job is
+    /// verified and settled (see settleJob / expireJobs for the custody model).
+    /// C-5 (v2): `buyer` is Text — a principal for ICP payers, or a 0x EVM address
+    /// for EVM payers (receipt.sender). It is NOT coerced to a Principal, which
+    /// trapped for EVM addresses after the on-chain transfer had already executed.
     public func submitRequest(
-      buyer : Principal,
+      buyer : Text,
       serviceId : Text,
       params : Blob,
       receipt : Types.PaymentReceipt,
@@ -153,7 +177,7 @@ module {
       let job : Types.Job = {
         id = jobId;
         serviceId;
-        buyer = Principal.toText(buyer);
+        buyer;
         operator = null;
         params;
         paymentReceiptId = receipt.id;
@@ -317,11 +341,42 @@ module {
       if (job.buyer != Principal.toText(buyer)) return #err("Not the buyer");
       if (job.status != #Submitted) return #err("Job not in submitted status");
       jobs.put(jobId, { job with status = #Disputed });
-      // Disputed jobs need admin resolution or auto-refund after timeout
+      // M-6: Disputed jobs are resolved via resolveDispute() or auto-refunded by
+      // expireJobs() once past the timeout — escrow is never locked permanently.
       #ok;
     };
 
-    /// Settle a verified job: transfer escrowed funds to the operator.
+    /// M-6 (v2): Resolve a submitted/disputed job. The consuming canister MUST
+    /// gate access (e.g. controller-only). `refundBuyer = true` refunds the buyer;
+    /// false settles to the operator. Without this, BuyerConfirm jobs the buyer
+    /// neither confirms nor disputes (and disputed jobs) had no resolution path.
+    public func resolveDispute(jobId : Text, refundBuyer : Bool) : async { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      switch (job.status) {
+        case (#Submitted or #Disputed) {};
+        case (_) { return #err("Job is not in a resolvable state (status: " # debug_show(job.status) # ")") };
+      };
+      if (refundBuyer) {
+        switch (buyerIcpAccount(job.buyer)) {
+          case (?acct) {
+            switch (await payFromMainAccount(acct, job.amount)) {
+              case (#ok(_)) { jobs.put(jobId, { job with status = #Refunded }); #ok };
+              case (#err(e)) { #err("Refund failed: " # e) };
+            };
+          };
+          case (null) { #err("EVM buyer cannot be refunded via ICRC; refund out-of-band") };
+        };
+      } else {
+        jobs.put(jobId, { job with status = #Verified });
+        await settleJob(jobId);
+      };
+    };
+
+    /// Settle a verified job: pay the operator (and refund the Upto remainder to
+    /// the buyer) from the platform recipient account.
     func settleJob(jobId : Text) : async { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
         case (null) { return #err("Job not found") };
@@ -329,36 +384,49 @@ module {
       };
       if (job.status != #Verified) return #err("Job not verified");
 
+      // H-5 (v2): Reserve the terminal transition synchronously BEFORE any await.
+      // A concurrent confirmJob/verifyAndSettle that also reaches settleJob will
+      // now see #Settling (not #Verified) and abort, preventing double payout.
+      jobs.put(jobId, { job with status = #Settling });
+
       let cost = switch (job.actualCost) {
         case (?c) { c };
         case (null) { job.amount };
       };
 
-      // For ICP payments: transfer from escrow subaccount to recipient
-      if (config.tokens.size() > 0) {
-        let ledger : Types.LedgerActor = actor (Principal.toText(config.tokens[0].ledger));
-        let sub = jobSubaccount(jobId);
-
-        // Settle cost to recipient (canister owner / platform)
-        if (cost > 0) {
-          switch (await escrowManager.settle(ledger, sub, config.recipient, cost)) {
-            case (#err(e)) { return #err("Settlement failed: " # e) };
+      // C-4: Pay the operator their cost from the platform recipient account.
+      switch (job.operator) {
+        case (?op) {
+          switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
+            case (#err(e)) {
+              jobs.put(jobId, { job with status = #Verified }); // roll back for retry
+              return #err("Settlement failed: " # e);
+            };
             case (#ok(_)) {};
           };
         };
+        case (null) {
+          jobs.put(jobId, { job with status = #Verified });
+          return #err("Job has no assigned operator to settle to");
+        };
+      };
 
-        // Refund remainder to buyer (for Upto pricing)
-        let refundAmount = if (job.amount > cost) { job.amount - cost } else { 0 };
-        if (refundAmount > 0) {
-          // Parse buyer principal for refund
-          let buyerAccount : Types.Account = {
-            owner = Principal.fromText(job.buyer);
-            subaccount = null;
+      // C-4/C-5: Refund the Upto remainder to the buyer (ICP buyers only).
+      let refundAmount = if (job.amount > cost) { job.amount - cost } else { 0 };
+      if (refundAmount > 0) {
+        switch (buyerIcpAccount(job.buyer)) {
+          case (?buyerAccount) {
+            switch (await payFromMainAccount(buyerAccount, refundAmount)) {
+              case (#err(e)) {
+                // Operator was already paid — the job IS settled; surface the
+                // refund problem without rolling back the operator payment.
+                jobs.put(jobId, { job with status = #Settled });
+                return #err("Operator paid but buyer refund failed: " # e);
+              };
+              case (#ok(_)) {};
+            };
           };
-          switch (await escrowManager.refund(ledger, sub, buyerAccount, refundAmount)) {
-            case (#err(e)) { return #err("Refund failed: " # e) };
-            case (#ok(_)) {};
-          };
+          case (null) {}; // EVM buyer: Upto remainder is not ICRC-refundable here
         };
       };
 
@@ -418,22 +486,26 @@ module {
       let expired = Buffer.Buffer<Text>(8);
 
       for ((id, job) in jobs.entries()) {
-        if ((job.status == #Pending or job.status == #Assigned or job.status == #Computing) and now > job.expiresAt) {
+        // M-6 (v2): Also time out jobs stuck in #Submitted (buyer never confirmed)
+        // or #Disputed, so escrow is never locked permanently with no resolution.
+        let timedOut = switch (job.status) {
+          case (#Pending or #Assigned or #Computing or #Submitted or #Disputed) { now > job.expiresAt };
+          case (_) { false };
+        };
+        if (timedOut) {
           jobs.put(id, { job with status = #Expired });
           expired.add(id);
 
-          // Refund buyer
-          if (config.tokens.size() > 0) {
-            let ledger : Types.LedgerActor = actor (Principal.toText(config.tokens[0].ledger));
-            let sub = jobSubaccount(id);
-            let buyerAccount : Types.Account = {
-              owner = Principal.fromText(job.buyer);
-              subaccount = null;
+          // C-4/C-5: Refund the buyer from the platform recipient account
+          // (ICP buyers only — EVM buyers are refunded out-of-band).
+          switch (buyerIcpAccount(job.buyer)) {
+            case (?buyerAccount) {
+              switch (await payFromMainAccount(buyerAccount, job.amount)) {
+                case (#ok(_)) { jobs.put(id, { job with status = #Refunded }) };
+                case (#err(_)) {}; // leave #Expired; don't block other jobs
+              };
             };
-            switch (await escrowManager.refund(ledger, sub, buyerAccount, job.amount)) {
-              case (#ok(_)) { jobs.put(id, { job with status = #Refunded }) };
-              case (#err(_)) {}; // Log but don't block expiry of other jobs
-            };
+            case (null) {};
           };
         };
       };

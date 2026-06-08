@@ -62,6 +62,35 @@ if [ "$PREBUILT_MISSING" = true ]; then
     echo "  The ckUSDC ledger may not deploy. Sessions and ICP payments won't work."
   fi
 fi
+
+# Supply-chain gate: re-verify the committed/cached prebuilt artifacts against
+# the pinned SHA-256 checksums BEFORE deploying them. The fetch path only runs
+# when a file is missing, so a poisoned committed blob would otherwise be
+# deployed without ever being checked. Hard-fail on any mismatch.
+CHECKSUM_FILE="$PROJECT_ROOT/scripts/prebuilt.sha256"
+if [ -f "$CHECKSUM_FILE" ]; then
+  echo "  Verifying prebuilt artifact checksums..."
+  for f in icrc1-ledger.wasm.gz icrc1-ledger.did evm_rpc.wasm.gz evm_rpc.did; do
+    [ -f ".icp/$f" ] || continue
+    # Pull the pinned hash for this basename (skip comments/blank lines).
+    EXPECTED=$(awk -v n="$f" '!/^[[:space:]]*#/ && NF==2 && $2==n { print $1 }' "$CHECKSUM_FILE")
+    if [ -z "$EXPECTED" ]; then
+      echo "  WARNING: no pinned checksum for $f — skipping"
+      continue
+    fi
+    ACTUAL=$(shasum -a 256 ".icp/$f" | awk '{print $1}')
+    if [ "$ACTUAL" != "$EXPECTED" ]; then
+      echo "  SUPPLY-CHAIN ERROR: checksum mismatch for .icp/$f" >&2
+      echo "    expected: $EXPECTED" >&2
+      echo "    actual:   $ACTUAL" >&2
+      echo "    Refusing to deploy a tampered/corrupt artifact. Aborting." >&2
+      exit 1
+    fi
+    echo "    $f: checksum OK"
+  done
+else
+  echo "  WARNING: $CHECKSUM_FILE not found — cannot verify prebuilt artifact integrity."
+fi
 echo ""
 
 # ── Identities ──

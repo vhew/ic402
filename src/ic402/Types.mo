@@ -89,6 +89,10 @@ module {
     #tokenNotAccepted : Text;
     #networkNotSupported : Text;
     #settlementFailed : Text;
+    // H-1 (v2): EVM transfer was broadcast but not yet confirmed on-chain.
+    // The payment is NOT final — do not deliver value. The bound nonce is kept
+    // locked (and GC'd at expiry) so the same challenge is not re-broadcast.
+    #settlementPending : Text;
     #reputationTooLow : Nat;
     #depositBelowMinimum : Nat;
   };
@@ -475,17 +479,27 @@ module {
   };
 
   /// Stable storage format for a content entry with chunks.
+  /// M-2 (v2): `salt` is a per-entry value mixed into key/nonce derivation so a
+  /// re-created content id (delete + re-put) never reuses the same (key, nonce).
+  /// Optional for backward decode of pre-v2 state (defaults to 0).
   public type StableContentEntry = {
     id : Text;
     mimeType : Text;
     chunks : [Blob];
     totalSize : Nat;
     createdAt : Int;
+    salt : ?Nat;
   };
 
   /// Stable storage format for the content store.
+  /// H-6/H-7 (v2): the externally-seeded master key and the seed flag are now
+  /// persisted so encrypted content survives upgrades. Optional for backward
+  /// decode of pre-v2 state. `saltCounter` backs the monotonic per-entry salt.
   public type StableContentStoreState = {
     entries : [StableContentEntry];
+    masterKey : ?Blob;
+    seedInitialized : ?Bool;
+    saltCounter : ?Nat;
   };
 
   // ── EVM Session Deposits ──
@@ -577,6 +591,7 @@ module {
     #Computing;  // operator working (optional status)
     #Submitted;  // operator submitted result
     #Verified;   // result verified (ZK, hash, or buyer confirm)
+    #Settling;   // H-5 (v2): terminal settlement in progress — re-entry guard
     #Settled;    // payment transferred to operator
     #Disputed;   // buyer disputes the result
     #Expired;    // timed out, refund pending

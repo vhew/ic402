@@ -46,7 +46,7 @@ suite("AccessGrants", func() {
     ignore gate.initHmacSeed(testSeed);
     let grant = gate.issueGrant(sampleContentRef, grantee, "rcpt-1", 5 * 60 * 1_000_000_000);
 
-    switch (gate.verifyGrant(grant)) {
+    switch (gate.verifyGrant(grantee, grant)) {
       case (#ok) {};
       case (_) { assert(false) };
     };
@@ -57,7 +57,7 @@ suite("AccessGrants", func() {
     ignore gate.initHmacSeed(testSeed);
     let grant = gate.issueGrant(sampleContentRef, grantee, "rcpt-1", -1_000_000_000);
 
-    switch (gate.verifyGrant(grant)) {
+    switch (gate.verifyGrant(grantee, grant)) {
       case (#expired(_)) {};
       case (_) { assert(false) };
     };
@@ -78,7 +78,7 @@ suite("AccessGrants", func() {
       hmac = Blob.fromArray([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
     };
 
-    switch (gate.verifyGrant(tampered)) {
+    switch (gate.verifyGrant(grantee, tampered)) {
       case (#invalidGrant(_)) {};
       case (_) { assert(false) };
     };
@@ -92,8 +92,20 @@ suite("AccessGrants", func() {
     assert(gate.revokeGrant(grant.grantId));
     assert(not gate.revokeGrant(grant.grantId));
 
-    switch (gate.verifyGrant(grant)) {
+    switch (gate.verifyGrant(grantee, grant)) {
       case (#revoked(_)) {};
+      case (_) { assert(false) };
+    };
+  });
+
+  // H-8: grants are non-transferable — a non-grantee caller is rejected.
+  test("verifyGrant rejects a caller who is not the grantee (H-8)", func() {
+    let gate = Gateway.Gateway(config, testPrincipal);
+    ignore gate.initHmacSeed(testSeed);
+    let grant = gate.issueGrant(sampleContentRef, grantee, "rcpt-1", 5 * 60 * 1_000_000_000);
+    let attacker = Principal.fromText("aaaaa-aa");
+    switch (gate.verifyGrant(attacker, grant)) {
+      case (#invalidGrant(_)) {};
       case (_) { assert(false) };
     };
   });
@@ -131,7 +143,7 @@ suite("AccessGrants", func() {
       hmac = grant.hmac;
     };
 
-    switch (gate.verifyGrant(swapped)) {
+    switch (gate.verifyGrant(grantee, swapped)) {
       case (#invalidGrant(_)) {};
       case (_) { assert(false) };
     };
@@ -148,7 +160,7 @@ suite("AccessGrants", func() {
     gate2.loadStable(snapshot);
     // gate2 has hmacSeedInitialized = true via loadStable (hmacSeed > 0)
 
-    switch (gate2.verifyGrant(grant)) {
+    switch (gate2.verifyGrant(grantee, grant)) {
       case (#revoked(_)) {};
       case (_) { assert(false) };
     };

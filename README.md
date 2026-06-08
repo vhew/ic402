@@ -179,7 +179,7 @@ pnpm demo           # interactive walkthrough (10 steps)
 | `consumeVoucher(voucher)` | Verify + consume session voucher |
 | `closeSession(caller, id)` | Settle consumed, refund remainder |
 | `setPolicy(caller?, policy)` | Set spending policy |
-| `issueGrant(...)` / `verifyGrant(grant)` | HMAC access grants |
+| `issueGrant(...)` / `verifyGrant(caller, grant)` | HMAC access grants (non-transferable — `caller` must equal `grant.grantee`) |
 | `startTimers<system>()` | Start background timers |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
 
@@ -190,13 +190,16 @@ pnpm demo           # interactive walkthrough (10 steps)
 | `registerService(caller, def)` | Register a paid service |
 | `enableService(caller, id)` | Activate for purchases |
 | `listServices(enabledOnly)` | Service discovery |
-| `submitRequest(buyer, serviceId, params, receipt, callback?)` | Create a paid job |
+| `submitRequest(buyer, serviceId, params, receipt, callback?)` | Create a paid job (`buyer : Text` — principal for ICP, 0x address for EVM) |
 | `claimJob(caller, jobId)` | Operator claims work |
 | `submitResult(caller, jobId, result, proof?, actualCost?)` | Submit + auto-verify |
 | `confirmJob(buyer, jobId)` | Buyer confirms (BuyerConfirm) |
 | `disputeJob(buyer, jobId, reason)` | Buyer disputes |
-| `expireJobs()` | Timer: refund stale jobs |
+| `resolveDispute(jobId, refundBuyer)` | Admin: settle to operator or refund buyer (gate access) |
+| `expireJobs()` | Timer: refund stale/disputed jobs |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
+
+Funds are custodied at the platform recipient account; `settleJob` pays the operator and refunds the buyer from there.
 
 **Verification methods:** `#AutoSettle`, `#HashMatch`, `#BuyerConfirm`, `#ZkGroth16` (external Rust verifier canister).
 
@@ -204,9 +207,16 @@ pnpm demo           # interactive walkthrough (10 steps)
 
 | Method | Description |
 |--------|-------------|
+| `startTimers<system>()` | Seed the encryption key from canister randomness (call once after deploy) |
+| `initExternalSeed(seed)` | Manually seed the key (alternative to `startTimers`) |
 | `put(id, mimeType, data)` | Encrypt + store |
 | `get(id)` | Decrypt + retrieve |
 | `list()` | Content metadata |
+
+> **Seeding is required.** Writes trap until the master key is seeded with canister
+> randomness (`startTimers()` or `initExternalSeed(await raw_rand())`). The key is then
+> persisted across upgrades. This replaces the v1 deterministic key derived from the
+> (public) canister principal.
 
 ### EvmSigner (optional)
 

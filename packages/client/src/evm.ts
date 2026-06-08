@@ -119,6 +119,7 @@ export interface PaymentOption {
   tokenVersion: string; // EIP-712 domain version
   network: string; // CAIP-2 network string
   asset: string; // token contract address
+  ic402Nonce?: string; // H-10: ic402 server nonce (hex) to echo back so settle() can bind the amount
 }
 
 /**
@@ -157,6 +158,7 @@ export function findPaymentOption(body: string, chainId: number): PaymentOption 
         tokenVersion: extra.version || '2',
         network: caip2,
         asset: String(e.asset ?? ''),
+        ic402Nonce: e.ic402Nonce ? String(e.ic402Nonce) : undefined,
       };
       bestAmount = amount;
     }
@@ -197,6 +199,7 @@ function findPaymentOptionFromText(
         tokenVersion: version,
         network: `eip155:${chainId}`,
         asset: extractJsonField(entry, 'asset') || '',
+        ic402Nonce: extractJsonField(entry, 'ic402Nonce') || undefined,
       };
       bestAmount = amount;
     }
@@ -349,12 +352,25 @@ export async function fetchX402(
     return { status: 'error', error: new Ic402Error(kind, msg, e) };
   }
 
-  // 3. Retry with payment header
+  // 3. Retry with payment header.
+  // H-10: echo the ic402 server nonce from the 402 challenge into the payment
+  // payload so the canister can lock the bound amount (server-nonce → amount
+  // binding). Without it, an EVM-over-HTTP settlement returns #expired.
+  let headerToSend = signed.header;
+  if (paymentOption.ic402Nonce) {
+    try {
+      const obj = JSON.parse(atob(signed.header));
+      obj.ic402Nonce = paymentOption.ic402Nonce;
+      headerToSend = btoa(JSON.stringify(obj));
+    } catch {
+      headerToSend = signed.header; // fall back to the canister-signed header as-is
+    }
+  }
   let response: Response;
   try {
     const headers = new Headers(init?.headers);
-    headers.set('X-Payment', signed.header);
-    headers.set('Payment-Signature', signed.header);
+    headers.set('X-Payment', headerToSend);
+    headers.set('Payment-Signature', headerToSend);
     response = await fetch(url, { ...init, headers });
   } catch (e) {
     return { status: 'error', error: classifyNetworkError(e) };

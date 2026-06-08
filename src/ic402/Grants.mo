@@ -28,7 +28,10 @@ module {
 
     func hmacSecret() : [Nat8] {
       let principalBytes = Blob.toArray(Principal.toBlob(canisterPrincipal));
-      let seedBytes = Utils.natToBytes8(hmacSeed);
+      // M-1/M-8: Use the FULL-width seed bytes. initHmacSeed stores the entire
+      // 256-bit randomness in `hmacSeed`; the previous natToBytes8 truncated it
+      // to the low 64 bits, silently dropping ~192 bits of entropy.
+      let seedBytes = Utils.natToBytesBE(hmacSeed);
       Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, seedBytes)));
     };
 
@@ -97,7 +100,14 @@ module {
     };
 
     /// Verify an access grant (stateless HMAC check + expiry + revocation).
-    public func verifyGrant(grant : Types.AccessGrant) : Types.AccessGrantResult {
+    /// H-8 (v2): `caller` MUST equal grant.grantee. Grants are non-transferable —
+    /// the grantee binding in the HMAC is now enforced against the actual caller,
+    /// so a leaked grant blob cannot be replayed by a third party.
+    public func verifyGrant(caller : Principal, grant : Types.AccessGrant) : Types.AccessGrantResult {
+      if (not Principal.equal(caller, grant.grantee)) {
+        return #invalidGrant("Caller is not the grantee of grant " # grant.grantId);
+      };
+
       switch (revokedGrants.get(grant.grantId)) {
         case (?_) { return #revoked("Grant " # grant.grantId # " has been revoked") };
         case (null) {};

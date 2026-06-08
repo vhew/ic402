@@ -290,6 +290,8 @@ export class Ic402Client {
     const state: SessionState = result.ok;
     let sequence = 0n;
     let consumed = 0n;
+    // M-7: bind the verifying canister's principal into every voucher signature.
+    const canisterIdText = this.config.canisterId;
 
     const handle: SessionHandle = {
       id: state.id,
@@ -317,7 +319,9 @@ export class Ic402Client {
         // Sign voucher
         let signature: Uint8Array = new Uint8Array(64);
         if (signer) {
-          signature = new Uint8Array(await signVoucher(signer, state.id, consumed, sequence));
+          signature = new Uint8Array(
+            await signVoucher(signer, canisterIdText, state.id, consumed, sequence),
+          );
         }
 
         const voucher: Voucher = {
@@ -344,7 +348,9 @@ export class Ic402Client {
 
         let sig: Uint8Array = new Uint8Array(64);
         if (signer) {
-          sig = new Uint8Array(await signVoucher(signer, state.id, consumed, sequence));
+          sig = new Uint8Array(
+            await signVoucher(signer, canisterIdText, state.id, consumed, sequence),
+          );
         }
 
         const v: Voucher = {

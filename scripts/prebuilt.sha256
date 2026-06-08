@@ -1,0 +1,29 @@
+# =============================================================================
+# prebuilt.sha256 — Pinned SHA-256 checksums for prebuilt DFINITY artifacts
+#
+# These hashes gate the supply-chain integrity of the prebuilt WASMs/Candid
+# files fetched by scripts/fetch-prebuilt.sh and consumed by scripts/setup.sh.
+#
+# Format: one entry per line, "<sha256>  <basename>" (two-space separator, the
+# native `shasum -a 256 -c` format). Lines starting with '#' are comments.
+#
+# Pinned release tags (keep in sync with fetch-prebuilt.sh):
+#   LEDGER_RELEASE  = ledger-suite-icrc-2026-02-02
+#   EVM_RPC_VERSION = evm_rpc-v2.8.0
+#
+# PROVENANCE / RE-VERIFICATION:
+#   These hashes were captured from the artifacts already committed in .icp/,
+#   which were downloaded from the pinned release tags above. They are the
+#   known-good baseline. Before bumping either version pin, re-download the
+#   new artifacts and re-verify the fresh hashes against the official DFINITY
+#   release notes / SHA256SUMS published for the new tag, then update both the
+#   version variables in fetch-prebuilt.sh AND the hashes below.
+# =============================================================================
+
+# ICRC-1 ledger (ledger-suite-icrc-2026-02-02)
+e2d266d3834cecda2a8be8e87ecc435ebffe1a3ae490cd4a807889967e35927f  icrc1-ledger.wasm.gz
+02a42599e3d2036a19dcfa53db04ad5a5271b0bd78ac1a5986b3dd361f33a99c  icrc1-ledger.did
+
+# EVM RPC canister (evm_rpc-v2.8.0)
+455fcea61d679848761848db2d99ebb9b66a7cf060de350a4fdc5c680e5292c6  evm_rpc.wasm.gz
+11735568b4b4fd80fb0075b6f0ff06c592da1a182d08b786f76de2d1118feedd  evm_rpc.did

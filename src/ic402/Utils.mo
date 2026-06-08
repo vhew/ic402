@@ -13,6 +13,8 @@ import Principal "mo:base/Principal";
 module {
 
   /// Encode a Nat as a big-endian 8-byte array.
+  /// WARNING: truncates to the low 64 bits. Use ONLY for genuine 64-bit counters
+  /// (nonce counter, chunk index). Do NOT use for secret material — see M-1/M-8.
   public func natToBytes8(n : Nat) : [Nat8] {
     var value = n;
     let bytes = Array.init<Nat8>(8, 0);
@@ -24,6 +26,25 @@ module {
     };
     bytes[0] := Nat8.fromNat(value % 256);
     Array.freeze(bytes);
+  };
+
+  /// M-1/M-8: Encode a Nat as its FULL minimal big-endian byte representation
+  /// (no truncation). Used for secret/seed material that must preserve all
+  /// entropy. Returns a single zero byte for n == 0.
+  public func natToBytesBE(n : Nat) : [Nat8] {
+    if (n == 0) return [0 : Nat8];
+    var byteCount : Nat = 0;
+    var v = n;
+    while (v > 0) { byteCount += 1; v := v / 256 };
+    let buf = Array.init<Nat8>(byteCount, 0 : Nat8);
+    v := n;
+    var i = byteCount;
+    while (i > 0) {
+      i -= 1;
+      buf[i] := Nat8.fromNat(v % 256);
+      v := v / 256;
+    };
+    Array.freeze(buf);
   };
 
   /// Convert ASCII upper-case letters to lower-case.

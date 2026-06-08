@@ -26,6 +26,12 @@ Thumbs.db
 *.key
 .local/
 
+# Patch backup files (created by scripts/patch-local.sh during local deploy).
+# These hold the pristine MAINNET source while it is temporarily testnet-patched.
+# A failed restore can leave testnet-patched content behind — never commit these.
+*.local-bak
+example/main.mo.local-bak
+
 # Deploy (local-only tooling, not part of the library)
 deploy/
 

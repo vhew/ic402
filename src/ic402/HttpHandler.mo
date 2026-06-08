@@ -48,6 +48,12 @@ module {
         # ",\"maxAmountRequired\":\"" # Nat.toText(r.amount) # "\""
         # ",\"payTo\":\"" # Utils.escapeJsonString(r.recipient) # "\""
         # ",\"maxTimeoutSeconds\":" # Int.toText(300)
+        // H-10 (v2): Expose the ic402 server nonce + expiry so clients can bind a
+        // payment to this specific challenge. EVM (EIP-3009) clients must echo
+        // `ic402Nonce` in the X-PAYMENT payload so settle() can lock the bound
+        // amount; without it the server-nonce → amount binding was unusable.
+        # ",\"ic402Nonce\":\"" # blobToHex(r.nonce) # "\""
+        # ",\"expiry\":" # Int.toText(r.expiry)
         # ",\"extra\":{\"name\":\"" # Utils.escapeJsonString(tName) # "\",\"version\":\"" # Utils.escapeJsonString(tVersion) # "\"}"
         # "}";
     };
@@ -219,6 +225,8 @@ module {
     let validBefore = Utils.extractJsonNatField(json, "validBefore");
     let nonce = Utils.extractJsonField(json, "nonce");
     let sig = Utils.extractJsonField(json, "signature");
+    // H-10 (v2): the echoed ic402 server nonce (hex), if the client included it.
+    let ic402Nonce = Utils.extractJsonField(json, "ic402Nonce");
 
     if (from == "" or to == "" or sig == "" or nonce == "") return null;
 
@@ -236,7 +244,10 @@ module {
       signature = Blob.fromArray([]);
       publicKey = null;
       sender = from;
-      nonce = Blob.fromArray([]);
+      // H-10: carry the echoed server nonce so Gateway.settle can lock the bound
+      // amount. Empty when the client did not echo it (then settle returns
+      // #expired rather than silently settling an unbound amount).
+      nonce = if (ic402Nonce != "") { Blob.fromArray(hexToBytes(ic402Nonce)) } else { Blob.fromArray([]) };
       authorization = ?{
         from;
         to;

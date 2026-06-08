@@ -19,6 +19,7 @@ import Order "mo:base/Order";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
+import Timer "mo:base/Timer";
 import Debug "mo:base/Debug";
 import Utils "Utils";
 
@@ -32,32 +33,38 @@ module {
     chunks : [var Blob];
     totalSize : Nat;
     createdAt : Int;
+    // M-2: per-entry salt mixed into key + nonce derivation. A re-created id
+    // (delete + re-put) gets a fresh salt, so the same (key, nonce) — and thus
+    // the same keystream — is never reused across the two encryptions.
+    salt : Nat;
   };
 
   // ── Encryption helpers (ChaCha20-Poly1305 AEAD) ──
 
   /// Derive a 32-byte ChaCha20 key for a specific chunk.
-  /// key = SHA-256(masterKey || contentId || chunkIndex)
-  func deriveChunkKey(masterKey : [Nat8], contentId : Text, chunkIndex : Nat) : [Nat8] {
+  /// key = SHA-256(masterKey || salt || contentId || chunkIndex)
+  func deriveChunkKey(masterKey : [Nat8], salt : Nat, contentId : Text, chunkIndex : Nat) : [Nat8] {
+    let saltBytes = Utils.natToBytesBE(salt);
     let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
     let indexBytes = Utils.natToBytes8(chunkIndex);
-    Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(masterKey, idBytes), indexBytes)));
+    Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(Array.append(masterKey, saltBytes), idBytes), indexBytes)));
   };
 
-  /// Derive a 12-byte nonce from contentId + chunkIndex.
-  /// nonce = SHA-256(contentId || chunkIndex)[0..12]
-  func deriveNonce(contentId : Text, chunkIndex : Nat) : [Nat8] {
+  /// Derive a 12-byte nonce from salt + contentId + chunkIndex.
+  /// nonce = SHA-256(salt || contentId || chunkIndex)[0..12]
+  func deriveNonce(salt : Nat, contentId : Text, chunkIndex : Nat) : [Nat8] {
+    let saltBytes = Utils.natToBytesBE(salt);
     let idBytes = Blob.toArray(Text.encodeUtf8(contentId));
     let indexBytes = Utils.natToBytes8(chunkIndex);
-    let hash = Blob.toArray(SHA256.fromArray(#sha256, Array.append(idBytes, indexBytes)));
+    let hash = Blob.toArray(SHA256.fromArray(#sha256, Array.append(Array.append(saltBytes, idBytes), indexBytes)));
     Array.subArray(hash, 0, 12);
   };
 
   /// Encrypt a chunk with ChaCha20-Poly1305 AEAD.
   /// Returns ciphertext || tag (16-byte auth tag appended).
-  func encryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : Blob {
-    let key = deriveChunkKey(masterKey, contentId, chunkIndex);
-    let nonce = deriveNonce(contentId, chunkIndex);
+  func encryptChunkData(masterKey : [Nat8], salt : Nat, contentId : Text, chunkIndex : Nat, data : Blob) : Blob {
+    let key = deriveChunkKey(masterKey, salt, contentId, chunkIndex);
+    let nonce = deriveNonce(salt, contentId, chunkIndex);
     let (ciphertext, tag) = ChaCha.aeadEncryptWithNonce(
       Blob.toArray(data),
       [], // no additional authenticated data
@@ -70,13 +77,13 @@ module {
   /// Decrypt a chunk with ChaCha20-Poly1305 AEAD.
   /// Input is ciphertext || tag (last 16 bytes are tag).
   /// H-6: Returns null on authentication failure instead of silently returning empty blob.
-  func decryptChunkData(masterKey : [Nat8], contentId : Text, chunkIndex : Nat, data : Blob) : ?Blob {
+  func decryptChunkData(masterKey : [Nat8], salt : Nat, contentId : Text, chunkIndex : Nat, data : Blob) : ?Blob {
     let bytes = Blob.toArray(data);
     if (bytes.size() < 16) return null;
     let ciphertext = Array.subArray(bytes, 0, bytes.size() - 16);
     let tag = Array.subArray(bytes, bytes.size() - 16, 16);
-    let key = deriveChunkKey(masterKey, contentId, chunkIndex);
-    let nonce = deriveNonce(contentId, chunkIndex);
+    let key = deriveChunkKey(masterKey, salt, contentId, chunkIndex);
+    let nonce = deriveNonce(salt, contentId, chunkIndex);
     switch (ChaCha.aeadDecryptWithNonce(ciphertext, tag, [], key, nonce)) {
       case (?plaintext) { ?Blob.fromArray(plaintext) };
       case (null) { null }; // authentication failed — tampered or wrong key
@@ -92,19 +99,25 @@ module {
   /// ```
   public class ContentStore(selfPrincipal : Principal) {
 
-    // Master key: SHA-256(principal ++ "ic402-content-key")
-    // M-6: Changed to var so it can be re-keyed with external randomness
+    // Placeholder master key derived from the (public) principal. This is NEVER
+    // used to encrypt: put()/putChunkedInit() trap until initExternalSeed() has
+    // installed a real key from canister randomness (see seedInitialized below).
     var masterKey : [Nat8] = do {
       let principalBytes = Blob.toArray(Principal.toBlob(selfPrincipal));
       let suffix = Blob.toArray(Text.encodeUtf8("ic402-content-key"));
       Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, suffix)));
     };
 
-    // H-3: Tracks whether initExternalSeed() has been called.
-    // Defaults to true because the deterministic key (from principal) provides
-    // basic encryption. Call initExternalSeed() for production-grade security.
-    // The consuming canister should call initExternalSeed(raw_rand()) on first deploy.
-    var seedInitialized : Bool = true;
+    // H-6 (v2): Defaults to FALSE — external-randomness seeding is now REQUIRED.
+    // The previous default (true) made the encryption key fully deterministic from
+    // the public canister principal, so anyone who exfiltrated stable memory could
+    // re-derive it. Writes trap until initExternalSeed(raw_rand()) installs a real
+    // key; ContentStore.startTimers() (or the consuming actor) must call it once
+    // after deploy. Existing pre-v2 deterministic-key content must be migrated.
+    var seedInitialized : Bool = false;
+
+    // M-2: monotonic counter backing per-entry salts (persisted in stable state).
+    var saltCounter : Nat = 0;
 
     /// M-6: Initialize master key with external randomness.
     /// Derives key: SHA-256(seed ++ principal ++ "ic402-content-key").
@@ -121,6 +134,19 @@ module {
       true;
     };
 
+    /// H-6 (v2): Auto-seed the master key from canister randomness on first deploy.
+    /// Call once from actor context (requires <system>). Idempotent: does nothing
+    /// if the key was already seeded (incl. restored from stable state on upgrade).
+    public func startTimers<system>() {
+      if (seedInitialized) { return };
+      ignore Timer.setTimer<system>(#seconds 0, func() : async () {
+        if (seedInitialized) { return };
+        let ic : actor { raw_rand : () -> async Blob } = actor "aaaaa-aa";
+        let seed = await ic.raw_rand();
+        ignore initExternalSeed(seed);
+      });
+    };
+
     var entries = HashMap.HashMap<Text, InternalEntry>(16, Text.equal, Text.hash);
 
     /// Store a blob, encrypting and auto-chunking at 1.5 MB.
@@ -135,6 +161,8 @@ module {
         case (null) {};
       };
 
+      saltCounter += 1;
+      let salt = saltCounter;
       let dataSize = data.size();
       let numChunks = if (dataSize == 0) { 1 } else {
         (dataSize + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
@@ -151,11 +179,11 @@ module {
         } else {
           Blob.fromArray(Array.tabulate<Nat8>(end_ - start, func(j) { dataBytes[start + j] }));
         };
-        chunks[i] := encryptChunkData(masterKey, id, i, chunkData);
+        chunks[i] := encryptChunkData(masterKey, salt, id, i, chunkData);
         i += 1;
       };
 
-      entries.put(id, { id; mimeType; chunks; totalSize = dataSize; createdAt = Time.now() });
+      entries.put(id, { id; mimeType; chunks; totalSize = dataSize; createdAt = Time.now(); salt });
       #ok;
     };
 
@@ -170,8 +198,10 @@ module {
         case (null) {};
       };
 
+      saltCounter += 1;
+      let salt = saltCounter;
       let chunks = Array.init<Blob>(chunkCount, "");
-      entries.put(id, { id; mimeType; chunks; totalSize; createdAt = Time.now() });
+      entries.put(id, { id; mimeType; chunks; totalSize; createdAt = Time.now(); salt });
       #ok;
     };
 
@@ -185,7 +215,7 @@ module {
           if (data.size() > MAX_CHUNK_SIZE) { return #chunkTooLarge(data.size()) };
           // Reject overwrites — CTR mode reuses the same keystream for the same (id, index)
           if (Blob.toArray(entry.chunks[index]).size() > 0) { return #contentAlreadyExists };
-          entry.chunks[index] := encryptChunkData(masterKey, id, index, data);
+          entry.chunks[index] := encryptChunkData(masterKey, entry.salt, id, index, data);
           #ok;
         };
       };
@@ -200,7 +230,7 @@ module {
           let buf = Buffer.Buffer<Nat8>(entry.totalSize);
           var i : Nat = 0;
           while (i < entry.chunks.size()) {
-            switch (decryptChunkData(masterKey, id, i, entry.chunks[i])) {
+            switch (decryptChunkData(masterKey, entry.salt, id, i, entry.chunks[i])) {
               case (?decrypted) {
                 for (byte in Blob.toArray(decrypted).vals()) {
                   buf.add(byte);
@@ -222,7 +252,7 @@ module {
         case (null) { null };
         case (?entry) {
           if (index >= entry.chunks.size()) { return null };
-          decryptChunkData(masterKey, id, index, entry.chunks[index]);
+          decryptChunkData(masterKey, entry.salt, id, index, entry.chunks[index]);
         };
       };
     };
@@ -288,6 +318,8 @@ module {
     };
 
     /// Serialize for upgrades. Data stays encrypted in stable state.
+    /// H-7 (v2): the master key, seed flag, and salt counter are persisted so
+    /// externally-seeded content stays decryptable across upgrades.
     public func toStable() : Types.StableContentStoreState {
       let stableEntries = Iter.toArray(
         Iter.map<(Text, InternalEntry), Types.StableContentEntry>(
@@ -299,14 +331,23 @@ module {
               chunks = Array.freeze(entry.chunks);
               totalSize = entry.totalSize;
               createdAt = entry.createdAt;
+              salt = ?entry.salt;
             };
           },
         )
       );
-      { entries = stableEntries };
+      {
+        entries = stableEntries;
+        masterKey = ?Blob.fromArray(masterKey);
+        seedInitialized = ?seedInitialized;
+        saltCounter = ?saltCounter;
+      };
     };
 
     /// Deserialize after upgrade.
+    /// H-7 (v2): restore the persisted key/flag/salt counter. Fields are optional
+    /// so pre-v2 state still decodes (without a persisted key the store stays
+    /// unseeded and writes trap until re-seeded — pre-v2 content must be migrated).
     public func loadStable(data : Types.StableContentStoreState) {
       entries := HashMap.HashMap<Text, InternalEntry>(
         data.entries.size(), Text.equal, Text.hash,
@@ -318,11 +359,12 @@ module {
           chunks = Array.thaw<Blob>(entry.chunks);
           totalSize = entry.totalSize;
           createdAt = entry.createdAt;
+          salt = switch (entry.salt) { case (?s) { s }; case (null) { 0 } };
         });
       };
-      // seedInitialized defaults to true. If initExternalSeed was called in a
-      // previous deployment, the master key was already upgraded. Content remains
-      // readable because the stable key bytes are restored by the persistent actor.
+      switch (data.masterKey) { case (?k) { masterKey := Blob.toArray(k) }; case (null) {} };
+      switch (data.seedInitialized) { case (?s) { seedInitialized := s }; case (null) {} };
+      switch (data.saltCounter) { case (?c) { saltCounter := c }; case (null) {} };
     };
   };
 };

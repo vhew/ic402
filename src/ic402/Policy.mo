@@ -169,6 +169,41 @@ module {
       dailySpend.put(key, current + amount);
     };
 
+    /// H-4 (v2): Roll back a previously reserved daily spend (e.g., when the
+    /// settlement that the reservation guarded fails). Never underflows.
+    public func releaseDaily(caller : Principal, amount : Nat) {
+      let day = dayNumber(Time.now());
+      let key = dailyKey(caller, day);
+      let current = switch (dailySpend.get(key)) { case (null) { 0 }; case (?a) { a } };
+      let next : Nat = if (current >= amount) { current - amount } else { 0 };
+      if (next == 0) { dailySpend.delete(key) } else { dailySpend.put(key, next) };
+    };
+
+    /// H-4 (v2): Atomically check all charge limits AND reserve the daily spend
+    /// in a single synchronous step (no await between the check and the record).
+    /// Callers MUST invoke this BEFORE the value-moving await and call
+    /// releaseDaily(caller, amount) if that settlement subsequently fails.
+    /// This closes the check-then-await-then-record race that let concurrent
+    /// charges each pass a stale daily-limit check.
+    public func reserveCharge(caller : Principal, amount : Nat) : { #ok; #denied : Text } {
+      switch (checkCharge(caller, amount)) {
+        case (#denied(r)) { return #denied(r) };
+        case (#ok) {};
+      };
+      recordSpend(caller, amount);
+      #ok;
+    };
+
+    /// H-4 (v2): Atomic check-and-reserve for session opens (see reserveCharge).
+    public func reserveSessionOpen(caller : Principal, deposit : Nat, activeCount : Nat) : { #ok; #denied : Text } {
+      switch (checkSessionOpen(caller, deposit, activeCount)) {
+        case (#denied(r)) { return #denied(r) };
+        case (#ok) {};
+      };
+      recordSpend(caller, deposit);
+      #ok;
+    };
+
     func checkDailyLimit(policy : SpendingPolicy, caller : Principal, amount : Nat) : { #ok; #denied : Text } {
       switch (policy.maxPerDay) {
         case (null) { #ok };

@@ -10,6 +10,7 @@ import Nat "mo:base/Nat";
 import Time "mo:base/Time";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
+import Buffer "mo:base/Buffer";
 import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
 import Utils "Utils";
@@ -26,6 +27,8 @@ module {
     var nonces = HashMap.HashMap<Blob, (Int, Nat, Text, Text)>(64, Blob.equal, Blob.hash);
     // C-1: nonces currently locked for settlement (persisted across upgrades)
     var locked = HashMap.HashMap<Blob, Bool>(16, Blob.equal, Blob.hash);
+    // M-5: insertion-order ring for bounded eviction (transient — rebuilt on load).
+    var insertionOrder = Buffer.Buffer<Blob>(64);
 
     /// Generate a deterministic nonce bound to a specific payment context.
     /// nonce = sha256(canisterPrincipal ++ counter)
@@ -36,12 +39,45 @@ module {
       let nonce = SHA256.fromArray(#sha256, input);
       counter += 1;
 
+      // M-5: Enforce a HARD cap (not just a GC trigger). First drop expired
+      // entries; if still at capacity, evict the OLDEST unlocked nonce. Locked
+      // (in-flight settlement) nonces are never evicted, so replay protection on
+      // active settlements is preserved. Under sustained 402-challenge spam this
+      // bounds memory at ~MAX_NONCES instead of growing without limit.
       if (nonces.size() >= MAX_NONCES) {
         gcExpired();
+        while (nonces.size() >= MAX_NONCES and evictOldestUnlocked()) {};
       };
 
       nonces.put(nonce, (expiry, amount, network, token));
+      insertionOrder.add(nonce);
       nonce;
+    };
+
+    // M-5: Evict the oldest unlocked nonce. Returns false if none can be evicted
+    // (all remaining are locked — bounded by concurrent in-flight settlements).
+    func evictOldestUnlocked() : Bool {
+      var i = 0;
+      while (i < insertionOrder.size()) {
+        let n = insertionOrder.get(i);
+        switch (nonces.get(n)) {
+          case (null) {
+            // Stale order entry (already consumed/expired) — drop and keep scanning.
+            ignore insertionOrder.remove(i);
+          };
+          case (?_) {
+            switch (locked.get(n)) {
+              case (?_) { i += 1 }; // locked: skip, try the next oldest
+              case (null) {
+                nonces.delete(n);
+                ignore insertionOrder.remove(i);
+                return true;
+              };
+            };
+          };
+        };
+      };
+      false;
     };
 
     /// Lock a nonce for settlement. Returns the bound amount if valid,
@@ -100,6 +136,12 @@ module {
         nonces.delete(nonce);
         locked.delete(nonce);
       };
+      // M-5: Compact the insertion-order ring so it tracks only live nonces.
+      let compacted = Buffer.Buffer<Blob>(nonces.size());
+      for (n in insertionOrder.vals()) {
+        switch (nonces.get(n)) { case (?_) { compacted.add(n) }; case (null) {} };
+      };
+      insertionOrder := compacted;
     };
 
     /// Serialize nonce state for stable storage.
@@ -123,6 +165,10 @@ module {
         data.nonces.vals(), data.nonces.size(), Blob.equal, Blob.hash,
       );
       counter := data.counter;
+      // M-5: Rebuild the (transient) insertion-order ring from restored nonces.
+      // Order is approximate after an upgrade, which only affects eviction order.
+      insertionOrder := Buffer.Buffer<Blob>(nonces.size());
+      for ((nonce, _) in nonces.entries()) { insertionOrder.add(nonce) };
       // C-1: Restore locked nonces if present
       switch (data.lockedNonces) {
         case (?locks) {

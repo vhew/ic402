@@ -179,6 +179,54 @@ describe('ic402 integration', () => {
       expect(result).toHaveProperty('paymentRequired');
     });
 
+    // v2: full paid delivery — exercises ContentStore seeding (H-6) and the
+    // caller-bound, non-transferable access grant (H-8).
+    it('settles payment and delivers content with a grant bound to the caller', async () => {
+      if (skip) return;
+
+      // 1. Payment requirement (nonce) for the uploaded doc
+      const reqResult = await actor.getContent('int-test-doc', []);
+      expect(reqResult).toHaveProperty('paymentRequired');
+      const icpReq = reqResult.paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      expect(icpReq).toBeDefined();
+
+      // 2. ICRC-2 approve
+      const approveResult = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: BigInt(icpReq.amount) + 10_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approveResult).toHaveProperty('Ok');
+
+      // 3. Settle via getContent
+      const callerPrincipal = await agent.getPrincipal();
+      const paymentSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: callerPrincipal.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const paid = await actor.getContent('int-test-doc', [paymentSig]);
+      expect(paid).toHaveProperty('ok');
+
+      // 4. H-8: the grant is bound to the paying caller, and verifyGrant
+      // (caller-aware) succeeds for that same identity.
+      const grant = paid.ok.grant;
+      expect(grant.grantee.toText()).toBe(callerPrincipal.toText());
+      const verifyResult = await actor.verifyGrant(grant);
+      expect(verifyResult).toHaveProperty('ok');
+    });
+
     it('delete content', async () => {
       if (skip) return;
       const result = await actor.deleteContent('int-test-doc');

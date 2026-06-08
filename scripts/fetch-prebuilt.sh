@@ -21,6 +21,47 @@ ICP_DIR="$PROJECT_ROOT/.icp"
 LEDGER_RELEASE="ledger-suite-icrc-2026-02-02"
 EVM_RPC_VERSION="evm_rpc-v2.8.0"
 
+# --- Pinned integrity checksums -----------------------------------------------
+# Supply-chain defence: every downloaded artifact is verified against a pinned
+# SHA-256 before it is allowed to be used. Hashes live in scripts/prebuilt.sha256
+# (keyed by basename) and must be kept in sync with the version pins above.
+CHECKSUM_FILE="$DEPLOY_DIR/prebuilt.sha256"
+
+# Look up the pinned SHA-256 for a given artifact basename.
+# Prints the hash to stdout, or returns non-zero if no pin exists.
+pinned_sha256() {
+  local name="$1"
+  [ -f "$CHECKSUM_FILE" ] || return 1
+  # Match "<sha>  <name>" lines, ignore comments/blank lines.
+  awk -v n="$name" '!/^[[:space:]]*#/ && NF==2 && $2==n { print $1; found=1 } END { exit (found?0:1) }' "$CHECKSUM_FILE"
+}
+
+# Verify a file against its pinned SHA-256. Hard-fails (rm + exit 1) on mismatch.
+# Files with no pin (e.g. generated candid) are skipped with a notice.
+verify_sha256() {
+  local file="$1"
+  local name
+  name="$(basename "$file")"
+
+  local expected
+  if ! expected="$(pinned_sha256 "$name")" || [ -z "$expected" ]; then
+    echo "  $name: no pinned checksum (skipping integrity check)"
+    return 0
+  fi
+
+  local actual
+  actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  if [ "$actual" != "$expected" ]; then
+    echo "  SUPPLY-CHAIN ERROR: checksum mismatch for $name" >&2
+    echo "    expected: $expected" >&2
+    echo "    actual:   $actual" >&2
+    echo "    The file may be corrupt or tampered with. Removing it." >&2
+    rm -f "$file"
+    exit 1
+  fi
+  echo "  $name: checksum OK"
+}
+
 # --- URLs ---------------------------------------------------------------------
 LEDGER_BASE="https://github.com/dfinity/ic/releases/download/${LEDGER_RELEASE}"
 EVM_RPC_BASE="https://github.com/dfinity/evm-rpc-canister/releases/download/${EVM_RPC_VERSION}"
@@ -44,6 +85,9 @@ fetch() {
 
   if [ "$FORCE" = false ] && [ -f "$dest" ]; then
     echo "  $label: already exists (use --force to re-download)"
+    # Re-verify the cached/committed copy against the pinned hash so a poisoned
+    # or corrupted committed blob can never slip through.
+    verify_sha256 "$dest"
     return
   fi
 
@@ -54,6 +98,8 @@ fetch() {
     rm -f "$dest"
     return 1
   fi
+  # Verify integrity immediately after download (hard-fails on mismatch).
+  verify_sha256 "$dest"
   echo "  $label: OK"
 }
 

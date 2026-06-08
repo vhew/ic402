@@ -9,9 +9,12 @@ import { test; suite } "mo:test";
 suite("ContentStore", func() {
 
   let testPrincipal = Principal.fromText("aaaaa-aa");
+  // H-6: external seed is now required before writes
+  let testSeed = "\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef\de\ad\be\ef" : Blob;
 
   test("put and get small blob", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     let data = Text.encodeUtf8("Hello, World!");
 
     switch (store.put("doc-001", "text/plain", data)) {
@@ -27,6 +30,7 @@ suite("ContentStore", func() {
 
   test("put rejects duplicate ID", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     ignore store.put("doc-001", "text/plain", Text.encodeUtf8("first"));
 
     switch (store.put("doc-001", "text/plain", Text.encodeUtf8("second"))) {
@@ -37,11 +41,13 @@ suite("ContentStore", func() {
 
   test("get unknown ID returns null", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     assert(store.get("nonexistent") == null);
   });
 
   test("delete and verify", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     ignore store.put("doc-001", "text/plain", Text.encodeUtf8("data"));
 
     switch (store.delete("doc-001")) {
@@ -54,6 +60,7 @@ suite("ContentStore", func() {
 
   test("delete nonexistent returns contentNotFound", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
 
     switch (store.delete("nonexistent")) {
       case (#contentNotFound) {};
@@ -63,6 +70,7 @@ suite("ContentStore", func() {
 
   test("getMetadata returns correct entry", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     let data = Text.encodeUtf8("test content");
     ignore store.put("doc-001", "text/plain", data);
 
@@ -79,6 +87,7 @@ suite("ContentStore", func() {
 
   test("list returns all entries", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     ignore store.put("a", "text/plain", Text.encodeUtf8("aaa"));
     ignore store.put("b", "text/plain", Text.encodeUtf8("bbb"));
 
@@ -88,6 +97,7 @@ suite("ContentStore", func() {
 
   test("toContentRef bridges to Gateway", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     ignore store.put("photo-001", "image/jpeg", Text.encodeUtf8("jpeg data"));
 
     switch (store.toContentRef("photo-001")) {
@@ -104,6 +114,7 @@ suite("ContentStore", func() {
 
   test("getChunk and out-of-range", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     let data = Text.encodeUtf8("chunk test");
     ignore store.put("doc-001", "text/plain", data);
 
@@ -122,6 +133,7 @@ suite("ContentStore", func() {
 
   test("chunked upload: init + putChunk + get", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     let part1 = Text.encodeUtf8("Hello, ");
     let part2 = Text.encodeUtf8("World!");
 
@@ -162,6 +174,7 @@ suite("ContentStore", func() {
 
   test("stable state roundtrip", func() {
     let store1 = ContentStore.ContentStore(testPrincipal);
+    ignore store1.initExternalSeed(testSeed);
     ignore store1.put("doc-001", "text/plain", Text.encodeUtf8("stable data"));
     ignore store1.put("doc-002", "image/png", Text.encodeUtf8("png bytes"));
 
@@ -186,6 +199,7 @@ suite("ContentStore", func() {
 
   test("empty blob edge case", func() {
     let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
     let empty = Blob.fromArray([]);
 
     switch (store.put("empty", "application/octet-stream", empty)) {

@@ -21,7 +21,6 @@ module {
 
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
-    var localNonce : ?Nat = null;
     // H-1: Serialize EVM transactions to prevent nonce desync on concurrent calls.
     var txInProgress : Bool = false;
 
@@ -88,25 +87,31 @@ module {
           };
         };
 
-        // Get nonce
-        let nonce = switch (localNonce) {
-          case (?n) { n };
-          case (null) {
-            let rpcResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-              services, null, { address = senderAddr; block = #Latest },
-            );
-            switch (rpcResult) {
-              case (#Consistent(#Ok(n))) { n };
-              case (_) {
-                txInProgress := false;
-                return #err("Failed to get EVM nonce");
-              };
-            };
+        // H-2: Always read the PENDING nonce from chain immediately before each
+        // send. EvmSender (broadcast) and EvmSigner (client-broadcast) share the
+        // same canister EVM address; a long-lived in-memory nonce cache desynced
+        // the moment the other path landed a tx, producing stuck/replaced txs.
+        // Reading #Pending each time self-heals and accounts for in-flight txs.
+        let nonce = switch (
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
+            services, null, { address = senderAddr; block = #Pending },
+          )
+        ) {
+          case (#Consistent(#Ok(n))) { n };
+          case (_) {
+            txInProgress := false;
+            return #err("Failed to get EVM nonce");
           };
         };
 
-        // Get fee data
-        let (maxFee, priorityFee) = await getFeeData(evmRpc, services);
+        // H-3: Get fee data; if unavailable, do NOT broadcast a low-fee tx.
+        let (maxFee, priorityFee) = switch (await getFeeData(evmRpc, services)) {
+          case (?fd) { fd };
+          case (null) {
+            txInProgress := false;
+            return #err("EVM fee data unavailable — not broadcasting (retry later)");
+          };
+        };
 
         // Build unsigned tx
         let txParams : EvmUtils.TxParams = {
@@ -139,18 +144,9 @@ module {
 
         let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, null, rawTxHex);
         switch (sendResult) {
-          case (#Consistent(#Ok(#Ok(?hash)))) {
-            localNonce := ?(nonce + 1);
-            #ok(hash);
-          };
-          case (#Consistent(#Ok(#Ok(null)))) {
-            localNonce := ?(nonce + 1);
-            #ok(rawTxHex);
-          };
-          case (#Consistent(#Ok(#NonceTooLow))) {
-            localNonce := null;
-            #err("Nonce too low — retry");
-          };
+          case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
+          case (#Consistent(#Ok(#Ok(null)))) { #ok(rawTxHex) };
+          case (#Consistent(#Ok(#NonceTooLow))) { #err("Nonce too low — retry") };
           case (#Consistent(#Ok(#NonceTooHigh))) { #err("Nonce too high") };
           case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas") };
           case (#Consistent(#Err(e))) { #err("RPC error: " # EvmRpc.rpcErrorToText(e)) };
@@ -219,7 +215,12 @@ module {
       await sendTransaction(chainId, tokenAddress, calldata, 120_000);
     };
 
-    func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async (Nat, Nat) {
+    // H-3: Returns null when fee data is unavailable instead of fabricating a
+    // tiny (~0.1 gwei) fee. The previous fallback produced transactions that are
+    // unmineable on mainnet/busy L2s yet were still broadcast, jamming the nonce
+    // pipeline. Callers must NOT broadcast on null — they return an error so the
+    // operation can be retried with fresh fee data.
+    func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async ?(Nat, Nat) {
       try {
         let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_feeHistory(
           services, null,
@@ -238,13 +239,53 @@ module {
             let priorityFee = if (baseFee > 1_500_000_000) { 1_500_000_000 }
               else if (baseFee > minPriority) { baseFee }
               else { minPriority };
-            (2 * baseFee + priorityFee, priorityFee);
+            ?(2 * baseFee + priorityFee, priorityFee);
           };
-          case (_) { (100_000_000, 10_000_000) };
+          case (_) { null };
         };
       } catch (_) {
-        (100_000_000, 10_000_000);
+        null;
       };
+    };
+
+    // H-1: Poll the transaction receipt up to `maxPolls` times to confirm the tx
+    // mined successfully. On IC each inter-canister round-trip takes real
+    // wall-clock time, so a few polls span ~10-20s — enough for an L2 block.
+    // Returns #confirmed on status==1, #reverted on status==0, #pending if not
+    // yet mined within the budget, #err on RPC failure.
+    public func confirmTransaction(
+      chainId : Nat,
+      txHash : Text,
+      maxPolls : Nat,
+    ) : async { #confirmed; #reverted; #pending; #err : Text } {
+      let rpcPrincipal = switch (evmRpcCanister) {
+        case (?p) { p };
+        case (null) { EvmRpc.DEFAULT_CANISTER };
+      };
+      let evmRpc : EvmRpc.EvmRpcCanister = actor (rpcPrincipal);
+      let services = switch (EvmRpc.rpcServices(chainId)) {
+        case (?s) { s };
+        case (null) { return #err("Unsupported chain ID: " # Nat.toText(chainId)) };
+      };
+      var attempts = 0;
+      label poll while (attempts < maxPolls) {
+        attempts += 1;
+        let result = try {
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, null, txHash);
+        } catch (_) { return #err("Receipt query failed") };
+        switch (result) {
+          case (#Consistent(#Ok(?receipt))) {
+            switch (receipt.status) {
+              case (?1) { return #confirmed };
+              case (?0) { return #reverted };
+              case (_) { return #confirmed }; // pre-Byzantium / missing status: treat as included
+            };
+          };
+          case (#Consistent(#Ok(null))) { /* not yet mined — keep polling */ };
+          case (_) { /* transient inconsistency — keep polling */ };
+        };
+      };
+      #pending;
     };
   };
 };

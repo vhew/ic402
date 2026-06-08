@@ -17,7 +17,7 @@ import GatewayModule "Gateway";
 import ContentStoreMod "ContentStore";
 import IdentityMod "Identity";
 import HttpHandlerMod "HttpHandler";
-import IC "mo:ic";
+import ICTypes "mo:ic/Types";
 import EvmSignerMod "EvmSigner";
 import Eip712Mod "Eip712";
 import EvmAddressMod "EvmAddress";
@@ -122,7 +122,8 @@ module {
   /// IC HTTP gateway response.
   public type HttpResponse = Types.HttpResponse;
   /// IC HTTPS outcall response (for transform functions).
-  public type HttpResponse_ = IC.HttpRequestResult;
+  /// ic@4.0.0 moved canister types from the top-level module to `mo:ic/Types`.
+  public type HttpResponse_ = ICTypes.HttpRequestResult;
   /// HTTP response builder and payment header parser.
   public let HttpHandler = HttpHandlerMod;
 

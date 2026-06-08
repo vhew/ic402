@@ -309,6 +309,15 @@ module {
           case (?addr) { addr };
           case (null) { nonceManager.unlock(signature.nonce); return #settlementFailed("Canister EVM address not derived") };
         };
+        // C-1 (v2): The EIP-3009 recipient MUST be the canister's own EVM address.
+        // Without this check a payer can sign a self-transfer (to = an address they
+        // control), pass signature verification, have the canister pay gas to
+        // broadcast it, and still receive a valid receipt + access grant while the
+        // merchant receives nothing. This is the core EVM payment-bypass fix.
+        if (not EvmUtils.addressesEqual(authz.to, canisterEvmAddr)) {
+          nonceManager.unlock(signature.nonce);
+          return #invalidSignature("EIP-3009 recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")");
+        };
         if (authz.value < amount) {
           nonceManager.unlock(signature.nonce);
           return #insufficientFunds("Authorization value " # Nat.toText(authz.value) # " < required " # Nat.toText(amount));
@@ -362,6 +371,12 @@ module {
           case (null) { nonceManager.unlock(signature.nonce); return #settlementFailed("EVM sender not configured") };
         };
 
+        // H-4 (v2): Reserve the daily spend synchronously BEFORE the value-moving
+        // await (this whole prefix runs atomically up to the await, so concurrent
+        // charges can no longer each pass a stale daily-limit check). Released on
+        // any settlement failure below.
+        policy.recordSpend(evmSender, amount);
+
         let execResult = await sender.executeTransferWithAuthorization(
           chainId, tokenAddr,
           EvmUtils.hexToBytes(authz.from),
@@ -372,26 +387,50 @@ module {
         );
 
         switch (execResult) {
-          case (#ok(txHash)) {
-            nonceManager.consumeLocked(signature.nonce);
-            policy.recordSpend(evmSender, amount);
-            let receipt : Types.PaymentReceipt = {
-              id = nextReceiptId();
-              amount;
-              token = tokenAddr;
-              sender = authz.from;
-              recipient = canisterEvmAddr;
-              network = signature.network;
-              timestamp = Time.now();
-              txHash = ?txHash;
-              sessionId = null;
-              refunded = null;
-            };
-            return #ok(receipt);
-          };
           case (#err(msg)) {
             nonceManager.unlock(signature.nonce);
+            policy.releaseDaily(evmSender, amount);
             return #settlementFailed("EIP-3009 execution failed: " # msg);
+          };
+          case (#ok(txHash)) {
+            // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the
+            // transfer actually mined (status == 1) before issuing a receipt; an
+            // on-chain revert (insufficient balance, reused token nonce, paused
+            // token) must not yield a "paid" receipt.
+            switch (await sender.confirmTransaction(chainId, txHash, 4)) {
+              case (#confirmed) {
+                nonceManager.consumeLocked(signature.nonce);
+                let receipt : Types.PaymentReceipt = {
+                  id = nextReceiptId();
+                  amount;
+                  token = tokenAddr;
+                  sender = authz.from;
+                  recipient = canisterEvmAddr;
+                  network = signature.network;
+                  timestamp = Time.now();
+                  txHash = ?txHash;
+                  sessionId = null;
+                  refunded = null;
+                };
+                return #ok(receipt);
+              };
+              case (#reverted) {
+                nonceManager.unlock(signature.nonce);
+                policy.releaseDaily(evmSender, amount);
+                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ")");
+              };
+              case (#pending) {
+                // Keep the nonce locked (GC'd at expiry) so the same challenge is
+                // not re-broadcast; release the daily reservation since no receipt
+                // is issued. Caller MUST NOT deliver value on #settlementPending.
+                policy.releaseDaily(evmSender, amount);
+                return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ")");
+              };
+              case (#err(e)) {
+                policy.releaseDaily(evmSender, amount);
+                return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ")");
+              };
+            };
           };
         };
       };
@@ -427,6 +466,10 @@ module {
 
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
+      // H-4 (v2): Reserve the daily spend synchronously before the transfer await
+      // (closes the concurrent-charge daily-limit race); released on any failure.
+      policy.recordSpend(senderPrincipal, amount);
+
       try {
         let result = await ledger.icrc2_transfer_from({
           spender_subaccount = null;
@@ -453,11 +496,11 @@ module {
               sessionId = null;
               refunded = null;
             };
-            policy.recordSpend(senderPrincipal, receipt.amount);
             #ok(receipt);
           };
           case (#Err(err)) {
             nonceManager.unlock(signature.nonce);
+            policy.releaseDaily(senderPrincipal, amount);
             switch (err) {
               case (#InsufficientFunds({ balance })) { #insufficientFunds("Insufficient funds: balance " # Nat.toText(balance)) };
               case (#InsufficientAllowance({ allowance })) { #insufficientFunds("Insufficient allowance: " # Nat.toText(allowance)) };
@@ -467,6 +510,7 @@ module {
         };
       } catch (e) {
         nonceManager.unlock(signature.nonce);
+        policy.releaseDaily(senderPrincipal, amount);
         #settlementFailed("Ledger call failed: " # Error.message(e));
       };
     };
@@ -636,8 +680,9 @@ module {
     };
 
     /// Verify an access grant (stateless HMAC check + expiry + revocation).
-    public func verifyGrant(grant : Types.AccessGrant) : Types.AccessGrantResult {
-      grants.verifyGrant(grant);
+    /// H-8 (v2): `caller` must equal grant.grantee — grants are non-transferable.
+    public func verifyGrant(caller : Principal, grant : Types.AccessGrant) : Types.AccessGrantResult {
+      grants.verifyGrant(caller, grant);
     };
 
     /// Revoke a grant (e.g., after refund).

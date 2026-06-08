@@ -64,6 +64,22 @@ module {
     bytes;
   };
 
+  /// C-1 (v2): Case-insensitive, prefix-tolerant equality of two EVM addresses.
+  /// Compares the decoded 20-byte values, so "0xAbC…" == "abc…". Returns false
+  /// if either side is not a valid 20-byte address (defensive — never treats a
+  /// malformed address as a match).
+  public func addressesEqual(a : Text, b : Text) : Bool {
+    let ab = hexToBytes(a);
+    let bb = hexToBytes(b);
+    if (ab.size() != 20 or bb.size() != 20) return false;
+    var i = 0;
+    while (i < 20) {
+      if (ab[i] != bb[i]) return false;
+      i += 1;
+    };
+    true;
+  };
+
   // ═══════════════════════════════════════════════════════════════════════
   // Byte <-> Nat Conversion
   // ═══════════════════════════════════════════════════════════════════════

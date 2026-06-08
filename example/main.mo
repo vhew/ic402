@@ -117,6 +117,9 @@ persistent actor KnowledgeBase {
 
   // Start background timers (session expiry, EVM address derivation)
   gate.startTimers<system>();
+  // H-6: Seed the content store's encryption key from canister randomness on
+  // first deploy (idempotent; no-op once seeded / restored from stable state).
+  store.startTimers<system>();
 
   // ── Stable state lifecycle ──
 
@@ -198,23 +201,14 @@ persistent actor KnowledgeBase {
       return Http.http200Json("{\"name\":\"KnowledgeBase\",\"x402Support\":true}");
     };
 
-    // Paid: content delivery
-    if (Text.startsWith(path, #text "/content/")) {
-      switch (Http.getHeader(request.headers, "x-payment")) {
-        case (?_) { return Http.httpUpgrade() };  // has payment → upgrade to update call
-        case (null) { return Http.http402(gate.requireAll(5_000)) }; // no payment → 402
-      };
-    };
+    // H-9: Paid resources ALWAYS upgrade to an update call. The 402 challenge
+    // (which mints + persists a server nonce via gate.requireAll) must be issued
+    // from an update context — issuing it here in a query would discard the nonce,
+    // so settlement could never match it and the GET→402→pay→200 loop never closed.
+    if (Text.startsWith(path, #text "/content/")) { return Http.httpUpgrade() };
+    if (Text.startsWith(path, #text "/search")) { return Http.httpUpgrade() };
 
-    // Paid: search
-    if (Text.startsWith(path, #text "/search")) {
-      switch (Http.getHeader(request.headers, "x-payment")) {
-        case (?_) { return Http.httpUpgrade() };
-        case (null) { return Http.http402(gate.requireAll(1_000)) };
-      };
-    };
-
-    // Paid: service request
+    // Paid: service request — cheap existence/enabled check, then defer to update.
     if (Text.startsWith(path, #text "/service/")) {
       let serviceId = switch (Text.stripStart(path, #text "/service/")) {
         case (?id) { id };
@@ -224,15 +218,7 @@ persistent actor KnowledgeBase {
         case (null) { return Http.httpError(404, "Service not found") };
         case (?svc) {
           if (not svc.enabled) return Http.httpError(404, "Service not available");
-          let amount = switch (svc.pricing) {
-            case (#Exact(p)) { p };
-            case (#Upto(p)) { p };
-            case (#Session) { 0 };
-          };
-          switch (Http.getHeader(request.headers, "x-payment")) {
-            case (?_) { return Http.httpUpgrade() };
-            case (null) { return Http.http402(gate.requireAll(amount)) };
-          };
+          return Http.httpUpgrade();
         };
       };
     };
@@ -249,7 +235,8 @@ persistent actor KnowledgeBase {
           let statusText = switch (job.status) {
             case (#Pending) { "pending" }; case (#Assigned) { "assigned" };
             case (#Computing) { "computing" }; case (#Submitted) { "submitted" };
-            case (#Verified) { "verified" }; case (#Settled) { "settled" };
+            case (#Verified) { "verified" }; case (#Settling) { "settling" };
+            case (#Settled) { "settled" };
             case (#Disputed) { "disputed" }; case (#Expired) { "expired" };
             case (#Refunded) { "refunded" };
           };
@@ -270,10 +257,31 @@ persistent actor KnowledgeBase {
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
 
-    // Parse payment header — supports x402 v2 (base64) and legacy ic402 (raw JSON)
+    // H-9: When there is no payment yet, issue the 402 challenge HERE (update
+    // context) so gate.requireAll persists the server nonce that settlement binds.
     let paymentHeader = switch (Http.getHeader(request.headers, "x-payment")) {
       case (?p) { p };
-      case (null) { return Http.httpError(400, "Missing X-PAYMENT header") };
+      case (null) {
+        if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000)) };
+        if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000)) };
+        if (Text.startsWith(path, #text "/service/")) {
+          let serviceId = switch (Text.stripStart(path, #text "/service/")) {
+            case (?id) { id };
+            case (null) { return Http.httpError(400, "Missing service ID") };
+          };
+          switch (registry.getService(serviceId)) {
+            case (null) { return Http.httpError(404, "Service not found") };
+            case (?svc) {
+              if (not svc.enabled) return Http.httpError(404, "Service not available");
+              let amount = switch (svc.pricing) {
+                case (#Exact(p)) { p }; case (#Upto(p)) { p }; case (#Session) { 0 };
+              };
+              return Http.http402(gate.requireAll(amount));
+            };
+          };
+        };
+        return Http.httpError(400, "Missing X-PAYMENT header");
+      };
     };
     let sig = switch (Http.parseX402PaymentHeader(paymentHeader)) {
       case (?s) { s };
@@ -336,7 +344,10 @@ persistent actor KnowledgeBase {
       };
       switch (await gate.settle(sig)) {
         case (#ok(receipt)) {
-          switch (registry.submitRequest(Principal.fromText(receipt.sender), serviceId, request.body, receipt, null)) {
+          // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
+          // Pass it through as Text — do NOT coerce to Principal (that trapped for
+          // EVM senders AFTER the on-chain transfer had already executed).
+          switch (registry.submitRequest(receipt.sender, serviceId, request.body, receipt, null)) {
             case (#ok(jobId)) {
               return Http.http202Json("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}");
             };
@@ -481,8 +492,10 @@ persistent actor KnowledgeBase {
     };
   };
 
-  public query func getChunk(grant : Ic402.AccessGrant, index : Nat) : async ?Blob {
-    switch (gate.verifyGrant(grant)) {
+  // H-8/M-3: caller-aware — only the grantee may fetch chunks (grants are not
+  // transferable bearer tokens). `shared query (msg)` exposes the caller.
+  public shared query (msg) func getChunk(grant : Ic402.AccessGrant, index : Nat) : async ?Blob {
+    switch (gate.verifyGrant(msg.caller, grant)) {
       case (#ok) { store.getChunk(grant.contentRef.id, index) };
       case (_) { null };
     };
@@ -588,7 +601,7 @@ persistent actor KnowledgeBase {
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
-            switch (registry.submitRequest(msg.caller, serviceId, params, receipt, null)) {
+            switch (registry.submitRequest(Principal.toText(msg.caller), serviceId, params, receipt, null)) {
               case (#ok(jobId)) { #ok({ jobId }) };
               case (#err(e)) { #error(e) };
             };
@@ -757,8 +770,8 @@ persistent actor KnowledgeBase {
     await gate.forceCloseSession(sessionId);
   };
 
-  public query func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {
-    gate.verifyGrant(grant);
+  public shared query (msg) func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {
+    gate.verifyGrant(msg.caller, grant);
   };
 
   // ── Internal stubs ──

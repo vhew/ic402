@@ -51,13 +51,14 @@ const PaymentReceipt = IDL.Record({
 
 const PaymentResult = IDL.Variant({
   ok: PaymentReceipt,
-  insufficientFunds: IDL.Null,
-  invalidSignature: IDL.Null,
-  expired: IDL.Null,
+  insufficientFunds: IDL.Text,
+  invalidSignature: IDL.Text,
+  expired: IDL.Text,
   policyDenied: IDL.Text,
-  tokenNotAccepted: IDL.Null,
-  networkNotSupported: IDL.Null,
+  tokenNotAccepted: IDL.Text,
+  networkNotSupported: IDL.Text,
   settlementFailed: IDL.Text,
+  settlementPending: IDL.Text, // v2 (H-1): EVM tx broadcast but not yet confirmed
   reputationTooLow: IDL.Nat,
   depositBelowMinimum: IDL.Nat,
 });
@@ -138,9 +139,9 @@ const AccessGrant = IDL.Record({
 
 const AccessGrantResult = IDL.Variant({
   ok: IDL.Null,
-  expired: IDL.Null,
-  invalidGrant: IDL.Null,
-  revoked: IDL.Null,
+  expired: IDL.Text,
+  invalidGrant: IDL.Text,
+  revoked: IDL.Text,
 });
 
 const DeliveryMethod = IDL.Variant({
@@ -280,6 +281,7 @@ const JobStatusVariant = IDL.Variant({
   Computing: IDL.Null,
   Submitted: IDL.Null,
   Verified: IDL.Null,
+  Settling: IDL.Null, // v2 (H-5): settlement-in-progress re-entry guard
   Settled: IDL.Null,
   Disputed: IDL.Null,
   Expired: IDL.Null,
