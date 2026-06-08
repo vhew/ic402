@@ -180,10 +180,29 @@ function isPrivateIpv6(host: string): boolean {
   // Link-local fe80::/10.
   if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb'))
     return true;
-  // IPv4-mapped (::ffff:a.b.c.d) — extract and re-check.
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (mapped && isPrivateIpv4(mapped[1])) return true;
+  // IPv4-mapped (::ffff:...) — extract the embedded IPv4 and re-check it.
+  const embedded = extractMappedIpv4(h);
+  if (embedded !== null && isPrivateIpv4(embedded)) return true;
   return false;
+}
+
+/**
+ * Extract the embedded IPv4 from an IPv4-mapped IPv6 address (::ffff:…), in BOTH
+ * the dotted form (::ffff:169.254.169.254) and the hex-compressed form
+ * (::ffff:a9fe:a9fe) that `new URL()` normalizes it to. Without the hex case an
+ * attacker reaches e.g. the cloud-metadata endpoint via http://[::ffff:169.254.169.254]/
+ * (SSRF), since the URL parser rewrites it to the hex form the dotted regex misses.
+ */
+function extractMappedIpv4(h: string): string | null {
+  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+  if (dotted) return dotted[1];
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+  }
+  return null;
 }
 
 /**
@@ -1426,6 +1445,115 @@ server.tool(
       content: [{ type: 'text' as const, text: JSON.stringify(serialize(result), null, 2) }],
     };
   },
+);
+
+// ---------------------------------------------------------------------------
+// Dedicated admin / signing tools
+//
+// These expose specific controller-gated canister methods as named tools with
+// explicit confirmation. Unlike the generic `call` tool (read-only allowlist),
+// the method per tool is FIXED — an LLM cannot pick an arbitrary method — and
+// every state-changing/signing action requires confirm:true.
+// ---------------------------------------------------------------------------
+
+async function invokeCanisterMethod(
+  cid: string,
+  method: string,
+  argsJson: string,
+): Promise<unknown> {
+  const actor = actorFactory(cid);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsJson);
+  } catch {
+    throw new Error('Invalid JSON in args parameter');
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fn = (actor as any)[method];
+  if (typeof fn !== 'function') {
+    throw new Error(`Unknown method "${method}" on canister ${cid}.`);
+  }
+  return await fn(...(Array.isArray(parsed) ? parsed : [parsed]));
+}
+
+function adminTool(
+  toolName: string,
+  canisterMethod: string,
+  description: string,
+  argsHint: string,
+  note: string,
+) {
+  server.tool(
+    toolName,
+    description,
+    {
+      args: z.string().describe(argsHint),
+      canisterId: z.string().optional().describe('Canister to call (defaults to configured)'),
+      confirm: z.boolean().default(false).describe('Authorize this state-changing/signing action.'),
+    },
+    async ({ args, canisterId, confirm }) => {
+      const cid = canisterId ?? defaultCanisterId;
+      if (!cid) throw new Error('No canister ID.');
+      requireAgent();
+      const gate = requireConfirmation({ action: toolName, confirm, note });
+      if (gate) return gate;
+      try {
+        return textResult(serialize(await invokeCanisterMethod(cid, canisterMethod, args)));
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+}
+
+adminTool(
+  'upload_content',
+  'uploadContent',
+  'Upload + encrypt content into the canister ContentStore (controller-gated, state-changing).',
+  'JSON array: [id, mimeType, dataBytes] where dataBytes is a number[] of the raw bytes.',
+  'Uploads and encrypts content into the canister (controller-gated).',
+);
+adminTool(
+  'delete_content',
+  'deleteContent',
+  'Delete a content entry from the canister ContentStore (controller-gated, destructive).',
+  'JSON array: [id].',
+  'Permanently deletes content from the canister (controller-gated, destructive).',
+);
+adminTool(
+  'register_service',
+  'registerService',
+  'Register a paid service in the marketplace (controller-gated, state-changing).',
+  'JSON array of registerService args: [name, description, serviceType, pricing, verificationMethod, verifierCanisterId?, verificationKey?, delivery, timeout].',
+  'Registers a marketplace service on the canister (controller-gated).',
+);
+adminTool(
+  'enable_service',
+  'enableService',
+  'Enable a registered service so it can accept paid requests (controller-gated).',
+  'JSON array: [serviceId].',
+  'Enables a marketplace service on the canister (controller-gated).',
+);
+adminTool(
+  'claim_job',
+  'claimJob',
+  'Operator claims a pending marketplace job (state-changing).',
+  'JSON array: [jobId].',
+  'Claims a marketplace job for the operator.',
+);
+adminTool(
+  'submit_job_result',
+  'submitJobResult',
+  'Operator submits a job result (and optional proof) for verification + settlement (state-changing).',
+  'JSON array: [jobId, resultBytes, proof?, actualCost?].',
+  'Submits a job result to the canister (triggers verification + settlement).',
+);
+adminTool(
+  'sign_typed_data',
+  'signTypedData',
+  'Sign arbitrary EIP-712 typed data with the canister tECDSA key. SENSITIVE — this is a generic signing primitive; only sign digests you constructed and trust.',
+  'JSON array: [domainSeparatorBytes, structHashBytes] — two 32-byte number[] arrays.',
+  'Signs an EIP-712 digest with the canister key (a generic signature primitive — forgeable use is dangerous).',
 );
 
 // ---------------------------------------------------------------------------

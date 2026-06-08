@@ -137,11 +137,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('The canister IS the server, the wallet, AND the payment processor.');
         info('One Motoko import. One deploy. No external infrastructure.');
 
-        const configArgs: Record<string, string> = {
+        const configArgs: Record<string, unknown> = {
           canisterId,
           host,
           network: 'icp:1',
           ledger: CKUSDC_LEDGER,
+          // Local controller-driven demo: opt into auto-payment + local fetch
+          // targets. Spends are still capped + confirmation-gated per tool.
+          autoPayment: true,
+          localDev: true,
         };
         if (process.env.ICP_IDENTITY_PEM) {
           configArgs.identityPem = process.env.ICP_IDENTITY_PEM;
@@ -220,8 +224,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         info('');
         info('Uploading via MCP...');
-        const upload = await mcpCall(client, 'call', {
-          method: 'uploadContent',
+        const upload = await mcpCall(client, 'upload_content', {
+          confirm: true,
           args: JSON.stringify(['ic402-logo', 'image/png', logoBytes]),
         });
         if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
@@ -694,8 +698,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         info('Deleting ic402-logo...');
         try {
-          const deleteRes = await mcpCall(client, 'call', {
-            method: 'deleteContent',
+          const deleteRes = await mcpCall(client, 'delete_content', {
+            confirm: true,
             args: '["ic402-logo"]',
           });
           const delObj = deleteRes as Record<string, unknown>;
@@ -834,8 +838,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('Registering a hash-computation service...');
         let svcId = 'svc-1';
         try {
-          const regResult = await mcpCall(client, 'call', {
-            method: 'registerService',
+          const regResult = await mcpCall(client, 'register_service', {
+            confirm: true,
             args: JSON.stringify([
               'Hash Computation',
               'Compute SHA-256 hash of input data',
@@ -864,7 +868,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
 
         try {
-          await mcpCall(client, 'call', { method: 'enableService', args: JSON.stringify([svcId]) });
+          await mcpCall(client, 'enable_service', { confirm: true, args: JSON.stringify([svcId]) });
           success('Service enabled');
         } catch (e) {
           info(`Enable: ${e instanceof Error ? e.message : String(e)}`);
@@ -878,6 +882,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('Buyer submits request with x402 payment...');
         let jobId = '';
         const submitResult = await mcpCallAndRender(client, 'submit_request', {
+          confirm: true,
           serviceId: svcId,
           params: 'Hello, ic402 services!',
         });
@@ -890,8 +895,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           info('Your client claims the job, computes off-chain, submits result...');
 
           try {
-            await mcpCall(client, 'call', {
-              method: 'claimJob',
+            await mcpCall(client, 'claim_job', {
+              confirm: true,
               args: JSON.stringify([jobId]),
             });
             success('Job claimed');
@@ -901,8 +906,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
               ),
             );
-            await mcpCall(client, 'call', {
-              method: 'submitJobResult',
+            await mcpCall(client, 'submit_job_result', {
+              confirm: true,
               args: JSON.stringify([jobId, mockResult, [], []]),
             });
             success('Result submitted → verified → payment settled');
@@ -948,8 +953,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           success(`ZK verifier canister: ${zkVerifierId}`);
           const vkBytes = Array.from(Buffer.from(ZK_VK, 'hex'));
           try {
-            const zkReg = await mcpCall(client, 'call', {
-              method: 'registerService',
+            const zkReg = await mcpCall(client, 'register_service', {
+              confirm: true,
               args: JSON.stringify([
                 'ZK Square Root',
                 'Prove knowledge of square root (Groth16/BN254)',
@@ -969,8 +974,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               success('ZK service already registered');
             else warn(`ZK register: ${zr?.err ?? JSON.stringify(zr)}`);
 
-            await mcpCall(client, 'call', {
-              method: 'enableService',
+            await mcpCall(client, 'enable_service', {
+              confirm: true,
               args: JSON.stringify([zkSvcId]),
             });
 
@@ -978,6 +983,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             info('Buyer submits request: "what is the square root of 25?"');
             const inputBytes = Array.from(Buffer.from(ZK_INPUT, 'hex'));
             const zkSubmit = await mcpCallAndRender(client, 'submit_request', {
+              confirm: true,
               serviceId: zkSvcId,
               params: String.fromCharCode(...inputBytes),
             });
@@ -986,16 +992,16 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             if (zkJobId) {
               info('');
               info('Client computes x=5, generates Groth16 proof off-chain...');
-              await mcpCall(client, 'call', {
-                method: 'claimJob',
+              await mcpCall(client, 'claim_job', {
+                confirm: true,
                 args: JSON.stringify([zkJobId]),
               });
 
               const proofBytes = Array.from(Buffer.from(ZK_PROOF, 'hex'));
               const resultBytes = Array.from(new TextEncoder().encode('x = 5'));
               try {
-                await mcpCall(client, 'call', {
-                  method: 'submitJobResult',
+                await mcpCall(client, 'submit_job_result', {
+                  confirm: true,
                   args: JSON.stringify([zkJobId, resultBytes, [proofBytes], []]),
                 });
                 success('Proof verified by ZK canister → payment settled');
@@ -1053,7 +1059,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const res = await mcpCallAndRender(
             client,
             'fetch_x402',
-            { url: x402Url, chainId: 84532 },
+            { url: x402Url, chainId: 84532, confirm: true },
             90_000,
           );
           highlight('One call: probe → canister signs → pay → content. All in the client library.');
@@ -1295,6 +1301,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
           try {
             const evmSession = (await mcpCall(client, 'open_session', {
+              confirm: true,
               maxDeposit: String(depositAmount),
               evmNetwork,
               evmSender: testAddr,
@@ -1336,6 +1343,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               info(`Refund remainder → payer on ${chain.name}`);
               try {
                 const closeRes = await mcpCall(client, 'close_session', {
+                  confirm: true,
                   sessionId: evmSessionId,
                 });
                 success('EVM session closed — settled on-chain');
@@ -1377,7 +1385,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         info('');
         info('Opening session with ICP ckUSDC...');
-        const session = (await mcpCall(client, 'open_session', {})) as Record<string, unknown>;
+        const session = (await mcpCall(client, 'open_session', { confirm: true })) as Record<
+          string,
+          unknown
+        >;
         const sessionId = session.sessionId as string;
 
         if (!sessionId) {
@@ -1411,7 +1422,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           info('');
           info('Closing session (settle consumed → recipient, refund remainder → caller)...');
           try {
-            const closeRes = await mcpCall(client, 'close_session', { sessionId });
+            const closeRes = await mcpCall(client, 'close_session', { sessionId, confirm: true });
             success('Session closed — settled on-chain');
             const receipt = closeRes as Record<string, unknown>;
             state('Consumed (settled)', String(receipt?.amount ?? '?'));
@@ -1489,7 +1500,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
 
         try {
-          const reg = await mcpCallAndRender(client, 'register_agent', {});
+          const reg = await mcpCallAndRender(client, 'register_agent', { confirm: true });
           if (reg?.status === 'ok') {
             if (reg.tokenId) {
               state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
@@ -1589,8 +1600,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('Expiry', `${new Date(expiry * 1000).toISOString()} (24h)`);
 
         try {
-          const signResult = await mcpCall(client, 'call', {
-            method: 'signTypedData',
+          const signResult = await mcpCall(client, 'sign_typed_data', {
+            confirm: true,
             args: JSON.stringify([Array.from(domainSep), Array.from(approveStructHash)]),
           });
           const sig = signResult as Record<string, unknown>;
@@ -1620,8 +1631,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         );
 
         try {
-          const orderSig = await mcpCall(client, 'call', {
-            method: 'signTypedData',
+          const orderSig = await mcpCall(client, 'sign_typed_data', {
+            confirm: true,
             args: JSON.stringify([Array.from(domainSep), Array.from(orderStructHash)]),
           });
           const sig = orderSig as Record<string, unknown>;
