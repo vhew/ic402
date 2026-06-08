@@ -462,7 +462,7 @@ describe('ic402 integration', () => {
     it('full EIP-712 flow: domain + type hash + sign', async () => {
       if (skip) return;
       // Build EIP-712 hashes client-side (same pattern as production use)
-      const { keccak_256 } = await import('@noble/hashes/sha3');
+      const { keccak_256 } = await import('@noble/hashes/sha3.js');
       const enc = (s: string) => new TextEncoder().encode(s);
       const uint256 = (n: number) => {
         const b = new Uint8Array(32);

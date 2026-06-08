@@ -10,12 +10,12 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1",
-    "@noble/curves": "1.9.1",
-    "@noble/hashes": "1.7.2"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0"
   },
   "devDependencies": {
-    "@types/node": "22.19.15",
-    "typescript": "5.9.3"
+    "@types/node": "22.19.20",
+    "typescript": "6.0.3"
   }
 }

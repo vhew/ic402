@@ -3,8 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Interface as ReadlineInterface } from 'node:readline/promises';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { secp256k1 } from '@noble/curves/secp256k1';
-import { keccak_256 } from '@noble/hashes/sha3';
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { StepDef } from './runner.js';
 import {
   mcpCall,
@@ -43,8 +43,8 @@ const EXTERNAL_CONTENT_URL =
 
 function pubkeyToEvmAddress(compressedHex: string): string | null {
   try {
-    const point = secp256k1.ProjectivePoint.fromHex(compressedHex);
-    const uncompressed = point.toRawBytes(false);
+    const point = secp256k1.Point.fromHex(compressedHex);
+    const uncompressed = point.toBytes(false);
     const hash = keccak_256(uncompressed.slice(1));
     return '0x' + Buffer.from(hash).slice(-20).toString('hex');
   } catch {
@@ -546,9 +546,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 );
                 const digest = keccak_256(cat(new Uint8Array([0x19, 0x01]), domSep, structHash));
 
-                // Sign with @noble/curves v1 API (lowS enforced, prehash defaults to false)
-                const sig = secp256k1.sign(digest, TEST_KEY, { lowS: true });
-                const v = sig.recovery + 27;
+                // @noble/curves v2: prehash defaults to TRUE — force false to sign the
+                // EIP-712 digest directly. 'recovered' format = [recovery(1), r(32), s(32)].
+                const sig = secp256k1.sign(digest, TEST_KEY, {
+                  lowS: true,
+                  prehash: false,
+                  format: 'recovered',
+                });
+                const v = sig[0] + 27;
 
                 section('EIP-712 Typed Data (what the wallet signs)');
                 state('  from', testAddr);
@@ -575,8 +580,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       validBefore,
                       nonce: Array.from(authNonce),
                       v,
-                      r: Array.from(sig.toCompactRawBytes().slice(0, 32)),
-                      s: Array.from(sig.toCompactRawBytes().slice(32, 64)),
+                      r: Array.from(sig.slice(1, 33)),
+                      s: Array.from(sig.slice(33, 65)),
                     },
                   ],
                 };
@@ -1266,8 +1271,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           );
           const digest = keccak_256(cat(new Uint8Array([0x19, 0x01]), domSep, structHash));
 
-          const sig = secp256k1.sign(digest, TEST_KEY, { lowS: true });
-          const v = sig.recovery + 27;
+          // @noble/curves v2: prehash defaults to TRUE — force false to sign the
+          // EIP-712 digest directly. 'recovered' format = [recovery(1), r(32), s(32)].
+          const sig = secp256k1.sign(digest, TEST_KEY, {
+            lowS: true,
+            prehash: false,
+            format: 'recovered',
+          });
+          const v = sig[0] + 27;
 
           divider();
           state('  Chain', `${chain.name} (${evmNetwork})`);
@@ -1298,8 +1309,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 validBefore,
                 nonce: Array.from(authNonce),
                 v,
-                r: Array.from(sig.toCompactRawBytes().slice(0, 32)),
-                s: Array.from(sig.toCompactRawBytes().slice(32, 64)),
+                r: Array.from(sig.slice(1, 33)),
+                s: Array.from(sig.slice(33, 65)),
               },
             })) as Record<string, unknown>;
 
