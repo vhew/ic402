@@ -628,22 +628,39 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     );
                   } else if (payObj && 'error' in payObj) {
                     const errMsg = String(payObj.error);
-                    if (errMsg.includes('insufficient funds') || errMsg.includes('have 0 want')) {
-                      warn(`EVM wallet has no gas funds: ${errMsg}`);
-                      info('The canister verified the EIP-712 signature but the on-chain call');
-                      info('failed because the canister EVM address has no ETH for gas.');
-                      info('Fund the address with testnet ETH to complete settlement.');
+                    const lower = errMsg.toLowerCase();
+                    if (lower.includes('insufficient funds') || lower.includes('have 0 want')) {
+                      warn(`Canister EVM wallet has no gas: ${errMsg}`);
+                      info('The canister verified the EIP-712 signature but could not broadcast —');
+                      info('its EVM address has no ETH for gas. Fund it with testnet ETH.');
+                    } else if (lower.includes('revert')) {
+                      // The canister ACCEPTED the signature and broadcast the tx; the
+                      // USDC contract reverted the transfer on-chain. (H-1 catches this
+                      // instead of issuing a "paid" receipt for a reverted transfer.)
+                      warn(`On-chain transfer reverted (signature was accepted): ${errMsg}`);
+                      info('The canister verified the EIP-712 signature and broadcast the tx, but');
+                      info(
+                        'the USDC contract reverted it. Common causes: the PAYER address has no',
+                      );
+                      info('USDC on this chain, the EIP-3009 nonce was already used, or the token');
+                      info(
+                        'rejected the authorization. It is NOT a signature-verification failure.',
+                      );
+                    } else if (lower.includes('pending') || lower.includes('not yet confirmed')) {
+                      warn(`Tx broadcast but not yet confirmed: ${errMsg}`);
+                      info(
+                        'The transfer was submitted; it had not mined within the confirm window.',
+                      );
                     } else if (
-                      errMsg.includes('settlement') ||
-                      errMsg.includes('RPC error') ||
-                      errMsg.includes('EVM')
+                      lower.includes('settlement') ||
+                      lower.includes('rpc error') ||
+                      lower.includes('evm')
                     ) {
                       warn(`On-chain settlement failed: ${errMsg}`);
-                      info('Signature was valid but the on-chain execution failed.');
-                      info('On local replica, the EVM RPC canister is a mock — this is expected.');
-                    } else if (errMsg.includes('EIP-3009') || errMsg.includes('signature')) {
-                      warn(`Signature verification failed: ${errMsg}`);
-                      info('The canister rejected the EIP-712 signature.');
+                      info('The signature was accepted; the on-chain execution failed.');
+                    } else if (lower.includes('eip-3009') || lower.includes('signature')) {
+                      warn(`Signature rejected by the canister: ${errMsg}`);
+                      info('The canister could not verify the EIP-712 signature locally.');
                     } else {
                       warn(`Error: ${errMsg}`);
                     }
