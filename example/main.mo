@@ -187,7 +187,15 @@ persistent actor KnowledgeBase {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
         switch (await gate.settle(sig)) {
-          case (#ok(_)) { #ok(doSearch(searchQuery)) };
+          // A nonce binds amount/token/network but NOT the resource, so a nonce minted at a
+          // cheaper endpoint could be redeemed here. Verify the settled amount covers THIS
+          // resource's price (cross-resource underpayment).
+          case (#ok(receipt)) {
+            if (receipt.amount < amount) {
+              return #error("Underpayment: search requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
+            };
+            #ok(doSearch(searchQuery));
+          };
           case (#policyDenied(r)) { #error("Policy: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
@@ -478,6 +486,11 @@ persistent actor KnowledgeBase {
       case (?sig) {
         switch (await gate.settle(sig)) {
           case (#ok(receipt)) {
+            // Cross-resource underpayment: the nonce binds amount/token/network but not the
+            // resource, so reject a settlement that doesn't cover this content's price.
+            if (receipt.amount < amount) {
+              return #error("Underpayment: content requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
+            };
             let metadata = switch (store.getMetadata(contentId)) {
               case (null) { return #error("Not found") };
               case (?m) { m };

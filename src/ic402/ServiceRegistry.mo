@@ -467,19 +467,49 @@ module {
             case (null) { return #err("ZK proof required but not provided") };
             case (?p) { p };
           };
-          // Params are the public inputs — each 32-byte chunk is one serialized field element
+          let result = switch (job.result) {
+            case (null) { return #err("No result to verify") };
+            case (?r) { r };
+          };
+
+          // Lost-update fix: reserve a non-resolvable interim status SYNCHRONOUSLY before the
+          // cross-canister verifier await. expireJobs / disputeJob / confirmJob all act only on
+          // #Submitted, so #Computing takes this job out of their reach; without this, a refund
+          // or dispute landing DURING the await would be silently clobbered by the stale
+          // write-back below — a refund-and-settle double spend.
+          jobs.put(jobId, { job with status = #Computing });
+
+          // Proof-not-bound fix: bind the DELIVERED result into the public inputs so the proof
+          // attests to (resultHash, params) — not just params. Circuit convention: public input
+          // 0 is SHA-256 of the operator's result; the remaining input(s) are the buyer's params.
+          // Without this an operator submits a valid proof for the params alongside an ARBITRARY
+          // result blob and is paid for garbage.
+          let resultHash = SHA256.fromBlob(#sha256, result);
           let publicInputs : [Blob] = if (Blob.toArray(job.params).size() > 0) {
-            [job.params];
-          } else { [] };
+            [resultHash, job.params];
+          } else { [resultHash] };
 
           let verifier : Types.ZkVerifierActor = actor (Principal.toText(verifierCanister));
           switch (await verifier.verify_groth16(proof, publicInputs, verificationKey)) {
             case (#ok) {
-              jobs.put(jobId, { job with status = #Verified });
-              await settleJob(jobId);
+              // Re-fetch after the await: settle only if no concurrent transition fired (the job
+              // is still our reserved #Computing). Otherwise abort without paying.
+              switch (jobs.get(jobId)) {
+                case (?j2) {
+                  if (j2.status != #Computing) {
+                    return #err("Job changed during verification (status: " # debug_show(j2.status) # ")");
+                  };
+                  jobs.put(jobId, { j2 with status = #Verified });
+                  await settleJob(jobId);
+                };
+                case (null) { #err("Job vanished during verification") };
+              };
             };
             case (#err(msg)) {
-              jobs.put(jobId, { job with status = #Disputed });
+              switch (jobs.get(jobId)) {
+                case (?j2) { jobs.put(jobId, { j2 with status = #Disputed }) };
+                case (null) {};
+              };
               #err("ZK verification failed: " # msg);
             };
           };

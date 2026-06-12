@@ -227,6 +227,47 @@ describe('ic402 integration', () => {
       expect(verifyResult).toHaveProperty('ok');
     });
 
+    // C1 finding 2: a nonce binds amount/token/network but NOT the resource. A nonce minted at
+    // the cheap `search` endpoint (1000) must not buy the pricier `getContent` (5000). The fix
+    // makes each resource reject a settlement that doesn't cover its own price.
+    it('rejects a cheap nonce redeemed at a pricier resource (cross-resource underpayment)', async () => {
+      if (skip) return;
+
+      // 1. Mint a CHEAP nonce via search (amount 1000), not getContent (5000).
+      const searchReq = await actor.search('underpay probe', []);
+      const icpReq = searchReq.paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      expect(BigInt(icpReq.amount)).toBe(1_000n);
+
+      // 2. Approve + present that cheap nonce to getContent.
+      await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      const caller = await agent.getPrincipal();
+      const cheapSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const result = await actor.getContent('int-test-doc', [cheapSig]);
+
+      // The 1000-nonce must NOT unlock the 5000 content.
+      expect(result).toHaveProperty('error');
+      expect(result.error.toLowerCase()).toContain('underpayment');
+    });
+
     it('delete content', async () => {
       if (skip) return;
       const result = await actor.deleteContent('int-test-doc');
