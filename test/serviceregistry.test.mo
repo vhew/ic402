@@ -805,6 +805,7 @@ suite("ServiceRegistry", func() {
         services = [];
         serviceCounter = 0;
         jobCounter = 0;
+        evmRails = null;
         jobs = [
           ("old-expired",    makeJob("old-expired",    #Expired,  ?(-2 * DAY), -2 * DAY)),
           ("old-settled",    makeJob("old-settled",    #Settled,  ?(-2 * DAY), -2 * DAY)),
@@ -876,7 +877,7 @@ suite("ServiceRegistry", func() {
 
     func loadJob(reg : ServiceRegistry.ServiceRegistry, buyer : Text) {
       reg.loadStable({
-        services = []; serviceCounter = 0; jobCounter = 0;
+        services = []; serviceCounter = 0; jobCounter = 0; evmRails = null;
         jobs = [("job-1", makeEvmJob("job-1", buyer, #Submitted))];
       });
     };
@@ -920,6 +921,62 @@ suite("ServiceRegistry", func() {
     test("recoverBuyerActionSigner rejects a malformed signature length", func() {
       let reg = makeRegistry();
       assert reg.recoverBuyerActionSigner("dispute", "job-1", [0, 1, 2]) == null;
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // 1a: EVM payment-rail tracking (foundation for per-rail settlement / C3)
+  // ══════════════════════════════════════════════════
+
+  suite("EVM rail tracking", func() {
+    let buyer0x = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    func evmReceipt(network : Text, token : Text, amount : Nat) : Types.PaymentReceipt {
+      {
+        id = "rcpt-evm"; amount; token; sender = buyer0x; recipient = "0xcanister";
+        network; timestamp = 0; txHash = ?"0xabc"; sessionId = null; refunded = null;
+      };
+    };
+
+    test("submitRequest records the EVM rail for a 0x buyer", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(buyer0x, svcId, Text.encodeUtf8("p"),
+        evmReceipt("eip155:8453", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      switch (reg.getEvmRail(jobId)) {
+        case (?rail) {
+          assert rail.network == "eip155:8453";
+          assert rail.token == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+        };
+        case (null) { assert false };
+      };
+    });
+
+    test("submitRequest records NO rail for an ICP (principal) buyer", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(Principal.toText(buyerPrincipal), svcId,
+        Text.encodeUtf8("p"), mockReceipt(1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      assert reg.getEvmRail(jobId) == null;
+    });
+
+    test("the EVM rail survives a toStable/loadStable round-trip", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(buyer0x, svcId, Text.encodeUtf8("p"),
+        evmReceipt("eip155:84532", "0xusdc", 1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      let reg2 = makeRegistry();
+      reg2.loadStable(reg.toStable());
+      switch (reg2.getEvmRail(jobId)) {
+        case (?rail) { assert rail.network == "eip155:84532" };
+        case (null) { assert false };
+      };
     });
   });
 });

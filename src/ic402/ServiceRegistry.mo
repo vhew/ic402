@@ -43,6 +43,10 @@ module {
     var jobs = HashMap.HashMap<Text, Types.Job>(64, Text.equal, Text.hash);
     var serviceCounter : Nat = 0;
     var jobCounter : Nat = 0;
+    // 1a: payment rail (chain + token) for EVM-paid jobs, keyed by jobId. Lets the registry
+    // settle/refund an EVM job on-chain on the rail it was paid on, rather than from the ICP
+    // pool (audit C3). Keyed separately so the public Job type / Candid interface is unchanged.
+    var evmJobRail = HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash);
 
     // ── Service Registration ──
 
@@ -218,7 +222,18 @@ module {
         deliveryCallback = callback;
       };
       jobs.put(jobId, job);
+      // 1a: record the EVM payment rail (network + token) for an EVM-paid job, so it can be
+      // settled/refunded on-chain on that rail rather than from the ICP pool (C3).
+      if (Text.startsWith(buyer, #text "0x")) {
+        evmJobRail.put(jobId, { network = receipt.network; token = receipt.token });
+      };
       #ok(jobId);
+    };
+
+    /// 1a: the EVM payment rail recorded for a job, if it was paid on-chain (null for ICP
+    /// jobs). Used by the per-rail settlement path; exposed for tests/observability.
+    public func getEvmRail(jobId : Text) : ?Types.EvmRail {
+      evmJobRail.get(jobId);
     };
 
     /// Operator claims a pending job.
@@ -643,7 +658,7 @@ module {
           case (_) {};
         };
       };
-      for (id in staleJobs.vals()) { jobs.delete(id) };
+      for (id in staleJobs.vals()) { jobs.delete(id); evmJobRail.delete(id) };
       staleJobs.size();
     };
 
@@ -663,6 +678,7 @@ module {
         jobs = Iter.toArray(jobs.entries());
         serviceCounter;
         jobCounter;
+        evmRails = ?Iter.toArray(evmJobRail.entries());
       };
     };
 
@@ -672,6 +688,11 @@ module {
       jobs := HashMap.fromIter(data.jobs.vals(), data.jobs.size(), Text.equal, Text.hash);
       serviceCounter := data.serviceCounter;
       jobCounter := data.jobCounter;
+      // Optional for upgrade compatibility: pre-1a stable records have no evmRails.
+      evmJobRail := switch (data.evmRails) {
+        case (?rails) { HashMap.fromIter(rails.vals(), rails.size(), Text.equal, Text.hash) };
+        case (null) { HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash) };
+      };
     };
   };
 };

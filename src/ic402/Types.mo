@@ -621,12 +621,23 @@ module {
     deliveryCallback : ?Text;  // optional callback URL
   };
 
+  /// 1a: the on-chain payment rail of an EVM-paid job — the CAIP-2 network
+  /// (e.g. "eip155:8453") and the ERC-20 token address it was paid in. Recorded at
+  /// submitRequest so the job can be settled/refunded on the SAME rail it was paid on,
+  /// instead of from the ICP ckUSDC pool (audit C3).
+  public type EvmRail = {
+    network : Text;
+    token : Text;
+  };
+
   /// Serializable service registry state for canister upgrades.
   public type StableServiceRegistryState = {
     services : [(Text, ServiceDefinition)];
     jobs : [(Text, Job)];
     serviceCounter : Nat;
     jobCounter : Nat;
+    // Optional for upgrade compatibility: pre-1a stable records have no EVM rails.
+    evmRails : ?[(Text, EvmRail)];
   };
 
   /// Interface for a ZK Groth16 verification canister.
