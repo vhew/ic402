@@ -129,10 +129,10 @@ module {
             };
           };
 
-          // M-2: If all timestamps expired, remove the key to prevent stale accumulation
-          if (existing.size() == 0) {
-            rateLimitLog.delete(key);
-          };
+          // S-11: the previous inline `if existing.size()==0 { delete(key) }` here was
+          // dead code — the unconditional `put` below re-inserts the same key in the same
+          // call, so the map never shrank. Stale principals are now reclaimed by
+          // gcRateLimit(), which the maintenance timer must call alongside gcDailySpend().
 
           if (existing.size() >= limit) {
             return #denied("Rate limit exceeded: " # Nat.toText(limit) # "/min");
@@ -246,6 +246,30 @@ module {
       };
     };
 
+    /// S-11: Reclaim rate-limit entries whose timestamps have all aged out of the
+    /// 60s window. Without this, rateLimitLog grows by one permanent, upgrade-persisted
+    /// entry per distinct (attacker-controllable) principal — an unbounded state DoS
+    /// reachable through unauthenticated settle attempts. Call from the maintenance
+    /// timer alongside gcDailySpend().
+    public func gcRateLimit() {
+      let windowStart = Time.now() - 60_000_000_000;
+      let toRemove = Iter.toArray(
+        Iter.filter<(Text, [Int])>(
+          rateLimitLog.entries(),
+          func((_, timestamps)) {
+            Array.filter<Int>(timestamps, func(t) { t > windowStart }).size() == 0;
+          },
+        )
+      );
+      for ((key, _) in toRemove.vals()) {
+        rateLimitLog.delete(key);
+      };
+    };
+
+    /// Number of distinct principals currently tracked by the rate limiter.
+    /// Exposed for the maintenance timer and observability/tests (see gcRateLimit).
+    public func rateLimitEntryCount() : Nat { rateLimitLog.size() };
+
     // ── Charge checks ──
 
     /// Check whether a one-time charge is permitted (access, rate, tx limit, daily limit).
@@ -321,19 +345,30 @@ module {
 
     // ── Voucher checks ──
 
-    /// Check whether a voucher spend delta is permitted (rate, daily limit).
-    public func checkVoucher(caller : Principal, delta : Nat) : { #ok; #denied : Text } {
+    /// Check whether a voucher spend is permitted (access, rate).
+    /// `_delta` is intentionally unused — see C-9 below.
+    public func checkVoucher(caller : Principal, _delta : Nat) : { #ok; #denied : Text } {
       let policy = getEffectivePolicy(caller);
+
+      // S-21: voucher spends must respect the allow/block list, mirroring
+      // checkCharge/checkSessionOpen. Without this, a caller blocked AFTER a session
+      // was opened could keep draining it via vouchers.
+      switch (checkAccess(policy, caller)) {
+        case (#denied(r)) { return #denied(r) };
+        case (#ok) {};
+      };
 
       switch (checkRateLimit(policy, caller)) {
         case (#denied(r)) { return #denied(r) };
         case (#ok) {};
       };
 
-      switch (checkDailyLimit(policy, caller, delta)) {
-        case (#denied(r)) { return #denied(r) };
-        case (#ok) {};
-      };
+      // C-9: Do NOT re-apply the daily limit here. The session's full deposit was
+      // already reserved against the daily bucket at open (recordSpend); charging each
+      // voucher delta against the same bucket double-counts and makes a funded session
+      // unusable once its deposit approaches maxPerDay. Per-voucher spend is already
+      // bounded by the session's own deposit (consumeVoucher enforces cumulative <=
+      // deposited); the daily limit is enforced once, at open.
 
       #ok;
     };
