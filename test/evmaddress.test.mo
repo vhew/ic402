@@ -185,4 +185,64 @@ suite("EvmAddress", func() {
       assert(found2);
     };
   });
+
+  // ── ecRecover guard / malleability invariants (encodes review invariant #3) ──
+  // These pin behavior that fund safety depends on: out-of-range r/s are rejected,
+  // and signature malleability (s vs N-s) recovers the SAME address. A regression in
+  // the normalization at EvmAddress.mo:50-57 would let forged/duplicate authorizations
+  // through; today no test guards it.
+
+  let secpN : Nat = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+  let zero32 : [Nat8] = Array.tabulate<Nat8>(32, func(_) { 0 });
+  // r/s from the Hardhat #0 signature over the 32-zero message (recovers 0xf39f…2266).
+  let hhR : [Nat8] = [
+    0x00,0xb8,0x82,0x33,0x64,0xc9,0x0e,0xa0,0xd2,0x70,0x0d,0x5a,0xd0,0xfe,0x39,0xd1,
+    0x67,0x78,0xbc,0x07,0xce,0x7d,0xf4,0x77,0x9f,0xf3,0x5e,0x4b,0x26,0x60,0xd0,0x43,
+  ];
+  let hhS : Nat = 0xcb74a002439225d1d518f9f1cf3db005f5e143196543fd5146a34bf63f0b810a;
+
+  test("ecRecover rejects r == 0", func() {
+    assert(EvmAddress.ecRecover(zero32, zero32, EvmUtils.natToBytes(hhS, 32), 0) == null);
+  });
+
+  test("ecRecover rejects s == 0", func() {
+    assert(EvmAddress.ecRecover(zero32, hhR, zero32, 0) == null);
+  });
+
+  test("ecRecover rejects r >= N", func() {
+    assert(EvmAddress.ecRecover(zero32, EvmUtils.natToBytes(secpN, 32), EvmUtils.natToBytes(hhS, 32), 0) == null);
+  });
+
+  test("ecRecover rejects s >= N", func() {
+    assert(EvmAddress.ecRecover(zero32, hhR, EvmUtils.natToBytes(secpN, 32), 0) == null);
+  });
+
+  test("ecRecover: both a signature and its malleation (N - s) recover the signer", func() {
+    // Generate a real signature with herumi over the 32-zero message for Hardhat #0,
+    // then assert the signer address is recoverable from BOTH s and N - s.
+    let curve = EcdsaLib.secp256k1Curve();
+    let sec = EcdsaLib.PrivateKey(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80, curve);
+    let rand : [Nat8] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32];
+    let #ok(sig) = sec.signHashed(zero32.vals(), rand.vals()) else { assert(false); return };
+    let rBytes = EvmUtils.natToBytes(sig.r, 32);
+    let target = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    func recovers(sBytes : [Nat8]) : Bool {
+      for (vv in [0, 1].vals()) {
+        switch (EvmAddress.ecRecover(zero32, rBytes, sBytes, Nat8.fromNat(vv))) {
+          case (?rec) {
+            switch (EvmAddress.fromCompressedPublicKey(rec)) {
+              case (#ok(addr)) { if (addr == target) return true };
+              case (#err(_)) {};
+            };
+          };
+          case (null) {};
+        };
+      };
+      false;
+    };
+
+    assert(recovers(EvmUtils.natToBytes(sig.s, 32)));          // canonical form
+    assert(recovers(EvmUtils.natToBytes(secpN - sig.s, 32)));  // malleated form (N - s)
+  });
 });
