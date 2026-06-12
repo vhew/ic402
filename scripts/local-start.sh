@@ -51,9 +51,25 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
-# ── Deploy canisters ──
+# ── Deploy canisters (patched for local) ──
 echo "→ Deploying canisters..."
+
+# S19: example/main.mo carries MAINNET values by design (ckUSDC principal, mainnet chain
+# IDs / USDC addresses, key_1). Deploy the ckUSDC ledger first to learn its LOCAL principal,
+# then patch the source to local/testnet values BEFORE the example canister is built —
+# otherwise the local deployment is silently wired to mainnet. Mirrors scripts/setup.sh.
+icp deploy ckusdc_ledger -e local
+CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --id-only 2>/dev/null || echo "")
+echo "  ckUSDC ledger (local): ${CKUSDC_ID:-<unknown>}"
+
+# shellcheck source=scripts/patch-local.sh
+source "$ROOT/scripts/patch-local.sh"
+register_patch_trap          # restore main.mo/mops.toml on EXIT/INT/TERM
+patch_for_local "$CKUSDC_ID" # hard-fails (set -e) if a mainnet marker survives the patch
+
 icp deploy -e local
+
+restore_source
 
 echo ""
 echo "=== Local deployment complete ==="
