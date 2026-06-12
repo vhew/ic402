@@ -9,6 +9,8 @@ import { Ic402Client, Ic402Error, probeX402, exampleIdlFactory } from '@ic402/cl
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
+import { validateFetchUrl, safeFetch } from './security.js';
+import { parseAtomicAmount, checkSpend, resolveSecurityConfig, isToolAllowed } from './guards.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,11 +49,27 @@ interface SecurityConfig {
 const DEFAULT_PER_CALL_MAX_ATOMIC = 1_000_000n; // 1.00 USDC
 const DEFAULT_SESSION_MAX_ATOMIC = 5_000_000n; // 5.00 USDC
 
+// S8/S1/S9: operator-only startup switches. By default the LLM-callable `configure`
+// tool CANNOT loosen the security knobs, and the dangerous signing/destructive tools are
+// disabled — an operator opts in explicitly via env, never the model.
+const ALLOW_SECURITY_CHANGES = process.env.IC402_MCP_ALLOW_SECURITY_CHANGES === '1';
+const ALLOW_DANGEROUS_TOOLS = process.env.IC402_MCP_ALLOW_DANGEROUS_TOOLS === '1';
+
+function envAmountOr(name: string, fallback: bigint): bigint {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  try {
+    return parseAtomicAmount(v, name);
+  } catch {
+    return fallback;
+  }
+}
+
 const securityConfig: SecurityConfig = {
-  localDev: false,
-  perCallMaxAtomic: DEFAULT_PER_CALL_MAX_ATOMIC,
-  sessionMaxAtomic: DEFAULT_SESSION_MAX_ATOMIC,
-  autoPayment: false,
+  localDev: process.env.IC402_MCP_LOCAL_DEV === '1',
+  perCallMaxAtomic: envAmountOr('IC402_MCP_PER_CALL_MAX_ATOMIC', DEFAULT_PER_CALL_MAX_ATOMIC),
+  sessionMaxAtomic: envAmountOr('IC402_MCP_SESSION_MAX_ATOMIC', DEFAULT_SESSION_MAX_ATOMIC),
+  autoPayment: process.env.IC402_MCP_AUTO_PAYMENT === '1',
 };
 
 /** Running total of atomic units spent (signed/approved) this server session. */
@@ -63,22 +81,7 @@ let sessionSpentAtomic = 0n;
  * pass commit:true to reserve up-front. Throws on violation.
  */
 function spendGuard(amountAtomic: bigint, opts: { commit?: boolean } = {}): void {
-  if (amountAtomic < 0n) {
-    throw new Error(`Invalid negative amount: ${amountAtomic}`);
-  }
-  if (amountAtomic > securityConfig.perCallMaxAtomic) {
-    throw new Error(
-      `Amount ${amountAtomic} exceeds per-call cap ${securityConfig.perCallMaxAtomic} (atomic units). ` +
-        `Raise perCallMaxAtomic via the "configure" tool if this spend is intended.`,
-    );
-  }
-  if (sessionSpentAtomic + amountAtomic > securityConfig.sessionMaxAtomic) {
-    throw new Error(
-      `Amount ${amountAtomic} would exceed the cumulative session cap ${securityConfig.sessionMaxAtomic} ` +
-        `(already spent ${sessionSpentAtomic} atomic units). ` +
-        `Raise sessionMaxAtomic via the "configure" tool if this spend is intended.`,
-    );
-  }
+  checkSpend(amountAtomic, securityConfig, sessionSpentAtomic);
   if (opts.commit) sessionSpentAtomic += amountAtomic;
 }
 
@@ -139,121 +142,14 @@ function requireConfirmation(args: {
 // SSRF guard — used by every outbound fetch path
 // ---------------------------------------------------------------------------
 
-/** Parse a dotted-quad IPv4 string to a 32-bit unsigned int, or null. */
-function ipv4ToInt(host: string): number | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (!m) return null;
-  const parts = m.slice(1, 5).map((p) => Number(p));
-  if (parts.some((p) => p > 255)) return null;
-  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
-}
+// The SSRF helpers (ipv4ToInt / isPrivateIpv4 / isPrivateIpv6 / validateFetchUrl) and the
+// redirect-safe `safeFetch` now live in ./security.ts so they can be unit-tested in
+// isolation (see test/mcp-security.test.ts). validateFetchUrl/safeFetch take the localDev
+// flag explicitly rather than reading the module global.
 
-/** True if a literal IPv4 falls in a private/loopback/link-local/metadata range. */
-function isPrivateIpv4(host: string): boolean {
-  const ip = ipv4ToInt(host);
-  if (ip === null) return false;
-  const inRange = (cidrBase: string, bits: number) => {
-    const base = ipv4ToInt(cidrBase);
-    if (base === null) return false;
-    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-    return (ip & mask) === (base & mask);
-  };
-  return (
-    inRange('10.0.0.0', 8) ||
-    inRange('172.16.0.0', 12) ||
-    inRange('192.168.0.0', 16) ||
-    inRange('127.0.0.0', 8) ||
-    inRange('169.254.0.0', 16) || // link-local incl. 169.254.169.254 metadata
-    inRange('0.0.0.0', 8)
-  );
-}
-
-/** True if a host string is a loopback/link-local/ULA/metadata IPv6 literal. */
-function isPrivateIpv6(host: string): boolean {
-  // URL hostnames keep IPv6 in brackets; strip them.
-  let h = host;
-  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  h = h.toLowerCase();
-  if (h === '::1' || h === '::') return true;
-  // Unique-local fc00::/7 → first byte 0xfc or 0xfd.
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  // Link-local fe80::/10.
-  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb'))
-    return true;
-  // IPv4-mapped (::ffff:...) — extract the embedded IPv4 and re-check it.
-  const embedded = extractMappedIpv4(h);
-  if (embedded !== null && isPrivateIpv4(embedded)) return true;
-  return false;
-}
-
-/**
- * Extract the embedded IPv4 from an IPv4-mapped IPv6 address (::ffff:…), in BOTH
- * the dotted form (::ffff:169.254.169.254) and the hex-compressed form
- * (::ffff:a9fe:a9fe) that `new URL()` normalizes it to. Without the hex case an
- * attacker reaches e.g. the cloud-metadata endpoint via http://[::ffff:169.254.169.254]/
- * (SSRF), since the URL parser rewrites it to the hex form the dotted regex misses.
- */
-function extractMappedIpv4(h: string): string | null {
-  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (dotted) return dotted[1];
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-  if (hex) {
-    const hi = parseInt(hex[1], 16);
-    const lo = parseInt(hex[2], 16);
-    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-  }
-  return null;
-}
-
-/**
- * Validate an outbound fetch URL against SSRF. Requires https: (or
- * http://localhost|127.0.0.1 when securityConfig.localDev is set) and rejects
- * hosts that are literal/internal private, loopback, link-local, or metadata
- * addresses, plus obvious internal TLDs. Returns the parsed URL or throws.
- */
-function validateFetchUrl(raw: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`Invalid URL: ${raw}`);
-  }
-  const host = parsed.hostname.toLowerCase();
-  const isLocalHost =
-    host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-
-  if (parsed.protocol === 'http:') {
-    if (!(securityConfig.localDev && isLocalHost)) {
-      throw new Error(
-        `Refusing http:// URL (${raw}). Only https:// is allowed; ` +
-          `http://localhost is permitted only when localDev is enabled via "configure".`,
-      );
-    }
-    return parsed;
-  }
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`Refusing non-http(s) URL scheme "${parsed.protocol}" (${raw}).`);
-  }
-
-  // https path — still block internal targets unless explicitly local-dev'd.
-  if (isLocalHost && !securityConfig.localDev) {
-    throw new Error(`Refusing localhost/loopback target (${raw}). Enable localDev to allow it.`);
-  }
-  // Literal IP checks.
-  if (isPrivateIpv4(host) && !securityConfig.localDev) {
-    throw new Error(`Refusing private/loopback/link-local/metadata IPv4 target (${raw}).`);
-  }
-  if (host === '169.254.169.254') {
-    throw new Error(`Refusing cloud metadata endpoint (${raw}).`);
-  }
-  if (isPrivateIpv6(host) && !securityConfig.localDev) {
-    throw new Error(`Refusing private/loopback/link-local IPv6 target (${raw}).`);
-  }
-  // Internal TLDs.
-  if (host.endsWith('.local') || host.endsWith('.internal')) {
-    throw new Error(`Refusing internal TLD host (${raw}).`);
-  }
-  return parsed;
+/** Per-request SSRF options derived from the (mutable) server security config. */
+function ssrfOpts(): { localDev: boolean } {
+  return { localDev: securityConfig.localDev };
 }
 
 /**
@@ -456,23 +352,24 @@ server.tool(
 
     defaultCanisterId = canisterId;
 
-    // Apply security config (caps, localDev, opt-in auto-payment).
-    securityConfig.localDev = localDev;
-    securityConfig.autoPayment = autoPayment;
-    if (perCallMaxAtomic !== undefined) {
-      try {
-        securityConfig.perCallMaxAtomic = BigInt(perCallMaxAtomic);
-      } catch {
-        throw new Error(`Invalid perCallMaxAtomic: ${perCallMaxAtomic}`);
-      }
-    }
-    if (sessionMaxAtomic !== undefined) {
-      try {
-        securityConfig.sessionMaxAtomic = BigInt(sessionMaxAtomic);
-      } catch {
-        throw new Error(`Invalid sessionMaxAtomic: ${sessionMaxAtomic}`);
-      }
-    }
+    // S8: Apply the security knobs ONLY if the operator allowed LLM-driven changes;
+    // otherwise the request's localDev/autoPayment/caps are ignored and the
+    // operator/default config stands. This stops a prompt-injected model from raising
+    // its own caps or enabling localDev/autoPayment via the configure tool.
+    const resolved = resolveSecurityConfig(
+      securityConfig,
+      { localDev, autoPayment, perCallMaxAtomic, sessionMaxAtomic },
+      ALLOW_SECURITY_CHANGES,
+    );
+    securityConfig.localDev = resolved.config.localDev;
+    securityConfig.autoPayment = resolved.config.autoPayment;
+    securityConfig.perCallMaxAtomic = resolved.config.perCallMaxAtomic;
+    securityConfig.sessionMaxAtomic = resolved.config.sessionMaxAtomic;
+    const ignoredNote =
+      resolved.ignored.length > 0
+        ? ` IGNORED security params ${JSON.stringify(resolved.ignored)} — operator did not enable ` +
+          `LLM security changes (set IC402_MCP_ALLOW_SECURITY_CHANGES=1 to allow).`
+        : '';
 
     client = new Ic402Client({
       canisterId,
@@ -493,7 +390,8 @@ server.tool(
           text:
             `Connected to ${canisterId} at ${host} (network: ${network}, identity: ${identity ? identity.getPrincipal().toText() : 'anonymous'}). ` +
             `autoPayment=${securityConfig.autoPayment}, localDev=${securityConfig.localDev}, ` +
-            `perCallMaxAtomic=${securityConfig.perCallMaxAtomic}, sessionMaxAtomic=${securityConfig.sessionMaxAtomic}.`,
+            `perCallMaxAtomic=${securityConfig.perCallMaxAtomic}, sessionMaxAtomic=${securityConfig.sessionMaxAtomic}.` +
+            ignoredNote,
         },
       ],
     };
@@ -626,9 +524,9 @@ server.tool(
       .object({
         from: z.string(),
         to: z.string(),
-        value: z.number(),
-        validAfter: z.number(),
-        validBefore: z.number(),
+        value: z.union([z.string(), z.number()]),
+        validAfter: z.union([z.string(), z.number()]),
+        validBefore: z.union([z.string(), z.number()]),
         nonce: z.array(z.number()),
         v: z.number(),
         r: z.array(z.number()),
@@ -689,7 +587,16 @@ server.tool(
     if (evmSender) prefs.evmSender = evmSender;
     if (evmToken) prefs.evmToken = evmToken;
     if (evmRecipient) prefs.evmRecipient = evmRecipient;
-    if (authorization) prefs.authorization = authorization;
+    if (authorization) {
+      // C5: normalize the EIP-3009 numeric fields to bigint, REJECTING JS numbers that
+      // would have already lost precision (a uint256 must be passed as a decimal string).
+      prefs.authorization = {
+        ...authorization,
+        value: parseAtomicAmount(authorization.value, 'authorization.value'),
+        validAfter: parseAtomicAmount(authorization.validAfter, 'authorization.validAfter'),
+        validBefore: parseAtomicAmount(authorization.validBefore, 'authorization.validBefore'),
+      };
+    }
 
     // Generate Ed25519 keypair for voucher signing
     const voucherIdentity = Ed25519KeyIdentity.generate();
@@ -894,9 +801,9 @@ server.tool(
         typeof del.inline === 'string' ? Buffer.from(del.inline, 'hex') : Buffer.from(del.inline);
       resultText = buf.toString('utf-8');
     } else if ('httpUrl' in del) {
-      // H11: SSRF guard — httpUrl comes from an untrusted ContentDelivery payload.
-      const target = validateFetchUrl(String(del.httpUrl));
-      const resp = await globalThis.fetch(target.toString());
+      // H11/S2: SSRF guard — httpUrl comes from an untrusted ContentDelivery payload.
+      // safeFetch validates the URL and re-validates every redirect hop.
+      const resp = await safeFetch(String(del.httpUrl), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
       resultText = await resp.text();
     } else if ('assetCanister' in del) {
@@ -907,8 +814,7 @@ server.tool(
       // Treat the supplied path as a path only; URL() resolves/normalizes it
       // and cannot change the origin we constructed above.
       url.pathname = String(del.assetCanister.path ?? '/');
-      validateFetchUrl(url.toString());
-      const resp = await globalThis.fetch(url.toString());
+      const resp = await safeFetch(url.toString(), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`Asset fetch ${resp.status}: ${resp.statusText}`);
       resultText = await resp.text();
     } else if ('canisterQuery' in del) {
@@ -1014,7 +920,7 @@ server.tool(
     // C2: SSRF guard — the URL is attacker-influenceable. Validate before any fetch.
     let target: URL;
     try {
-      target = validateFetchUrl(url);
+      target = validateFetchUrl(url, ssrfOpts());
     } catch (e) {
       return errorResult(e);
     }
@@ -1026,7 +932,19 @@ server.tool(
       const timeout = setTimeout(() => controller.abort(), 15_000);
       let probeResult;
       try {
-        probeResult = await probeX402(safeUrl, chainId, { signal: controller.signal });
+        probeResult = await probeX402(
+          safeUrl,
+          chainId,
+          { signal: controller.signal },
+          {
+            // S2: re-validate every redirect hop so an allowlisted origin cannot 30x us to
+            // an internal/metadata target during the x402 probe.
+            validateRedirect: (u) => {
+              validateFetchUrl(u, ssrfOpts());
+            },
+            maxRedirects: 5,
+          },
+        );
       } finally {
         clearTimeout(timeout);
       }
@@ -1087,10 +1005,14 @@ server.tool(
       const retryTimeout = setTimeout(() => retryController.abort(), 15_000);
       let paidResponse: Response;
       try {
-        paidResponse = await globalThis.fetch(safeUrl, {
-          headers: { 'X-Payment': signed.header, 'Payment-Signature': signed.header },
-          signal: retryController.signal,
-        });
+        paidResponse = await safeFetch(
+          safeUrl,
+          {
+            headers: { 'X-Payment': signed.header, 'Payment-Signature': signed.header },
+            signal: retryController.signal,
+          },
+          ssrfOpts(),
+        );
       } finally {
         clearTimeout(retryTimeout);
       }
@@ -1153,7 +1075,7 @@ server.tool(
     // and require explicit confirmation. No USDC amount, so no spend cap.
     if (rpcUrl !== undefined) {
       try {
-        validateFetchUrl(rpcUrl);
+        validateFetchUrl(rpcUrl, ssrfOpts());
       } catch (e) {
         return errorResult(e);
       }
@@ -1492,6 +1414,18 @@ function adminTool(
       confirm: z.boolean().default(false).describe('Authorize this state-changing/signing action.'),
     },
     async ({ args, canisterId, confirm }) => {
+      // S1/S9: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
+      // delete) unless the operator enabled them at startup — they bypass/ignore the
+      // spend caps, so a prompt-injected LLM must not be able to reach them.
+      if (!isToolAllowed(toolName, ALLOW_DANGEROUS_TOOLS)) {
+        return errorResult(
+          new Error(
+            `Tool "${toolName}" is disabled: it is a dangerous primitive (raw EIP-712 signing / ` +
+              `destructive content deletion) that bypasses or ignores the spend caps. An operator ` +
+              `must enable it explicitly with IC402_MCP_ALLOW_DANGEROUS_TOOLS=1.`,
+          ),
+        );
+      }
       const cid = canisterId ?? defaultCanisterId;
       if (!cid) throw new Error('No canister ID.');
       requireAgent();
