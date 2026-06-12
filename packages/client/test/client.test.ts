@@ -83,6 +83,69 @@ describe('Ic402Client', () => {
     });
   });
 
+  describe('SessionHandle.call() accounting (C8)', () => {
+    // Minimal mock-actor pieces to obtain a real SessionHandle from openSession().
+    const intent = {
+      suggestedDeposit: 10_000n,
+      costPerCall: [500n],
+      minDeposit: [],
+      network: 'icp:1',
+      token: 'tok',
+      recipient: 'r',
+      expiry: 0n,
+      description: [],
+    };
+    const sessionBoilerplate = {
+      requestSession: async () => intent,
+      openSession: async () => ({ ok: { id: 'sess-1', deposited: 10_000n } }),
+    };
+
+    it('does NOT advance consumed/sequence when the canister call throws (transient failure)', async () => {
+      const mockActor = {
+        ...sessionBoilerplate,
+        useService: async () => {
+          throw new Error('transient RPC failure');
+        },
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
+      const handle = await client.openSession();
+      expect(handle.consumed).toBe(0n);
+
+      await expect(handle.call('useService', [])).rejects.toThrow('transient RPC failure');
+
+      // The session must remain usable: a desynced cumulative/sequence here would brick
+      // every subsequent voucher.
+      expect(handle.consumed).toBe(0n);
+      expect(handle.remaining).toBe(10_000n);
+    });
+
+    it('does NOT advance consumed when the canister returns an error variant', async () => {
+      const mockActor = {
+        ...sessionBoilerplate,
+        useService: async () => ({ error: 'Budget exhausted' }),
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
+      const handle = await client.openSession();
+
+      await expect(handle.call('useService', [])).rejects.toThrow('Budget exhausted');
+      expect(handle.consumed).toBe(0n);
+    });
+
+    it('DOES advance consumed after a successful call', async () => {
+      const mockActor = {
+        ...sessionBoilerplate,
+        useService: async () => ({ ok: 'served' }),
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
+      const handle = await client.openSession();
+
+      const r = await handle.call('useService', []);
+      expect(r).toBe('served');
+      expect(handle.consumed).toBe(500n);
+      expect(handle.remaining).toBe(9_500n);
+    });
+  });
+
   describe('fetchContent', () => {
     it('inline delivery returns blob', async () => {
       const client = new Ic402Client(makeConfig());

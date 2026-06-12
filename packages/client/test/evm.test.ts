@@ -1,5 +1,59 @@
-import { describe, it, expect } from 'vitest';
-import { findPaymentOption, Ic402Error } from '../src/evm.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { findPaymentOption, Ic402Error, probeX402 } from '../src/evm.js';
+
+describe('probeX402 redirect re-validation (S2)', () => {
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('BLOCKS a redirect to a private host (validateRedirect throws) and never fetches it', async () => {
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (u: string | URL | Request) => {
+      seen.push(String(u));
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://169.254.169.254/latest/' },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const block = (u: string) => {
+      if (u.includes('169.254')) throw new Error('blocked: cloud metadata');
+    };
+    const res = await probeX402('https://safe.example/x', 8453, undefined, {
+      validateRedirect: block,
+    });
+
+    expect(res.status).toBe('error');
+    // The validated origin was fetched once; the redirect target never was.
+    expect(seen).toEqual(['https://safe.example/x']);
+  });
+
+  it('follows a re-validated redirect to the final 402 and returns the payment option', async () => {
+    const paymentBody = JSON.stringify({
+      accepts: [{ network: 'eip155:8453', payTo: '0xRecipient', amount: '100', asset: '0xUSDC' }],
+    });
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call++;
+      if (call === 1)
+        return new Response(null, {
+          status: 301,
+          headers: { location: 'https://safe.example/final' },
+        });
+      return new Response(paymentBody, { status: 402 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const res = await probeX402('https://safe.example/start', 8453, undefined, {
+      validateRedirect: () => {}, // allow
+    });
+    expect(res.status).toBe('payment_required');
+    expect(call).toBe(2);
+  });
+});
 
 describe('findPaymentOption', () => {
   it('finds option by CAIP-2 network', () => {

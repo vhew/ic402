@@ -260,14 +260,52 @@ export type ProbeResult =
  * Probe a URL for x402 payment requirements.
  * Returns the payment option if 402, or the response if free/error.
  */
+export interface ProbeOptions {
+  /**
+   * Re-validate each redirect target before following it (SSRF). When provided, redirects
+   * are followed MANUALLY and every Location is passed to this callback, which must THROW
+   * to block an unsafe target. When omitted, redirects are followed normally (the caller is
+   * trusted). The ic402 MCP passes its SSRF validator here so an allowlisted origin cannot
+   * 30x the canister-controller host to an internal/metadata address (audit S2).
+   */
+  validateRedirect?: (url: string) => void;
+  /** Max redirect hops to follow when validateRedirect is set. Default 5. */
+  maxRedirects?: number;
+}
+
+async function fetchWithValidatedRedirects(
+  url: string,
+  init: RequestInit | undefined,
+  validateRedirect: (url: string) => void,
+  maxRedirects: number,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const resp = await fetch(current, { ...init, redirect: 'manual' });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location) return resp;
+      const next = new URL(location, current).toString();
+      validateRedirect(next); // throws to block an unsafe redirect target
+      current = next;
+      continue;
+    }
+    return resp;
+  }
+  throw new Error(`Too many redirects (> ${maxRedirects}) while probing ${url}`);
+}
+
 export async function probeX402(
   url: string,
   chainId: number,
   init?: RequestInit,
+  opts?: ProbeOptions,
 ): Promise<ProbeResult> {
   let response: Response;
   try {
-    response = await fetch(url, { ...init, redirect: 'follow' });
+    response = opts?.validateRedirect
+      ? await fetchWithValidatedRedirects(url, init, opts.validateRedirect, opts.maxRedirects ?? 5)
+      : await fetch(url, { ...init, redirect: 'follow' });
   } catch (e) {
     return { status: 'error', error: classifyNetworkError(e) };
   }

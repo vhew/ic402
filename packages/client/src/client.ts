@@ -316,30 +316,38 @@ export class Ic402Client {
             : typeof rawCost === 'bigint'
               ? rawCost
               : 1n;
-        consumed += cost;
-        sequence += 1n;
+        // C8: compute the next cumulative/sequence locally and COMMIT them only after the
+        // canister accepts the voucher. Previously these were incremented before the await,
+        // so a transient failure (throw) or an error variant left consumed/sequence advanced,
+        // desyncing every subsequent voucher (cumulative too high, sequence gap) and bricking
+        // the session — the canister rejects all further vouchers as #invalidSequence.
+        const nextConsumed = consumed + cost;
+        const nextSequence = sequence + 1n;
 
         // Sign voucher
         let signature: Uint8Array = new Uint8Array(64);
         if (signer) {
           signature = new Uint8Array(
-            await signVoucher(signer, canisterIdText, state.id, consumed, sequence),
+            await signVoucher(signer, canisterIdText, state.id, nextConsumed, nextSequence),
           );
         }
 
         const voucher: Voucher = {
           sessionId: state.id,
-          cumulativeAmount: consumed,
-          sequence,
+          cumulativeAmount: nextConsumed,
+          sequence: nextSequence,
           signature,
         };
 
         const callResult = await actor[method](voucher, ...callArgs);
-        if (callResult && typeof callResult === 'object' && 'ok' in callResult) {
-          return callResult.ok;
-        }
         if (callResult && typeof callResult === 'object' && 'error' in callResult) {
           throw new Error(callResult.error);
+        }
+        // Success — advance local accounting only now.
+        consumed = nextConsumed;
+        sequence = nextSequence;
+        if (callResult && typeof callResult === 'object' && 'ok' in callResult) {
+          return callResult.ok;
         }
         return callResult;
       },
@@ -355,29 +363,33 @@ export class Ic402Client {
             : typeof rawCost === 'bigint'
               ? rawCost
               : 1n;
-        consumed += cost;
-        sequence += 1n;
+        // C8: commit cumulative/sequence only after the canister accepts the voucher
+        // (see call() above) so a failed content fetch does not brick the session.
+        const nextConsumed = consumed + cost;
+        const nextSequence = sequence + 1n;
 
         let sig: Uint8Array = new Uint8Array(64);
         if (signer) {
           sig = new Uint8Array(
-            await signVoucher(signer, canisterIdText, state.id, consumed, sequence),
+            await signVoucher(signer, canisterIdText, state.id, nextConsumed, nextSequence),
           );
         }
 
         const v: Voucher = {
           sessionId: state.id,
-          cumulativeAmount: consumed,
-          sequence,
+          cumulativeAmount: nextConsumed,
+          sequence: nextSequence,
           signature: sig,
         };
 
         const callResult = await actor[method](v, ...callArgs);
-        if (callResult && typeof callResult === 'object' && 'ok' in callResult) {
-          return callResult.ok as ContentDelivery;
-        }
         if (callResult && typeof callResult === 'object' && 'error' in callResult) {
           throw new Error(callResult.error as string);
+        }
+        consumed = nextConsumed;
+        sequence = nextSequence;
+        if (callResult && typeof callResult === 'object' && 'ok' in callResult) {
+          return callResult.ok as ContentDelivery;
         }
         return callResult as ContentDelivery;
       },
