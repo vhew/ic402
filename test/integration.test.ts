@@ -281,6 +281,21 @@ describe('ic402 integration', () => {
       expect(reqs[0].amount).toBe(500n);
     });
 
+    it('quoteServiceRequest returns the price as a read-only query (C4)', async () => {
+      if (skip) return;
+      const result = await actor.quoteServiceRequest('svc-1');
+      expect(result).toHaveProperty('ok');
+      expect(result.ok.amount).toBe(500n);
+      expect(result.ok.enabled).toBe(true);
+      expect(result.ok.pricingKind).toBe('Exact');
+    });
+
+    it('quoteServiceRequest errors for a missing service', async () => {
+      if (skip) return;
+      const result = await actor.quoteServiceRequest('no-such-service');
+      expect(result).toHaveProperty('err');
+    });
+
     it('claim nonexistent job fails', async () => {
       if (skip) return;
       const result = await actor.claimJob('nonexistent-job');

@@ -586,6 +586,26 @@ persistent actor KnowledgeBase {
     registry.listServices(true);
   };
 
+  // C4: read-only price quote for a service. Lets a client (e.g. the MCP) discover the amount
+  // to enforce its spend cap WITHOUT invoking the state-changing submitServiceRequest probe
+  // (which mints a nonce). A query — no state change, no inter-canister calls.
+  public query func quoteServiceRequest(serviceId : Text) : async {
+    #ok : { amount : Nat; pricingKind : Text; enabled : Bool };
+    #err : Text;
+  } {
+    switch (registry.getService(serviceId)) {
+      case (null) { #err("Service not found") };
+      case (?svc) {
+        let (amount, kind) = switch (svc.pricing) {
+          case (#Exact(p)) { (p, "Exact") };
+          case (#Upto(p)) { (p, "Upto") };
+          case (#Session) { (0, "Session") };
+        };
+        #ok({ amount; pricingKind = kind; enabled = svc.enabled });
+      };
+    };
+  };
+
   // Paid: submit a service request (charge per request, then create job)
   public shared(msg) func submitServiceRequest(
     serviceId : Text,

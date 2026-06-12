@@ -375,6 +375,17 @@ export const exampleIdlFactory = () =>
     enableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
     disableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
     listServices: IDL.Func([], [IDL.Vec(ServiceDef)], ['query']),
+    // C4: read-only price quote (no nonce minted) so callers can cap-check before paying.
+    quoteServiceRequest: IDL.Func(
+      [IDL.Text],
+      [
+        IDL.Variant({
+          ok: IDL.Record({ amount: IDL.Nat, pricingKind: IDL.Text, enabled: IDL.Bool }),
+          err: IDL.Text,
+        }),
+      ],
+      ['query'],
+    ),
     submitServiceRequest: IDL.Func(
       [IDL.Text, IDL.Vec(IDL.Nat8), IDL.Opt(PaymentSignature)],
       [

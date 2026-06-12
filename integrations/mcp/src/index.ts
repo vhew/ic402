@@ -1146,66 +1146,60 @@ server.tool(
     const encoded = new TextEncoder().encode(params);
 
     try {
-      // H12: dry-run with no payment signature to discover whether payment is
-      // required and, if so, how much / to whom — BEFORE auto-paying.
+      // C4: discover the price via a READ-ONLY query (no nonce minted), instead of the prior
+      // state-changing submitServiceRequest "dry-run" probe. The client's submitServiceRequest
+      // still does the single probe+pay; this removes the redundant extra update call.
       const actor = actorFactory(cid);
-      const probe = (await actor.submitServiceRequest(
-        serviceId,
-        Array.from(encoded),
-        [],
-      )) as Record<string, unknown>;
-
-      // Free / already-accepted path: no payment needed.
-      if (probe && typeof probe === 'object' && 'ok' in probe) {
-        const ok = probe.ok as { jobId: string };
-        return textResult({ status: 'ok', jobId: ok.jobId });
+      const quote = (await actor.quoteServiceRequest(serviceId)) as Record<string, unknown>;
+      if (quote && typeof quote === 'object' && 'err' in quote) {
+        return errorResult(new Ic402Error('unknown', String(quote.err)));
       }
-      if (probe && typeof probe === 'object' && 'error' in probe) {
-        return errorResult(new Ic402Error('sign_failed', String(probe.error)));
+      const q = (quote as { ok?: { amount: bigint; pricingKind: string; enabled: boolean } }).ok;
+      if (!q) {
+        return errorResult(
+          new Ic402Error('unknown', `Unexpected quote: ${JSON.stringify(serialize(quote))}`),
+        );
       }
+      if (!q.enabled) {
+        return errorResult(new Ic402Error('unknown', `Service "${serviceId}" is disabled`));
+      }
+      const amountAtomic = BigInt(String(q.amount));
 
-      if (probe && typeof probe === 'object' && 'paymentRequired' in probe) {
-        // H12: auto-payment must be opt-in.
-        if (!securityConfig.autoPayment) {
-          return textResult({
-            status: 'payment_required',
-            serviceId,
-            requirements: serialize(probe.paymentRequired),
-            instruction:
-              'This service requires payment. Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
-          });
-        }
-
-        const reqs = probe.paymentRequired as Array<Record<string, unknown>>;
-        const req = Array.isArray(reqs) && reqs.length > 0 ? reqs[0] : undefined;
-        const amountAtomic = req?.amount !== undefined ? BigInt(String(req.amount)) : 0n;
-        const recipient = req?.recipient !== undefined ? String(req.recipient) : cid;
-        const asset = req?.token !== undefined ? String(req.token) : undefined;
-
-        // H12 + H13: cap + confirmation before any auto-approval/payment.
-        const gate = requireConfirmation({
-          action: 'submit_request',
-          confirm,
-          amountAtomic,
-          recipient,
-          asset,
-          note: `Auto-pay for service "${serviceId}" on canister ${cid}`,
-        });
-        if (gate) return gate;
-
-        // Confirmed and within caps — let the client perform approve + retry.
+      // Free / session-billed services quote amount 0 — submit directly (no payment).
+      if (amountAtomic === 0n) {
         const result = await c.submitServiceRequest(serviceId, encoded);
-        commitSpend(amountAtomic);
+        return textResult({ status: 'ok', jobId: result.jobId });
+      }
+
+      // Paid: H12 auto-payment must be opt-in.
+      if (!securityConfig.autoPayment) {
         return textResult({
-          status: 'ok',
-          jobId: result.jobId,
-          paidAmount: amountAtomic.toString(),
+          status: 'payment_required',
+          serviceId,
+          amount: amountAtomic.toString(),
+          instruction:
+            'This service requires payment. Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
         });
       }
 
-      return errorResult(
-        new Ic402Error('unknown', `Unexpected response: ${JSON.stringify(serialize(probe))}`),
-      );
+      // H12 + H13: cap + confirmation before any auto-approval/payment.
+      const gate = requireConfirmation({
+        action: 'submit_request',
+        confirm,
+        amountAtomic,
+        recipient: cid,
+        note: `Auto-pay ${amountAtomic} for service "${serviceId}" on canister ${cid}`,
+      });
+      if (gate) return gate;
+
+      // Confirmed and within caps — the client performs the single probe + approve + pay.
+      const result = await c.submitServiceRequest(serviceId, encoded);
+      commitSpend(amountAtomic);
+      return textResult({
+        status: 'ok',
+        jobId: result.jobId,
+        paidAmount: amountAtomic.toString(),
+      });
     } catch (e) {
       return errorResult(e);
     }
