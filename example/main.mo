@@ -34,6 +34,11 @@ persistent actor KnowledgeBase {
 
   // The ckUSDC ledger principal (mainnet). Deploy scripts patch for testnet.
   let CKUSDC = "xevnm-gaaaa-aaaar-qafnq-cai";
+  // A1: ckUSDC ICRC-1 transfer fee (atomic units). Buyers of marketplace services pay
+  // `price + CKUSDC_FEE` so the canister can cover the outbound settle transfer to the operator
+  // (the ledger deducts amount+fee). NOTE: at 10_000 the fee dwarfs sub-cent service prices —
+  // the quote shows it so the (uneconomical) breakdown is visible.
+  let CKUSDC_FEE : Nat = 10_000;
 
   transient let gate = Ic402.Gateway(
     {
@@ -129,6 +134,7 @@ persistent actor KnowledgeBase {
     {
       recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
       tokens = [{ ledger = Principal.fromText(CKUSDC); symbol = "ckUSDC"; decimals = 6 : Nat8 }];
+      ledgerFee = CKUSDC_FEE;
     },
   );
   registry.startTimers<system>();
@@ -283,8 +289,9 @@ persistent actor KnowledgeBase {
                 // #Session is billed against an existing session deposit, not a
                 // per-request 402 charge — requireAll(0) would trap.
                 case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
-                case (#Exact(p)) { return Http.http402(gate.requireAll(p)) };
-                case (#Upto(p)) { return Http.http402(gate.requireAll(p)) };
+                // A1: charge price + ledger fee so the canister can cover the outbound settle.
+                case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE)) };
+                case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE)) };
               };
             };
           };
@@ -589,8 +596,11 @@ persistent actor KnowledgeBase {
   // C4: read-only price quote for a service. Lets a client (e.g. the MCP) discover the amount
   // to enforce its spend cap WITHOUT invoking the state-changing submitServiceRequest probe
   // (which mints a nonce). A query — no state change, no inter-canister calls.
+  // A1: the quote is the transparency surface for the ledger fee. `amount` is the service
+  // price; `fee` is the ckUSDC transfer fee added on top; `total` (= amount + fee) is what the
+  // buyer must actually pay. #Session services bill against a deposit, so no per-request fee.
   public query func quoteServiceRequest(serviceId : Text) : async {
-    #ok : { amount : Nat; pricingKind : Text; enabled : Bool };
+    #ok : { amount : Nat; fee : Nat; total : Nat; pricingKind : Text; enabled : Bool };
     #err : Text;
   } {
     switch (registry.getService(serviceId)) {
@@ -601,7 +611,8 @@ persistent actor KnowledgeBase {
           case (#Upto(p)) { (p, "Upto") };
           case (#Session) { (0, "Session") };
         };
-        #ok({ amount; pricingKind = kind; enabled = svc.enabled });
+        let fee = switch (svc.pricing) { case (#Session) { 0 }; case (_) { CKUSDC_FEE } };
+        #ok({ amount; fee; total = amount + fee; pricingKind = kind; enabled = svc.enabled });
       };
     };
   };
@@ -630,7 +641,8 @@ persistent actor KnowledgeBase {
       // against requireAll(0), which traps.
       case (null) {
         if (amount == 0) { #error("Service uses session billing — open a session instead") } else {
-          #paymentRequired(gate.requireAll(amount));
+          // A1: quote price + ledger fee (matches quoteServiceRequest.total).
+          #paymentRequired(gate.requireAll(amount + CKUSDC_FEE));
         };
       };
       case (?sig) {

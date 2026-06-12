@@ -380,7 +380,14 @@ export const exampleIdlFactory = () =>
       [IDL.Text],
       [
         IDL.Variant({
-          ok: IDL.Record({ amount: IDL.Nat, pricingKind: IDL.Text, enabled: IDL.Bool }),
+          // A1: amount = service price, fee = ckUSDC ledger fee, total = amount + fee (what the buyer pays).
+          ok: IDL.Record({
+            amount: IDL.Nat,
+            fee: IDL.Nat,
+            total: IDL.Nat,
+            pricingKind: IDL.Text,
+            enabled: IDL.Bool,
+          }),
           err: IDL.Text,
         }),
       ],

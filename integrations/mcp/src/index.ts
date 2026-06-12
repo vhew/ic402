@@ -1152,7 +1152,17 @@ server.tool(
       if (quote && typeof quote === 'object' && 'err' in quote) {
         return errorResult(new Ic402Error('unknown', String(quote.err)));
       }
-      const q = (quote as { ok?: { amount: bigint; pricingKind: string; enabled: boolean } }).ok;
+      const q = (
+        quote as {
+          ok?: {
+            amount: bigint;
+            fee: bigint;
+            total: bigint;
+            pricingKind: string;
+            enabled: boolean;
+          };
+        }
+      ).ok;
       if (!q) {
         return errorResult(
           new Ic402Error('unknown', `Unexpected quote: ${JSON.stringify(serialize(quote))}`),
@@ -1161,9 +1171,13 @@ server.tool(
       if (!q.enabled) {
         return errorResult(new Ic402Error('unknown', `Service "${serviceId}" is disabled`));
       }
-      const amountAtomic = BigInt(String(q.amount));
+      // A1: the buyer actually pays price + ledger fee. Cap-check and commit against the TOTAL
+      // (what really moves), not the bare service price, so the spend guard isn't under-counting.
+      const price = BigInt(String(q.amount));
+      const fee = BigInt(String(q.fee ?? 0n));
+      const amountAtomic = BigInt(String(q.total ?? price + fee));
 
-      // Free / session-billed services quote amount 0 — submit directly (no payment).
+      // Free / session-billed services quote total 0 — submit directly (no payment).
       if (amountAtomic === 0n) {
         const result = await c.submitServiceRequest(serviceId, encoded);
         return textResult({ status: 'ok', jobId: result.jobId });
@@ -1175,8 +1189,10 @@ server.tool(
           status: 'payment_required',
           serviceId,
           amount: amountAtomic.toString(),
+          price: price.toString(),
+          fee: fee.toString(),
           instruction:
-            'This service requires payment. Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
+            'This service requires payment (price + ledger fee). Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
         });
       }
 
@@ -1186,7 +1202,7 @@ server.tool(
         confirm,
         amountAtomic,
         recipient: cid,
-        note: `Auto-pay ${amountAtomic} for service "${serviceId}" on canister ${cid}`,
+        note: `Auto-pay ${amountAtomic} (price ${price} + ledger fee ${fee}) for service "${serviceId}" on canister ${cid}`,
       });
       if (gate) return gate;
 

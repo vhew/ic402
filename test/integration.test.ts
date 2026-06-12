@@ -278,14 +278,17 @@ describe('ic402 integration', () => {
       expect(result).toHaveProperty('paymentRequired');
       const reqs = result.paymentRequired;
       expect(Array.isArray(reqs)).toBe(true);
-      expect(reqs[0].amount).toBe(500n);
+      // A1: the buyer is charged price (500) + ledger fee (10_000) so the canister can settle.
+      expect(reqs[0].amount).toBe(10_500n);
     });
 
-    it('quoteServiceRequest returns the price as a read-only query (C4)', async () => {
+    it('quoteServiceRequest returns price + fee + total as a read-only query (C4/A1)', async () => {
       if (skip) return;
       const result = await actor.quoteServiceRequest('svc-1');
       expect(result).toHaveProperty('ok');
-      expect(result.ok.amount).toBe(500n);
+      expect(result.ok.amount).toBe(500n); // service price
+      expect(result.ok.fee).toBe(10_000n); // ckUSDC ledger fee
+      expect(result.ok.total).toBe(10_500n); // what the buyer actually pays
       expect(result.ok.enabled).toBe(true);
       expect(result.ok.pricingKind).toBe('Exact');
     });
@@ -312,6 +315,62 @@ describe('ic402 integration', () => {
       if (skip) return;
       const result = await actor.getJobResult('nonexistent-job');
       expect(result).toEqual([]);
+    });
+
+    // A1: the full marketplace lifecycle that the prior suite never exercised — the exact path
+    // the ledger-fee bug broke. Buyer pays price + fee, operator fulfils, and the job must reach
+    // #Settled, which only happens if settleToOperator actually paid out of the pool (a settle
+    // that was short by one fee would roll the job back to #Verified instead).
+    it('settles a service job to the operator (buyer pays price + fee)', async () => {
+      if (skip) return;
+      const params = new TextEncoder().encode('settle-flow params');
+
+      // 1. Probe for the payment requirement (mints a nonce). svc-1 is Exact 500 + AutoSettle,
+      //    with the test identity as its operator — so the same identity is buyer and operator.
+      const probe = await actor.submitServiceRequest('svc-1', params, []);
+      expect(probe).toHaveProperty('paymentRequired');
+      const icpReq = probe.paymentRequired.find((r: { network: string }) => r.network === 'icp:1');
+      expect(icpReq).toBeDefined();
+      expect(BigInt(icpReq.amount)).toBe(10_500n); // 500 price + 10_000 fee
+
+      // 2. Approve the example canister to pull the charge (+ buffer for the transfer_from fee).
+      const approve = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: BigInt(icpReq.amount) + 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approve).toHaveProperty('Ok');
+
+      // 3. Pay → a job is created.
+      const caller = await agent.getPrincipal();
+      const paymentSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const submitted = await actor.submitServiceRequest('svc-1', params, [paymentSig]);
+      expect(submitted).toHaveProperty('ok');
+      const jobId = submitted.ok.jobId;
+
+      // 4. Operator claims and submits a result → AutoSettle runs settleJob → pays the operator.
+      const claimed = await actor.claimJob(jobId);
+      expect(claimed).toHaveProperty('ok');
+      const done = await actor.submitJobResult(jobId, new TextEncoder().encode('result'), [], []);
+      expect(done).toHaveProperty('ok');
+
+      // 5. Settle succeeded ⇒ terminal status is Settled (not rolled back to Verified).
+      const status = await actor.getJobStatus(jobId);
+      expect(status.length).toBe(1);
+      expect(status[0]).toHaveProperty('Settled');
     });
   });
 

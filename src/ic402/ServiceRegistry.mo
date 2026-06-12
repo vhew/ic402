@@ -35,6 +35,10 @@ module {
   public type ServiceConfig = {
     recipient : Types.Account;
     tokens : [Types.TokenConfig];
+    // A1: the ICP ledger transfer fee (e.g. ckUSDC = 10_000). Buyers pay `price + ledgerFee`
+    // so the pool can cover the outbound settle/refund transfer (the ledger deducts amount+fee).
+    // Without collecting it, every settle is short by one fee and fails (the audit fee finding).
+    ledgerFee : Nat;
   };
 
   public class ServiceRegistry(
@@ -101,29 +105,30 @@ module {
     /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
     /// address on-chain — fixing the settle half of the cross-rail flaw (C3). Returns true on
     /// success (false if no operator / no payout address / no transfer hook / transfer fails).
-    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async Bool {
+    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           let payout = switch (job.operator) { case (?op) { operatorEvmPayout.get(op) }; case (null) { null } };
           switch (evmTransfer, parseChainId(rail.network), payout) {
             case (?transfer, ?chainId, ?addr) {
               switch (await transfer(chainId, rail.token, addr, cost)) {
-                case (#ok(_)) { true };
-                case (#err(_)) { false };
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err("EVM settle to operator: " # e) };
               };
             };
-            case (_, _, _) { false };
+            case (?_, _, null) { #err("operator has no registered EVM payout address (call setEvmPayout)") };
+            case (_, _, _) { #err("EVM settle unavailable (no transfer hook / unparseable chain)") };
           };
         };
         case (null) {
           switch (job.operator) {
             case (?op) {
               switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
-                case (#ok(_)) { true };
-                case (#err(_)) { false };
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err(e) };
               };
             };
-            case (null) { false };
+            case (null) { #err("job has no assigned operator") };
           };
         };
       };
@@ -133,28 +138,28 @@ module {
     /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
     /// injected hook). Returns true on success. Fixes the EVM-buyer refund stranding (S14)
     /// and the refund half of the cross-rail flaw (C3).
-    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async Bool {
+    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           switch (evmTransfer, parseChainId(rail.network)) {
             case (?transfer, ?chainId) {
               switch (await transfer(chainId, rail.token, job.buyer, amount)) {
-                case (#ok(_)) { true };
-                case (#err(_)) { false };
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err("EVM refund: " # e) };
               };
             };
-            case (_, _) { false }; // no EVM transfer wired, or unparseable network
+            case (_, _) { #err("EVM refund unavailable (no transfer hook / unparseable chain)") };
           };
         };
         case (null) {
           switch (buyerIcpAccount(job.buyer)) {
             case (?acct) {
               switch (await payFromMainAccount(acct, amount)) {
-                case (#ok(_)) { true };
-                case (#err(_)) { false };
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err(e) };
               };
             };
-            case (null) { false };
+            case (null) { #err("buyer is not ICP-refundable and has no EVM rail") };
           };
         };
       };
@@ -300,14 +305,18 @@ module {
       };
       if (not svc.enabled) return #err("Service is disabled");
 
-      // Validate amount against pricing
+      // Validate amount against pricing. A1: the buyer must pay `price + ledgerFee` so the pool
+      // can cover the outbound settle transfer; otherwise every settle is short by one fee.
       switch (svc.pricing) {
         case (#Exact(price)) {
-          if (receipt.amount < price) return #err("Insufficient payment: need " # Nat.toText(price) # ", got " # Nat.toText(receipt.amount));
+          let total = price + config.ledgerFee;
+          if (receipt.amount < total) return #err("Insufficient payment: need " # Nat.toText(total) # " (price " # Nat.toText(price) # " + fee " # Nat.toText(config.ledgerFee) # "), got " # Nat.toText(receipt.amount));
         };
-        case (#Upto(maxPrice)) {
-          if (receipt.amount < 1) return #err("Payment required");
-          // Upto: buyer authorizes up to maxPrice, we accept any amount <= max
+        case (#Upto(_maxPrice)) {
+          // A positive payment that covers at least the ledger fee is required, so the job has
+          // something to settle and the pool can afford the outbound transfer.
+          if (receipt.amount < config.ledgerFee + 1) return #err("Payment required: must be at least " # Nat.toText(config.ledgerFee + 1) # " (ledger fee " # Nat.toText(config.ledgerFee) # " + 1) for Upto pricing, got " # Nat.toText(receipt.amount));
+          // Upto: buyer authorizes up to maxPrice + fee; we accept any amount over the fee.
         };
         case (#Session) {}; // Session-based billing handled separately
       };
@@ -388,13 +397,18 @@ module {
         case (null) { return #err("Job not assigned") };
       };
 
-      // Validate actualCost for Upto pricing
+      // Validate actualCost for Upto pricing. A1: the buyer paid `price + ledgerFee`, but the
+      // operator may only ever be paid the service amount (the fee covers the outbound transfer).
+      // So the operator's billable ceiling — and the Exact-pricing default — is the amount NET of
+      // the fee, not the full escrowed `job.amount` (which would let the operator claim the fee
+      // and leave the pool short).
+      let serviceAmount = if (job.amount > config.ledgerFee) { job.amount - config.ledgerFee } else { 0 };
       let cost = switch (actualCost) {
         case (?c) {
-          if (c > job.amount) return #err("Actual cost exceeds escrowed amount");
+          if (c > serviceAmount) return #err("Actual cost exceeds escrowed amount (net of ledger fee)");
           c;
         };
-        case (null) { job.amount }; // Exact pricing: full amount
+        case (null) { serviceAmount }; // Exact pricing: full service amount (net of fee)
       };
 
       let updated : Types.Job = {
@@ -591,14 +605,20 @@ module {
         // the expireJobs timer (which only acts on #Submitted/#Disputed/#Pending) cannot also
         // refund this same job during the await — preventing a double refund. Revert on failure.
         jobs.put(jobId, { job with status = #Settling });
-        // 1a: refund on the rail the job paid on — ICP pool, or on-chain to an EVM (0x) buyer.
-        // This is what lets EVM buyers actually be refunded (audit S14 / C3 refund half).
-        if (await refundOnRail(jobId, job, job.amount)) {
-          jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
-          #ok;
-        } else {
-          jobs.put(jobId, job); // revert to its prior status
-          #err("Refund failed (rail transfer did not succeed)");
+        // 1a/A1: refund on the rail the job paid on — ICP pool, or on-chain to an EVM (0x)
+        // buyer (lets EVM buyers actually be refunded; S14 / C3 refund half), net of the
+        // refund's ledger fee (buyer paid price+fee; the fee is consumed by the transfer).
+        let fee = config.ledgerFee;
+        let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+        switch (await refundOnRail(jobId, job, refundAmt)) {
+          case (#ok) {
+            jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
+            #ok;
+          };
+          case (#err(e)) {
+            jobs.put(jobId, job); // revert to its prior status
+            #err("Refund failed: " # e);
+          };
         };
       } else {
         jobs.put(jobId, { job with status = #Verified });
@@ -620,25 +640,36 @@ module {
       // now see #Settling (not #Verified) and abort, preventing double payout.
       jobs.put(jobId, { job with status = #Settling });
 
+      // A1: the buyer paid `price + ledgerFee`, so strip the fee to get the service amount the
+      // operator/remainder logic works with. The fee covers the outbound transfer (the ledger
+      // deducts amount+fee), so the pool nets zero per job instead of going short every time.
+      let fee = config.ledgerFee;
+      let serviceAmount = if (job.amount > fee) { job.amount - fee } else { 0 };
       let cost = switch (job.actualCost) {
         case (?c) { c };
-        case (null) { job.amount };
+        case (null) { serviceAmount };
       };
 
       // C-4 / 1a: pay the operator their cost on the job's rail — ICP from the pool, or on-chain
       // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
-      if (not (await settleToOperator(jobId, job, cost))) {
-        jobs.put(jobId, { job with status = #Verified }); // roll back for retry
-        return #err("Settlement to operator failed (no operator / EVM payout address / transfer failed)");
+      switch (await settleToOperator(jobId, job, cost)) {
+        case (#err(e)) {
+          jobs.put(jobId, { job with status = #Verified }); // roll back for retry
+          return #err("Settlement failed: " # e);
+        };
+        case (#ok) {};
       };
 
-      // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail. The operator is
-      // already paid, so on failure mark #Settled and surface the refund problem.
-      let refundAmount = if (job.amount > cost) { job.amount - cost } else { 0 };
+      // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail, net of the refund's own
+      // ledger fee. The operator is already paid, so on failure mark #Settled and surface it.
+      let refundAmount = if (serviceAmount > cost + fee) { serviceAmount - cost - fee } else { 0 };
       if (refundAmount > 0) {
-        if (not (await refundOnRail(jobId, job, refundAmount))) {
-          jobs.put(jobId, { job with status = #Settled });
-          return #err("Operator paid but buyer remainder refund failed");
+        switch (await refundOnRail(jobId, job, refundAmount)) {
+          case (#err(e)) {
+            jobs.put(jobId, { job with status = #Settled });
+            return #err("Operator paid but buyer remainder refund failed: " # e);
+          };
+          case (#ok) {};
         };
       };
 
@@ -708,10 +739,14 @@ module {
           jobs.put(id, { job with status = #Expired; completedAt = ?now });
           expired.add(id);
 
-          // 1a: refund the buyer on the rail it paid on — ICP from the pool, or on-chain to a
-          // 0x (EVM) buyer. On failure leave #Expired (reclaimed by gcTerminalJobs after 24h).
-          if (await refundOnRail(id, job, job.amount)) {
-            jobs.put(id, { job with status = #Refunded; completedAt = ?now });
+          // 1a/A1: refund the buyer on the rail it paid on — ICP from the pool, or on-chain to a
+          // 0x (EVM) buyer — net of the refund's ledger fee. On failure leave #Expired (reclaimed
+          // by gcTerminalJobs after 24h).
+          let fee = config.ledgerFee;
+          let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+          switch (await refundOnRail(id, job, refundAmt)) {
+            case (#ok) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
+            case (#err(_)) {}; // leave #Expired (reclaimed by gcTerminalJobs after 24h)
           };
         };
       };

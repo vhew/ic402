@@ -20,9 +20,14 @@ suite("ServiceRegistry", func() {
   let operatorPrincipal = Principal.fromText("2vxsx-fae");
   let buyerPrincipal = Principal.fromText("un4fu-tqaaa-aaaab-qadjq-cai");
 
-  let config : Types.Config = {
+  // Structurally a superset of ServiceRegistry.ServiceConfig (recipient/tokens/ledgerFee);
+  // the extra gateway fields are ignored by the registry constructor via width subtyping.
+  // ledgerFee = 0 here keeps the existing price/amount assertions exact; the A1 fee-threshold
+  // behaviour is covered by its own suite below (feeConfig) and end-to-end in the integration test.
+  let config = {
     recipient = { owner = testPrincipal; subaccount = null };
     tokens = [];
+    ledgerFee = 0;
     evmChains = [];
     evmRpcCanister = null;
     ecdsaKeyName = null;
@@ -314,6 +319,74 @@ suite("ServiceRegistry", func() {
       let svcId = registerAndEnable(reg, operatorPrincipal);
       switch (reg.submitRequest(
         Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(2000), null,
+      )) {
+        case (#ok(_)) {};
+        case (#err(_)) { assert false };
+      };
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // 4b. A1 — ledger-fee threshold (buyer pays price + fee)
+  // ══════════════════════════════════════════════════
+
+  // Same registry but with a real ckUSDC-sized fee, so the buyer must overpay by `fee`
+  // for the canister to afford the outbound settle transfer. Only the (sync) submitRequest
+  // validation is exercised here; the net-of-fee settle accounting needs a live ledger and
+  // is covered end-to-end by the integration test.
+  let feeConfig = { config with ledgerFee = 10_000 };
+  func makeFeeRegistry() : ServiceRegistry.ServiceRegistry {
+    ServiceRegistry.ServiceRegistry(testPrincipal, feeConfig);
+  };
+
+  suite("A1 ledger fee", func() {
+
+    test("Exact: paying exactly the price (no fee) is now insufficient", func() {
+      let reg = makeFeeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal); // price 1000, fee 10_000
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+      )) {
+        case (#err(e)) { assert Text.contains(e, #text("Insufficient")); assert Text.contains(e, #text("11000")) };
+        case (#ok(_)) { assert false };
+      };
+    });
+
+    test("Exact: paying price + fee succeeds", func() {
+      let reg = makeFeeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(11_000), null,
+      )) {
+        case (#ok(_)) {};
+        case (#err(_)) { assert false };
+      };
+    });
+
+    test("Upto: payment below the fee is rejected", func() {
+      let reg = makeFeeRegistry();
+      let def = { baseDef(operatorPrincipal) with pricing = #Upto(5000) };
+      let svcId = switch (reg.registerService(operatorPrincipal, def)) {
+        case (#ok(id)) { ignore reg.enableService(operatorPrincipal, id); id };
+        case (#err(_)) { assert false; "" };
+      };
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(5000), null,
+      )) {
+        case (#err(e)) { assert Text.contains(e, #text("ledger fee")) };
+        case (#ok(_)) { assert false };
+      };
+    });
+
+    test("Upto: payment above the fee succeeds", func() {
+      let reg = makeFeeRegistry();
+      let def = { baseDef(operatorPrincipal) with pricing = #Upto(5000) };
+      let svcId = switch (reg.registerService(operatorPrincipal, def)) {
+        case (#ok(id)) { ignore reg.enableService(operatorPrincipal, id); id };
+        case (#err(_)) { assert false; "" };
+      };
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(10_001), null,
       )) {
         case (#ok(_)) {};
         case (#err(_)) { assert false };
