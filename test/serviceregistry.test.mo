@@ -938,6 +938,16 @@ suite("ServiceRegistry", func() {
       };
     };
 
+    test("parseChainId parses CAIP-2 eip155 networks, rejects others", func() {
+      let reg = makeRegistry();
+      assert reg.parseChainId("eip155:8453") == ?8453;
+      assert reg.parseChainId("eip155:84532") == ?84532;
+      assert reg.parseChainId("eip155:1") == ?1;
+      assert reg.parseChainId("icp:1") == null; // not eip155
+      assert reg.parseChainId("eip155:") == null; // no digits
+      assert reg.parseChainId("eip155:0x10") == null; // non-decimal
+    });
+
     test("submitRequest records the EVM rail for a 0x buyer", func() {
       let reg = makeRegistry();
       let svcId = registerAndEnable(reg, operatorPrincipal);

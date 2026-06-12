@@ -133,6 +133,12 @@ persistent actor KnowledgeBase {
   );
   registry.startTimers<system>();
 
+  // 1a: wire the marketplace's on-chain settlement/refund to the Gateway's tECDSA EVM sender,
+  // so EVM-paid jobs are refunded/settled on their native rail instead of the ICP pool (C3).
+  registry.setEvmTransfer(func(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
+    await gate.sendErc20Transfer(chainId, token, to, amount);
+  });
+
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
     switch (stableContent) { case (?d) { store.loadStable(d) }; case (null) {} };

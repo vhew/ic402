@@ -23,6 +23,8 @@ import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import SHA256 "mo:sha2/Sha256";
 import Principal "mo:base/Principal";
+import Char "mo:base/Char";
+import Nat32 "mo:base/Nat32";
 import EvmAddress "EvmAddress";
 import EvmUtils "EvmUtils";
 
@@ -47,6 +49,64 @@ module {
     // settle/refund an EVM job on-chain on the rail it was paid on, rather than from the ICP
     // pool (audit C3). Keyed separately so the public Job type / Candid interface is unchanged.
     var evmJobRail = HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash);
+
+    // 1a: optional on-chain ERC-20 transfer capability (tECDSA), injected by the consuming
+    // canister (e.g. wired to its Gateway/EvmSender). The registry has no EVM capability of
+    // its own; left null it stays ICP-only. Signature: (chainId, token, toAddress, amount).
+    public type EvmTransferFn = (Nat, Text, Text, Nat) -> async { #ok : Text; #err : Text };
+    var evmTransfer : ?EvmTransferFn = null;
+
+    /// Wire the on-chain ERC-20 transfer used to settle/refund EVM-paid jobs. Call once at init.
+    public func setEvmTransfer(fn : EvmTransferFn) {
+      evmTransfer := ?fn;
+    };
+
+    /// Parse a CAIP-2 EVM network string ("eip155:8453") to its chain id, or null.
+    public func parseChainId(network : Text) : ?Nat {
+      let prefix = "eip155:";
+      if (not Text.startsWith(network, #text prefix)) return null;
+      let rest = Text.replace(network, #text prefix, "");
+      var n : Nat = 0;
+      var any = false;
+      for (c in rest.chars()) {
+        let d = Char.toNat32(c);
+        if (d < 48 or d > 57) return null;
+        n := n * 10 + Nat32.toNat(d - 48);
+        any := true;
+      };
+      if (any) { ?n } else { null };
+    };
+
+    /// 1a: refund `amount` to the job's buyer on the rail it paid on. ICP buyers via the
+    /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
+    /// injected hook). Returns true on success. Fixes the EVM-buyer refund stranding (S14)
+    /// and the refund half of the cross-rail flaw (C3).
+    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async Bool {
+      switch (evmJobRail.get(jobId)) {
+        case (?rail) {
+          switch (evmTransfer, parseChainId(rail.network)) {
+            case (?transfer, ?chainId) {
+              switch (await transfer(chainId, rail.token, job.buyer, amount)) {
+                case (#ok(_)) { true };
+                case (#err(_)) { false };
+              };
+            };
+            case (_, _) { false }; // no EVM transfer wired, or unparseable network
+          };
+        };
+        case (null) {
+          switch (buyerIcpAccount(job.buyer)) {
+            case (?acct) {
+              switch (await payFromMainAccount(acct, amount)) {
+                case (#ok(_)) { true };
+                case (#err(_)) { false };
+              };
+            };
+            case (null) { false };
+          };
+        };
+      };
+    };
 
     // ── Service Registration ──
 
@@ -475,19 +535,18 @@ module {
         case (_) { return #err("Job is not in a resolvable state (status: " # debug_show(job.status) # ")") };
       };
       if (refundBuyer) {
-        switch (buyerIcpAccount(job.buyer)) {
-          case (?acct) {
-            // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY
-            // before the await so the expireJobs timer (which only acts on
-            // #Submitted/#Disputed/#Pending) cannot also refund this same job
-            // during the await — preventing a double refund. Revert on failure.
-            jobs.put(jobId, { job with status = #Settling });
-            switch (await payFromMainAccount(acct, job.amount)) {
-              case (#ok(_)) { jobs.put(jobId, { job with status = #Refunded }); #ok };
-              case (#err(e)) { jobs.put(jobId, job); #err("Refund failed: " # e) };
-            };
-          };
-          case (null) { #err("EVM buyer cannot be refunded via ICRC; refund out-of-band") };
+        // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY before the await so
+        // the expireJobs timer (which only acts on #Submitted/#Disputed/#Pending) cannot also
+        // refund this same job during the await — preventing a double refund. Revert on failure.
+        jobs.put(jobId, { job with status = #Settling });
+        // 1a: refund on the rail the job paid on — ICP pool, or on-chain to an EVM (0x) buyer.
+        // This is what lets EVM buyers actually be refunded (audit S14 / C3 refund half).
+        if (await refundOnRail(jobId, job, job.amount)) {
+          jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
+          #ok;
+        } else {
+          jobs.put(jobId, job); // revert to its prior status
+          #err("Refund failed (rail transfer did not succeed)");
         };
       } else {
         jobs.put(jobId, { job with status = #Verified });
@@ -616,16 +675,10 @@ module {
           jobs.put(id, { job with status = #Expired; completedAt = ?now });
           expired.add(id);
 
-          // C-4/C-5: Refund the buyer from the platform recipient account
-          // (ICP buyers only — EVM buyers are refunded out-of-band).
-          switch (buyerIcpAccount(job.buyer)) {
-            case (?buyerAccount) {
-              switch (await payFromMainAccount(buyerAccount, job.amount)) {
-                case (#ok(_)) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
-                case (#err(_)) {}; // leave #Expired (now reclaimed by gcTerminalJobs after 24h)
-              };
-            };
-            case (null) {};
+          // 1a: refund the buyer on the rail it paid on — ICP from the pool, or on-chain to a
+          // 0x (EVM) buyer. On failure leave #Expired (reclaimed by gcTerminalJobs after 24h).
+          if (await refundOnRail(id, job, job.amount)) {
+            jobs.put(id, { job with status = #Refunded; completedAt = ?now });
           };
         };
       };

@@ -611,6 +611,17 @@ module {
       await sessionsMgr.recoverEscrow(caller, ledger, sessionId, amount);
     };
 
+    /// 1a: Send an ERC-20 transfer from the canister's EVM address via tECDSA, if EVM is
+    /// configured. Exposed so the marketplace (ServiceRegistry) can settle/refund EVM-paid
+    /// jobs on their native rail rather than from the ICP pool (audit C3). Returns the tx
+    /// hash on success.
+    public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
+      switch (evmSenderInst) {
+        case (?sender) { await sender.sendErc20Transfer(chainId, token, to, amount) };
+        case (null) { #err("EVM not configured (no ecdsaKeyName)") };
+      };
+    };
+
     /// Start recurring timers for session cleanup and policy garbage collection.
     /// Also auto-initializes HMAC seed and derives EVM address if ecdsaKeyName is set.
     /// Must be called from actor context (requires <system> capability).
