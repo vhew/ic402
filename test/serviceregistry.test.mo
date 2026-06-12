@@ -4,6 +4,12 @@ import Types "../src/ic402/Types";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
+import Nat8 "mo:base/Nat8";
+import Array "mo:base/Array";
+import EvmAddress "../src/ic402/EvmAddress";
+import EvmUtils "../src/ic402/EvmUtils";
+import EcdsaLib "mo:ecdsa";
+import EcdsaCurve "mo:ecdsa/Curve";
 import { test; suite } "mo:test";
 
 suite("ServiceRegistry", func() {
@@ -758,6 +764,162 @@ suite("ServiceRegistry", func() {
     test("getService returns null for non-existent ID", func() {
       let reg = makeRegistry();
       assert (reg.getService("nope") == null);
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // S-13: terminal-job GC must also reclaim #Expired jobs
+  // ══════════════════════════════════════════════════
+
+  suite("gcTerminalJobs", func() {
+    let DAY : Int = 24 * 60 * 60 * 1_000_000_000;
+
+    func makeJob(id : Text, status : Types.JobStatus, completedAt : ?Int, createdAt : Int) : Types.Job {
+      {
+        id;
+        serviceId = "svc-1";
+        buyer = Principal.toText(buyerPrincipal);
+        operator = null;
+        params = Text.encodeUtf8("p");
+        paymentReceiptId = "rcpt";
+        amount = 1000;
+        actualCost = null;
+        status;
+        result = null;
+        proof = null;
+        createdAt;
+        expiresAt = 0;
+        completedAt;
+        deliveryCallback = null;
+      };
+    };
+
+    func present(reg : ServiceRegistry.ServiceRegistry, id : Text) : Bool {
+      switch (reg.getJob(id)) { case (?_) { true }; case (null) { false } };
+    };
+
+    test("reclaims Expired/Settled/Refunded jobs older than 24h, keeps recent and active ones", func() {
+      let reg = makeRegistry();
+      // Time.now() is 0 under mo:test, so "older than 24h" means completedAt < -DAY.
+      reg.loadStable({
+        services = [];
+        serviceCounter = 0;
+        jobCounter = 0;
+        jobs = [
+          ("old-expired",    makeJob("old-expired",    #Expired,  ?(-2 * DAY), -2 * DAY)),
+          ("old-settled",    makeJob("old-settled",    #Settled,  ?(-2 * DAY), -2 * DAY)),
+          ("old-refunded",   makeJob("old-refunded",   #Refunded, ?(-2 * DAY), -2 * DAY)),
+          ("recent-expired", makeJob("recent-expired", #Expired,  ?0, 0)),
+          ("active-pending", makeJob("active-pending", #Pending,  null, 0)),
+        ];
+      });
+
+      let removed = reg.gcTerminalJobs();
+      // Old code collected only #Settled/#Refunded (removed == 2); the #Expired job leaked.
+      assert (removed == 3);
+      assert (not present(reg, "old-expired"));
+      assert (not present(reg, "old-settled"));
+      assert (not present(reg, "old-refunded"));
+      // A recently-terminal job and an active job must survive the sweep.
+      assert (present(reg, "recent-expired"));
+      assert (present(reg, "active-pending"));
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // S14 (option B): EVM-buyer signed confirm/dispute
+  // ══════════════════════════════════════════════════
+
+  suite("EVM buyer authorization", func() {
+    let buyerPriv : Nat = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80; // Hardhat #0
+    let otherPriv : Nat = 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d; // Hardhat #1
+    let rand : [Nat8] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32];
+
+    func makeEvmJob(id : Text, buyer : Text, status : Types.JobStatus) : Types.Job {
+      {
+        id; serviceId = "svc-1"; buyer; operator = null;
+        params = Text.encodeUtf8("p"); paymentReceiptId = "r"; amount = 1000; actualCost = null;
+        status; result = null; proof = null; createdAt = 0; expiresAt = 0; completedAt = null;
+        deliveryCallback = null;
+      };
+    };
+
+    // Derive the EVM address for a private key (herumi), mirroring evmaddress.test.mo.
+    func addrOf(priv : Nat) : Text {
+      let curve = EcdsaCurve.Curve(#secp256k1);
+      switch (curve.fromJacobi(curve.mul_base(#fr(priv)))) {
+        case (#affine(#fp(px), #fp(py))) {
+          let prefix : Nat8 = if (py % 2 == 0) 0x02 else 0x03;
+          let comp = Array.append<Nat8>([prefix], EvmUtils.natToBytes(px, 32));
+          switch (EvmAddress.fromCompressedPublicKey(comp)) { case (#ok(a)) { a }; case (#err(_)) { assert false; "" } };
+        };
+        case (_) { assert false; "" };
+      };
+    };
+
+    // Build a 65-byte (r||s||v) signature over buyerActionMessage(action, jobId) for `priv`.
+    func signAction(reg : ServiceRegistry.ServiceRegistry, priv : Nat, action : Text, jobId : Text) : [Nat8] {
+      let digest = EvmAddress.keccak256Text(reg.buyerActionMessage(action, jobId));
+      let sec = EcdsaLib.PrivateKey(priv, EcdsaLib.secp256k1Curve());
+      let #ok(sig) = sec.signHashed(digest.vals(), rand.vals()) else { assert false; return [] };
+      let rs = Array.append<Nat8>(EvmUtils.natToBytes(sig.r, 32), EvmUtils.natToBytes(sig.s, 32));
+      let want = addrOf(priv);
+      for (vv in [0, 1].vals()) {
+        let candidate = Array.append<Nat8>(rs, [Nat8.fromNat(vv)]);
+        switch (reg.recoverBuyerActionSigner(action, jobId, candidate)) {
+          case (?a) { if (a == want) return candidate };
+          case (null) {};
+        };
+      };
+      assert false; [];
+    };
+
+    func loadJob(reg : ServiceRegistry.ServiceRegistry, buyer : Text) {
+      reg.loadStable({
+        services = []; serviceCounter = 0; jobCounter = 0;
+        jobs = [("job-1", makeEvmJob("job-1", buyer, #Submitted))];
+      });
+    };
+
+    test("recoverBuyerActionSigner recovers the signing EVM address", func() {
+      let reg = makeRegistry();
+      let sig = signAction(reg, buyerPriv, "dispute", "job-1");
+      switch (reg.recoverBuyerActionSigner("dispute", "job-1", sig)) {
+        case (?a) { assert EvmUtils.addressesEqual(a, addrOf(buyerPriv)) };
+        case (null) { assert false };
+      };
+    });
+
+    test("EVM buyer can dispute their job with a valid signature", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      switch (reg.disputeJobEvm("job-1", signAction(reg, buyerPriv, "dispute", "job-1"), "bad result")) {
+        case (#ok) {}; case (#err(_)) { assert false };
+      };
+      switch (reg.getJob("job-1")) { case (?j) { assert j.status == #Disputed }; case (null) { assert false } };
+    });
+
+    test("a different key cannot dispute someone else's job", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      switch (reg.disputeJobEvm("job-1", signAction(reg, otherPriv, "dispute", "job-1"), "x")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+    });
+
+    test("a confirm signature cannot be replayed as a dispute (action-bound)", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      // Signature is valid for the "confirm" message; reused on the "dispute" path it
+      // recovers a different address (different digest) and is rejected.
+      switch (reg.disputeJobEvm("job-1", signAction(reg, buyerPriv, "confirm", "job-1"), "x")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+    });
+
+    test("recoverBuyerActionSigner rejects a malformed signature length", func() {
+      let reg = makeRegistry();
+      assert reg.recoverBuyerActionSigner("dispute", "job-1", [0, 1, 2]) == null;
     });
   });
 });

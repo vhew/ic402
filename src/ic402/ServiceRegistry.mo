@@ -23,6 +23,8 @@ import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import SHA256 "mo:sha2/Sha256";
 import Principal "mo:base/Principal";
+import EvmAddress "EvmAddress";
+import EvmUtils "EvmUtils";
 
 module {
 
@@ -370,6 +372,80 @@ module {
       #ok;
     };
 
+    // ── EVM buyer authorization (S14, option B) ──
+    // EVM-paid buyers have no ICP principal, so the principal-based confirmJob/disputeJob
+    // can NEVER authorize them (job.buyer is a 0x address that Principal.toText can't equal).
+    // These accept a secp256k1 signature over a canister/action/job-bound message, recover the
+    // signer, and authorize it against the stored EVM buyer address. The buyer signs the
+    // keccak256 of buyerActionMessage(action, jobId) with the key that owns job.buyer.
+
+    /// The message an EVM buyer signs to confirm/dispute a job. Binds the action
+    /// ("confirm"/"dispute"), the specific job, and THIS canister — so a signature cannot be
+    /// replayed across actions, jobs, or canisters. Single-use is enforced by the job status
+    /// (each transition requires #Submitted, which the action leaves).
+    public func buyerActionMessage(action : Text, jobId : Text) : Text {
+      "ic402-buyer-action:v1:" # action # ":" # jobId # ":" # Principal.toText(_canisterPrincipal);
+    };
+
+    /// Recover the EVM address that signed buyerActionMessage(action, jobId). `signature` is
+    /// 65 bytes: r[0:32] || s[32:64] || v[64]. Returns the lowercase 0x address, or null.
+    public func recoverBuyerActionSigner(action : Text, jobId : Text, signature : [Nat8]) : ?Text {
+      if (signature.size() != 65) return null;
+      let digest = EvmAddress.keccak256Text(buyerActionMessage(action, jobId));
+      let r = Array.subArray<Nat8>(signature, 0, 32);
+      let s = Array.subArray<Nat8>(signature, 32, 32);
+      var v = signature[64];
+      if (v >= 27) { v -= 27 };
+      switch (EvmAddress.ecRecover(digest, r, s, v)) {
+        case (?pubKey) {
+          switch (EvmAddress.fromCompressedPublicKey(pubKey)) {
+            case (#ok(addr)) { ?addr };
+            case (#err(_)) { null };
+          };
+        };
+        case (null) { null };
+      };
+    };
+
+    /// Authorize an EVM buyer action: the recovered signer must equal job.buyer.
+    func authorizeEvmBuyer(job : Types.Job, action : Text, jobId : Text, signature : [Nat8]) : Bool {
+      switch (recoverBuyerActionSigner(action, jobId, signature)) {
+        case (?signer) { EvmUtils.addressesEqual(signer, job.buyer) };
+        case (null) { false };
+      };
+    };
+
+    /// EVM-buyer counterpart of confirmJob: on a valid signature from the job's EVM buyer,
+    /// settle the job to the operator. (Settlement currently draws the ICP pool — the EVM-rail
+    /// payout for EVM-paid jobs is the cross-rail follow-up, audit C3.)
+    public func confirmJobEvm(jobId : Text, signature : [Nat8]) : async { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      if (job.status != #Submitted) return #err("Job not in submitted status");
+      if (not authorizeEvmBuyer(job, "confirm", jobId, signature)) {
+        return #err("Signature does not authorize this job's EVM buyer");
+      };
+      jobs.put(jobId, { job with status = #Verified });
+      await settleJob(jobId);
+    };
+
+    /// EVM-buyer counterpart of disputeJob: on a valid signature from the job's EVM buyer,
+    /// mark the job disputed (resolved via resolveDispute / timeout). Synchronous.
+    public func disputeJobEvm(jobId : Text, signature : [Nat8], _reason : Text) : { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      if (job.status != #Submitted) return #err("Job not in submitted status");
+      if (not authorizeEvmBuyer(job, "dispute", jobId, signature)) {
+        return #err("Signature does not authorize this job's EVM buyer");
+      };
+      jobs.put(jobId, { job with status = #Disputed });
+      #ok;
+    };
+
     /// M-6 (v2): Resolve a submitted/disputed job. The consuming canister MUST
     /// gate access (e.g. controller-only). `refundBuyer = true` refunds the buyer;
     /// false settles to the operator. Without this, BuyerConfirm jobs the buyer
@@ -522,7 +598,7 @@ module {
           case (_) { false };
         };
         if (timedOut) {
-          jobs.put(id, { job with status = #Expired });
+          jobs.put(id, { job with status = #Expired; completedAt = ?now });
           expired.add(id);
 
           // C-4/C-5: Refund the buyer from the platform recipient account
@@ -530,8 +606,8 @@ module {
           switch (buyerIcpAccount(job.buyer)) {
             case (?buyerAccount) {
               switch (await payFromMainAccount(buyerAccount, job.amount)) {
-                case (#ok(_)) { jobs.put(id, { job with status = #Refunded }) };
-                case (#err(_)) {}; // leave #Expired; don't block other jobs
+                case (#ok(_)) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
+                case (#err(_)) {}; // leave #Expired (now reclaimed by gcTerminalJobs after 24h)
               };
             };
             case (null) {};
@@ -539,28 +615,36 @@ module {
         };
       };
 
-      // M-5: Remove terminal jobs (Settled/Refunded) older than 24 hours
-      let gcCutoff = now - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
+      // M-5 / S-13: Remove terminal jobs (Settled / Refunded / Expired) older than 24h.
+      ignore gcTerminalJobs();
+
+      Buffer.toArray(expired);
+    };
+
+    /// S-13: Garbage-collect terminal jobs (Settled / Refunded / Expired) older than 24h,
+    /// freeing their retained params/result/proof blobs. Previously #Expired jobs — every
+    /// timed-out EVM-paid job, and every ICP job whose refund failed — were NEVER collected,
+    /// so the jobs map (and the stable snapshot that preupgrade serializes) grew without
+    /// bound: an attacker-cheap state-exhaustion / upgrade-brick vector. Synchronous so it is
+    /// directly unit-testable and can also be driven from the maintenance timer. Returns the
+    /// number of jobs removed.
+    public func gcTerminalJobs() : Nat {
+      let gcCutoff = Time.now() - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
       let staleJobs = Buffer.Buffer<Text>(8);
       for ((id, job) in jobs.entries()) {
         switch (job.status) {
-          case (#Settled or #Refunded) {
+          case (#Settled or #Refunded or #Expired) {
             let completedTime = switch (job.completedAt) {
               case (?t) { t };
               case (null) { job.createdAt }; // fallback if completedAt not set
             };
-            if (completedTime < gcCutoff) {
-              staleJobs.add(id);
-            };
+            if (completedTime < gcCutoff) { staleJobs.add(id) };
           };
           case (_) {};
         };
       };
-      for (id in staleJobs.vals()) {
-        jobs.delete(id);
-      };
-
-      Buffer.toArray(expired);
+      for (id in staleJobs.vals()) { jobs.delete(id) };
+      staleJobs.size();
     };
 
     /// Start the job expiry timer. Call once at canister init.
