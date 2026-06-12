@@ -24,6 +24,16 @@ module {
     // H-1: Serialize EVM transactions to prevent nonce desync on concurrent calls.
     var txInProgress : Bool = false;
 
+    // S10: require multi-provider AGREEMENT on every outbound RPC, so a single compromised
+    // or stale provider can't forge a result — e.g. a fake "confirmed" receipt that would
+    // mint a paid receipt / credit an escrow. `total = null` queries all configured providers;
+    // `min = 2` requires at least two to agree (vs. the prior `null` config, which could act
+    // on a single provider's answer for the 2-provider custom chains).
+    let RPC_CONFIG : ?EvmRpc.RpcConfig = ?{
+      responseSizeEstimate = null;
+      responseConsensus = ?#Threshold({ total = null; min = 2 });
+    };
+
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
       switch (cachedPubKey) {
@@ -94,7 +104,7 @@ module {
         // Reading #Pending each time self-heals and accounts for in-flight txs.
         let nonce = switch (
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-            services, null, { address = senderAddr; block = #Pending },
+            services, RPC_CONFIG, { address = senderAddr; block = #Pending },
           )
         ) {
           case (#Consistent(#Ok(n))) { n };
@@ -142,7 +152,7 @@ module {
         let rawTxBytes = EvmUtils.signedRawTx(txParams, r, s, yParity);
         let rawTxHex = EvmUtils.bytesToHex(rawTxBytes);
 
-        let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, null, rawTxHex);
+        let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
         switch (sendResult) {
           case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
           case (#Consistent(#Ok(#Ok(null)))) { #ok(rawTxHex) };
@@ -223,7 +233,7 @@ module {
     func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async ?(Nat, Nat) {
       try {
         let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_feeHistory(
-          services, null,
+          services, RPC_CONFIG,
           { blockCount = 1; newestBlock = #Latest; rewardPercentiles = null },
         );
         switch (result) {
@@ -271,7 +281,7 @@ module {
       label poll while (attempts < maxPolls) {
         attempts += 1;
         let result = try {
-          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, null, txHash);
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
         } catch (_) { return #err("Receipt query failed") };
         switch (result) {
           case (#Consistent(#Ok(?receipt))) {
