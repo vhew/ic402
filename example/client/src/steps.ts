@@ -8,6 +8,7 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { StepDef } from './runner.js';
 import {
   mcpCall,
+  assertMcpOk,
   header,
   info,
   success,
@@ -912,10 +913,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           info('Your client claims the job, computes off-chain, submits result...');
 
           try {
-            await mcpCall(client, 'claim_job', {
+            const claimRes = await mcpCall(client, 'claim_job', {
               confirm: true,
               args: JSON.stringify([jobId]),
             });
+            assertMcpOk(claimRes, 'claim_job');
             success('Job claimed');
 
             const mockResult = Array.from(
@@ -923,10 +925,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
               ),
             );
-            await mcpCall(client, 'submit_job_result', {
+            const submitRes = await mcpCall(client, 'submit_job_result', {
               confirm: true,
               args: JSON.stringify([jobId, mockResult, [], []]),
             });
+            // C6: only claim success if the canister actually settled it.
+            assertMcpOk(submitRes, 'submit_job_result');
             success('Result submitted → verified → payment settled');
           } catch (e) {
             warn(`Fulfill: ${e instanceof Error ? e.message : String(e)}`);
@@ -1017,10 +1021,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               const proofBytes = Array.from(Buffer.from(ZK_PROOF, 'hex'));
               const resultBytes = Array.from(new TextEncoder().encode('x = 5'));
               try {
-                await mcpCall(client, 'submit_job_result', {
+                const zkSubmit = await mcpCall(client, 'submit_job_result', {
                   confirm: true,
                   args: JSON.stringify([zkJobId, resultBytes, [proofBytes], []]),
                 });
+                // C6: a rejected proof returns an error envelope (not a throw) — gate on it
+                // so we never print "verified" for a proof the ZK canister refused.
+                assertMcpOk(zkSubmit, 'submit_job_result');
                 success('Proof verified by ZK canister → payment settled');
                 state('Proof size', `${proofBytes.length} bytes (Groth16/BN254)`);
                 state('Verification cost', '~$0.005 (~1-5B ICP instructions)');
