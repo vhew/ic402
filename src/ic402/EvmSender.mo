@@ -47,12 +47,12 @@ module {
         case (?addr) { addr };
         case (null) {
           let pk = await getPublicKey();
-          let addr = switch (EvmAddress.fromCompressedPublicKey(pk)) {
-            case (#ok(a)) { a };
+          switch (EvmAddress.fromCompressedPublicKey(pk)) {
+            // C2: cache ONLY on success — a transient #err must not permanently cache ""
+            // (which would poison every later send with the empty/zero sender address).
+            case (#ok(a)) { cachedEvmAddr := ?a; a };
             case (#err(_)) { "" };
           };
-          cachedEvmAddr := ?addr;
-          addr;
         };
       };
     };
