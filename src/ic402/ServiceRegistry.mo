@@ -61,6 +61,26 @@ module {
       evmTransfer := ?fn;
     };
 
+    // 1a: operator EVM payout addresses, keyed by operator principal. An EVM-paid job is
+    // settled on-chain to its operator's registered payout address (no ServiceDefinition /
+    // Candid change). Without one, EVM settlement can't pay the operator and rolls back.
+    var operatorEvmPayout = HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash);
+
+    /// Register the calling operator's EVM payout address (0x, 20 bytes). The consuming
+    /// canister passes msg.caller and should require the caller be a registered operator.
+    public func setOperatorEvmPayout(caller : Principal, address : Text) : { #ok; #err : Text } {
+      if (not Text.startsWith(address, #text "0x") or address.size() != 42) {
+        return #err("Invalid EVM payout address: must be a 0x-prefixed 20-byte address");
+      };
+      operatorEvmPayout.put(caller, address);
+      #ok;
+    };
+
+    /// The operator's registered EVM payout address, if any.
+    public func getOperatorEvmPayout(operator : Principal) : ?Text {
+      operatorEvmPayout.get(operator);
+    };
+
     /// Parse a CAIP-2 EVM network string ("eip155:8453") to its chain id, or null.
     public func parseChainId(network : Text) : ?Nat {
       let prefix = "eip155:";
@@ -75,6 +95,38 @@ module {
         any := true;
       };
       if (any) { ?n } else { null };
+    };
+
+    /// 1a: settle `cost` to the job's operator on the rail it was paid on. ICP jobs pay the
+    /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
+    /// address on-chain — fixing the settle half of the cross-rail flaw (C3). Returns true on
+    /// success (false if no operator / no payout address / no transfer hook / transfer fails).
+    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async Bool {
+      switch (evmJobRail.get(jobId)) {
+        case (?rail) {
+          let payout = switch (job.operator) { case (?op) { operatorEvmPayout.get(op) }; case (null) { null } };
+          switch (evmTransfer, parseChainId(rail.network), payout) {
+            case (?transfer, ?chainId, ?addr) {
+              switch (await transfer(chainId, rail.token, addr, cost)) {
+                case (#ok(_)) { true };
+                case (#err(_)) { false };
+              };
+            };
+            case (_, _, _) { false };
+          };
+        };
+        case (null) {
+          switch (job.operator) {
+            case (?op) {
+              switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
+                case (#ok(_)) { true };
+                case (#err(_)) { false };
+              };
+            };
+            case (null) { false };
+          };
+        };
+      };
     };
 
     /// 1a: refund `amount` to the job's buyer on the rail it paid on. ICP buyers via the
@@ -573,39 +625,20 @@ module {
         case (null) { job.amount };
       };
 
-      // C-4: Pay the operator their cost from the platform recipient account.
-      switch (job.operator) {
-        case (?op) {
-          switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
-            case (#err(e)) {
-              jobs.put(jobId, { job with status = #Verified }); // roll back for retry
-              return #err("Settlement failed: " # e);
-            };
-            case (#ok(_)) {};
-          };
-        };
-        case (null) {
-          jobs.put(jobId, { job with status = #Verified });
-          return #err("Job has no assigned operator to settle to");
-        };
+      // C-4 / 1a: pay the operator their cost on the job's rail — ICP from the pool, or on-chain
+      // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
+      if (not (await settleToOperator(jobId, job, cost))) {
+        jobs.put(jobId, { job with status = #Verified }); // roll back for retry
+        return #err("Settlement to operator failed (no operator / EVM payout address / transfer failed)");
       };
 
-      // C-4/C-5: Refund the Upto remainder to the buyer (ICP buyers only).
+      // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail. The operator is
+      // already paid, so on failure mark #Settled and surface the refund problem.
       let refundAmount = if (job.amount > cost) { job.amount - cost } else { 0 };
       if (refundAmount > 0) {
-        switch (buyerIcpAccount(job.buyer)) {
-          case (?buyerAccount) {
-            switch (await payFromMainAccount(buyerAccount, refundAmount)) {
-              case (#err(e)) {
-                // Operator was already paid — the job IS settled; surface the
-                // refund problem without rolling back the operator payment.
-                jobs.put(jobId, { job with status = #Settled });
-                return #err("Operator paid but buyer refund failed: " # e);
-              };
-              case (#ok(_)) {};
-            };
-          };
-          case (null) {}; // EVM buyer: Upto remainder is not ICRC-refundable here
+        if (not (await refundOnRail(jobId, job, refundAmount))) {
+          jobs.put(jobId, { job with status = #Settled });
+          return #err("Operator paid but buyer remainder refund failed");
         };
       };
 
@@ -732,6 +765,7 @@ module {
         serviceCounter;
         jobCounter;
         evmRails = ?Iter.toArray(evmJobRail.entries());
+        operatorPayouts = ?Iter.toArray(operatorEvmPayout.entries());
       };
     };
 
@@ -745,6 +779,10 @@ module {
       evmJobRail := switch (data.evmRails) {
         case (?rails) { HashMap.fromIter(rails.vals(), rails.size(), Text.equal, Text.hash) };
         case (null) { HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash) };
+      };
+      operatorEvmPayout := switch (data.operatorPayouts) {
+        case (?p) { HashMap.fromIter(p.vals(), p.size(), Principal.equal, Principal.hash) };
+        case (null) { HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash) };
       };
     };
   };

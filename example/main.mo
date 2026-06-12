@@ -639,6 +639,12 @@ persistent actor KnowledgeBase {
     registry.claimJob(msg.caller, jobId);
   };
 
+  // 1a: operators register their EVM payout address so EVM-paid jobs they fulfil are settled
+  // on-chain to it (rather than from the ICP pool — audit C3).
+  public shared(msg) func setEvmPayout(address : Text) : async { #ok; #err : Text } {
+    registry.setOperatorEvmPayout(msg.caller, address);
+  };
+
   public shared(msg) func submitJobResult(jobId : Text, result : Blob, proof : ?Blob, actualCost : ?Nat) : async { #ok; #err : Text } {
     await registry.submitResult(msg.caller, jobId, result, proof, actualCost);
   };

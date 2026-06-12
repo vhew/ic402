@@ -636,8 +636,9 @@ module {
     jobs : [(Text, Job)];
     serviceCounter : Nat;
     jobCounter : Nat;
-    // Optional for upgrade compatibility: pre-1a stable records have no EVM rails.
+    // Optional for upgrade compatibility: pre-1a stable records have no EVM rails / payouts.
     evmRails : ?[(Text, EvmRail)];
+    operatorPayouts : ?[(Principal, Text)];
   };
 
   /// Interface for a ZK Groth16 verification canister.

@@ -806,6 +806,7 @@ suite("ServiceRegistry", func() {
         serviceCounter = 0;
         jobCounter = 0;
         evmRails = null;
+        operatorPayouts = null;
         jobs = [
           ("old-expired",    makeJob("old-expired",    #Expired,  ?(-2 * DAY), -2 * DAY)),
           ("old-settled",    makeJob("old-settled",    #Settled,  ?(-2 * DAY), -2 * DAY)),
@@ -877,7 +878,7 @@ suite("ServiceRegistry", func() {
 
     func loadJob(reg : ServiceRegistry.ServiceRegistry, buyer : Text) {
       reg.loadStable({
-        services = []; serviceCounter = 0; jobCounter = 0; evmRails = null;
+        services = []; serviceCounter = 0; jobCounter = 0; evmRails = null; operatorPayouts = null;
         jobs = [("job-1", makeEvmJob("job-1", buyer, #Submitted))];
       });
     };
@@ -937,6 +938,25 @@ suite("ServiceRegistry", func() {
         network; timestamp = 0; txHash = ?"0xabc"; sessionId = null; refunded = null;
       };
     };
+
+    test("operator EVM payout: set, validate, get, and persist across upgrade", func() {
+      let reg = makeRegistry();
+      // Reject a malformed address.
+      switch (reg.setOperatorEvmPayout(operatorPrincipal, "not-an-address")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+      // Accept a valid 0x address.
+      let addr = "0x1111111111111111111111111111111111111111";
+      switch (reg.setOperatorEvmPayout(operatorPrincipal, addr)) {
+        case (#ok) {}; case (#err(_)) { assert false };
+      };
+      assert reg.getOperatorEvmPayout(operatorPrincipal) == ?addr;
+      assert reg.getOperatorEvmPayout(buyerPrincipal) == null;
+      // Survives a stable round-trip.
+      let reg2 = makeRegistry();
+      reg2.loadStable(reg.toStable());
+      assert reg2.getOperatorEvmPayout(operatorPrincipal) == ?addr;
+    });
 
     test("parseChainId parses CAIP-2 eip155 networks, rejects others", func() {
       let reg = makeRegistry();
