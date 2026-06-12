@@ -137,3 +137,59 @@ export function isToolAllowed(toolName: string, allowDangerousTools: boolean): b
   if (DANGEROUS_TOOLS.has(toolName)) return allowDangerousTools;
   return true;
 }
+
+export interface OperatorConfig {
+  security: SecurityConfig;
+  allowSecurityChanges: boolean;
+  allowDangerousTools: boolean;
+}
+
+/**
+ * Resolve the operator's startup security config from an optional JSON config file and the
+ * environment. BOTH are out-of-band inputs the LLM cannot influence, so the security boundary
+ * stays with the operator (audit S8). Precedence: built-in defaults < config file < env vars
+ * (env wins, so an operator can override a file value at launch). Unparseable values fall back
+ * to the lower-precedence source rather than throwing, so a typo can't crash the server.
+ */
+export function resolveOperatorConfig(
+  file: Record<string, unknown> | null,
+  env: Record<string, string | undefined>,
+  defaults: { perCallMaxAtomic: bigint; sessionMaxAtomic: bigint },
+): OperatorConfig {
+  const f = file ?? {};
+  const isTrue = (v: string | undefined) => v === '1' || v === 'true';
+
+  const pickBool = (fileKey: string, envKey: string): boolean => {
+    if (env[envKey] !== undefined) return isTrue(env[envKey]);
+    if (typeof f[fileKey] === 'boolean') return f[fileKey] as boolean;
+    return false;
+  };
+  const pickAmount = (fileKey: string, envKey: string, dflt: bigint): bigint => {
+    const raw = env[envKey] !== undefined ? env[envKey] : f[fileKey];
+    if (raw === undefined) return dflt;
+    try {
+      return parseAtomicAmount(raw, envKey);
+    } catch {
+      return dflt;
+    }
+  };
+
+  return {
+    security: {
+      localDev: pickBool('localDev', 'IC402_MCP_LOCAL_DEV'),
+      autoPayment: pickBool('autoPayment', 'IC402_MCP_AUTO_PAYMENT'),
+      perCallMaxAtomic: pickAmount(
+        'perCallMaxAtomic',
+        'IC402_MCP_PER_CALL_MAX_ATOMIC',
+        defaults.perCallMaxAtomic,
+      ),
+      sessionMaxAtomic: pickAmount(
+        'sessionMaxAtomic',
+        'IC402_MCP_SESSION_MAX_ATOMIC',
+        defaults.sessionMaxAtomic,
+      ),
+    },
+    allowSecurityChanges: pickBool('allowSecurityChanges', 'IC402_MCP_ALLOW_SECURITY_CHANGES'),
+    allowDangerousTools: pickBool('allowDangerousTools', 'IC402_MCP_ALLOW_DANGEROUS_TOOLS'),
+  };
+}

@@ -4,6 +4,7 @@ import {
   checkSpend,
   resolveSecurityConfig,
   isToolAllowed,
+  resolveOperatorConfig,
   type SecurityConfig,
 } from '../integrations/mcp/src/guards';
 
@@ -91,6 +92,45 @@ describe('resolveSecurityConfig (S8: LLM cannot loosen security knobs by default
   it('does not flag a request that sets nothing sensitive', () => {
     const { ignored } = resolveSecurityConfig(base, {}, false);
     expect(ignored).toEqual([]);
+  });
+});
+
+describe('resolveOperatorConfig (operator config file + env; env wins; LLM cannot touch either)', () => {
+  const defaults = { perCallMaxAtomic: 1_000_000n, sessionMaxAtomic: 5_000_000n };
+
+  it('uses conservative defaults when neither file nor env set anything', () => {
+    const c = resolveOperatorConfig(null, {}, defaults);
+    expect(c.security.perCallMaxAtomic).toBe(1_000_000n);
+    expect(c.security.localDev).toBe(false);
+    expect(c.security.autoPayment).toBe(false);
+    expect(c.allowSecurityChanges).toBe(false);
+    expect(c.allowDangerousTools).toBe(false);
+  });
+
+  it('applies config-file values', () => {
+    const c = resolveOperatorConfig(
+      { perCallMaxAtomic: '2000000', localDev: true, allowDangerousTools: true },
+      {},
+      defaults,
+    );
+    expect(c.security.perCallMaxAtomic).toBe(2_000_000n);
+    expect(c.security.localDev).toBe(true);
+    expect(c.allowDangerousTools).toBe(true);
+  });
+
+  it('env overrides the config file', () => {
+    const c = resolveOperatorConfig(
+      { perCallMaxAtomic: '2000000', allowDangerousTools: true },
+      { IC402_MCP_PER_CALL_MAX_ATOMIC: '9000000', IC402_MCP_ALLOW_DANGEROUS_TOOLS: '0' },
+      defaults,
+    );
+    expect(c.security.perCallMaxAtomic).toBe(9_000_000n); // env wins
+    expect(c.allowDangerousTools).toBe(false); // env '0' overrides file true
+  });
+
+  it('falls back rather than throwing on an unparseable amount', () => {
+    const c = resolveOperatorConfig({ perCallMaxAtomic: 'not-a-number' }, {}, defaults);
+    expect(c.security.perCallMaxAtomic).toBe(1_000_000n);
   });
 });
 

@@ -10,7 +10,14 @@ import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { validateFetchUrl, safeFetch } from './security.js';
-import { parseAtomicAmount, checkSpend, resolveSecurityConfig, isToolAllowed } from './guards.js';
+import {
+  parseAtomicAmount,
+  checkSpend,
+  resolveSecurityConfig,
+  isToolAllowed,
+  resolveOperatorConfig,
+  type OperatorConfig,
+} from './guards.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -49,27 +56,18 @@ interface SecurityConfig {
 const DEFAULT_PER_CALL_MAX_ATOMIC = 1_000_000n; // 1.00 USDC
 const DEFAULT_SESSION_MAX_ATOMIC = 5_000_000n; // 5.00 USDC
 
-// S8/S1/S9: operator-only startup switches. By default the LLM-callable `configure`
-// tool CANNOT loosen the security knobs, and the dangerous signing/destructive tools are
-// disabled — an operator opts in explicitly via env, never the model.
-const ALLOW_SECURITY_CHANGES = process.env.IC402_MCP_ALLOW_SECURITY_CHANGES === '1';
-const ALLOW_DANGEROUS_TOOLS = process.env.IC402_MCP_ALLOW_DANGEROUS_TOOLS === '1';
-
-function envAmountOr(name: string, fallback: bigint): bigint {
-  const v = process.env[name];
-  if (v === undefined) return fallback;
-  try {
-    return parseAtomicAmount(v, name);
-  } catch {
-    return fallback;
-  }
-}
+// S8/S1/S9: operator-only security posture. Resolved at STARTUP in main() from an optional
+// config file + env vars (both out-of-band — the LLM cannot influence them). The `configure`
+// tool cannot loosen these unless the operator set allowSecurityChanges, and the dangerous
+// signing/destructive tools are off unless allowDangerousTools. Defaults are conservative.
+let allowSecurityChanges = false;
+let allowDangerousTools = false;
 
 const securityConfig: SecurityConfig = {
-  localDev: process.env.IC402_MCP_LOCAL_DEV === '1',
-  perCallMaxAtomic: envAmountOr('IC402_MCP_PER_CALL_MAX_ATOMIC', DEFAULT_PER_CALL_MAX_ATOMIC),
-  sessionMaxAtomic: envAmountOr('IC402_MCP_SESSION_MAX_ATOMIC', DEFAULT_SESSION_MAX_ATOMIC),
-  autoPayment: process.env.IC402_MCP_AUTO_PAYMENT === '1',
+  localDev: false,
+  perCallMaxAtomic: DEFAULT_PER_CALL_MAX_ATOMIC,
+  sessionMaxAtomic: DEFAULT_SESSION_MAX_ATOMIC,
+  autoPayment: false,
 };
 
 /** Running total of atomic units spent (signed/approved) this server session. */
@@ -359,7 +357,7 @@ server.tool(
     const resolved = resolveSecurityConfig(
       securityConfig,
       { localDev, autoPayment, perCallMaxAtomic, sessionMaxAtomic },
-      ALLOW_SECURITY_CHANGES,
+      allowSecurityChanges,
     );
     securityConfig.localDev = resolved.config.localDev;
     securityConfig.autoPayment = resolved.config.autoPayment;
@@ -1411,7 +1409,7 @@ function adminTool(
       // S1/S9: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
       // delete) unless the operator enabled them at startup — they bypass/ignore the
       // spend caps, so a prompt-injected LLM must not be able to reach them.
-      if (!isToolAllowed(toolName, ALLOW_DANGEROUS_TOOLS)) {
+      if (!isToolAllowed(toolName, allowDangerousTools)) {
         return errorResult(
           new Error(
             `Tool "${toolName}" is disabled: it is a dangerous primitive (raw EIP-712 signing / ` +
@@ -1488,7 +1486,62 @@ adminTool(
 // Start
 // ---------------------------------------------------------------------------
 
+function cliFlag(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
+}
+
+/** Print the effective security posture to STDERR (stdout is the MCP JSON-RPC channel and
+ *  must not be polluted). Lets the operator verify what's active before the agent connects. */
+function printSecurityBanner(cfg: OperatorConfig, source: string | null): void {
+  const L = (s: string) => console.error(s);
+  L('───────────────────────────────────────────────────────────────');
+  L(' ic402 MCP — effective security config (operator-set, out-of-band)');
+  L(`   source                 : ${source ? `config file: ${source}` : 'env vars / defaults'}`);
+  L(`   perCallMaxAtomic       : ${cfg.security.perCallMaxAtomic}`);
+  L(`   sessionMaxAtomic       : ${cfg.security.sessionMaxAtomic}`);
+  L(`   localDev               : ${cfg.security.localDev}`);
+  L(`   autoPayment            : ${cfg.security.autoPayment}`);
+  L(
+    `   allowSecurityChanges   : ${cfg.allowSecurityChanges}  (LLM may retune caps via "configure")`,
+  );
+  L(`   allowDangerousTools    : ${cfg.allowDangerousTools}  (sign_typed_data / delete_content)`);
+  if (cfg.allowSecurityChanges || cfg.allowDangerousTools) {
+    L(
+      '   ⚠  a loosened knob is enabled — only do this in a TRUSTED context (no prompt-injection risk).',
+    );
+  }
+  L('───────────────────────────────────────────────────────────────');
+}
+
 async function main() {
+  // Operator config (out-of-band): optional JSON file via `--config <path>` or IC402_MCP_CONFIG,
+  // merged with env vars (env wins). The LLM can influence neither, so the security boundary
+  // stays operator-set (audit S8).
+  const configPath = cliFlag('--config') ?? process.env.IC402_MCP_CONFIG ?? null;
+  let fileJson: Record<string, unknown> | null = null;
+  if (configPath) {
+    try {
+      fileJson = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    } catch (e) {
+      console.error(
+        `ic402-mcp: failed to read config file ${configPath}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      process.exit(1);
+    }
+  }
+  const cfg = resolveOperatorConfig(fileJson, process.env, {
+    perCallMaxAtomic: DEFAULT_PER_CALL_MAX_ATOMIC,
+    sessionMaxAtomic: DEFAULT_SESSION_MAX_ATOMIC,
+  });
+  securityConfig.localDev = cfg.security.localDev;
+  securityConfig.autoPayment = cfg.security.autoPayment;
+  securityConfig.perCallMaxAtomic = cfg.security.perCallMaxAtomic;
+  securityConfig.sessionMaxAtomic = cfg.security.sessionMaxAtomic;
+  allowSecurityChanges = cfg.allowSecurityChanges;
+  allowDangerousTools = cfg.allowDangerousTools;
+  printSecurityBanner(cfg, configPath);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
