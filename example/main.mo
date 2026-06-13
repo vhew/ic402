@@ -219,6 +219,10 @@ persistent actor KnowledgeBase {
     // CORS preflight for the v2 custom `PAYMENT-SIGNATURE` request header.
     if (request.method == "OPTIONS") { return Http.httpOptions() };
 
+    // Facilitator POST endpoints run in the update context (verify reads chain config; settle
+    // broadcasts), so upgrade the query to an update call.
+    if (path == "/verify" or path == "/settle") { return Http.httpUpgrade() };
+
     // Free: canister info
     if (path == "/" or path == "") {
       return Http.http200Json("{\"name\":\"KnowledgeBase\",\"x402Support\":true}");
@@ -316,9 +320,47 @@ persistent actor KnowledgeBase {
     Http.httpError(404, "Not found");
   };
 
+  // Map a settle PaymentResult to a v2 SettlementResponse JSON, mapping ic402's result variants
+  // to the x402 v2 error-reason vocabulary. Used by the facilitator /settle endpoint and by HTTP
+  // resource settlement failures.
+  func settleResultJson(result : Ic402.PaymentResult, network : Text, payer : Text, amount : Nat) : Text {
+    switch (result) {
+      case (#ok(receipt)) { Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null) };
+      case (#invalidSignature(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_exact_evm_payload_authorization_signature") };
+      case (#insufficientFunds(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"insufficient_funds") };
+      case (#expired(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_exact_evm_payload_authorization_valid_before") };
+      case (#networkNotSupported(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_network") };
+      case (#tokenNotAccepted(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unsupported_scheme") };
+      case (#policyDenied(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unexpected_settle_error") };
+      // settlementFailed (on-chain revert / RPC), settlementPending, and any other variant.
+      case (_) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_transaction_state") };
+    };
+  };
+
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
     if (request.method == "OPTIONS") { return Http.httpOptions() };
+
+    // x402 v2 facilitator endpoints (POST { paymentPayload, paymentRequirements }).
+    // /verify validates the exact/EVM authorization off-chain; /settle broadcasts on-chain.
+    if (path == "/verify" or path == "/settle") {
+      let body = switch (Text.decodeUtf8(request.body)) {
+        case (?t) { t };
+        case (null) { return Http.httpError(400, "Invalid request body") };
+      };
+      let parsed = switch (Http.parseFacilitatorRequest(body)) {
+        case (?p) { p };
+        case (null) { return Http.httpError(400, "Invalid facilitator request (need paymentPayload + paymentRequirements)") };
+      };
+      if (path == "/verify") {
+        let v = gate.verifyPayment(parsed.sig, parsed.amount, parsed.payTo, parsed.asset);
+        return Http.http200Json(Http.verifyResponseJson(v.isValid, v.invalidReason, v.payer));
+      } else {
+        let result = await gate.settle(parsed.sig, ?parsed.amount);
+        return Http.http200Json(settleResultJson(result, parsed.sig.network, parsed.sig.sender, parsed.amount));
+      };
+    };
+
     // x402 v2 ResourceInfo.url — absolute URL built from the Host header (ICP request.url is path-only).
     let resourceUrl = Http.buildResourceUrl(request.headers, request.url);
 

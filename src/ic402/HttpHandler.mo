@@ -149,6 +149,78 @@ module {
       # errPart # "}";
   };
 
+  /// x402 v2 facilitator `POST /verify` response: { isValid, invalidReason?, payer? }.
+  public func verifyResponseJson(isValid : Bool, invalidReason : ?Text, payer : ?Text) : Text {
+    let reasonPart = switch (invalidReason) {
+      case (?r) { ",\"invalidReason\":\"" # Utils.escapeJsonString(r) # "\"" };
+      case (null) { "" };
+    };
+    let payerPart = switch (payer) {
+      case (?p) { ",\"payer\":\"" # Utils.escapeJsonString(p) # "\"" };
+      case (null) { "" };
+    };
+    "{\"isValid\":" # (if (isValid) { "true" } else { "false" }) # reasonPart # payerPart # "}";
+  };
+
+  /// Parse a facilitator `POST /verify`|`/settle` body: { x402Version, paymentPayload, paymentRequirements }.
+  /// Returns the exact-EVM authorization as a PaymentSignature (with an EMPTY server nonce — the
+  /// facilitator path binds the amount via the supplied requirement, not a server nonce) plus the
+  /// authoritative amount/payTo/asset taken from `paymentRequirements` (NOT the client's echoed
+  /// `accepted`, which a malicious client could understate).
+  public func parseFacilitatorRequest(json : Text) : ?{ sig : Types.PaymentSignature; amount : Nat; payTo : Text; asset : Text } {
+    // Isolate the paymentRequirements sub-object so amount/payTo/asset come from the server's
+    // requirement, not from an `accepted`/`amount` that appears earlier inside paymentPayload.
+    let reqParts = Iter.toArray(Text.split(json, #text "\"paymentRequirements\""));
+    let reqPart = if (reqParts.size() >= 2) { reqParts[1] } else { json };
+
+    let network = Utils.extractJsonField(reqPart, "network");
+    let payTo = Utils.extractJsonField(reqPart, "payTo");
+    let asset = Utils.extractJsonField(reqPart, "asset");
+    let amount = Utils.extractJsonNatField(reqPart, "amount");
+    if (network == "" or payTo == "" or amount == 0) return null;
+
+    // Authorization fields are unique within the body (requirements have no from/to/value).
+    let from = Utils.extractJsonField(json, "from");
+    let to = Utils.extractJsonField(json, "to");
+    let value = Utils.extractJsonNatField(json, "value");
+    let validAfter = Utils.extractJsonNatField(json, "validAfter");
+    let validBefore = Utils.extractJsonNatField(json, "validBefore");
+    let authzNonce = Utils.extractJsonField(json, "nonce");
+    let sigHex = Utils.extractJsonField(json, "signature");
+    if (from == "" or to == "" or sigHex == "" or authzNonce == "") return null;
+
+    let sigBytes = hexToBytes(sigHex);
+    if (sigBytes.size() != 65) return null;
+    let r = Blob.fromArray(arraySlice(sigBytes, 0, 32));
+    let s = Blob.fromArray(arraySlice(sigBytes, 32, 32));
+    let v = sigBytes[64];
+
+    ?{
+      sig = {
+        scheme = "exact";
+        network;
+        signature = Blob.fromArray([]);
+        publicKey = null;
+        sender = from;
+        nonce = Blob.fromArray([]); // facilitator: no server nonce
+        authorization = ?{
+          from;
+          to;
+          value;
+          validAfter;
+          validBefore;
+          nonce = Blob.fromArray(hexToBytes(authzNonce));
+          v = if (v >= 27) { v - 27 : Nat8 } else { v };
+          r;
+          s;
+        };
+      };
+      amount;
+      payTo;
+      asset;
+    };
+  };
+
   /// 200 (binary content) carrying the v2 `PAYMENT-RESPONSE` settlement header.
   public func http200WithSettlement(contentBody : Blob, mimeType : Text, settlementJson : Text) : Types.HttpResponse {
     let b64 = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(settlementJson)));

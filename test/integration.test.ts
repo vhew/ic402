@@ -813,5 +813,84 @@ describe('ic402 integration', () => {
       expect(evm.amount).toBe('1000');
       expect(evm.extra.assetTransferMethod).toBe('eip3009');
     });
+
+    // Facilitator POST /verify, exercised with an authorization the CANISTER itself signs
+    // (signX402Payment), so no external crypto is needed and the EIP-712 domain matches the
+    // canister's own chain config.
+    const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+    async function signedVerifyBody(amountInReq: bigint) {
+      const payTo = await actor.getEvmAddress();
+      const signed = await actor.signX402Payment(
+        84532n,
+        BASE_SEPOLIA_USDC,
+        payTo,
+        1000n,
+        'USDC',
+        '2',
+      );
+      const header = signed.ok.header as string;
+      const paymentPayload = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+      return {
+        payTo,
+        body: JSON.stringify({
+          x402Version: 2,
+          paymentPayload,
+          paymentRequirements: {
+            scheme: 'exact',
+            network: 'eip155:84532',
+            amount: amountInReq.toString(),
+            asset: BASE_SEPOLIA_USDC,
+            payTo,
+            extra: { name: 'USDC', version: '2' },
+          },
+        }),
+      };
+    }
+
+    it('POST /verify returns isValid for a correctly-signed authorization', async () => {
+      if (skip) return;
+      const { payTo, body } = await signedVerifyBody(1000n); // requirement amount == signed value
+      const res = await fetch(`${raw()}/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(res.status).toBe(200);
+      const v = await res.json();
+      expect(v.isValid).toBe(true);
+      expect(String(v.payer).toLowerCase()).toBe(String(payTo).toLowerCase());
+    });
+
+    it('POST /verify rejects a value/amount mismatch with the v2 reason code', async () => {
+      if (skip) return;
+      const { body } = await signedVerifyBody(999n); // requirement 999 != signed 1000
+      const res = await fetch(`${raw()}/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      const v = await res.json();
+      expect(v.isValid).toBe(false);
+      expect(v.invalidReason).toBe('invalid_exact_evm_payload_authorization_value_mismatch');
+    });
+
+    it('POST /settle returns a well-formed v2 SettlementResponse', async () => {
+      if (skip) return;
+      // The Base Sepolia USDC reverts EIP-3009 on-chain (documented), and the local replica
+      // can't reach it anyway — so this asserts the response is a valid v2 SettlementResponse,
+      // not that the on-chain transfer succeeds.
+      const { body } = await signedVerifyBody(1000n);
+      const res = await fetch(`${raw()}/settle`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(res.status).toBe(200);
+      const s = await res.json();
+      expect(typeof s.success).toBe('boolean');
+      expect(s).toHaveProperty('transaction');
+      expect(s.network).toBe('eip155:84532');
+      if (!s.success) expect(typeof s.errorReason).toBe('string');
+    });
   });
 });

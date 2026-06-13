@@ -286,6 +286,59 @@ module {
       "{\"kinds\":[" # kinds # "],\"extensions\":[],\"signers\":{\"eip155:*\":[\"" # signer # "\"]}}";
     };
 
+    /// x402 v2 facilitator `POST /verify`: validate an exact/EVM PaymentPayload against the chosen
+    /// PaymentRequirements OFF-CHAIN (no nonce, no broadcast, no state change). Returns the v2
+    /// verify verdict {isValid, invalidReason?, payer?}. EVM-only — the ICP rail is non-standard
+    /// and not exposed as a facilitator scheme. `asset` is the requirement's token (EIP-712
+    /// verifyingContract); name/version come from the per-chain config.
+    public func verifyPayment(signature : Types.PaymentSignature, expectedAmount : Nat, payTo : Text, asset : Text) : {
+      isValid : Bool;
+      invalidReason : ?Text;
+      payer : ?Text;
+    } {
+      if (not isEvmNetwork(signature.network)) {
+        return { isValid = false; invalidReason = ?"unsupported_scheme"; payer = null };
+      };
+      let authz = switch (signature.authorization) {
+        case (?a) { a };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_payload"; payer = null } };
+      };
+      let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
+      if (nowSeconds < authz.validAfter) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_after"; payer = ?authz.from };
+      };
+      if (nowSeconds > authz.validBefore) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_before"; payer = ?authz.from };
+      };
+      if (not EvmUtils.addressesEqual(authz.to, payTo)) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_recipient_mismatch"; payer = ?authz.from };
+      };
+      if (authz.value != expectedAmount) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_value_mismatch"; payer = ?authz.from };
+      };
+      let chainId = switch (extractChainId(signature.network)) {
+        case (?id) { id };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
+      };
+      var tokenName : ?Text = null;
+      var tokenVersion : ?Text = null;
+      switch (findEvmChain(chainId)) {
+        case (?chain) { if (chain.tokens.size() > 0) { tokenName := chain.tokens[0].name; tokenVersion := chain.tokens[0].version } };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
+      };
+      let verified = Eip712.verifyAuthorization(
+        chainId, EvmUtils.hexToBytes(asset),
+        EvmUtils.hexToBytes(authz.from), EvmUtils.hexToBytes(authz.to),
+        authz.value, authz.validAfter, authz.validBefore,
+        Blob.toArray(authz.nonce), authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
+        tokenName, tokenVersion,
+      );
+      if (not verified) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_signature"; payer = ?authz.from };
+      };
+      { isValid = true; invalidReason = null; payer = ?authz.from };
+    };
+
     func extractChainId(network : Text) : ?Nat {
       Utils.extractChainId(network);
     };
