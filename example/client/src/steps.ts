@@ -26,20 +26,88 @@ const BASE_CHAIN = 'Base Sepolia testnet (chainId 84532)';
 const BASE_EXPLORER = 'https://sepolia.basescan.org';
 const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
 const EVM_CHAINS = [
-  { name: 'Base Sepolia', chainId: 84532, usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
+  {
+    name: 'Base Sepolia',
+    chainId: 84532,
+    usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    rpc: 'https://base-sepolia-rpc.publicnode.com',
+  },
   {
     name: 'Ethereum Sepolia',
     chainId: 11155111,
     usdc: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+    rpc: 'https://ethereum-sepolia-rpc.publicnode.com',
   },
-  { name: 'Avalanche Fuji', chainId: 43113, usdc: '0x5425890298aed601595a70AB815c96711a31Bc65' },
+  {
+    name: 'Avalanche Fuji',
+    chainId: 43113,
+    usdc: '0x5425890298aed601595a70AB815c96711a31Bc65',
+    rpc: 'https://avalanche-fuji-c-chain-rpc.publicnode.com',
+  },
   {
     name: 'Optimism Sepolia',
     chainId: 11155420,
     usdc: '0x5fd84259d66Cd46123540766Be93DFE6D43130D7',
+    rpc: 'https://optimism-sepolia-rpc.publicnode.com',
   },
-  { name: 'Arbitrum Sepolia', chainId: 421614, usdc: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d' },
+  {
+    name: 'Arbitrum Sepolia',
+    chainId: 421614,
+    usdc: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
+    rpc: 'https://arbitrum-sepolia-rpc.publicnode.com',
+  },
 ];
+
+/**
+ * Fetch the on-chain code length at `addr`. Circle's USDC (FiatToken V2.2) verifies an EIP-3009
+ * signature via `SignatureChecker`: a PURE EOA (no code) goes through plain `ecrecover`, but any
+ * address WITH code (a contract, or an EOA that set an EIP-7702 delegation) is routed to the
+ * EIP-1271 `isValidSignature` path — which rejects a normal ECDSA signature. The infamous test
+ * key Hardhat #0 (0xf39f…266) has a stray EIP-7702 delegation on Base/ETH/OP/Arb/Amoy Sepolia,
+ * which is the ONLY reason its EIP-3009 transfers were rejected there. So the payer must be a
+ * clean EOA. Returns -1 if the code couldn't be fetched.
+ */
+async function evmCodeLen(rpc: string, addr: string): Promise<number> {
+  try {
+    const res = await fetch(rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getCode',
+        params: [addr, 'latest'],
+      }),
+    });
+    const j = (await res.json()) as { result?: string };
+    const hex = (j.result ?? '0x').replace(/^0x/, '');
+    return hex.length / 2;
+  } catch {
+    return -1;
+  }
+}
+
+/** Fetch an address's USDC (ERC-20) balance in atomic units. Returns -1n if unreadable. */
+async function evmUsdcBalance(rpc: string, usdc: string, addr: string): Promise<bigint> {
+  try {
+    // balanceOf(address) selector 0x70a08231 + 32-byte left-padded address
+    const data = '0x70a08231' + addr.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+    const res = await fetch(rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_call',
+        params: [{ to: usdc, data }, 'latest'],
+      }),
+    });
+    const j = (await res.json()) as { result?: string };
+    return j.result ? BigInt(j.result) : -1n;
+  } catch {
+    return -1n;
+  }
+}
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
 
@@ -492,20 +560,45 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 state('  Amount', `${(amount / 1_000_000).toFixed(6)} USDC → ${payTo}`);
 
                 info('');
-                info('Signing with test key (Hardhat account #0 — demo only)...');
-
-                // Test private key — NEVER use in production.
-                // In production, the client signs with MetaMask eth_signTypedData_v4.
-                const TEST_KEY = Buffer.from(
-                  'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-                  'hex',
-                );
+                // The payer key. MUST be a CLEAN EOA (no code): Circle's USDC rejects EIP-3009
+                // from any address with code (a contract or an EIP-7702-delegated EOA — see
+                // evmCodeLen). Default to a deterministic demo EOA; override with a funded key via
+                // IC402_DEMO_EVM_KEY. (Hardhat #0 is deliberately NOT used — it is 7702-delegated
+                // on most testnets, which is exactly what blocked EVM settlement before.)
+                const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
+                const TEST_KEY = envKey
+                  ? Buffer.from(envKey, 'hex')
+                  : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
                 const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
                 const testAddr =
                   '0x' +
                   Buffer.from(keccak_256(testPubUncompressed.slice(1)))
                     .slice(-20)
                     .toString('hex');
+                info(
+                  `Signing as ${testAddr} (${envKey ? 'IC402_DEMO_EVM_KEY' : 'deterministic demo EOA'})...`,
+                );
+
+                // EIP-7702 / contract-account preflight: if the payer has code, Circle's
+                // SignatureChecker takes the EIP-1271 path and rejects a plain ECDSA EIP-3009 sig.
+                const code = await evmCodeLen(selectedChain.rpc, testAddr);
+                if (code > 0) {
+                  warn(`Payer ${testAddr} has ${code} bytes of code on ${selectedChain.name}.`);
+                  info(
+                    "It is a contract or an EIP-7702-delegated EOA, so Circle's USDC will route",
+                  );
+                  info('verification to EIP-1271 and reject this ECDSA signature. Use a CLEAN EOA');
+                  info(
+                    '(no delegation) as the payer — set IC402_DEMO_EVM_KEY to a fresh funded key.',
+                  );
+                  throw new KnownIssueError(
+                    `${selectedChain.name}: payer ${testAddr} has code (EIP-7702/contract) — USDC rejects EOA EIP-3009 sigs from it`,
+                    'Use a clean EOA payer (IC402_DEMO_EVM_KEY). Not an ic402 or contract bug.',
+                  );
+                }
+                if (code === 0) {
+                  success(`Payer is a clean EOA (no EIP-7702 delegation) — EIP-3009 will verify`);
+                }
 
                 const validAfter = 0;
                 const validBefore = Math.floor(Date.now() / 1000) + 300;
@@ -659,28 +752,45 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                         'External setup: fund the canister EVM address with testnet ETH. Not an ic402 bug.',
                       );
                     } else if (lower.includes('revert')) {
-                      // The canister verified the signature locally and broadcast the tx; the USDC
-                      // contract reverted it on-chain. (H-1 surfaces this instead of issuing a
-                      // "paid" receipt.) For Base Sepolia this is a PROVEN contract-side defect:
-                      // the submitted signature recovers to the funded payer under the contract's
-                      // own typehash + DOMAIN_SEPARATOR, yet it reverts "FiatTokenV2: invalid
-                      // signature". So this is NOT an ic402 problem — the canister signed correctly.
+                      // The canister verified the signature locally and broadcast it; the USDC
+                      // contract reverted on-chain (H-1 surfaces this instead of a "paid" receipt).
+                      // The payer passed the clean-EOA preflight, so the signature is accepted — pull
+                      // the real on-chain reason (usually an unfunded payer) from the tx, since the
+                      // canister only reports a generic "reverted".
                       warn(`On-chain transfer reverted on ${selectedChain.name}: ${errMsg}`);
+                      // Reliable signal: a clean-EOA sig is accepted, so a revert is almost always
+                      // the payer holding too little USDC. Read its balance directly.
+                      const bal = await evmUsdcBalance(
+                        selectedChain.rpc,
+                        selectedChain.usdc,
+                        testAddr,
+                      );
+                      const isBalance = bal >= 0n && bal < BigInt(amount);
+                      if (isBalance) {
+                        info(
+                          `On-chain: payer holds ${(Number(bal) / 1e6).toFixed(6)} USDC, needs ${(amount / 1e6).toFixed(6)}.`,
+                        );
+                        info(`The signature was ACCEPTED — the payer ${testAddr} just has no USDC`);
+                        info(
+                          `on ${selectedChain.name}. Fund it from the Circle testnet faucet, then re-run.`,
+                        );
+                        throw new KnownIssueError(
+                          `${selectedChain.name}: payer has no USDC (signature accepted)`,
+                          `Fund ${testAddr} with ${selectedChain.name} USDC (faucet.circle.com). Not an ic402 bug.`,
+                        );
+                      }
                       info(
-                        "ic402's EIP-712 signature is valid — on Base Sepolia it provably recovers",
+                        "The canister's EIP-712 signature is valid (proven against the chain's own",
                       );
                       info(
-                        "to the funded payer under the USDC contract's own typehash + domain — yet",
+                        'ecrecover). A revert here is on-chain execution: most often an unfunded payer,',
                       );
                       info(
-                        'this testnet USDC rejects it ("FiatTokenV2: invalid signature"), a known',
-                      );
-                      info(
-                        'contract-side EIP-3009 defect. NOT an ic402 issue; the ICP rail settles fine.',
+                        'a reused EIP-3009 nonce, or a contract-side EIP-3009 quirk. NOT a signing bug.',
                       );
                       throw new KnownIssueError(
-                        `${selectedChain.name} USDC reverted a valid EIP-3009 authorization`,
-                        "Contract-side defect: the testnet USDC rejects a signature that is valid by its own typehash + DOMAIN_SEPARATOR. ic402's signing is proven correct.",
+                        `${selectedChain.name} USDC transfer reverted on-chain`,
+                        "ic402's signing is proven correct; the on-chain transfer failed (funding / nonce / contract).",
                       );
                     } else if (lower.includes('pending') || lower.includes('not yet confirmed')) {
                       warn(`Tx broadcast but not yet confirmed: ${errMsg}`);

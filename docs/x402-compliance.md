@@ -145,7 +145,7 @@ error reason maps to the v2 vocabulary (`invalid_exact_evm_payload_authorization
 | Discovery | `GET /discovery/resources` (Bazaar) | ✅ done |
 | Wire | HTTP settlement *failures* return a v2 `SettlementResponse` + error‑reason codes | ✅ done |
 | N/A | fiat ISO‑4217 `asset` / role‑constant `payTo` | **unsupported** (ic402 settles concrete on‑chain transfers — no settlement path) |
-| Deferred | `permit2` / `erc7710` asset‑transfer methods | **not implemented — intentionally.** Only `eip3009` (the v2 default, declared in `extra.assetTransferMethod`) is implemented. permit2/erc7710 are large, security‑sensitive on‑chain calldata encoders (Permit2 `permitWitnessTransferFrom` via the `x402ExactPermit2Proxy`; ERC‑7710 `redeemDelegations`) that **cannot be verified on‑chain in this environment** (the only available testnet USDC reverts EIP‑3009 — see B1). Shipping unverified transfer encoders would be irresponsible; deferred until a chain whose USDC honours these is available. |
+| Deferred | `permit2` / `erc7710` asset‑transfer methods | **not implemented — intentionally.** Only `eip3009` (the v2 default, declared in `extra.assetTransferMethod`) is implemented — and it is now verified accepted on the canonical Base Sepolia USDC with a clean‑EOA payer (see below). permit2/erc7710 are large, security‑sensitive on‑chain calldata encoders (Permit2 `permitWitnessTransferFrom` via the `x402ExactPermit2Proxy`; ERC‑7710 `redeemDelegations`); deferred until there's a concrete need and a funded path to test them end‑to‑end. |
 
 > The two former "Minor" items (HTTP failure SettlementResponse, full error‑reason mapping) are
 > now done. `dual X-Payment + PAYMENT-SIGNATURE` request headers are still sent by the client —
@@ -166,17 +166,27 @@ are still delivered on the response. Consequences:
   reading the custom headers. This is an IC-platform behavior, not an ic402 gap; the canister
   emits the correct headers.
 
-### Verification limitation (be honest about it)
+### EVM settlement on testnet — RESOLVED (it was the demo payer, not the contract)
 
-A *successful end‑to‑end* EVM HTTP payment by a stock v2 client **cannot be verified in this
-environment**: the only available testnet USDC (Base Sepolia `0x036CbD…`) rejects canonical
-EIP‑3009 `transferWithAuthorization` on‑chain — a contract‑side issue, not ic402 (see the B1
-investigation: the demo's signature recovers to the funded payer and the EIP‑712 domain matches
-the contract byte‑for‑byte, yet a direct `eth_call` still reverts). So:
+Earlier this looked like "Base Sepolia USDC rejects canonical EIP‑3009". A forked‑node trace
+(`anvil --fork` + `cast run`, which return real revert reasons the public RPCs strip) found the
+true cause: the demo was signing as **Hardhat #0 (`0xf39f…266`), which has a stray EIP‑7702
+delegation** (`0xef0100…`, 23 bytes of code) on Base/ETH/OP/Arb/Amoy Sepolia. Circle's USDC
+(FiatToken V2.2) verifies EIP‑3009 via `SignatureChecker`: a pure EOA goes through plain
+`ecrecover`, but any address **with code** is routed to the EIP‑1271 `isValidSignature` path,
+which rejects a normal ECDSA signature. So a delegated payer is rejected; a **clean EOA is
+accepted**.
 
-- The **v2 wire format, header transport, CORS/OPTIONS, and `PAYMENT-SIGNATURE` reading** are
-  verified over HTTP against the local replica.
-- The **exact‑EVM scheme logic** (`value == amount`, EIP‑3009‑nonce replay, error mapping) is
-  unit‑tested.
-- A **live successful stock‑client EVM settle** needs a chain whose USDC honours EIP‑3009; that
-  is an external dependency, not an ic402 gap.
+Proven on‑chain: a clean‑EOA EIP‑3009 transfer against the **canonical Base Sepolia USDC**
+(`0x036CbD…`) reverts only with `ERC20: transfer amount exceeds balance` — i.e. the signature is
+**accepted**, only the (unfunded) balance fails. ic402's signing was correct all along.
+
+The fix (in the demo): sign with a **clean EOA** (default `IC402_DEMO_EVM_KEY`, or a deterministic
+no‑code demo key), with an EIP‑7702 **preflight** (`eth_getCode`) that refuses a code‑bearing
+payer and explains why. To get a green EVM settle on Base Sepolia, fund the demo payer with Base
+Sepolia USDC (faucet.circle.com); the canister's own EVM address pays gas.
+
+So: the v2 wire format, header transport, CORS/OPTIONS, and `PAYMENT‑SIGNATURE` reading are
+verified over HTTP on the local replica; the exact‑EVM scheme logic is unit‑tested; and the
+exact‑EVM **signature is verified accepted on the canonical Base Sepolia USDC** — a full green
+settle only needs the payer funded.
