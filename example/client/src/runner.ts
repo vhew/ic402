@@ -15,6 +15,21 @@ export class QuitError extends Error {
   }
 }
 
+/**
+ * Thrown by a step to report that THIS specific failure is a known issue outside ic402's
+ * control (e.g. a testnet contract that rejects a valid EIP-3009 signature, or an unfunded
+ * gas wallet) — reported as ⚠ (does not fail the run), without flagging the whole step
+ * `knownIssue` (which would also mask a genuine ic402 bug in that step). `detail` is an
+ * optional second line explaining why it is not a real failure.
+ */
+export class KnownIssueError extends Error {
+  detail?: string;
+  constructor(message: string, detail?: string) {
+    super(message);
+    this.detail = detail;
+  }
+}
+
 export interface StepDef {
   name: string;
   description: string;
@@ -141,7 +156,12 @@ export async function runSteps(
           break;
         }
         const msg = err instanceof Error ? err.message : String(err);
-        if (step.knownIssue) {
+        if (err instanceof KnownIssueError) {
+          // The step itself classified this failure as a known external issue.
+          console.log(`${YELLOW}  ⚠ ${step.name} — known issue (not a failure): ${msg}${RESET}`);
+          if (err.detail) console.log(`${DIM}  ${err.detail}${RESET}`);
+          results.push({ name: step.name, status: 'known-issue', error: msg });
+        } else if (step.knownIssue) {
           console.log(`${YELLOW}  ⚠ Known issue (not a failure): ${msg}${RESET}`);
           console.log(`${DIM}  ${step.knownIssue}${RESET}`);
           results.push({ name: step.name, status: 'known-issue', error: msg });

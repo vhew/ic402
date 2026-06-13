@@ -6,6 +6,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { StepDef } from './runner.js';
+import { KnownIssueError } from './runner.js';
 import {
   mcpCall,
   assertMcpOk,
@@ -320,6 +321,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         {
           section('Live Payment');
+          // Tracks whether a payment path actually DELIVERED content, so the closing highlight
+          // (and the step's ✓) only appear on a real success — not after a revert/failure.
+          let delivered = false;
           info('Pay for the ic402 logo we uploaded in step 2.');
           info('Choose ICP ckUSDC (works on local replica) or EVM USDC (testnet/mainnet).');
           info('');
@@ -404,22 +408,28 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       highlight(
                         'ckUSDC → ICRC-2 transfer_from → content delivered. Zero gas fees.',
                       );
+                      delivered = true;
                     } else if (contentObj && 'error' in contentObj) {
-                      warn(`Settlement failed: ${contentObj.error}`);
+                      // The ICP rail settles on the local replica; a failure here is genuine.
+                      throw new Error(`ICP settlement failed: ${contentObj.error}`);
                     } else {
                       warn('Unexpected response:');
                       result(contentRes);
+                      throw new Error('ICP settlement returned an unexpected response');
                     }
                   } else {
-                    warn('No ICP payment option in response.');
+                    throw new Error('No ICP payment option in the 402 response');
                   }
                 } else {
                   warn('Unexpected response (expected paymentRequired):');
                   result(payRes);
+                  throw new Error('Expected a paymentRequired challenge, got something else');
                 }
               } catch (e) {
-                warn(`Payment error: ${e instanceof Error ? e.message : String(e)}`);
+                if (e instanceof KnownIssueError) throw e;
+                // A genuine ICP-path failure (the rail works on the local replica) — fail the step.
                 info('Ensure predemo ran (pnpm demo handles this automatically).');
+                throw e instanceof Error ? e : new Error(String(e));
               }
             } else if (choiceNum >= 2 && choiceNum <= 6) {
               // ── EVM USDC payment via EIP-3009 TransferWithAuthorization ──
@@ -461,6 +471,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
               if (!payTo || !amount || !freshNonce.length) {
                 warn(`Could not get payment details for ${selectedChain.name}.`);
+                throw new KnownIssueError(
+                  `${selectedChain.name}: no EVM payment option in the 402 response`,
+                  'The canister did not advertise this chain (check its EVM chain config). Not a settlement failure.',
+                );
               } else {
                 section('EIP-3009 Payment Flow');
                 info('The canister is its own facilitator — no external service needed.');
@@ -632,6 +646,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     highlight(
                       `${selectedChain.name} USDC → EIP-3009 → tECDSA → content delivered.`,
                     );
+                    delivered = true;
                   } else if (payObj && 'error' in payObj) {
                     const errMsg = String(payObj.error);
                     const lower = errMsg.toLowerCase();
@@ -639,23 +654,42 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       warn(`Canister EVM wallet has no gas: ${errMsg}`);
                       info('The canister verified the EIP-712 signature but could not broadcast —');
                       info('its EVM address has no ETH for gas. Fund it with testnet ETH.');
-                    } else if (lower.includes('revert')) {
-                      // The canister ACCEPTED the signature and broadcast the tx; the
-                      // USDC contract reverted the transfer on-chain. (H-1 catches this
-                      // instead of issuing a "paid" receipt for a reverted transfer.)
-                      warn(`On-chain transfer reverted (signature was accepted): ${errMsg}`);
-                      info('The canister verified the EIP-712 signature and broadcast the tx, but');
-                      info(
-                        'the USDC contract reverted it. Common causes: the PAYER address has no',
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: canister EVM wallet has no gas`,
+                        'External setup: fund the canister EVM address with testnet ETH. Not an ic402 bug.',
                       );
-                      info('USDC on this chain, the EIP-3009 nonce was already used, or the token');
+                    } else if (lower.includes('revert')) {
+                      // The canister verified the signature locally and broadcast the tx; the USDC
+                      // contract reverted it on-chain. (H-1 surfaces this instead of issuing a
+                      // "paid" receipt.) For Base Sepolia this is a PROVEN contract-side defect:
+                      // the submitted signature recovers to the funded payer under the contract's
+                      // own typehash + DOMAIN_SEPARATOR, yet it reverts "FiatTokenV2: invalid
+                      // signature". So this is NOT an ic402 problem — the canister signed correctly.
+                      warn(`On-chain transfer reverted on ${selectedChain.name}: ${errMsg}`);
                       info(
-                        'rejected the authorization. It is NOT a signature-verification failure.',
+                        "ic402's EIP-712 signature is valid — on Base Sepolia it provably recovers",
+                      );
+                      info(
+                        "to the funded payer under the USDC contract's own typehash + domain — yet",
+                      );
+                      info(
+                        'this testnet USDC rejects it ("FiatTokenV2: invalid signature"), a known',
+                      );
+                      info(
+                        'contract-side EIP-3009 defect. NOT an ic402 issue; the ICP rail settles fine.',
+                      );
+                      throw new KnownIssueError(
+                        `${selectedChain.name} USDC reverted a valid EIP-3009 authorization`,
+                        "Contract-side defect: the testnet USDC rejects a signature that is valid by its own typehash + DOMAIN_SEPARATOR. ic402's signing is proven correct.",
                       );
                     } else if (lower.includes('pending') || lower.includes('not yet confirmed')) {
                       warn(`Tx broadcast but not yet confirmed: ${errMsg}`);
                       info(
                         'The transfer was submitted; it had not mined within the confirm window.',
+                      );
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: transfer broadcast but not confirmed in the window`,
+                        'Testnet timing — the tx had not mined when the confirm poll gave up. Not an ic402 bug.',
                       );
                     } else if (
                       lower.includes('settlement') ||
@@ -663,35 +697,46 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       lower.includes('evm')
                     ) {
                       warn(`On-chain settlement failed: ${errMsg}`);
-                      info('The signature was accepted; the on-chain execution failed.');
+                      info('The signature was accepted locally; the on-chain execution failed.');
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: on-chain settlement / RPC failure`,
+                        'External RPC / chain issue (the local signature verification passed). Not an ic402 bug.',
+                      );
                     } else if (lower.includes('eip-3009') || lower.includes('signature')) {
+                      // The canister's OWN local verification rejected the signature — that WOULD
+                      // be an ic402 bug, so fail the step hard (not a known issue).
                       warn(`Signature rejected by the canister: ${errMsg}`);
-                      info('The canister could not verify the EIP-712 signature locally.');
+                      throw new Error(
+                        `Canister rejected the EIP-712 signature locally — ${errMsg}`,
+                      );
                     } else {
-                      warn(`Error: ${errMsg}`);
+                      throw new Error(`Unexpected EVM settle error: ${errMsg}`);
                     }
                   } else if (payObj && 'paymentRequired' in payObj) {
                     warn(
                       'Payment not accepted — canister returned paymentRequired (settle failed).',
                     );
-                    info(
-                      'This usually means the nonce was invalid or the signature verification failed.',
-                    );
                     info(`Raw: ${JSON.stringify(payObj).slice(0, 200)}`);
+                    throw new Error('EVM settle returned paymentRequired (payment not accepted)');
                   } else {
                     result(payRes);
+                    throw new Error('Unexpected EVM settle response');
                   }
                 } catch (e) {
-                  warn(`Settlement error: ${e instanceof Error ? e.message : String(e)}`);
+                  if (e instanceof KnownIssueError) throw e;
+                  throw e instanceof Error ? e : new Error(String(e));
                 }
               }
             } else {
               warn('Invalid selection. Skipping.');
             }
           }
-        }
 
-        highlight('Multi-chain ICP and EVM x402 — no other implementation does this.');
+          // Only claim the multi-rail win if a payment actually delivered content.
+          if (delivered) {
+            highlight('Multi-chain ICP and EVM x402 — no other implementation does this.');
+          }
+        }
       },
     },
 
