@@ -56,12 +56,11 @@ module {
     };
   };
 
-  /// Build the x402 v2 `PaymentRequired` JSON object.
-  /// Shape: { x402Version:2, error?, resource:ResourceInfo, accepts:[PaymentRequirements...] }.
-  /// PaymentRequirements use the v2 field names (`amount`, not `maxAmountRequired`), CAIP-2
-  /// `network`, and a real `maxTimeoutSeconds`. The non-standard ic402 server nonce/expiry live
-  /// under `extra` (the only spec-sanctioned bag) where a stock client ignores them.
-  public func paymentRequiredJson(requirements : [Types.PaymentRequirement], resourceUrl : Text, errorMsg : ?Text) : Text {
+  /// Render the x402 v2 `accepts` array (the list of PaymentRequirements). Reused by the 402
+  /// challenge and by the discovery listing. PaymentRequirements use the v2 field names
+  /// (`amount`, not `maxAmountRequired`), CAIP-2 `network`, and a real `maxTimeoutSeconds`. The
+  /// non-standard ic402 server nonce/expiry live under `extra` where a stock client ignores them.
+  public func acceptsArrayJson(requirements : [Types.PaymentRequirement]) : Text {
     let now = Time.now();
     var accepts = "";
     // requirements.keys() avoids the `size() - 1` Nat underflow trap on an empty array.
@@ -90,13 +89,27 @@ module {
         # ",\"ic402Expiry\":" # Int.toText(r.expiry) # "}"
         # "}";
     };
+    "[" # accepts # "]";
+  };
+
+  /// Build the x402 v2 `PaymentRequired` JSON object.
+  /// Shape: { x402Version:2, error?, resource:ResourceInfo, accepts:[PaymentRequirements...] }.
+  public func paymentRequiredJson(requirements : [Types.PaymentRequirement], resourceUrl : Text, errorMsg : ?Text) : Text {
     let errPart = switch (errorMsg) {
       case (?m) { "\"error\":\"" # Utils.escapeJsonString(m) # "\"," };
       case (null) { "" };
     };
     "{\"x402Version\":2," # errPart
       # "\"resource\":{\"url\":\"" # Utils.escapeJsonString(resourceUrl) # "\"}"
-      # ",\"accepts\":[" # accepts # "]}";
+      # ",\"accepts\":" # acceptsArrayJson(requirements) # "}";
+  };
+
+  /// One entry in the x402 discovery (`GET /discovery/resources`) listing. `acceptsJson` is the
+  /// pre-rendered v2 accepts array (e.g. from acceptsArrayJson). The resource URL is escaped here.
+  public func discoveryItemJson(resourceUrl : Text, resType : Text, acceptsJson : Text) : Text {
+    "{\"resource\":\"" # Utils.escapeJsonString(resourceUrl) # "\""
+      # ",\"type\":\"" # Utils.escapeJsonString(resType) # "\""
+      # ",\"x402Version\":2,\"accepts\":" # acceptsJson # "}";
   };
 
   /// Build a 402 Payment Required response (x402 v2). The `PaymentRequired` object travels in

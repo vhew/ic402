@@ -780,5 +780,38 @@ describe('ic402 integration', () => {
       const body = await res.json();
       expect(body.error).toContain('PAYMENT-SIGNATURE');
     });
+
+    it('GET /supported advertises the v2 EVM kinds + signer', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/supported`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.kinds)).toBe(true);
+      expect(body.kinds.length).toBeGreaterThan(0);
+      for (const k of body.kinds) {
+        expect(k.x402Version).toBe(2);
+        expect(k.scheme).toBe('exact');
+        expect(k.network).toMatch(/^eip155:/); // ICP omitted from the standard kinds
+      }
+      // signers maps the EVM namespace to the canister's own address
+      expect(body.signers['eip155:*'][0]).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    });
+
+    it('GET /discovery/resources lists paid resources with v2 accepts', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/discovery/resources`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.resources)).toBe(true);
+      const search = body.resources.find((r: { resource: string }) =>
+        r.resource.endsWith('/search'),
+      );
+      expect(search).toBeDefined();
+      expect(search.x402Version).toBe(2);
+      expect(Array.isArray(search.accepts)).toBe(true);
+      const evm = search.accepts.find((a: { network: string }) => a.network.startsWith('eip155:'));
+      expect(evm.amount).toBe('1000');
+      expect(evm.extra.assetTransferMethod).toBe('eip3009');
+    });
   });
 });

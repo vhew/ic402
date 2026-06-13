@@ -274,6 +274,45 @@ persistent actor KnowledgeBase {
       };
     };
 
+    // x402 facilitator: advertise the (x402Version, scheme, network) kinds this canister can
+    // settle, plus its on-chain signer address. ic402 self-hosts the facilitator role.
+    if (path == "/supported") {
+      return Http.http200Json(gate.supportedJson());
+    };
+
+    // x402 discovery (Bazaar): list the paid resources with their v2 accepts[] (non-minting —
+    // describeAll advertises price/asset without burning a server nonce; clients hit the
+    // resource for a live challenge).
+    if (path == "/discovery/resources") {
+      var items = Http.discoveryItemJson(
+        Http.buildResourceUrl(request.headers, "/search"),
+        "http",
+        Http.acceptsArrayJson(gate.describeAll(1_000)),
+      );
+      for (entry in store.list().vals()) {
+        items #= "," # Http.discoveryItemJson(
+          Http.buildResourceUrl(request.headers, "/content/" # entry.id),
+          "http",
+          Http.acceptsArrayJson(gate.describeAll(5_000)),
+        );
+      };
+      for (svc in registry.listServices(true).vals()) {
+        let amt = switch (svc.pricing) {
+          case (#Exact(p)) { p + CKUSDC_FEE };
+          case (#Upto(p)) { p + CKUSDC_FEE };
+          case (#Session) { 0 };
+        };
+        if (amt > 0) {
+          items #= "," # Http.discoveryItemJson(
+            Http.buildResourceUrl(request.headers, "/service/" # svc.id),
+            "http",
+            Http.acceptsArrayJson(gate.describeAll(amt)),
+          );
+        };
+      };
+      return Http.http200Json("{\"resources\":[" # items # "]}");
+    };
+
     Http.httpError(404, "Not found");
   };
 

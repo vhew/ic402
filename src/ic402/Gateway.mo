@@ -236,6 +236,56 @@ module {
       Utils.isEvmNetwork(network);
     };
 
+    // ── x402 facilitator / discovery (advertising) ──
+
+    /// Non-minting payment requirements for ADVERTISING (discovery / Bazaar). Unlike
+    /// require*, this does NOT generate or persist a server nonce — it describes the price/asset
+    /// for each rail so a client can discover the endpoint. The client must still hit the
+    /// resource to receive a live 402 challenge with a real nonce. nonce = empty, expiry = 0.
+    public func describeAll(amount : Nat) : [Types.PaymentRequirement] {
+      let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size() + 1);
+      switch (price(amount)) {
+        case (?p) {
+          buf.add({
+            scheme = "exact"; network = p.network; token = Principal.toText(p.token);
+            amount = p.amount; recipient = recipientText();
+            nonce = Blob.fromArray([]); expiry = 0; tokenName = null; tokenVersion = null;
+          });
+        };
+        case (null) {};
+      };
+      for (chain in config.evmChains.vals()) {
+        if (chain.tokens.size() == 0) { /* skip */ } else {
+          let tok = chain.tokens[0];
+          buf.add({
+            scheme = "exact"; network = "eip155:" # Nat.toText(chain.chainId);
+            token = tok.address; amount; recipient = evmRecipientFor(chain);
+            nonce = Blob.fromArray([]); expiry = 0; tokenName = tok.name; tokenVersion = tok.version;
+          });
+        };
+      };
+      Buffer.toArray(buf);
+    };
+
+    /// x402 v2 `GET /supported` body: the (x402Version, scheme, network) kinds this facilitator
+    /// can settle, plus the on-chain signer(s). Only the STANDARD EVM (`eip155:*`, `exact`) kinds
+    /// are advertised — the ICP rail is non-standard and intentionally omitted so a strict v2
+    /// client/facilitator sees only what it can interoperate with. `signers` maps the CAIP-2 EVM
+    /// namespace to the canister's own tECDSA-derived EVM address (the entity that broadcasts).
+    public func supportedJson() : Text {
+      var kinds = "";
+      var first = true;
+      for (chain in config.evmChains.vals()) {
+        if (chain.tokens.size() == 0) { /* skip */ } else {
+          if (not first) { kinds #= "," };
+          kinds #= "{\"x402Version\":2,\"scheme\":\"exact\",\"network\":\"eip155:" # Nat.toText(chain.chainId) # "\"}";
+          first := false;
+        };
+      };
+      let signer = switch (evmRecipient) { case (?a) { a }; case (null) { "" } };
+      "{\"kinds\":[" # kinds # "],\"extensions\":[],\"signers\":{\"eip155:*\":[\"" # signer # "\"]}}";
+    };
+
     func extractChainId(network : Text) : ?Nat {
       Utils.extractChainId(network);
     };
