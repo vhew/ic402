@@ -216,6 +216,9 @@ persistent actor KnowledgeBase {
   public query func http_request(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
 
+    // CORS preflight for the v2 custom `PAYMENT-SIGNATURE` request header.
+    if (request.method == "OPTIONS") { return Http.httpOptions() };
+
     // Free: canister info
     if (path == "/" or path == "") {
       return Http.http200Json("{\"name\":\"KnowledgeBase\",\"x402Support\":true}");
@@ -276,35 +279,44 @@ persistent actor KnowledgeBase {
 
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
+    if (request.method == "OPTIONS") { return Http.httpOptions() };
+    // x402 v2 ResourceInfo.url — absolute URL built from the Host header (ICP request.url is path-only).
+    let resourceUrl = Http.buildResourceUrl(request.headers, request.url);
 
-    // H-9: When there is no payment yet, issue the 402 challenge HERE (update
-    // context) so gate.requireAll persists the server nonce that settlement binds.
-    let paymentHeader = switch (Http.getHeader(request.headers, "x-payment")) {
+    // v2: a stock client sends the payment in PAYMENT-SIGNATURE; accept the legacy x-payment as a
+    // fallback. H-9: with no payment yet, issue the 402 challenge HERE (update context) so
+    // gate.requireAll persists the server nonce that the ICP/legacy rail binds to.
+    let paymentHeader = switch (Http.getHeader(request.headers, "payment-signature")) {
       case (?p) { p };
       case (null) {
-        if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000)) };
-        if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000)) };
-        if (Text.startsWith(path, #text "/service/")) {
-          let serviceId = switch (Text.stripStart(path, #text "/service/")) {
-            case (?id) { id };
-            case (null) { return Http.httpError(400, "Missing service ID") };
-          };
-          switch (registry.getService(serviceId)) {
-            case (null) { return Http.httpError(404, "Service not found") };
-            case (?svc) {
-              if (not svc.enabled) return Http.httpError(404, "Service not available");
-              switch (svc.pricing) {
-                // #Session is billed against an existing session deposit, not a
-                // per-request 402 charge — requireAll(0) would trap.
-                case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
-                // A1: charge price + ledger fee so the canister can cover the outbound settle.
-                case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE)) };
-                case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE)) };
+        switch (Http.getHeader(request.headers, "x-payment")) {
+          case (?p) { p };
+          case (null) {
+            if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/service/")) {
+              let serviceId = switch (Text.stripStart(path, #text "/service/")) {
+                case (?id) { id };
+                case (null) { return Http.httpError(400, "Missing service ID") };
+              };
+              switch (registry.getService(serviceId)) {
+                case (null) { return Http.httpError(404, "Service not found") };
+                case (?svc) {
+                  if (not svc.enabled) return Http.httpError(404, "Service not available");
+                  switch (svc.pricing) {
+                    // #Session is billed against an existing session deposit, not a
+                    // per-request 402 charge — requireAll(0) would trap.
+                    case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+                    // A1: charge price + ledger fee so the canister can cover the outbound settle.
+                    case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                    case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                  };
+                };
               };
             };
+            return Http.httpError(400, "Missing PAYMENT-SIGNATURE header");
           };
         };
-        return Http.httpError(400, "Missing X-PAYMENT header");
       };
     };
     let sig = switch (Http.parseX402PaymentHeader(paymentHeader)) {
@@ -312,7 +324,7 @@ persistent actor KnowledgeBase {
       case (null) {
         switch (Http.parsePaymentHeader(paymentHeader)) {
           case (?s) { s };
-          case (null) { return Http.httpError(400, "Invalid X-PAYMENT header") };
+          case (null) { return Http.httpError(400, "Invalid PAYMENT-SIGNATURE header") };
         };
       };
     };
@@ -325,17 +337,23 @@ persistent actor KnowledgeBase {
       };
       switch (await gate.settle(sig)) {
         case (#ok(receipt)) {
+          // Cross-resource underpayment: the nonce binds amount/token/network but not the
+          // resource, so reject a settlement that doesn't cover this content's price.
+          if (receipt.amount < 5_000) {
+            return Http.httpError(402, "Underpayment: content requires 5000, settled " # Nat.toText(receipt.amount));
+          };
+          let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let metadata = switch (store.getMetadata(contentId)) {
             case (null) { return Http.httpError(404, "Content not found") };
             case (?m) { m };
           };
           if (metadata.chunkCount <= 1) {
             switch (store.get(contentId)) {
-              case (?blob) { return Http.http200(blob, metadata.mimeType) };
+              case (?blob) { return Http.http200WithSettlement(blob, metadata.mimeType, settlement) };
               case (null) { return Http.httpError(500, "Read failed") };
             };
           } else {
-            return Http.http200Json("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}");
+            return Http.http200JsonWithSettlement("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}", settlement);
           };
         };
         case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
@@ -346,14 +364,18 @@ persistent actor KnowledgeBase {
     if (Text.startsWith(path, #text "/search")) {
       let q = switch (Http.getQueryParam(request.url, "q")) { case (?q) { q }; case (null) { "ic402" } };
       switch (await gate.settle(sig)) {
-        case (#ok(_)) {
+        case (#ok(receipt)) {
+          if (receipt.amount < 1_000) {
+            return Http.httpError(402, "Underpayment: search requires 1000, settled " # Nat.toText(receipt.amount));
+          };
+          let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let results = doSearch(q);
           var json = "[";
           for (i in results.keys()) {
             if (i > 0) { json #= "," };
             json #= "\"" # results[i] # "\"";
           };
-          return Http.http200Json("{\"results\":" # json # "]}");
+          return Http.http200JsonWithSettlement("{\"results\":" # json # "]}", settlement);
         };
         case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
         case (_) { return Http.httpError(402, "Payment failed") };
@@ -371,9 +393,11 @@ persistent actor KnowledgeBase {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
           // Pass it through as Text — do NOT coerce to Principal (that trapped for
           // EVM senders AFTER the on-chain transfer had already executed).
+          // submitRequest enforces receipt.amount >= price + fee (cross-resource safe).
           switch (registry.submitRequest(receipt.sender, serviceId, request.body, receipt, null)) {
             case (#ok(jobId)) {
-              return Http.http202Json("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}");
+              let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
+              return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
             };
             case (#err(e)) { return Http.httpError(400, e) };
           };

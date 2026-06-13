@@ -737,4 +737,46 @@ describe('ic402 integration', () => {
       expect(true).toBe(true);
     });
   });
+
+  // ── x402 v2 HTTP wire format ──
+
+  describe('x402 v2 http', () => {
+    const raw = () => `http://${exampleId}.raw.localhost:4944`;
+
+    it('GET a paid resource returns a v2 PaymentRequired challenge', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/search?q=probe`);
+      expect(res.status).toBe(402);
+      // v2 header transport: the challenge travels in the base64 PAYMENT-REQUIRED header.
+      const hdr = res.headers.get('payment-required');
+      expect(hdr).toBeTruthy();
+      const fromHeader = JSON.parse(Buffer.from(hdr as string, 'base64').toString('utf8'));
+      expect(fromHeader.x402Version).toBe(2);
+
+      const body = await res.json();
+      expect(body.x402Version).toBe(2);
+      expect(body.error).toBeTruthy();
+      expect(typeof body.resource?.url).toBe('string'); // ResourceInfo
+      expect(Array.isArray(body.accepts)).toBe(true);
+      const evm = body.accepts.find((a: { network: string }) => a.network.startsWith('eip155:'));
+      expect(evm).toBeDefined();
+      expect(evm.scheme).toBe('exact');
+      expect(evm.amount).toBe('1000'); // v2 `amount`, not maxAmountRequired
+      expect(evm.payTo).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(evm.extra.assetTransferMethod).toBe('eip3009');
+      // v1 field name must be gone; non-standard ic402 fields live under extra
+      expect(JSON.stringify(body)).not.toContain('maxAmountRequired');
+      expect(evm.ic402Nonce).toBeUndefined();
+      expect(typeof evm.extra.ic402Nonce).toBe('string');
+    });
+
+    it('missing PAYMENT-SIGNATURE on a POST-style retry is reported as such', async () => {
+      if (skip) return;
+      // No payment header at all → the update path returns the v2 challenge / guidance.
+      const res = await fetch(`${raw()}/search?q=x`, { method: 'GET' });
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.error).toContain('PAYMENT-SIGNATURE');
+    });
+  });
 });

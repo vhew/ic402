@@ -22,6 +22,7 @@ import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
 import Int "mo:base/Int";
+import Time "mo:base/Time";
 import Array "mo:base/Array";
 import Buffer "mo:base/Buffer";
 import Char "mo:base/Char";
@@ -31,49 +32,127 @@ import Utils "Utils";
 
 module {
 
-  /// Build a JSON string from PaymentRequirements for the 402 response body.
-  /// Follows x402 v1 convention: { "x402Version": 1, "accepts": [...] }
-  /// Includes both x402-standard fields (asset, payTo, maxAmountRequired) and
-  /// ic402 fields (token, recipient, amount, nonce) for compatibility.
-  public func paymentRequiredJson(requirements : [Types.PaymentRequirement]) : Text {
+  /// Standard CORS + x402 header-transport headers attached to every response, so a
+  /// browser agent can (a) pass the OPTIONS preflight carrying the custom
+  /// `PAYMENT-SIGNATURE` request header and (b) actually READ the `PAYMENT-REQUIRED` /
+  /// `PAYMENT-RESPONSE` response headers (without `Access-Control-Expose-Headers`,
+  /// `Allow-Origin: *` hides all non-safelisted response headers from JS).
+  public func corsHeaders() : [(Text, Text)] {
+    [
+      ("Access-Control-Allow-Origin", "*"),
+      ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+      ("Access-Control-Allow-Headers", "PAYMENT-SIGNATURE, X-Payment, Content-Type"),
+      ("Access-Control-Expose-Headers", "PAYMENT-REQUIRED, PAYMENT-RESPONSE"),
+    ];
+  };
+
+  /// Build the absolute resource URL for x402 v2 `ResourceInfo.url`. ICP's `request.url`
+  /// is only the path+query (no scheme/host), so the origin is taken from the `Host` header.
+  public func buildResourceUrl(headers : [(Text, Text)], url : Text) : Text {
+    let path = getPath(url);
+    switch (getHeader(headers, "host")) {
+      case (?host) { if (host == "") { path } else { "https://" # host # path } };
+      case (null) { path };
+    };
+  };
+
+  /// Build the x402 v2 `PaymentRequired` JSON object.
+  /// Shape: { x402Version:2, error?, resource:ResourceInfo, accepts:[PaymentRequirements...] }.
+  /// PaymentRequirements use the v2 field names (`amount`, not `maxAmountRequired`), CAIP-2
+  /// `network`, and a real `maxTimeoutSeconds`. The non-standard ic402 server nonce/expiry live
+  /// under `extra` (the only spec-sanctioned bag) where a stock client ignores them.
+  public func paymentRequiredJson(requirements : [Types.PaymentRequirement], resourceUrl : Text, errorMsg : ?Text) : Text {
+    let now = Time.now();
     var accepts = "";
     for (i in Iter.range(0, requirements.size() - 1)) {
       let r = requirements[i];
       if (i > 0) { accepts #= "," };
       let tName = switch (r.tokenName) { case (?n) { n }; case (null) { "USD Coin" } };
       let tVersion = switch (r.tokenVersion) { case (?v) { v }; case (null) { "2" } };
+      // v2 maxTimeoutSeconds = the real remaining challenge window, not a constant.
+      let timeout : Int = if (r.expiry > now) { (r.expiry - now) / 1_000_000_000 } else { 0 };
       accepts #= "{\"scheme\":\"" # Utils.escapeJsonString(r.scheme) # "\""
         # ",\"network\":\"" # Utils.escapeJsonString(r.network) # "\""
+        # ",\"amount\":\"" # Nat.toText(r.amount) # "\""
         # ",\"asset\":\"" # Utils.escapeJsonString(r.token) # "\""
-        # ",\"maxAmountRequired\":\"" # Nat.toText(r.amount) # "\""
         # ",\"payTo\":\"" # Utils.escapeJsonString(r.recipient) # "\""
-        # ",\"maxTimeoutSeconds\":" # Int.toText(300)
-        // H-10 (v2): Expose the ic402 server nonce + expiry so clients can bind a
-        // payment to this specific challenge. EVM (EIP-3009) clients must echo
-        // `ic402Nonce` in the X-PAYMENT payload so settle() can lock the bound
-        // amount; without it the server-nonce → amount binding was unusable.
+        # ",\"maxTimeoutSeconds\":" # Int.toText(timeout)
+        // extra = EIP-712 domain (name/version, load-bearing for signature verification),
+        // the default asset-transfer method, and the NON-STANDARD ic402 server nonce/expiry
+        // (unique key names so the flat JSON reader never collides with authorization.nonce;
+        // stock x402 clients ignore them — only the ic402 server-nonce binding on the
+        // ICP/legacy rail reads them back).
+        # ",\"extra\":{\"name\":\"" # Utils.escapeJsonString(tName) # "\""
+        # ",\"version\":\"" # Utils.escapeJsonString(tVersion) # "\""
+        # ",\"assetTransferMethod\":\"eip3009\""
         # ",\"ic402Nonce\":\"" # blobToHex(r.nonce) # "\""
-        # ",\"expiry\":" # Int.toText(r.expiry)
-        # ",\"extra\":{\"name\":\"" # Utils.escapeJsonString(tName) # "\",\"version\":\"" # Utils.escapeJsonString(tVersion) # "\"}"
+        # ",\"ic402Expiry\":" # Int.toText(r.expiry) # "}"
         # "}";
     };
-    "{\"x402Version\":1,\"accepts\":[" # accepts # "]}";
+    let errPart = switch (errorMsg) {
+      case (?m) { "\"error\":\"" # Utils.escapeJsonString(m) # "\"," };
+      case (null) { "" };
+    };
+    "{\"x402Version\":2," # errPart
+      # "\"resource\":{\"url\":\"" # Utils.escapeJsonString(resourceUrl) # "\"}"
+      # ",\"accepts\":[" # accepts # "]}";
   };
 
-  /// Build a 402 Payment Required HTTP response.
-  /// Includes both x402 v1 (JSON body) and x402 v2 (base64 payment-required header).
-  public func http402(requirements : [Types.PaymentRequirement]) : Types.HttpResponse {
-    let body = paymentRequiredJson(requirements);
+  /// Build a 402 Payment Required response (x402 v2). The `PaymentRequired` object travels in
+  /// the base64 `PAYMENT-REQUIRED` header (v2 header transport); the JSON body carries the same
+  /// object for non-browser tooling.
+  public func http402(requirements : [Types.PaymentRequirement], resourceUrl : Text) : Types.HttpResponse {
+    let body = paymentRequiredJson(requirements, resourceUrl, ?"PAYMENT-SIGNATURE header is required");
     let base64Header = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(body)));
     {
       status_code = 402;
-      headers = [
+      headers = Array.append(corsHeaders(), [
         ("Content-Type", "application/json"),
-        ("Access-Control-Allow-Origin", "*"),
-        ("WWW-Authenticate", "Payment realm=\"ic402\", method=\"x402\""),
-        ("payment-required", base64Header),
-      ];
+        ("PAYMENT-REQUIRED", base64Header),
+      ]);
       body = Text.encodeUtf8(body);
+      upgrade = null;
+    };
+  };
+
+  /// CORS preflight response for the v2 custom request header `PAYMENT-SIGNATURE`.
+  public func httpOptions() : Types.HttpResponse {
+    { status_code = 204; headers = corsHeaders(); body = Blob.fromArray([]); upgrade = null };
+  };
+
+  /// Build the x402 v2 `SettlementResponse` JSON, emitted in the `PAYMENT-RESPONSE` header.
+  public func settlementResponseJson(success : Bool, txHash : ?Text, network : Text, payer : Text, amount : Nat, errorReason : ?Text) : Text {
+    let tx = switch (txHash) { case (?h) { h }; case (null) { "" } };
+    let errPart = switch (errorReason) {
+      case (?e) { ",\"errorReason\":\"" # Utils.escapeJsonString(e) # "\"" };
+      case (null) { "" };
+    };
+    "{\"success\":" # (if (success) { "true" } else { "false" })
+      # ",\"transaction\":\"" # Utils.escapeJsonString(tx) # "\""
+      # ",\"network\":\"" # Utils.escapeJsonString(network) # "\""
+      # ",\"payer\":\"" # Utils.escapeJsonString(payer) # "\""
+      # ",\"amount\":\"" # Nat.toText(amount) # "\""
+      # errPart # "}";
+  };
+
+  /// 200 (binary content) carrying the v2 `PAYMENT-RESPONSE` settlement header.
+  public func http200WithSettlement(contentBody : Blob, mimeType : Text, settlementJson : Text) : Types.HttpResponse {
+    let b64 = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(settlementJson)));
+    {
+      status_code = 200;
+      headers = Array.append(corsHeaders(), [("Content-Type", mimeType), ("PAYMENT-RESPONSE", b64)]);
+      body = contentBody;
+      upgrade = null;
+    };
+  };
+
+  /// 200 (JSON) carrying the v2 `PAYMENT-RESPONSE` settlement header.
+  public func http200JsonWithSettlement(json : Text, settlementJson : Text) : Types.HttpResponse {
+    let b64 = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(settlementJson)));
+    {
+      status_code = 200;
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json"), ("PAYMENT-RESPONSE", b64)]);
+      body = Text.encodeUtf8(json);
       upgrade = null;
     };
   };
@@ -82,10 +161,7 @@ module {
   public func http200(contentBody : Blob, mimeType : Text) : Types.HttpResponse {
     {
       status_code = 200;
-      headers = [
-        ("Content-Type", mimeType),
-        ("Access-Control-Allow-Origin", "*"),
-      ];
+      headers = Array.append(corsHeaders(), [("Content-Type", mimeType)]);
       body = contentBody;
       upgrade = null;
     };
@@ -95,10 +171,7 @@ module {
   public func http200Json(json : Text) : Types.HttpResponse {
     {
       status_code = 200;
-      headers = [
-        ("Content-Type", "application/json"),
-        ("Access-Control-Allow-Origin", "*"),
-      ];
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json")]);
       body = Text.encodeUtf8(json);
       upgrade = null;
     };
@@ -108,10 +181,7 @@ module {
   public func httpError(status : Nat16, message : Text) : Types.HttpResponse {
     {
       status_code = status;
-      headers = [
-        ("Content-Type", "application/json"),
-        ("Access-Control-Allow-Origin", "*"),
-      ];
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json")]);
       body = Text.encodeUtf8("{\"error\":\"" # Utils.escapeJsonString(message) # "\"}");
       upgrade = null;
     };
@@ -131,10 +201,7 @@ module {
   public func http202Json(json : Text) : Types.HttpResponse {
     {
       status_code = 202;
-      headers = [
-        ("Content-Type", "application/json"),
-        ("Access-Control-Allow-Origin", "*"),
-      ];
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json")]);
       body = Text.encodeUtf8(json);
       upgrade = null;
     };
