@@ -416,7 +416,8 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
       };
-      switch (await gate.settle(sig, ?5_000)) {
+      let contentResult = await gate.settle(sig, ?5_000);
+      switch (contentResult) {
         case (#ok(receipt)) {
           // Cross-resource underpayment: the nonce binds amount/token/network but not the
           // resource, so reject a settlement that doesn't cover this content's price.
@@ -437,14 +438,15 @@ persistent actor KnowledgeBase {
             return Http.http200JsonWithSettlement("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}", settlement);
           };
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        // v2: emit a SettlementResponse (success:false + error reason) on any settle failure.
+        case (_) { return Http.http402WithSettlement(settleResultJson(contentResult, sig.network, sig.sender, 5_000)) };
       };
     };
 
     if (Text.startsWith(path, #text "/search")) {
       let q = switch (Http.getQueryParam(request.url, "q")) { case (?q) { q }; case (null) { "ic402" } };
-      switch (await gate.settle(sig, ?1_000)) {
+      let searchResult = await gate.settle(sig, ?1_000);
+      switch (searchResult) {
         case (#ok(receipt)) {
           if (receipt.amount < 1_000) {
             return Http.httpError(402, "Underpayment: search requires 1000, settled " # Nat.toText(receipt.amount));
@@ -458,8 +460,7 @@ persistent actor KnowledgeBase {
           };
           return Http.http200JsonWithSettlement("{\"results\":" # json # "]}", settlement);
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        case (_) { return Http.http402WithSettlement(settleResultJson(searchResult, sig.network, sig.sender, 1_000)) };
       };
     };
 
@@ -469,7 +470,8 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing service ID") };
       };
-      switch (await gate.settle(sig, null)) {
+      let serviceResult = await gate.settle(sig, null);
+      switch (serviceResult) {
         case (#ok(receipt)) {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
           // Pass it through as Text — do NOT coerce to Principal (that trapped for
@@ -483,8 +485,8 @@ persistent actor KnowledgeBase {
             case (#err(e)) { return Http.httpError(400, e) };
           };
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        // amount unknown on a failed service settle (varies per service); 0 in the response.
+        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, 0)) };
       };
     };
 

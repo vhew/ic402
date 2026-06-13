@@ -129,6 +129,18 @@ module {
     };
   };
 
+  /// 402 carrying a v2 `SettlementResponse` (a settlement FAILURE on a paid request) — both in
+  /// the `PAYMENT-RESPONSE` header and the body, instead of an ad-hoc `{"error":...}`.
+  public func http402WithSettlement(settlementJson : Text) : Types.HttpResponse {
+    let b64 = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(settlementJson)));
+    {
+      status_code = 402;
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json"), ("PAYMENT-RESPONSE", b64)]);
+      body = Text.encodeUtf8(settlementJson);
+      upgrade = null;
+    };
+  };
+
   /// CORS preflight response for the v2 custom request header `PAYMENT-SIGNATURE`.
   public func httpOptions() : Types.HttpResponse {
     { status_code = 204; headers = corsHeaders(); body = Blob.fromArray([]); upgrade = null };

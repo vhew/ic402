@@ -892,5 +892,30 @@ describe('ic402 integration', () => {
       expect(s.network).toBe('eip155:84532');
       if (!s.success) expect(typeof s.errorReason).toBe('string');
     });
+
+    it('an HTTP settlement failure returns a v2 SettlementResponse, not a plain error', async () => {
+      if (skip) return;
+      // Sign an authorization to the canister for 1000, then present it at /content (needs 5000):
+      // settle fails on the value check BEFORE any broadcast, exercising the failure response.
+      const canisterAddr = await actor.getEvmAddress();
+      const signed = await actor.signX402Payment(
+        84532n,
+        BASE_SEPOLIA_USDC,
+        canisterAddr,
+        1000n,
+        'USDC',
+        '2',
+      );
+      const res = await fetch(`${raw()}/content/probe`, {
+        method: 'GET',
+        headers: { 'PAYMENT-SIGNATURE': signed.ok.header as string },
+      });
+      expect(res.status).toBe(402);
+      const s = await res.json();
+      expect(s.success).toBe(false);
+      expect(typeof s.errorReason).toBe('string');
+      expect(s.errorReason.length).toBeGreaterThan(0);
+      expect(s.transaction).toBe('');
+    });
   });
 });
