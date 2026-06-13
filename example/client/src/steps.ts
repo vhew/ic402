@@ -297,7 +297,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const searchAmt = ((await searchRes.json()) as Record<string, unknown>).accepts;
           const searchCount = Array.isArray(searchAmt) ? searchAmt.length : 0;
           const searchPrice = Array.isArray(searchAmt)
-            ? Number((searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ?? 0)
+            ? Number(
+                (searchAmt as Record<string, unknown>[])[0]?.amount ??
+                  // v1 back-compat alias
+                  (searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ??
+                  0,
+              )
             : 0;
           success(
             `HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${(searchPrice / 1_000_000).toFixed(6)} USDC)`,

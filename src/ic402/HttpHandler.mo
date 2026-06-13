@@ -64,7 +64,8 @@ module {
   public func paymentRequiredJson(requirements : [Types.PaymentRequirement], resourceUrl : Text, errorMsg : ?Text) : Text {
     let now = Time.now();
     var accepts = "";
-    for (i in Iter.range(0, requirements.size() - 1)) {
+    // requirements.keys() avoids the `size() - 1` Nat underflow trap on an empty array.
+    for (i in requirements.keys()) {
       let r = requirements[i];
       if (i > 0) { accepts #= "," };
       let tName = switch (r.tokenName) { case (?n) { n }; case (null) { "USD Coin" } };

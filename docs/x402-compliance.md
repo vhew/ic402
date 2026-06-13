@@ -130,15 +130,18 @@ error reason maps to the v2 vocabulary (`invalid_exact_evm_payload_authorization
 
 | Area | Item | Status |
 |---|---|---|
-| Wire | `x402Version` → 2, `PaymentRequired` + `ResourceInfo`, `amount` rename, `extra.assetTransferMethod` | see commits |
-| Wire | `PAYMENT-SIGNATURE` read (primary) + `x-payment` fallback | see commits |
-| Wire | `SettlementResponse` + `PAYMENT-RESPONSE` header on success | see commits |
-| Wire | relocate `ic402Nonce`/`expiry` → `extra.ic402`; `maxTimeoutSeconds` from real expiry | see commits |
-| CORS | `Access-Control-Expose-Headers`, `Allow-Headers`, `OPTIONS` preflight | see commits |
-| Scheme | `value >= amount` → `value == amount`; v2 error‑reason codes | see commits |
-| Scheme | EVM rail payable without the server nonce (EIP‑3009 nonce replay + per‑resource amount) | see commits |
-| Client | echo `accepted` verbatim, real `resource`, drop dead v1 helper + dual headers | see commits |
-| Hardening | cross‑resource amount check on the **HTTP** handlers (parity with the Candid fix) | see commits |
+| Wire | `x402Version` → 2, `PaymentRequired` + `ResourceInfo`, `amount` rename, `extra.assetTransferMethod` | ✅ done |
+| Wire | `PAYMENT-SIGNATURE` read (primary) + `x-payment` fallback | ✅ done |
+| Wire | `SettlementResponse` + `PAYMENT-RESPONSE` header on success | ✅ done |
+| Wire | relocate `ic402Nonce`/`expiry` → `extra.ic402`; `maxTimeoutSeconds` from real expiry | ✅ done |
+| CORS | `Access-Control-Expose-Headers`, `Allow-Headers`, `OPTIONS` preflight | ✅ done |
+| Scheme | `value >= amount` → `value == amount`; v2 error‑reason codes | ✅ done |
+| Scheme | EVM rail payable without the server nonce (EIP‑3009 nonce replay + per‑resource amount) | ✅ done |
+| Client | real `resource` (drop empty `{}`), `ic402Nonce` under `extra`, remove dead v1 helper | ✅ done |
+| Client | echo the advertised `accepts[]` entry *verbatim* as `accepted` (today reconstructed); send only `PAYMENT-SIGNATURE` | partial (reconstructed `accepted`; dual headers still sent — harmless) |
+| Hardening | cross‑resource amount check on the **HTTP** handlers (parity with the Candid fix) | ✅ done |
+| Minor | HTTP settlement *failures* return a plain `{"error":…}` body, not a v2 `SettlementResponse` | open (v2-acceptable) |
+| Minor | full v2 error-reason enum mapping (only the value-mismatch code is emitted today) | open |
 | Optional | facilitator API `/verify`,`/settle`,`/supported`; discovery `/discovery/resources` | **not done** (optional) |
 | Optional | `permit2` / `erc7710` asset‑transfer methods | **not done** (optional) |
 | N/A | fiat ISO‑4217 `asset` / role‑constant `payTo` | **unsupported** (no settlement path) |
