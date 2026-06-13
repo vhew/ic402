@@ -263,9 +263,11 @@ describe('ic402 integration', () => {
       };
       const result = await actor.getContent('int-test-doc', [cheapSig]);
 
-      // The 1000-nonce must NOT unlock the 5000 content.
+      // The 1000-nonce must NOT unlock the 5000 content. The gateway now rejects the
+      // amount/resource mismatch BEFORE settling (no funds move), rather than after.
       expect(result).toHaveProperty('error');
-      expect(result.error.toLowerCase()).toContain('underpayment');
+      const err = result.error.toLowerCase();
+      expect(err).toContain('does not match the resource price');
     });
 
     it('delete content', async () => {

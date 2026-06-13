@@ -186,7 +186,7 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
-        switch (await gate.settle(sig)) {
+        switch (await gate.settle(sig, ?amount)) {
           // A nonce binds amount/token/network but NOT the resource, so a nonce minted at a
           // cheaper endpoint could be redeemed here. Verify the settled amount covers THIS
           // resource's price (cross-resource underpayment).
@@ -335,7 +335,7 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
       };
-      switch (await gate.settle(sig)) {
+      switch (await gate.settle(sig, ?5_000)) {
         case (#ok(receipt)) {
           // Cross-resource underpayment: the nonce binds amount/token/network but not the
           // resource, so reject a settlement that doesn't cover this content's price.
@@ -363,7 +363,7 @@ persistent actor KnowledgeBase {
 
     if (Text.startsWith(path, #text "/search")) {
       let q = switch (Http.getQueryParam(request.url, "q")) { case (?q) { q }; case (null) { "ic402" } };
-      switch (await gate.settle(sig)) {
+      switch (await gate.settle(sig, ?1_000)) {
         case (#ok(receipt)) {
           if (receipt.amount < 1_000) {
             return Http.httpError(402, "Underpayment: search requires 1000, settled " # Nat.toText(receipt.amount));
@@ -388,7 +388,7 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing service ID") };
       };
-      switch (await gate.settle(sig)) {
+      switch (await gate.settle(sig, null)) {
         case (#ok(receipt)) {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
           // Pass it through as Text — do NOT coerce to Principal (that trapped for
@@ -508,7 +508,7 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
-        switch (await gate.settle(sig)) {
+        switch (await gate.settle(sig, ?amount)) {
           case (#ok(receipt)) {
             // Cross-resource underpayment: the nonce binds amount/token/network but not the
             // resource, so reject a settlement that doesn't cover this content's price.
@@ -683,7 +683,7 @@ persistent actor KnowledgeBase {
         };
       };
       case (?sig) {
-        switch (await gate.settle(sig)) {
+        switch (await gate.settle(sig, null)) {
           case (#ok(receipt)) {
             switch (registry.submitRequest(Principal.toText(msg.caller), serviceId, params, receipt, null)) {
               case (#ok(jobId)) { #ok({ jobId }) };

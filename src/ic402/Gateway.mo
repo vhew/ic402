@@ -267,13 +267,45 @@ module {
     };
 
     /// Verify and settle a charge payment (ICP via ICRC-2 or EVM via EIP-3009).
-    public func settle(signature : Types.PaymentSignature) : async Types.PaymentResult {
+    ///
+    /// `expectedAmount` is the price the calling resource advertised. It is REQUIRED for a
+    /// conformant x402 client that sends no ic402 server nonce (the EVM rail), and serves as a
+    /// cross-resource guard for server-nonce clients (a nonce whose bound amount doesn't match
+    /// the resource's price is rejected). Pass `null` to fall back to the nonce-bound amount.
+    public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       // H-2: Resolve token to verify nonce is bound to the correct network+token
       let resolvedToken = resolveTokenForNonce(signature.network);
-      // Lock nonce and extract the bound payment amount
-      let amount = switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
-        case (null) { return #expired("Nonce expired or already consumed") };
-        case (?a) { a };
+
+      // Amount + replay model, two paths:
+      //  • Server-nonce (ICP + legacy clients echo the ic402 nonce): lock it for the bound amount,
+      //    and reject a nonce whose amount != the resource's advertised price (cross-resource).
+      //  • Stock x402 (EVM): a conformant client sends NO server nonce. The amount is the
+      //    resource's advertised price, enforced as exact-equality below; replay protection is the
+      //    EIP-3009 authorization.nonce + the on-chain single-use transferWithAuthorization. ICP
+      //    has no on-chain nonce, so it always requires the server nonce.
+      let usesServerNonce = signature.nonce.size() > 0;
+      let amount = if (usesServerNonce) {
+        switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
+          case (null) { return #expired("Nonce expired or already consumed") };
+          case (?a) {
+            switch (expectedAmount) {
+              case (?e) {
+                if (a != e) {
+                  nonceManager.unlock(signature.nonce);
+                  return #policyDenied("Nonce-bound amount " # Nat.toText(a) # " does not match the resource price " # Nat.toText(e));
+                };
+              };
+              case (null) {};
+            };
+            a;
+          };
+        };
+      } else {
+        switch (expectedAmount, isEvmNetwork(signature.network)) {
+          case (?e, true) { e }; // stock EVM client: amount comes from the resource, value==amount below
+          case (_, false) { return #expired("ICP settlement requires the ic402 server nonce") };
+          case (null, _) { return #expired("No server nonce and no resource amount; cannot settle") };
+        };
       };
 
       // Dispatch to EVM settlement via EIP-3009 if eip155:* network
@@ -318,9 +350,12 @@ module {
           nonceManager.unlock(signature.nonce);
           return #invalidSignature("EIP-3009 recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")");
         };
-        if (authz.value < amount) {
+        // v2 §6.1.2: the exact-EVM scheme requires the authorization value to EQUAL the amount
+        // (not merely cover it). A v1 `>=` would accept an overpayment a strict v2 facilitator
+        // rejects. unlock() is a no-op when there is no server nonce (stock EVM client).
+        if (authz.value != amount) {
           nonceManager.unlock(signature.nonce);
-          return #insufficientFunds("Authorization value " # Nat.toText(authz.value) # " < required " # Nat.toText(amount));
+          return #invalidSignature("invalid_exact_evm_payload_authorization_value_mismatch: value " # Nat.toText(authz.value) # " != required " # Nat.toText(amount));
         };
 
         // Verify EIP-712 signature locally
