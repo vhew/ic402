@@ -564,7 +564,12 @@ module {
 
   /// How the canister verifies the operator's result before settling.
   public type VerificationMethod = {
-    #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal };
+    // bindResult: when true, the canister prepends a field element derived from SHA-256(result)
+    // as public input 0, so the proof attests to the DELIVERED result (not just the params). This
+    // requires a circuit built to commit to that input — so it is OPT-IN. When false (default),
+    // the public inputs are the buyer's params only (a circuit that proves the computation but not
+    // the result string — e.g. the √25 demo).
+    #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal; bindResult : Bool };
     #HashMatch;                              // sha256(result) must match buyer-provided hash
     #BuyerConfirm : { disputeWindowSeconds : Nat }; // buyer approves or disputes
     #AutoSettle;                             // trust the operator (reputation-gated)

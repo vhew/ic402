@@ -666,9 +666,17 @@ persistent actor KnowledgeBase {
     let verification : Ic402.VerificationMethod = switch (verificationMethod) {
       case ("AutoSettle") { #AutoSettle };
       case ("HashMatch") { #HashMatch };
-      case ("ZkGroth16") {
+      // "ZkGroth16" = params-only public inputs (default). "ZkGroth16:bind" = also bind
+      // SHA-256(result) as public input 0 — only with a circuit built to commit to it.
+      case ("ZkGroth16" or "ZkGroth16:bind") {
         switch (verifierCanisterId, verificationKey) {
-          case (?cid, ?vk) { #ZkGroth16({ verifierCanister = Principal.fromText(cid); verificationKey = vk }) };
+          case (?cid, ?vk) {
+            #ZkGroth16({
+              verifierCanister = Principal.fromText(cid);
+              verificationKey = vk;
+              bindResult = (verificationMethod == "ZkGroth16:bind");
+            });
+          };
           case (_, _) { return #err("ZkGroth16 requires verifierCanisterId and verificationKey") };
         };
       };

@@ -462,7 +462,7 @@ module {
           // Stay in #Submitted — buyer must call confirmJob or disputeJob
           #ok;
         };
-        case (#ZkGroth16({ verificationKey; verifierCanister })) {
+        case (#ZkGroth16({ verificationKey; verifierCanister; bindResult })) {
           let proof = switch (job.proof) {
             case (null) { return #err("ZK proof required but not provided") };
             case (?p) { p };
@@ -479,15 +479,21 @@ module {
           // write-back below — a refund-and-settle double spend.
           jobs.put(jobId, { job with status = #Computing });
 
-          // Proof-not-bound fix: bind the DELIVERED result into the public inputs so the proof
-          // attests to (resultHash, params) — not just params. Circuit convention: public input
-          // 0 is SHA-256 of the operator's result; the remaining input(s) are the buyer's params.
-          // Without this an operator submits a valid proof for the params alongside an ARBITRARY
-          // result blob and is paid for garbage.
-          let resultHash = SHA256.fromBlob(#sha256, result);
-          let publicInputs : [Blob] = if (Blob.toArray(job.params).size() > 0) {
-            [resultHash, job.params];
-          } else { [resultHash] };
+          // Proof-not-bound fix (OPT-IN, bindResult): bind the DELIVERED result into the public
+          // inputs so the proof attests to (resultHash, params) — not just params. Otherwise an
+          // operator submits a valid proof for the params alongside an ARBITRARY result and is paid
+          // for garbage. This requires a circuit whose public input 0 commits to the result, so it
+          // is opt-in; the default (false) passes the buyer's params only, matching circuits that
+          // prove the computation but not the result string (e.g. the √25 demo).
+          // The hash is reduced to a valid BN254 scalar (clear the top byte so it is < the field
+          // modulus); the circuit must commit to the same reduced value.
+          let publicInputs : [Blob] = if (bindResult) {
+            let h = Blob.toArray(SHA256.fromBlob(#sha256, result));
+            let reduced = Blob.fromArray(Array.tabulate<Nat8>(32, func(i) { if (i == 0) { 0 } else { h[i] } }));
+            if (Blob.toArray(job.params).size() > 0) { [reduced, job.params] } else { [reduced] };
+          } else if (Blob.toArray(job.params).size() > 0) {
+            [job.params];
+          } else { [] };
 
           let verifier : Types.ZkVerifierActor = actor (Principal.toText(verifierCanister));
           switch (await verifier.verify_groth16(proof, publicInputs, verificationKey)) {
