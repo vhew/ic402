@@ -70,35 +70,7 @@ export function buildTransferAuthorizationMessage(params: TransferAuthorizationP
   };
 }
 
-/** Build the base64-encoded X-PAYMENT header for x402. */
-export function buildX402PaymentHeader(
-  network: string,
-  signature: string,
-  authorization: {
-    from: string;
-    to: string;
-    value: bigint;
-    validAfter: bigint;
-    validBefore: bigint;
-    nonce: string;
-  },
-): string {
-  const payload = {
-    x402Version: 1,
-    scheme: 'exact',
-    network,
-    payload: {
-      signature,
-      authorization: {
-        from: authorization.from,
-        to: authorization.to,
-        value: authorization.value.toString(),
-        validAfter: authorization.validAfter.toString(),
-        validBefore: authorization.validBefore.toString(),
-        nonce: authorization.nonce,
-      },
-    },
-  };
-
-  return btoa(JSON.stringify(payload));
-}
+// (removed) buildX402PaymentHeader — it emitted a conflicting x402Version:1 payload, was never
+// used internally, and produced an incomplete payload (no v2 `accepted` echo). The live payment
+// flow builds the v2 PaymentPayload header inline in evm.ts (probeX402 → pay). Build the v2
+// header there or via the canister's signX402Payment, which echoes the chosen requirement.

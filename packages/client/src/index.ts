@@ -40,7 +40,6 @@ export {
   usdcDomain,
   TRANSFER_WITH_AUTHORIZATION_TYPES,
   buildTransferAuthorizationMessage,
-  buildX402PaymentHeader,
 } from './eip712.js';
 export {
   Ic402Error,

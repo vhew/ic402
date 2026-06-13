@@ -66,15 +66,24 @@ export interface Eip3009Authorization {
   s: Uint8Array; // 32 bytes
 }
 
-// x402 v1 payment requirement (from 402 response)
+// x402 v2 PaymentRequirements (one entry in PaymentRequired.accepts[])
 export interface X402PaymentRequirement {
   scheme: string;
-  network: string;
+  network: string; // CAIP-2, e.g. "eip155:84532"
   asset: string; // token contract address
-  maxAmountRequired: string; // amount as decimal string
+  amount: string; // v2 amount (atomic units, decimal string)
+  maxAmountRequired?: string; // v1 back-compat alias for `amount`
   payTo: string; // recipient address
   maxTimeoutSeconds: number;
-  extra?: { name: string; version: string };
+  // extra carries the EIP-712 domain, the default asset-transfer method, and the
+  // NON-STANDARD ic402 server nonce/expiry (ignored by stock x402 clients).
+  extra?: {
+    name?: string;
+    version?: string;
+    assetTransferMethod?: string;
+    ic402Nonce?: string;
+    ic402Expiry?: number;
+  };
 }
 
 // ── Content Delivery ──

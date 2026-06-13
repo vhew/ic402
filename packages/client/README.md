@@ -93,7 +93,6 @@ const signature = await walletClient.signTypedData({
 | `usdcDomain(chainId, tokenAddress)` | EIP-712 domain for USDC contracts |
 | `TRANSFER_WITH_AUTHORIZATION_TYPES` | EIP-712 type definition |
 | `buildTransferAuthorizationMessage(params)` | Build the EIP-712 message |
-| `buildX402PaymentHeader(network, sig, authz)` | Build X-PAYMENT header |
 
 ### Voucher Signing
 

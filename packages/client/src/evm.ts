@@ -158,7 +158,13 @@ export function findPaymentOption(body: string, chainId: number): PaymentOption 
         tokenVersion: extra.version || '2',
         network: caip2,
         asset: String(e.asset ?? ''),
-        ic402Nonce: e.ic402Nonce ? String(e.ic402Nonce) : undefined,
+        // v2: the non-standard ic402 server nonce lives under `extra` (was top-level in the old
+        // wire). Fall back to the top level for backward compatibility.
+        ic402Nonce: extra.ic402Nonce
+          ? String(extra.ic402Nonce)
+          : e.ic402Nonce
+            ? String(e.ic402Nonce)
+            : undefined,
       };
       bestAmount = amount;
     }
