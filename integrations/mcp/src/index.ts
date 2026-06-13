@@ -5,7 +5,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
-import { Ic402Client, Ic402Error, probeX402, exampleIdlFactory } from '@ic402/client';
+import {
+  Ic402Client,
+  Ic402Error,
+  probeX402,
+  applyVerbatimAccepted,
+  exampleIdlFactory,
+} from '@ic402/client';
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
@@ -993,6 +999,10 @@ server.tool(
         );
       }
       const signed = signResult.ok as { header: string; paidAmount: bigint };
+      // Echo the external server's advertised requirement VERBATIM as the v2 `accepted` (the
+      // canister reconstructs it; this makes a strict facilitator's accepted check pass). The
+      // `accepted` is not EIP-712-signed, so rewriting it is safe.
+      const headerToSend = applyVerbatimAccepted(signed.header, opt.rawRequirement);
 
       // Record the spend against the cumulative session cap now that signing
       // succeeded.
@@ -1006,7 +1016,7 @@ server.tool(
         paidResponse = await safeFetch(
           safeUrl,
           {
-            headers: { 'X-Payment': signed.header, 'Payment-Signature': signed.header },
+            headers: { 'X-Payment': headerToSend, 'Payment-Signature': headerToSend },
             signal: retryController.signal,
           },
           ssrfOpts(),

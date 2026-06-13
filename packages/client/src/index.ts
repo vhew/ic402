@@ -45,6 +45,7 @@ export {
   Ic402Error,
   classifyNetworkError,
   findPaymentOption,
+  applyVerbatimAccepted,
   probeX402,
   fetchX402,
   createEvmClient,

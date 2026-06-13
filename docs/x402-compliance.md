@@ -21,9 +21,9 @@ and the explicit statement of what stays non‑standard by nature.
 - ic402 is a **resource server that self‑hosts the facilitator role** (it verifies the EIP‑712
   signature and broadcasts `transferWithAuthorization` itself, via threshold‑ECDSA). The spec
   explicitly blesses "server‑as‑its‑own‑facilitator", so the fused `Gateway.settle` model is
-  conformant; the standalone facilitator HTTP API (`/verify`, `/settle`, `/supported`) and the
-  discovery Bazaar are **optional** (only needed to be callable *by third parties* as a
-  facilitator) and are out of scope for resource‑server compliance.
+  conformant. The standalone facilitator HTTP API (`/verify`, `/settle`, `/supported`) and the
+  discovery Bazaar were **optional** for resource‑server compliance (they make ic402 callable
+  *by third parties* as a facilitator) — these are **now implemented** as well (see Status).
 
 ## Why this was more than a rename
 
@@ -138,13 +138,18 @@ error reason maps to the v2 vocabulary (`invalid_exact_evm_payload_authorization
 | Scheme | `value >= amount` → `value == amount`; v2 error‑reason codes | ✅ done |
 | Scheme | EVM rail payable without the server nonce (EIP‑3009 nonce replay + per‑resource amount) | ✅ done |
 | Client | real `resource` (drop empty `{}`), `ic402Nonce` under `extra`, remove dead v1 helper | ✅ done |
-| Client | echo the advertised `accepts[]` entry *verbatim* as `accepted` (today reconstructed); send only `PAYMENT-SIGNATURE` | partial (reconstructed `accepted`; dual headers still sent — harmless) |
-| Hardening | cross‑resource amount check on the **HTTP** handlers (parity with the Candid fix) | ✅ done |
-| Minor | HTTP settlement *failures* return a plain `{"error":…}` body, not a v2 `SettlementResponse` | open (v2-acceptable) |
-| Minor | full v2 error-reason enum mapping (only the value-mismatch code is emitted today) | open |
-| Optional | facilitator API `/verify`,`/settle`,`/supported`; discovery `/discovery/resources` | **not done** (optional) |
-| Optional | `permit2` / `erc7710` asset‑transfer methods | **not done** (optional) |
-| N/A | fiat ISO‑4217 `asset` / role‑constant `payTo` | **unsupported** (no settlement path) |
+| Client | echo the advertised `accepts[]` entry *verbatim* as `accepted` | ✅ done (client rewrites the canister-built header post-signing; `applyVerbatimAccepted`) |
+| Hardening | cross‑resource amount check on the **HTTP** handlers + at the gateway (before funds move) | ✅ done |
+| Facilitator | `GET /supported` (kinds + signers) | ✅ done |
+| Facilitator | `POST /verify` (off‑chain) + `POST /settle` (v2 `SettlementResponse`) | ✅ done |
+| Discovery | `GET /discovery/resources` (Bazaar) | ✅ done |
+| Wire | HTTP settlement *failures* return a v2 `SettlementResponse` + error‑reason codes | ✅ done |
+| N/A | fiat ISO‑4217 `asset` / role‑constant `payTo` | **unsupported** (ic402 settles concrete on‑chain transfers — no settlement path) |
+| Deferred | `permit2` / `erc7710` asset‑transfer methods | **not implemented — intentionally.** Only `eip3009` (the v2 default, declared in `extra.assetTransferMethod`) is implemented. permit2/erc7710 are large, security‑sensitive on‑chain calldata encoders (Permit2 `permitWitnessTransferFrom` via the `x402ExactPermit2Proxy`; ERC‑7710 `redeemDelegations`) that **cannot be verified on‑chain in this environment** (the only available testnet USDC reverts EIP‑3009 — see B1). Shipping unverified transfer encoders would be irresponsible; deferred until a chain whose USDC honours these is available. |
+
+> The two former "Minor" items (HTTP failure SettlementResponse, full error‑reason mapping) are
+> now done. `dual X-Payment + PAYMENT-SIGNATURE` request headers are still sent by the client —
+> intentionally, as a v1 back‑compat alias; the server reads `PAYMENT-SIGNATURE` first.
 
 ### IC boundary-node CORS caveat
 

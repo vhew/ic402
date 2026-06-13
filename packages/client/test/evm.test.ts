@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { findPaymentOption, Ic402Error, probeX402 } from '../src/evm.js';
+import { findPaymentOption, applyVerbatimAccepted, Ic402Error, probeX402 } from '../src/evm.js';
 
 describe('probeX402 redirect re-validation (S2)', () => {
   let originalFetch: typeof globalThis.fetch;
@@ -437,5 +437,50 @@ describe('SignedTypedData type', () => {
     expect(mock.v).toBeGreaterThanOrEqual(27);
     expect(mock.r).toHaveLength(66);
     expect(mock.s).toHaveLength(66);
+  });
+});
+
+describe('applyVerbatimAccepted (echo advertised requirement as v2 `accepted`)', () => {
+  it('findPaymentOption captures the advertised requirement verbatim', () => {
+    const req = {
+      scheme: 'exact',
+      network: 'eip155:84532',
+      payTo: '0xRecipient',
+      amount: '1000',
+      asset: '0xUSDC',
+      maxTimeoutSeconds: 120,
+      extra: { name: 'USDC', version: '2', assetTransferMethod: 'eip3009' },
+    };
+    const option = findPaymentOption(JSON.stringify({ accepts: [req] }), 84532);
+    expect(option!.rawRequirement).toBeDefined();
+    expect(JSON.parse(option!.rawRequirement!)).toMatchObject({
+      amount: '1000',
+      maxTimeoutSeconds: 120,
+    });
+  });
+
+  it('rewrites `accepted` verbatim and leaves the signed authorization untouched', () => {
+    const header = btoa(
+      JSON.stringify({
+        x402Version: 2,
+        accepted: { scheme: 'exact', amount: '1000', maxTimeoutSeconds: 300 }, // reconstructed
+        payload: { signature: '0xsig', authorization: { from: '0xA', to: '0xB', value: '1000' } },
+      }),
+    );
+    const raw = JSON.stringify({
+      scheme: 'exact',
+      amount: '1000',
+      maxTimeoutSeconds: 120,
+      extra: { name: 'USDC', version: '2' },
+    });
+    const decoded = JSON.parse(atob(applyVerbatimAccepted(header, raw)));
+    expect(decoded.accepted.maxTimeoutSeconds).toBe(120); // verbatim, not the reconstructed 300
+    expect(decoded.accepted.extra.name).toBe('USDC');
+    expect(decoded.payload.authorization.value).toBe('1000'); // authorization untouched
+  });
+
+  it('returns the header unchanged when there is no raw requirement', () => {
+    const header = btoa(JSON.stringify({ x402Version: 2, payload: {} }));
+    expect(applyVerbatimAccepted(header, undefined)).toBe(header);
   });
 });
