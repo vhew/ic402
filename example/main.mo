@@ -524,12 +524,38 @@ persistent actor KnowledgeBase {
     config : Ic402.SessionConfig,
     sig : Ic402.PaymentSignature,
   ) : async { #ok : Ic402.SessionState; #err : Text } {
-    let intent = await requestSession();
+    // Honour the rail the client signed for: an EVM (eip155:*) signature opens an EVM session
+    // (deposit via EIP-3009, settle/refund on that chain via tECDSA); anything else is the default
+    // ICP ckUSDC session. Previously this always built the ICP intent, so an "EVM session" silently
+    // became an ICP one and the EIP-3009 authorization was ignored.
+    let intent = if (Text.startsWith(sig.network, #text "eip155:")) {
+      switch (gate.evmSessionParams(sig.network)) {
+        case (?p) {
+          gate.offerSession({
+            network = sig.network;
+            token = p.token;
+            recipient = p.recipient;
+            suggestedDeposit = 50_000;
+            minDeposit = ?5_000;
+            expiry = Time.now() + 300_000_000_000;
+            costPerCall = ?500;
+            description = ?"Knowledge base session (EVM)";
+          });
+        };
+        case (null) {
+          return #err("EVM session unavailable for " # sig.network # " (chain not configured or canister EVM address not derived yet)");
+        };
+      };
+    } else {
+      await requestSession();
+    };
     switch (await gate.openSession(msg.caller, intent, config, sig)) {
       case (#ok(state)) { #ok(state) };
       case (#err(#policyDenied(r))) { #err("Policy: " # r) };
       case (#err(#depositBelowMinimum(min))) { #err("Min deposit: " # Nat.toText(min)) };
       case (#err(#settlementFailed(r))) { #err("Settlement failed: " # r) };
+      case (#err(#settlementPending(r))) { #err("Settlement pending: " # r) };
+      case (#err(#networkNotSupported(r))) { #err("Network not supported: " # r) };
       case (#err(#expired(r))) { #err("Expired: " # r) };
       case (#err(#tokenNotAccepted(r))) { #err("Token not accepted: " # r) };
       case (#err(#insufficientFunds(r))) { #err("Insufficient funds: " # r) };
@@ -539,11 +565,16 @@ persistent actor KnowledgeBase {
   };
 
   public shared func sessionQuery(voucher : Ic402.Voucher, question : Text) : async { #ok : Text; #error : Text } {
+    // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
+    // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
     switch (gate.consumeVoucher(voucher)) {
       case (#ok(_)) { #ok(doQuery(question)) };
-      case (#insufficientDeposit) { #error("Budget exhausted") };
+      case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
-      case (_) { #error("Invalid voucher") };
+      case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
+      case (#invalidSignature) { #error("Invalid voucher: Ed25519 signature does not verify against the session's registered public key") };
+      case (#sessionNotOpen) { #error("Invalid voucher: session not open (unknown id, closed, expired, or idle-timed-out)") };
+      case (#payloadOverflow) { #error("Invalid voucher: cumulativeAmount or sequence exceeds the Nat64 maximum") };
     };
   };
 

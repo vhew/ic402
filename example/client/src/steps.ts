@@ -1323,42 +1323,51 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
         info('');
 
-        // Shared: stream 3 queries through a session
-        async function runSessionQueries(sid: string, deposited: number) {
+        // Shared: stream 3 queries through a session. Reads the canister's REAL consumed/remaining
+        // from each session_query response — never fabricates them — and surfaces every voucher
+        // rejection. Returns the number of vouchers the canister actually accepted.
+        async function runSessionQueries(sid: string, deposited: number): Promise<number> {
           info('');
           info('Streaming 3 queries through the session...');
           info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
-          const costPerCall = 500;
           const questions = [
             'What is ic402?',
             'How do sessions work?',
             'What tokens are accepted?',
           ];
+          let lastConsumed = 0;
+          let lastRemaining = deposited;
+          let succeeded = 0;
           for (let i = 0; i < questions.length; i++) {
-            const cumConsumed = costPerCall * (i + 1);
-            const cumRemaining = deposited - cumConsumed;
             try {
-              await mcpCall(client, 'session_query', { sessionId: sid, question: questions[i] });
+              const res = (await mcpCall(client, 'session_query', {
+                sessionId: sid,
+                question: questions[i],
+              })) as Record<string, unknown>;
+              lastConsumed = Number(res.consumed ?? lastConsumed);
+              lastRemaining = Number(res.remaining ?? lastRemaining);
+              succeeded++;
+              const q = questions[i].padEnd(42);
+              state(
+                `  ${String(i + 1).padStart(2)}/${questions.length}`,
+                `${q} consumed=${String(lastConsumed).padStart(5)}  remaining=${String(lastRemaining).padStart(5)}`,
+              );
             } catch (e) {
-              // Log first failure for debugging
-              if (i === 0) warn(`Voucher error: ${e instanceof Error ? e.message : String(e)}`);
+              warn(
+                `Voucher ${i + 1}/${questions.length} rejected: ${e instanceof Error ? e.message : String(e)}`,
+              );
+              // A rejected voucher does not advance the session, so every later voucher reuses the
+              // same sequence and is also rejected — stop here rather than print fake successes.
+              break;
             }
-            const q = questions[i].padEnd(42);
-            const c = String(cumConsumed).padStart(5);
-            const r = String(cumRemaining).padStart(5);
-            state(
-              `  ${String(i + 1).padStart(2)}/${questions.length}`,
-              `${q} consumed=${c}  remaining=${r}`,
-            );
           }
 
           info('');
-          const totalConsumed = costPerCall * questions.length;
-          const totalRemaining = deposited - totalConsumed;
-          state('Queries', `${questions.length}`);
-          state('On-chain txns', '0 (all voucher-verified in-canister)');
-          state('Total consumed', `${totalConsumed} ($${(totalConsumed / 1_000_000).toFixed(6)})`);
-          state('Remaining', `${totalRemaining} ($${(totalRemaining / 1_000_000).toFixed(6)})`);
+          state('Queries accepted', `${succeeded}/${questions.length}`);
+          state('On-chain txns', '0 (vouchers verified in-canister)');
+          state('Total consumed', `${lastConsumed} ($${(lastConsumed / 1_000_000).toFixed(6)})`);
+          state('Remaining', `${lastRemaining} ($${(lastRemaining / 1_000_000).toFixed(6)})`);
+          return succeeded;
         }
 
         const depositChoice = await rl.question('\x1b[2m  Deposit method (1-6): \x1b[0m');
@@ -1387,17 +1396,36 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const tName = [84532, 11155420].includes(chain.chainId) ? 'USDC' : 'USD Coin';
           const tVersion = '2';
 
-          // Sign EIP-3009 deposit authorization with test key
-          const TEST_KEY = Buffer.from(
-            'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-            'hex',
-          );
+          // Sign the EIP-3009 deposit with a CLEAN EOA (no code) — same as Step 3. Circle's USDC
+          // rejects EIP-3009 from a contract / EIP-7702-delegated address (Hardhat #0), so never
+          // use that key here either. Override with IC402_DEMO_EVM_KEY (a funded clean key).
+          const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
+          const TEST_KEY = envKey
+            ? Buffer.from(envKey, 'hex')
+            : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
           const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
           const testAddr =
             '0x' +
             Buffer.from(keccak_256(testPubUncompressed.slice(1)))
               .slice(-20)
               .toString('hex');
+
+          // EIP-7702 / contract-account preflight: a code-bearing payer is rejected by Circle's USDC.
+          const sessionPayerCode = await evmCodeLen(chain.rpc, testAddr);
+          if (sessionPayerCode > 0) {
+            warn(
+              `Session payer ${testAddr} has ${sessionPayerCode} bytes of code on ${chain.name}.`,
+            );
+            info('A contract / EIP-7702-delegated payer is routed to EIP-1271 and rejected.');
+            info('Use a clean EOA — set IC402_DEMO_EVM_KEY to a fresh funded key.');
+            throw new KnownIssueError(
+              `${chain.name}: session payer ${testAddr} has code (EIP-7702/contract)`,
+              'Use a clean EOA payer (IC402_DEMO_EVM_KEY) funded with the deposit. Not an ic402 bug.',
+            );
+          }
+          if (sessionPayerCode === 0) {
+            success(`Session payer is a clean EOA (no EIP-7702 delegation)`);
+          }
 
           const validAfter = 0;
           const validBefore = Math.floor(Date.now() / 1000) + 300;
@@ -1506,54 +1534,109 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             })) as Record<string, unknown>;
 
             const evmSessionId = evmSession.sessionId as string;
-
             if (!evmSessionId) {
               const errMsg =
                 typeof evmSession === 'string' ? evmSession : JSON.stringify(evmSession);
-              warn(`Open failed: ${errMsg.slice(0, 200)}`);
+              throw new Error(`open failed: ${errMsg.slice(0, 200)}`);
+            }
+            // The canister honours the EVM rail — confirm the opened session is actually EVM.
+            const openNet = String(evmSession.network ?? evmNetwork);
+            success('EVM session opened!');
+            state('Session ID', evmSessionId);
+            state('Deposited', `${evmSession.deposited ?? '?'} (${chain.name} USDC)`);
+            state('Network', openNet);
+            state('Status', 'OPEN');
+            if (!openNet.startsWith('eip155:')) {
+              warn(
+                `Opened session network is "${openNet}", not the EVM chain — refusing to label it EVM.`,
+              );
+            }
+
+            const evmDeposited = Number(evmSession.deposited ?? depositAmount);
+            await runSessionQueries(evmSessionId, evmDeposited);
+
+            info('');
+            info(`Closing EVM session — canister signs ERC-20 transfers via tECDSA...`);
+            const closeRes = (await mcpCall(client, 'close_session', {
+              confirm: true,
+              sessionId: evmSessionId,
+            })) as Record<string, unknown>;
+            const receipt = closeRes;
+            const txHash = receipt?.txHash ? String(receipt.txHash) : '';
+            // Only claim an EVM on-chain settlement if the receipt carries a real 0x tx hash —
+            // the canister's ICP close path emits "refund:<block-index>", which is NOT an EVM tx.
+            const isEvmSettle = /0x[0-9a-fA-F]{6,}/.test(txHash);
+            if (isEvmSettle) {
+              success(`EVM session closed — settled on-chain (tECDSA ERC-20 on ${chain.name})`);
+              highlight('Same 5,000x reduction — works on any EVM chain.');
             } else {
-              success('EVM session opened!');
-              state('Session ID', evmSessionId);
-              state('Deposited', `${evmSession.deposited ?? '?'} (${chain.name} USDC)`);
-              state('Network', evmNetwork);
-              state('Status', 'OPEN');
-
-              const evmDeposited = Number(evmSession.deposited ?? depositAmount);
-              await runSessionQueries(evmSessionId, evmDeposited);
-
-              info('');
-              info(`Closing EVM session — canister signs ERC-20 transfers via tECDSA...`);
-              info(`Settle consumed → canister operator on ${chain.name}`);
-              info(`Refund remainder → payer on ${chain.name}`);
-              try {
-                const closeRes = await mcpCall(client, 'close_session', {
-                  confirm: true,
-                  sessionId: evmSessionId,
-                });
-                success('EVM session closed — settled on-chain');
-                const receipt = closeRes as Record<string, unknown>;
-                state(
-                  'Consumed',
-                  `${receipt?.amount ?? 0} (settled to recipient on ${chain.name})`,
-                );
-                state('Refunded', `${receipt?.refunded ?? 0} (returned to payer on ${chain.name})`);
-                if (receipt?.txHash) {
-                  const hashes = String(receipt.txHash).split('|');
-                  if (hashes.length === 2) {
-                    state('Settle tx', hashes[0]);
-                    state('Refund tx', hashes[1]);
-                  } else {
-                    state('Tx', hashes[0]);
-                  }
-                }
-                state('Settlement', `tECDSA-signed ERC-20 transfers on ${chain.name}`);
-                highlight('Same 5,000x reduction — works on any EVM chain.');
-              } catch (e) {
-                warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
+              warn(`Session closed, but the receipt is NOT an EVM on-chain settlement.`);
+              info(
+                `  txHash="${txHash}" — "refund:<n>" is an ICP ledger block index, not an EVM tx.`,
+              );
+            }
+            state('Consumed', `${receipt?.amount ?? 0}`);
+            state('Refunded', `${receipt?.refunded ?? 0}`);
+            if (txHash) {
+              const hashes = txHash.split('|');
+              if (hashes.length === 2) {
+                state('Settle tx', hashes[0]);
+                state('Refund tx', hashes[1]);
+              } else {
+                state('Tx', hashes[0]);
               }
             }
+            if (!isEvmSettle) {
+              throw new KnownIssueError(
+                `${chain.name}: session settled on the ICP rail, not on-chain EVM`,
+                'The close receipt is not a 0x EVM tx — the EVM settle/refund did not run as expected.',
+              );
+            }
           } catch (e) {
-            warn(`Open session error: ${e instanceof Error ? e.message : String(e)}`);
+            if (e instanceof KnownIssueError) throw e;
+            const msg = e instanceof Error ? e.message : String(e);
+            const lower = msg.toLowerCase();
+            warn(`EVM session error on ${chain.name}: ${msg}`);
+            // CLOSE couldn't fetch EVM fee/nonce data from the RPC: the canister safely refuses to
+            // broadcast (H-3) and parks the session in #closing for recovery (S16). Transient RPC.
+            if (
+              lower.includes('fee data') ||
+              lower.includes('not broadcasting') ||
+              lower.includes('parked') ||
+              lower.includes('nonce') ||
+              lower.includes('rpc')
+            ) {
+              info(
+                'The EVM deposit + vouchers settled; the CLOSE could not fetch EVM gas/fee data',
+              );
+              info(
+                'from the RPC, so the canister refused to broadcast (H-3) and parked the session in',
+              );
+              info(
+                '#closing for recovery (S16). Transient RPC issue on the local replica, not ic402.',
+              );
+              throw new KnownIssueError(
+                `${chain.name}: EVM close deferred — RPC fee/nonce data unavailable; session parked for recovery`,
+                'Transient EVM RPC fee/nonce-consensus issue. The session is parked in #closing; retry or recover.',
+              );
+            }
+            // DEPOSIT reverted on-chain — for a clean EOA that means the payer is unfunded.
+            if (
+              lower.includes('revert') ||
+              lower.includes('balance') ||
+              lower.includes('exceeds') ||
+              lower.includes('insufficient')
+            ) {
+              info(`The clean-EOA signature is accepted; the deposit just needs funding.`);
+              info(
+                `Fund ${testAddr} with ${chain.name} USDC (faucet.circle.com) ≥ ${(depositAmount / 1e6).toFixed(6)}, then re-run.`,
+              );
+              throw new KnownIssueError(
+                `${chain.name}: EVM session deposit needs a funded payer`,
+                `Fund ${testAddr} with ${chain.name} USDC. Not an ic402 bug.`,
+              );
+            }
+            throw new Error(`EVM session failed on ${chain.name}: ${msg}`);
           }
           return;
         }

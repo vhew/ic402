@@ -267,6 +267,30 @@ module {
       Buffer.toArray(buf);
     };
 
+    /// Resolve the (token, recipient) for opening an EVM session on `network` ("eip155:<chainId>"):
+    /// the chain's first configured USDC and the canister's own derived EVM address. Returns null
+    /// if the network is malformed, the chain/token isn't configured, or the EVM address isn't
+    /// derived yet — so a consumer can build a SessionIntent honouring the client's EVM rail
+    /// instead of forcing ICP.
+    public func evmSessionParams(network : Text) : ?{ token : Text; recipient : Text } {
+      switch (extractChainId(network)) {
+        case (null) { null };
+        case (?chainId) {
+          switch (findEvmChain(chainId)) {
+            case (?chain) {
+              if (chain.tokens.size() == 0) { null } else {
+                switch (evmRecipient) {
+                  case (?addr) { ?{ token = chain.tokens[0].address; recipient = addr } };
+                  case (null) { null };
+                };
+              };
+            };
+            case (null) { null };
+          };
+        };
+      };
+    };
+
     /// x402 v2 `GET /supported` body: the (x402Version, scheme, network) kinds this facilitator
     /// can settle, plus the on-chain signer(s). Only the STANDARD EVM (`eip155:*`, `exact`) kinds
     /// are advertised — the ICP rail is non-standard and intentionally omitted so a strict v2
