@@ -261,6 +261,7 @@ service : {
       ok: text;
     });
   setPolicy: (p: SpendingPolicy) -> ();
+  getPolicyConfig: () -> (SpendingPolicy) query;
   uploadContent: (id: text, mimeType: text, data: blob) ->
    (ContentStoreResult);
   uploadContentChunk: (id: text, index: nat, data: blob) ->

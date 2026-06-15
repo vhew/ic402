@@ -298,13 +298,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           confirm: true,
           args: JSON.stringify(['ic402-logo', 'image/png', logoBytes]),
         });
-        if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
+        // uploadContent returns a ContentStoreResult variant, which serializes to an object
+        // ({ok:null} / {contentAlreadyExists:null} / …) — NOT a string. Gate the green line on
+        // the real {ok}; a re-run returns {contentAlreadyExists} (nothing was written).
+        const up = upload as Record<string, unknown>;
+        if (up && typeof up === 'object' && 'ok' in up) {
+          success('Uploaded and encrypted — plaintext never persists');
+        } else if (up && typeof up === 'object' && 'contentAlreadyExists' in up) {
+          success('Content "ic402-logo" already exists (uploaded in a previous run)');
+        } else if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
           warn('Upload rejected — MCP identity is not a canister controller.');
           info('Run deploy.sh to add the MCP identity as a controller.');
-        } else if (typeof upload === 'string' && upload.toLowerCase().includes('already')) {
-          success('Content "ic402-logo" already exists (uploaded in a previous run)');
         } else {
-          success('Uploaded and encrypted — plaintext never persists');
+          warn(`Upload rejected: ${JSON.stringify(upload)}`);
         }
 
         info('Content catalog (IDs are public, content requires payment):');
@@ -954,7 +960,17 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               });
               const paidObj = paid as Record<string, unknown>;
               if (paidObj && 'error' in paidObj) {
-                success(`Content not found: ${paidObj.error}`);
+                const err = String(paidObj.error);
+                // Only claim "not found" when the canister actually says so — the dummy
+                // zero-byte signature can also trip a verification error, which is NOT
+                // proof of deletion. Deletion was already verified above via listContent.
+                if (/not found|does not exist|no content|unknown content/i.test(err)) {
+                  success(`Content not found (deleted): ${err}`);
+                } else {
+                  info(
+                    `Paid retry rejected: ${err} (deletion already verified above via listContent)`,
+                  );
+                }
               } else {
                 warn('Content still accessible (unexpected)');
               }
@@ -962,20 +978,33 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           } else {
             state('HTTP status', `${contentRes.status}`);
           }
-        } catch {
-          success('Endpoint unreachable — content deleted');
+        } catch (e) {
+          // A network failure is replica-unreachable, NOT proof the content was deleted.
+          warn(
+            `Endpoint fetch failed (${e instanceof Error ? e.message : String(e)}) — replica unreachable? Deletion was already verified above via listContent.`,
+          );
         }
 
         info('');
         info('Fetching /search?q=test (should still work)...');
         try {
           const searchRes = await fetch(`${rawHttpUrl}/search?q=test`);
-          success(`HTTP ${searchRes.status} — search endpoint still available`);
+          if (searchRes.ok) {
+            success(`HTTP ${searchRes.status} — search endpoint still available`);
+          } else {
+            warn(`Search endpoint returned HTTP ${searchRes.status}`);
+          }
         } catch {
           warn('Search endpoint unreachable');
         }
 
-        highlight('Content lifecycle complete — upload, gate, pay, deliver, delete.');
+        if (afterCount < beforeCount) {
+          highlight('Content lifecycle complete — upload, gate, pay, deliver, delete.');
+        } else {
+          warn(
+            'Content lifecycle: delete not reflected in listContent (see above) — not asserting completion.',
+          );
+        }
       },
     },
 
@@ -1014,7 +1043,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         section('Register service');
         info('Registering a hash-computation service...');
-        let svcId = 'svc-1';
+        // No hardcoded fallback id: registerService auto-assigns a monotonic svc-N that never
+        // collides, so a non-ok return is a real error, not "already exists" — don't proceed
+        // against a stale 'svc-1'.
+        let svcId = '';
         try {
           const regResult = await mcpCall(client, 'register_service', {
             confirm: true,
@@ -1034,22 +1066,26 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           if (reg && 'ok' in reg) {
             svcId = String(reg.ok);
             success(`Service registered: ${svcId}`);
-          } else if (reg && 'err' in reg) {
-            if (String(reg.err).includes('already exists')) {
-              success('Service already registered (previous run)');
-            } else {
-              warn(`Register: ${reg.err}`);
-            }
+          } else {
+            warn(`Register failed: ${reg && 'err' in reg ? String(reg.err) : JSON.stringify(reg)}`);
           }
         } catch (e) {
           warn(`Register: ${e instanceof Error ? e.message : String(e)}`);
         }
 
-        try {
-          await mcpCall(client, 'enable_service', { confirm: true, args: JSON.stringify([svcId]) });
-          success('Service enabled');
-        } catch (e) {
-          info(`Enable: ${e instanceof Error ? e.message : String(e)}`);
+        if (svcId) {
+          try {
+            const enableRes = await mcpCall(client, 'enable_service', {
+              confirm: true,
+              args: JSON.stringify([svcId]),
+            });
+            assertMcpOk(enableRes, 'enable_service'); // gate the green line on the real {ok}/{err}
+            success('Service enabled');
+          } catch (e) {
+            warn(`Enable failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else {
+          warn('Skipping enable/submit — registration returned no service id.');
         }
 
         info('');
@@ -1149,16 +1185,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               ]),
             });
             const zr = zkReg as Record<string, unknown>;
-            const zkSvcId = zr?.ok ? String(zr.ok) : 'svc-2';
+            // No hardcoded 'svc-2' fallback: auto svc-N ids never collide, so a non-ok return
+            // is a real error — don't enable/submit against a stale or unrelated service id.
+            const zkSvcId = zr?.ok ? String(zr.ok) : '';
             if (zr?.ok) success(`ZK service registered: ${zkSvcId}`);
-            else if (String(zr?.err ?? '').includes('already exists'))
-              success('ZK service already registered');
-            else warn(`ZK register: ${zr?.err ?? JSON.stringify(zr)}`);
+            else warn(`ZK register failed: ${zr?.err ?? JSON.stringify(zr)}`);
 
-            await mcpCall(client, 'enable_service', {
-              confirm: true,
-              args: JSON.stringify([zkSvcId]),
-            });
+            if (zkSvcId) {
+              const zkEnable = await mcpCall(client, 'enable_service', {
+                confirm: true,
+                args: JSON.stringify([zkSvcId]),
+              });
+              assertMcpOk(zkEnable, 'enable_service');
+            }
 
             info('');
             info('Buyer submits request: "what is the square root of 25?"');
@@ -1235,7 +1274,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info(`URL: ${x402Url}`);
         info('');
         info('Flow: client probes URL → parses 402 → canister signs → client retries with header.');
-        info('GoldRush serves mainnet data but accepts Base Sepolia USDC ($0.0001/request).');
+        info(
+          'GoldRush serves mainnet data but accepts Base Sepolia USDC (advertised ~$0.0001/request; the actual amount comes from its 402 challenge).',
+        );
         info('');
 
         info('Probing → signing → paying...');
@@ -1246,7 +1287,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             { url: x402Url, chainId: 84532, confirm: true },
             90_000,
           );
-          highlight('One call: probe → canister signs → pay → content. All in the client library.');
+          // mcpCallAndRender never throws — it returns {status} and warns on error. Only claim
+          // the paid round-trip when it actually settled.
+          if (res?.status === 'ok') {
+            highlight(
+              'One call: probe → canister signs → pay → content. All in the client library.',
+            );
+          } else if (res?.status === 'free') {
+            info('Resource returned content with no 402 challenge — nothing to pay.');
+          } else {
+            info(
+              'No paid round-trip completed — see the error above (fund the canister EVM wallet with Base Sepolia USDC to settle).',
+            );
+          }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes('aborted') || msg.includes('timeout')) {
@@ -1305,12 +1358,30 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         info('Requesting session pricing...');
         const intent = await mcpCall(client, 'request_session', {});
-        success('Session intent received');
-
         const intentObj = intent as Record<string, unknown>;
-        state('Suggested deposit', `${intentObj?.suggestedDeposit ?? '?'} ($0.05 — ~100 queries)`);
-        state('Cost per call', `${(intentObj?.costPerCall as string[])?.[0] ?? '?'} ($0.0005)`);
-        state('Min deposit', `${(intentObj?.minDeposit as string[])?.[0] ?? '?'} ($0.005)`);
+        if (intentObj?.suggestedDeposit == null) {
+          warn(`request_session returned no pricing: ${JSON.stringify(intent).slice(0, 200)}`);
+        } else {
+          success('Session intent received');
+          // Dollar values are COMPUTED from the canister's real units, not hardcoded — so they
+          // can't drift if the example policy changes.
+          const sugg = Number(intentObj.suggestedDeposit ?? 0);
+          const cpc = Number((intentObj.costPerCall as unknown[])?.[0] ?? 0);
+          const minDep = Number((intentObj.minDeposit as unknown[])?.[0] ?? 0);
+          const approxQueries = cpc > 0 ? Math.floor(sugg / cpc) : 0;
+          state(
+            'Suggested deposit',
+            `${intentObj.suggestedDeposit} units ($${(sugg / 1_000_000).toFixed(6)}${approxQueries ? ` — ~${approxQueries} queries` : ''})`,
+          );
+          state(
+            'Cost per call',
+            `${(intentObj.costPerCall as unknown[])?.[0] ?? '?'} units ($${(cpc / 1_000_000).toFixed(6)})`,
+          );
+          state(
+            'Min deposit',
+            `${(intentObj.minDeposit as unknown[])?.[0] ?? '?'} units ($${(minDep / 1_000_000).toFixed(6)})`,
+          );
+        }
 
         section('Session Deposit Method');
         info('The client deposits tokens to open a session.');
@@ -1327,14 +1398,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         // from each session_query response — never fabricates them — and surfaces every voucher
         // rejection. Returns the number of vouchers the canister actually accepted.
         async function runSessionQueries(sid: string, deposited: number): Promise<number> {
-          info('');
-          info('Streaming 3 queries through the session...');
-          info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
           const questions = [
             'What is ic402?',
             'How do sessions work?',
             'What tokens are accepted?',
           ];
+          info('');
+          info(`Streaming ${questions.length} queries through the session...`);
+          info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
           let lastConsumed = 0;
           let lastRemaining = deposited;
           let succeeded = 0;
@@ -1647,8 +1718,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('The predemo script minted 1 ckUSDC to the test-payer account and approved');
         info('the canister to spend it. In production, the ic402 client SDK handles this.');
         state('Test payer', callerPrincipal || '(test-payer identity)');
-        state('Funded', '1,000,000 units ($1.00 ckUSDC) via icrc1_transfer');
-        state('Approved', 'ICRC-2 approval for canister to spend up to 1,000,000 units');
+        // Expected predemo setup — these are NOT read back from the ledger here. The open_session
+        // call below is the real verification: it fails if the deposit isn't funded + approved.
+        state('Expected funding (predemo)', '1,000,000 units ($1.00 ckUSDC) via icrc1_transfer');
+        state(
+          'Expected approval (predemo)',
+          'ICRC-2 approval for canister to spend up to 1,000,000 units',
+        );
 
         info('');
         info('Opening session with ICP ckUSDC...');
@@ -1674,37 +1750,51 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             state('Needs', 'ckUSDC balance + icrc2_approve for the canister to spend');
             state('In production', 'Client SDK handles approval automatically');
           }
-          highlight('The session protocol is fully implemented.');
+          // No celebratory highlight here — the session did NOT open. The failure was explained above.
         } else {
           success('Session opened!');
           state('Session ID', sessionId);
-          state('Deposited', `${session.deposited ?? '?'} ($0.05)`);
-          state('Remaining', `${session.remaining ?? '?'} ($0.05)`);
-          state('Cost per call', '500 ($0.0005)');
+          const dep = Number(session.deposited ?? 0);
+          const rem = Number(session.remaining ?? session.deposited ?? 0);
+          state(
+            'Deposited',
+            `${session.deposited ?? '?'} units ($${(dep / 1_000_000).toFixed(6)})`,
+          );
+          state(
+            'Remaining',
+            `${session.remaining ?? '?'} units ($${(rem / 1_000_000).toFixed(6)})`,
+          );
+          state('Cost per call', '500 units ($0.0005, per the example policy)');
           state('Status', 'OPEN');
 
           const deposited = Number(session.deposited ?? 50000);
-          await runSessionQueries(sessionId, deposited);
+          const ran = await runSessionQueries(sessionId, deposited);
 
           info('');
           info('Closing session (settle consumed → recipient, refund remainder → caller)...');
           try {
-            const closeRes = await mcpCall(client, 'close_session', { sessionId, confirm: true });
-            success('Session closed — settled on-chain');
-            const receipt = closeRes as Record<string, unknown>;
+            const closeRes = (await mcpCall(client, 'close_session', {
+              sessionId,
+              confirm: true,
+            })) as Record<string, unknown>;
+            assertMcpOk(closeRes, 'close_session');
+            success('Session closed — settled on the ICP ledger');
+            const receipt = closeRes;
             state('Consumed (settled)', String(receipt?.amount ?? '?'));
             state('Refunded', String(receipt?.refunded ?? '?'));
             if (receipt?.txHash) {
               const tx = String(receipt.txHash);
               if (tx.includes('|')) {
-                const parts = tx.split('|');
-                for (const p of parts) state('Ledger tx', p);
+                for (const p of tx.split('|')) state('Ledger block', p);
               } else if (tx) {
-                state('Ledger tx', tx);
+                state('Ledger block', tx);
               }
             }
-            state('Total on-chain txns', '2 (open + close) for 3 queries');
-            highlight('3 queries, 2 on-chain transactions. Scale to thousands with the same cost.');
+            const qWord = ran === 1 ? 'voucher' : 'vouchers';
+            state('On-chain txns', `2 (open + close) for ${ran} ${qWord}`);
+            highlight(
+              `${ran} ${qWord}, 2 on-chain transactions. Scale to thousands at the same cost.`,
+            );
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -1939,14 +2029,66 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('Rate limits, session caps, idle timeouts.');
         info('Evaluated in-canister, zero ledger calls, constant time.');
 
-        section('Canister-side (your canister protects your service)');
-        state('Max per tx', '$0.05');
-        state('Max per day', '$0.50');
-        state('Rate limit', '120 req/min per caller');
-        state('Session deposit cap', '$0.10');
-        state('Concurrent sessions', '1 per caller');
-        state('Idle timeout', '1h — auto-close + refund remainder');
-        state('Per-caller overrides', 'Trusted callers get higher limits');
+        section(
+          'Configured policy (read LIVE from the canister via getPolicyConfig — enforced in-canister)',
+        );
+        // opt Nat/Int decode to [] | [value]; unwrap, then format atomic USDC (6dp) to dollars
+        // or nanosecond durations to hours. Values are small — well within Number's safe range.
+        const optNum = (v: unknown): number | undefined => {
+          const a = v as unknown[] | undefined;
+          return a && a.length > 0 ? Number(a[0]) : undefined;
+        };
+        const usd = (v: number | undefined): string =>
+          v === undefined ? 'unset (no limit)' : `$${(v / 1_000_000).toFixed(6)}`;
+        const hrs = (ns: number | undefined): string =>
+          ns === undefined ? 'unset' : `${ns / 3_600_000_000_000}h`;
+        try {
+          const pol = (await mcpCall(client, 'call', {
+            method: 'getPolicyConfig',
+            args: '[]',
+          })) as Record<string, unknown>;
+          const maxTx = optNum(pol.maxPerTransaction);
+          const maxDay = optNum(pol.maxPerDay);
+          const rate = optNum(pol.rateLimitPerMinute);
+          const sessDep = optNum(pol.maxSessionDeposit);
+          const conc = optNum(pol.maxConcurrentSessions);
+          const idle = optNum(pol.sessionIdleTimeout);
+          const maxDur = optNum(pol.maxSessionDuration);
+          state('Max per tx', `${usd(maxTx)} (maxPerTransaction = ${maxTx ?? 'null'})`);
+          state('Max per day', `${usd(maxDay)} (maxPerDay = ${maxDay ?? 'null'})`);
+          state('Rate limit', `${rate ?? 'unset'} req/min per caller (rateLimitPerMinute)`);
+          state(
+            'Session deposit cap',
+            `${usd(sessDep)} (maxSessionDeposit = ${sessDep ?? 'null'})`,
+          );
+          state('Concurrent sessions', `${conc ?? 'unset'} per caller (maxConcurrentSessions)`);
+          state(
+            'Idle timeout',
+            `${hrs(idle)} — auto-close + refund remainder (sessionIdleTimeout)`,
+          );
+          state('Max session duration', `${hrs(maxDur)} (maxSessionDuration)`);
+          state(
+            'Per-caller overrides',
+            'Supported via setPolicy(?caller, …); none configured here',
+          );
+        } catch (e) {
+          // Older canister without getPolicyConfig (or RPC error) — fall back to the
+          // example/main.mo configured defaults rather than crashing the step.
+          info(
+            `getPolicyConfig unavailable (${e instanceof Error ? e.message : String(e)}) — showing example/main.mo defaults.`,
+          );
+          state('Max per tx', '$0.05 (maxPerTransaction = 50,000)');
+          state('Max per day', '$0.50 (maxPerDay = 500,000)');
+          state('Rate limit', '120 req/min per caller (rateLimitPerMinute)');
+          state('Session deposit cap', '$0.10 (maxSessionDeposit = 100,000)');
+          state('Concurrent sessions', '1 per caller (maxConcurrentSessions)');
+          state('Idle timeout', '1h — auto-close + refund remainder (sessionIdleTimeout)');
+          state('Max session duration', '24h (maxSessionDuration)');
+          state(
+            'Per-caller overrides',
+            'Supported via setPolicy(?caller, …); none configured here',
+          );
+        }
         highlight('Your service can never be abused. Idle sessions auto-refund.');
 
         section('What ic402 provides');

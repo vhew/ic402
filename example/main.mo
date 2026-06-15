@@ -977,6 +977,14 @@ persistent actor KnowledgeBase {
     gate.setPolicy(null, p);
   };
 
+  // Read back the LIVE global spending policy (the one set via setPolicy(null, _)).
+  // Public read-only query: the limits are non-secret (they're advertised in the 402
+  // challenge anyway) and this lets clients/the demo display the in-canister policy
+  // instead of hardcoding it.
+  public query func getPolicyConfig() : async Ic402.SpendingPolicy {
+    gate.getGlobalPolicy();
+  };
+
   public shared(msg) func forceCloseSession(sessionId : Text) : async Ic402.PaymentResult {
     assert(Principal.isController(msg.caller));
     await gate.forceCloseSession(sessionId);

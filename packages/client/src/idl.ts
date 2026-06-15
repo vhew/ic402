@@ -335,6 +335,7 @@ export const exampleIdlFactory = () =>
     // Admin
     verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
+    getPolicyConfig: IDL.Func([], [SpendingPolicy], ['query']),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
     // Remote signer: sign-only endpoints (client broadcasts)
     signX402Payment: IDL.Func(

@@ -833,6 +833,12 @@ module {
       policy.getEffectivePolicy(caller);
     };
 
+    /// Get the global (null-keyed) spending policy — the one set via setPolicy(null, _).
+    /// Lets a canister expose its configured limits for read-back without naming a caller.
+    public func getGlobalPolicy() : Types.SpendingPolicy {
+      policy.getGlobalPolicy();
+    };
+
     /// Get the current daily spend total for a caller.
     public func dailySpend(caller : Principal) : Nat {
       policy.getDailySpendAmount(caller);

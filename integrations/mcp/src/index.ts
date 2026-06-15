@@ -1297,6 +1297,7 @@ const READONLY_CALL_ALLOWLIST = new Set<string>([
   'getJob',
   'getJobResult',
   'keccak256',
+  'getPolicyConfig', // pure read-only query; contains the blocked 'policy' substring, so it must be allowlisted
 ]);
 
 // Substrings that must NEVER be reachable through the generic `call` path —
@@ -1324,6 +1325,12 @@ const CALL_BLOCK_SUBSTRINGS = [
 
 function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
   const lower = method.toLowerCase();
+  // The explicit, curated read-only allowlist is authoritative: it wins over the
+  // substring heuristic below. This is required for genuine read-only getters
+  // whose name happens to contain a blocked substring (e.g. getPolicyConfig
+  // contains 'policy', a future getSettings would contain 'set'). ONLY add
+  // verified non-state-changing query methods to READONLY_CALL_ALLOWLIST.
+  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
   // Hard block on any signing/admin/value-moving name, even if it would
   // otherwise match a read-only prefix.
   for (const bad of CALL_BLOCK_SUBSTRINGS) {
@@ -1334,7 +1341,6 @@ function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
       };
     }
   }
-  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
   // Fall back to read-only name prefixes for forward-compat with new query
   // getters, but only after the blocklist above has cleared the name.
   if (/^(get|list|fetch|is)[A-Z]/.test(method) || /^(get|list|fetch|is)$/.test(method)) {
