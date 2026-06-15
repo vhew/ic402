@@ -47,29 +47,72 @@ case "$ARG" in
 esac
 
 if [ "$NEW" = "$CURRENT" ]; then
-  echo "Already at $CURRENT"
-  exit 0
+  # Don't bail: the apply step below is idempotent, so re-running at the same
+  # version re-syncs any file that has drifted out of sync (the whole point of
+  # having one bump command for every place the version lives).
+  echo "Already at $CURRENT — re-syncing all files in case any drifted."
 fi
 
 echo "  $CURRENT → $NEW"
 echo ""
 
-# 1. mops.toml (source of truth)
-sed -i.bak "s/^version = \".*\"/version = \"$NEW\"/" mops.toml
-rm -f mops.toml.bak
-echo "  mops.toml:                         $NEW"
+# --- helpers ---------------------------------------------------------------
 
-# 2. packages/client/package.json
-cd packages/client
-npm version "$NEW" --no-git-tag-version --allow-same-version >/dev/null 2>&1
-cd "$PROJECT_ROOT"
-echo "  packages/client/package.json:      $NEW"
+# Bump a package.json version via npm (idempotent; works on private packages).
+bump_pkg() { # dir  label
+  ( cd "$1" && npm version "$NEW" --no-git-tag-version --allow-same-version >/dev/null 2>&1 )
+  printf '  %-36s %s\n' "$2" "$NEW"
+}
 
-# 3. integrations/mcp/package.json
-cd integrations/mcp
-npm version "$NEW" --no-git-tag-version --allow-same-version >/dev/null 2>&1
-cd "$PROJECT_ROOT"
-echo "  integrations/mcp/package.json:      $NEW"
+# Sync a `version = "X.Y.Z"` line (mops.toml / Cargo.toml [package]) in place.
+bump_toml() { # file  label
+  sed -i.bak "s/^version = \".*\"/version = \"$NEW\"/" "$1"
+  rm -f "$1.bak"
+  printf '  %-36s %s\n' "$2" "$NEW"
+}
+
+# Sync a `version: 'X.Y.Z'` literal in a TS source file (a version advertised at
+# runtime, not covered by npm version), then VERIFY it took — fail loudly if the
+# pattern drifted so a release can't silently ship a stale version string.
+bump_ts_literal() { # file  label
+  sed -i.bak -E "s/(version: ')[0-9]+\.[0-9]+\.[0-9]+(')/\1$NEW\2/" "$1"
+  rm -f "$1.bak"
+  if ! grep -q "version: '$NEW'" "$1"; then
+    echo "ERROR: could not sync the version literal in $1 (pattern not found)."
+    echo "       The \`version: 'X.Y.Z'\` line may have changed — fix scripts/version.sh."
+    exit 1
+  fi
+  printf '  %-36s %s\n' "$2" "$NEW"
+}
+
+# --- apply to every place the version lives --------------------------------
+
+bump_toml mops.toml                        "mops.toml (source of truth):"
+bump_pkg  .                                "package.json (root):"
+bump_pkg  packages/client                  "packages/client:"
+bump_pkg  integrations/mcp                 "integrations/mcp:"
+bump_pkg  example/client                   "example/client:"
+bump_toml example/zk-verifier/Cargo.toml   "example/zk-verifier Cargo.toml:"
+
+# Cargo.lock records the crate's OWN version too (the [[package]] entry for
+# zk-verifier) — keep it in sync so `cargo build --locked` on the example does
+# not fail. Update the `version` line directly under that package's `name`.
+ZK_LOCK="example/zk-verifier/Cargo.lock"
+if [ -f "$ZK_LOCK" ]; then
+  awk -v v="$NEW" '
+    /^name = "zk-verifier"$/ { print; getline; sub(/version = ".*"/, "version = \"" v "\""); print; next }
+    { print }
+  ' "$ZK_LOCK" > "$ZK_LOCK.tmp" && mv "$ZK_LOCK.tmp" "$ZK_LOCK"
+  if ! grep -A1 '^name = "zk-verifier"$' "$ZK_LOCK" | grep -q "^version = \"$NEW\"$"; then
+    echo "ERROR: could not sync the zk-verifier version in $ZK_LOCK."
+    exit 1
+  fi
+  printf '  %-36s %s\n' "example/zk-verifier Cargo.lock:" "$NEW"
+fi
+
+# Versions advertised at runtime by source literals (not in any package.json):
+bump_ts_literal integrations/mcp/src/index.ts "integrations/mcp McpServer:"
+bump_ts_literal example/client/src/index.ts   "example/client demo Client:"
 
 echo ""
 echo "  Version bumped to $NEW."
