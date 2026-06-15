@@ -196,6 +196,17 @@ module {
       null;
     };
 
+    /// Find the configured EVM token on `chain` whose address matches `address`
+    /// (case-insensitive). Used to select the EIP-712 domain (name/version) of the
+    /// token actually being paid, rather than assuming tokens[0] — they differ on a
+    /// multi-token chain, and a mismatched domain makes a valid signature fail.
+    func findEvmToken(chain : Types.EvmChainConfig, address : Text) : ?Types.EvmTokenConfig {
+      for (tok in chain.tokens.vals()) {
+        if (EvmUtils.addressesEqual(tok.address, address)) return ?tok;
+      };
+      null;
+    };
+
     /// Resolve the EVM recipient: prefer self-derived address, fall back to config.
     func evmRecipientFor(chain : Types.EvmChainConfig) : Text {
       switch (evmRecipient) {
@@ -344,10 +355,19 @@ module {
         case (?id) { id };
         case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
       };
+      // Resolve the EIP-712 domain (name/version) from the token actually being paid
+      // (`asset` is the verifyingContract passed to verifyAuthorization below), NOT
+      // tokens[0]: on a multi-token chain they differ and a wrong domain makes a
+      // valid signature fail to verify. Reject an asset this canister doesn't accept.
       var tokenName : ?Text = null;
       var tokenVersion : ?Text = null;
       switch (findEvmChain(chainId)) {
-        case (?chain) { if (chain.tokens.size() > 0) { tokenName := chain.tokens[0].name; tokenVersion := chain.tokens[0].version } };
+        case (?chain) {
+          switch (findEvmToken(chain, asset)) {
+            case (?tok) { tokenName := tok.name; tokenVersion := tok.version };
+            case (null) { return { isValid = false; invalidReason = ?"unsupported_asset"; payer = ?authz.from } };
+          };
+        };
         case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
       };
       let verified = Eip712.verifyAuthorization(

@@ -16,6 +16,38 @@ import Call "mo:ic/Call";
 
 module {
 
+  // ── Pure fee helpers (module scope so they're unit-testable) ──
+
+  /// Pick the latest base fee from one provider's FeeHistory: prefer the forecast
+  /// next-block base fee (index 1, as the original did), then the current block
+  /// (index 0); null on an empty array so callers distinguish "no data" from a real 0.
+  public func latestBaseFee(history : EvmRpc.FeeHistory) : ?Nat {
+    if (history.baseFeePerGas.size() > 1) { ?history.baseFeePerGas[1] } else if (history.baseFeePerGas.size() > 0) {
+      ?history.baseFeePerGas[0];
+    } else { null };
+  };
+
+  /// Convert a base fee into the (maxFeePerGas, maxPriorityFeePerGas) pair — the
+  /// exact formula the original #Consistent path used: priority fee = base fee
+  /// clamped to [1e6, 1.5 gwei]; maxFee = 2*base + priority.
+  ///
+  /// S16: clamp the base fee to a sane ceiling (10_000 gwei — orders of magnitude
+  /// above any real L1/L2 base fee, far below a balance-busting value) FIRST. Since
+  /// fee data no longer requires strict multi-provider agreement (see getFeeData),
+  /// a single hostile or buggy RPC provider could otherwise return an absurd base
+  /// fee that inflates maxFeePerGas into an unpayable upfront gas reservation
+  /// (gasLimit * maxFeePerGas), tripping eth_sendRawTransaction's balance check and
+  /// parking every transfer. The cap bounds that. It also hardens the #Consistent
+  /// path, which previously had no ceiling either.
+  public func feeFromBase(rawBaseFee : Nat) : (Nat, Nat) {
+    let baseFee = Nat.min(rawBaseFee, 10_000_000_000_000);
+    let minPriority = 1_000_000;
+    let priorityFee = if (baseFee > 1_500_000_000) { 1_500_000_000 } else if (baseFee > minPriority) { baseFee } else {
+      minPriority;
+    };
+    (2 * baseFee + priorityFee, priorityFee);
+  };
+
   /// EVM transaction sender with tECDSA signing.
   public class EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) {
 
@@ -225,35 +257,8 @@ module {
       await sendTransaction(chainId, tokenAddress, calldata, 120_000);
     };
 
-    // Pick the latest base fee from one provider's FeeHistory: prefer the forecast
-    // next-block base fee (index 1, as the original did), then the current block
-    // (index 0); null on an empty array so callers distinguish "no data" from a real 0.
-    func latestBaseFee(history : EvmRpc.FeeHistory) : ?Nat {
-      if (history.baseFeePerGas.size() > 1) { ?history.baseFeePerGas[1] } else if (history.baseFeePerGas.size() > 0) {
-        ?history.baseFeePerGas[0];
-      } else { null };
-    };
-
-    // Convert a base fee into the (maxFeePerGas, maxPriorityFeePerGas) pair — the
-    // exact formula the original #Consistent path used: priority fee = base fee
-    // clamped to [1e6, 1.5 gwei]; maxFee = 2*base + priority.
-    //
-    // S16: clamp the base fee to a sane ceiling (10_000 gwei — orders of magnitude
-    // above any real L1/L2 base fee, far below a balance-busting value) FIRST. Since
-    // fee data no longer requires strict multi-provider agreement (see getFeeData),
-    // a single hostile or buggy RPC provider could otherwise return an absurd base
-    // fee that inflates maxFeePerGas into an unpayable upfront gas reservation
-    // (gasLimit * maxFeePerGas), tripping eth_sendRawTransaction's balance check and
-    // parking every transfer. The cap bounds that. It also hardens the #Consistent
-    // path, which previously had no ceiling either.
-    func feeFromBase(rawBaseFee : Nat) : (Nat, Nat) {
-      let baseFee = Nat.min(rawBaseFee, 10_000_000_000_000);
-      let minPriority = 1_000_000;
-      let priorityFee = if (baseFee > 1_500_000_000) { 1_500_000_000 } else if (baseFee > minPriority) { baseFee } else {
-        minPriority;
-      };
-      (2 * baseFee + priorityFee, priorityFee);
-    };
+    // latestBaseFee + feeFromBase are pure functions defined at module scope (above
+    // the class) so they are unit-testable without constructing an EvmSender.
 
     // H-3: Returns null when fee data is unavailable instead of fabricating a
     // tiny (~0.1 gwei) fee. The previous fallback produced transactions that are

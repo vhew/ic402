@@ -385,4 +385,30 @@ suite("Policy.Engine", func() {
     // The stale principal is reclaimed; the fresh one survives.
     assert(engine.rateLimitEntryCount() == 1);
   });
+
+  // getGlobalPolicy reads back exactly what setGlobalPolicy stored — this is what
+  // the canister's getPolicyConfig query exposes for live policy display.
+  test("getGlobalPolicy round-trips the configured policy", func() {
+    let engine = Policy.Engine();
+    let p = {
+      maxPerTransaction = ?50_000;
+      maxPerDay = ?500_000;
+      rateLimitPerMinute = ?120;
+      maxSessionDeposit = ?100_000;
+      maxConcurrentSessions = ?1;
+      maxSessionDuration = ?(24 * 60 * 60 * 1_000_000_000);
+      sessionIdleTimeout = ?(60 * 60 * 1_000_000_000);
+      allowedCallers = null;
+      blockedCallers = null;
+    };
+    engine.setGlobalPolicy(p);
+    let got = engine.getGlobalPolicy();
+    assert(got.maxPerTransaction == ?50_000);
+    assert(got.maxPerDay == ?500_000);
+    assert(got.rateLimitPerMinute == ?120);
+    assert(got.maxSessionDeposit == ?100_000);
+    assert(got.maxConcurrentSessions == ?1);
+    assert(got.sessionIdleTimeout == ?(60 * 60 * 1_000_000_000));
+    assert(got.maxSessionDuration == ?(24 * 60 * 60 * 1_000_000_000));
+  });
 });
