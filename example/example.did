@@ -5,6 +5,18 @@ type Voucher =
    sessionId: text;
    signature: blob;
  };
+type VerificationMethod = 
+ variant {
+   AutoSettle;
+   BuyerConfirm: record {disputeWindowSeconds: nat;};
+   HashMatch;
+   ZkGroth16:
+    record {
+      bindResult: bool;
+      verificationKey: blob;
+      verifierCanister: principal;
+    };
+ };
 type SpendingPolicy = 
  record {
    allowedCallers: opt vec principal;
@@ -16,6 +28,35 @@ type SpendingPolicy =
    maxSessionDuration: opt int;
    rateLimitPerMinute: opt nat;
    sessionIdleTimeout: opt int;
+ };
+type SignedTypedData = 
+ record {
+   digest: text;
+   r: text;
+   s: text;
+   signature: text;
+   signer: text;
+   v: nat8;
+ };
+type SignedTransaction = 
+ record {
+   rawTx: text;
+   txHash: text;
+ };
+type SignedAuthorization = 
+ record {
+   authorization:
+    record {
+      from: text;
+      nonce: text;
+      signature: text;
+      to: text;
+      validAfter: nat;
+      validBefore: nat;
+      value: nat;
+    };
+   header: text;
+   paidAmount: nat;
  };
 type SessionStatus = 
  variant {
@@ -53,6 +94,11 @@ type SessionConfig =
    idleTimeout: opt int;
    maxDeposit: nat;
  };
+type ServiceType = 
+ variant {
+   Async;
+   Sync;
+ };
 type ServiceEntry = 
  record {
    domains: vec text;
@@ -61,10 +107,38 @@ type ServiceEntry =
    skills: vec text;
    version: text;
  };
+type ServiceDeliveryMethod = 
+ variant {
+   Both;
+   Callback;
+   Poll;
+ };
+type ServiceDefinition = 
+ record {
+   createdAt: int;
+   delivery: ServiceDeliveryMethod;
+   description: text;
+   enabled: bool;
+   id: text;
+   name: text;
+   operatorId: principal;
+   pricing: PricingScheme;
+   serviceType: ServiceType;
+   timeout: nat;
+   verification: VerificationMethod;
+ };
+type PricingScheme = 
+ variant {
+   Exact: nat;
+   Session;
+   Upto: nat;
+ };
 type PaymentSignature = 
  record {
+   authorization: opt Eip3009Authorization;
    network: text;
    nonce: blob;
+   publicKey: opt blob;
    scheme: text;
    sender: text;
    signature: blob;
@@ -72,15 +146,16 @@ type PaymentSignature =
 type PaymentResult = 
  variant {
    depositBelowMinimum: nat;
-   expired;
-   insufficientFunds;
-   invalidSignature;
-   networkNotSupported;
+   expired: text;
+   insufficientFunds: text;
+   invalidSignature: text;
+   networkNotSupported: text;
    ok: PaymentReceipt;
    policyDenied: text;
    reputationTooLow: nat;
    settlementFailed: text;
-   tokenNotAccepted;
+   settlementPending: text;
+   tokenNotAccepted: text;
  };
 type PaymentRequirement = 
  record {
@@ -91,6 +166,8 @@ type PaymentRequirement =
    recipient: text;
    scheme: text;
    token: text;
+   tokenName: opt text;
+   tokenVersion: opt text;
  };
 type PaymentReceipt = 
  record {
@@ -104,6 +181,37 @@ type PaymentReceipt =
    timestamp: int;
    token: text;
    txHash: opt text;
+ };
+type JobStatus = 
+ variant {
+   Assigned;
+   Computing;
+   Disputed;
+   Expired;
+   Pending;
+   Refunded;
+   Settled;
+   Settling;
+   Submitted;
+   Verified;
+ };
+type Job = 
+ record {
+   actualCost: opt nat;
+   amount: nat;
+   buyer: text;
+   completedAt: opt int;
+   createdAt: int;
+   deliveryCallback: opt text;
+   expiresAt: int;
+   id: text;
+   operator: opt principal;
+   params: blob;
+   paymentReceiptId: text;
+   proof: opt blob;
+   result: opt blob;
+   serviceId: text;
+   status: JobStatus;
  };
 type HttpResponse = 
  record {
@@ -124,6 +232,18 @@ type HttpRequest =
                 };
    method: text;
    url: text;
+ };
+type Eip3009Authorization = 
+ record {
+   from: text;
+   nonce: blob;
+   r: blob;
+   s: blob;
+   to: text;
+   v: nat8;
+   validAfter: nat;
+   validBefore: nat;
+   value: nat;
  };
 type DeliveryMethod = 
  variant {
@@ -178,10 +298,10 @@ type AgentCard =
  };
 type AccessGrantResult = 
  variant {
-   expired;
-   invalidGrant;
+   expired: text;
+   invalidGrant: text;
    ok;
-   revoked;
+   revoked: text;
  };
 type AccessGrant = 
  record {
@@ -193,32 +313,43 @@ type AccessGrant =
    issuedAt: int;
    receiptId: text;
  };
-/// Example canister demonstrating ic402 payments for content and services.
+/// ic402 Example Canister
 /// 
-/// Shows three content hosting patterns side by side:
-///   1. In-canister (ContentStore) — encrypted blob storage
-///   2. Asset canister — separate ICP canister via HTTP gateway
-///   3. External (S3/IPFS/Arweave) — off-chain hosting
+/// Demonstrates a paid knowledge base API with multiple optional features.
+/// The required core is small — everything marked OPTIONAL can be removed.
 /// 
-/// Plus a paid service endpoint (search), streaming sessions, and
-/// ERC-8004 agent identity on Base for cross-chain discovery.
+/// Structure:
+///   1. REQUIRED: Gateway + paid endpoint + HTTP 402 serving
+///   2. OPTIONAL: Streaming sessions (escrow + vouchers)
+///   3. OPTIONAL: Encrypted content store (in-canister)
+///   4. OPTIONAL: EVM remote signer (canister signs, client broadcasts)
+///   5. OPTIONAL: ERC-8004 identity metadata
 service : {
+  claimJob: (jobId: text) -> (variant {
+                                err: text;
+                                ok;
+                              });
+  confirmJob: (jobId: text) -> (variant {
+                                  err: text;
+                                  ok;
+                                });
   deleteContent: (id: text) -> (ContentStoreResult);
+  disableService: (id: text) -> (variant {
+                                   err: text;
+                                   ok;
+                                 });
+  disputeJob: (jobId: text, reason: text) -> (variant {
+                                                err: text;
+                                                ok;
+                                              });
+  enableService: (id: text) -> (variant {
+                                  err: text;
+                                  ok;
+                                });
   endSession: (sessionId: text) -> (PaymentResult);
   forceCloseSession: (sessionId: text) -> (PaymentResult);
-  /// Get the agent card (public, no auth required).
-  /// Other agents and indexers call this to discover capabilities.
   getAgentCard: () -> (AgentCard) query;
-  /// Get the registered agent ID on Base (null if not yet registered).
   getAgentId: () -> (opt nat) query;
-  getAssetContent: (assetPath: text, paymentSig: opt PaymentSignature) ->
-   (variant {
-      error: text;
-      ok: ContentDelivery;
-      paymentRequired: vec PaymentRequirement;
-    });
-  /// Chunk query — verifies AccessGrant HMAC, decrypts + returns chunk.
-  /// Called by the client SDK when delivery is #canisterQuery.
   getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
   getContent: (contentId: text, paymentSig: opt PaymentSignature) ->
    (variant {
@@ -226,28 +357,42 @@ service : {
       ok: ContentDelivery;
       paymentRequired: vec PaymentRequirement;
     });
-  /// Get the canister's tECDSA public key for EVM chains.
-  getEvmPublicKey: () -> (blob);
-  /// Get the canister's self-derived EVM address.
   getEvmAddress: () -> (text);
-  getExternalContent: (contentId: text, paymentSig: opt PaymentSignature) ->
-   (variant {
-      error: text;
-      ok: ContentDelivery;
-      paymentRequired: vec PaymentRequirement;
-    });
+  getEvmPublicKey: () -> (blob);
+  getJob: (jobId: text) -> (opt Job) query;
+  getJobResult: (jobId: text) -> (opt blob) query;
+  getJobStatus: (jobId: text) -> (opt JobStatus) query;
+  getPolicyConfig: () -> (SpendingPolicy) query;
   http_request: (request: HttpRequest) -> (HttpResponse) query;
   http_request_update: (request: HttpRequest) -> (HttpResponse);
+  /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
+  keccak256: (data: vec nat8) -> (vec nat8) query;
   listContent: () -> (vec ContentEntry) query;
+  listServices: () -> (vec ServiceDefinition) query;
   openSession: (config: SessionConfig, sig: PaymentSignature) ->
    (variant {
       err: text;
       ok: SessionState;
     });
-  /// Register this canister as an agent on Base's IdentityRegistry.
-  /// Signs and submits the EVM tx autonomously via tECDSA.
-  /// Requires the canister's EVM address to have ETH for gas.
-  registerAgent: () -> (variant { ok: record { tokenId: nat; txHash: text }; err: text });
+  quoteServiceRequest: (serviceId: text) ->
+   (variant {
+      err: text;
+      ok:
+       record {
+         amount: nat;
+         enabled: bool;
+         fee: nat;
+         pricingKind: text;
+         total: nat;
+       };
+    }) query;
+  registerService: (name: text, description: text, serviceType: ServiceType,
+   pricing: PricingScheme, verificationMethod: text, verifierCanisterId:
+   opt text, verificationKey: opt blob, delivery: ServiceDeliveryMethod,
+   timeout: nat) -> (variant {
+                       err: text;
+                       ok: text;
+                     });
   requestSession: () -> (SessionIntent);
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
    (variant {
@@ -260,14 +405,66 @@ service : {
       error: text;
       ok: text;
     });
+  setEvmPayout: (address: text) -> (variant {
+                                      err: text;
+                                      ok;
+                                    });
   setPolicy: (p: SpendingPolicy) -> ();
-  getPolicyConfig: () -> (SpendingPolicy) query;
+  /// Sign an ERC-8004 agent registration tx.
+  /// Client provides nonce + gas from their RPC, broadcasts + polls receipt.
+  signAgentRegistration: (nonce: nat, maxFeePerGas: nat,
+   maxPriorityFeePerGas: nat) -> (variant {
+                                    err: text;
+                                    ok: SignedTransaction;
+                                  });
+  /// Sign an ERC-20 transfer. Client provides nonce + gas from their RPC.
+  signErc20Transfer: (chainId: nat, tokenAddress: text, recipientAddress:
+   text, amount: nat, nonce: nat, maxFeePerGas: nat, maxPriorityFeePerGas:
+   nat) -> (variant {
+              err: text;
+              ok: SignedTransaction;
+            });
+  /// Sign a native ETH transfer. Client provides nonce + gas from their RPC.
+  signEthTransfer: (chainId: nat, recipientAddress: text, amountWei: 
+   nat, gasLimit: nat, nonce: nat, maxFeePerGas: nat, maxPriorityFeePerGas:
+   nat) -> (variant {
+              err: text;
+              ok: SignedTransaction;
+            });
+  /// Sign arbitrary EIP-712 typed data. The generic primitive for DEX integration.
+  /// The caller provides pre-computed domainSeparator and structHash (32 bytes each).
+  /// The canister computes the EIP-712 digest and signs with tECDSA.
+  signTypedData: (domainSeparator: vec nat8, structHash: vec nat8) ->
+   (variant {
+      err: text;
+      ok: SignedTypedData;
+    });
+  /// Sign an EIP-3009 authorization for x402 payment.
+  /// Client probes the URL, extracts chain/token/recipient/amount from the 402, and calls this.
+  /// Canister signs → returns header → client retries with header.
+  signX402Payment: (chainId: nat, tokenAddress: text, recipient: text,
+   amount: nat, tokenName: text, tokenVersion: text) ->
+   (variant {
+      err: text;
+      ok: SignedAuthorization;
+    });
+  submitJobResult: (jobId: text, result: blob, proof: opt blob, actualCost:
+   opt nat) -> (variant {
+                  err: text;
+                  ok;
+                });
+  submitServiceRequest: (serviceId: text, params: blob, paymentSig:
+   opt PaymentSignature) ->
+   (variant {
+      error: text;
+      ok: record {jobId: text;};
+      paymentRequired: vec PaymentRequirement;
+    });
   uploadContent: (id: text, mimeType: text, data: blob) ->
    (ContentStoreResult);
   uploadContentChunk: (id: text, index: nat, data: blob) ->
    (ContentStoreResult);
   uploadContentInit: (id: text, mimeType: text, totalSize: nat, chunkCount:
    nat) -> (ContentStoreResult);
-  /// Verify a grant (usable from query calls or http_request handlers).
   verifyGrant: (grant: AccessGrant) -> (AccessGrantResult) query;
 }
