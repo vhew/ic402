@@ -196,6 +196,17 @@ module {
       null;
     };
 
+    /// Find the configured EVM token on `chain` whose address matches `address`
+    /// (case-insensitive). Used to select the EIP-712 domain (name/version) of the
+    /// token actually being paid, rather than assuming tokens[0] — they differ on a
+    /// multi-token chain, and a mismatched domain makes a valid signature fail.
+    func findEvmToken(chain : Types.EvmChainConfig, address : Text) : ?Types.EvmTokenConfig {
+      for (tok in chain.tokens.vals()) {
+        if (EvmUtils.addressesEqual(tok.address, address)) return ?tok;
+      };
+      null;
+    };
+
     /// Resolve the EVM recipient: prefer self-derived address, fall back to config.
     func evmRecipientFor(chain : Types.EvmChainConfig) : Text {
       switch (evmRecipient) {
@@ -236,6 +247,142 @@ module {
       Utils.isEvmNetwork(network);
     };
 
+    // ── x402 facilitator / discovery (advertising) ──
+
+    /// Non-minting payment requirements for ADVERTISING (discovery / Bazaar). Unlike
+    /// require*, this does NOT generate or persist a server nonce — it describes the price/asset
+    /// for each rail so a client can discover the endpoint. The client must still hit the
+    /// resource to receive a live 402 challenge with a real nonce. nonce = empty, expiry = 0.
+    public func describeAll(amount : Nat) : [Types.PaymentRequirement] {
+      let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size() + 1);
+      switch (price(amount)) {
+        case (?p) {
+          buf.add({
+            scheme = "exact"; network = p.network; token = Principal.toText(p.token);
+            amount = p.amount; recipient = recipientText();
+            nonce = Blob.fromArray([]); expiry = 0; tokenName = null; tokenVersion = null;
+          });
+        };
+        case (null) {};
+      };
+      for (chain in config.evmChains.vals()) {
+        if (chain.tokens.size() == 0) { /* skip */ } else {
+          let tok = chain.tokens[0];
+          buf.add({
+            scheme = "exact"; network = "eip155:" # Nat.toText(chain.chainId);
+            token = tok.address; amount; recipient = evmRecipientFor(chain);
+            nonce = Blob.fromArray([]); expiry = 0; tokenName = tok.name; tokenVersion = tok.version;
+          });
+        };
+      };
+      Buffer.toArray(buf);
+    };
+
+    /// Resolve the (token, recipient) for opening an EVM session on `network` ("eip155:<chainId>"):
+    /// the chain's first configured USDC and the canister's own derived EVM address. Returns null
+    /// if the network is malformed, the chain/token isn't configured, or the EVM address isn't
+    /// derived yet — so a consumer can build a SessionIntent honouring the client's EVM rail
+    /// instead of forcing ICP.
+    public func evmSessionParams(network : Text) : ?{ token : Text; recipient : Text } {
+      switch (extractChainId(network)) {
+        case (null) { null };
+        case (?chainId) {
+          switch (findEvmChain(chainId)) {
+            case (?chain) {
+              if (chain.tokens.size() == 0) { null } else {
+                switch (evmRecipient) {
+                  case (?addr) { ?{ token = chain.tokens[0].address; recipient = addr } };
+                  case (null) { null };
+                };
+              };
+            };
+            case (null) { null };
+          };
+        };
+      };
+    };
+
+    /// x402 v2 `GET /supported` body: the (x402Version, scheme, network) kinds this facilitator
+    /// can settle, plus the on-chain signer(s). Only the STANDARD EVM (`eip155:*`, `exact`) kinds
+    /// are advertised — the ICP rail is non-standard and intentionally omitted so a strict v2
+    /// client/facilitator sees only what it can interoperate with. `signers` maps the CAIP-2 EVM
+    /// namespace to the canister's own tECDSA-derived EVM address (the entity that broadcasts).
+    public func supportedJson() : Text {
+      var kinds = "";
+      var first = true;
+      for (chain in config.evmChains.vals()) {
+        if (chain.tokens.size() == 0) { /* skip */ } else {
+          if (not first) { kinds #= "," };
+          kinds #= "{\"x402Version\":2,\"scheme\":\"exact\",\"network\":\"eip155:" # Nat.toText(chain.chainId) # "\"}";
+          first := false;
+        };
+      };
+      let signer = switch (evmRecipient) { case (?a) { a }; case (null) { "" } };
+      "{\"kinds\":[" # kinds # "],\"extensions\":[],\"signers\":{\"eip155:*\":[\"" # signer # "\"]}}";
+    };
+
+    /// x402 v2 facilitator `POST /verify`: validate an exact/EVM PaymentPayload against the chosen
+    /// PaymentRequirements OFF-CHAIN (no nonce, no broadcast, no state change). Returns the v2
+    /// verify verdict {isValid, invalidReason?, payer?}. EVM-only — the ICP rail is non-standard
+    /// and not exposed as a facilitator scheme. `asset` is the requirement's token (EIP-712
+    /// verifyingContract); name/version come from the per-chain config.
+    public func verifyPayment(signature : Types.PaymentSignature, expectedAmount : Nat, payTo : Text, asset : Text) : {
+      isValid : Bool;
+      invalidReason : ?Text;
+      payer : ?Text;
+    } {
+      if (not isEvmNetwork(signature.network)) {
+        return { isValid = false; invalidReason = ?"unsupported_scheme"; payer = null };
+      };
+      let authz = switch (signature.authorization) {
+        case (?a) { a };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_payload"; payer = null } };
+      };
+      let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
+      if (nowSeconds < authz.validAfter) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_after"; payer = ?authz.from };
+      };
+      if (nowSeconds > authz.validBefore) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_before"; payer = ?authz.from };
+      };
+      if (not EvmUtils.addressesEqual(authz.to, payTo)) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_recipient_mismatch"; payer = ?authz.from };
+      };
+      if (authz.value != expectedAmount) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_value_mismatch"; payer = ?authz.from };
+      };
+      let chainId = switch (extractChainId(signature.network)) {
+        case (?id) { id };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
+      };
+      // Resolve the EIP-712 domain (name/version) from the token actually being paid
+      // (`asset` is the verifyingContract passed to verifyAuthorization below), NOT
+      // tokens[0]: on a multi-token chain they differ and a wrong domain makes a
+      // valid signature fail to verify. Reject an asset this canister doesn't accept.
+      var tokenName : ?Text = null;
+      var tokenVersion : ?Text = null;
+      switch (findEvmChain(chainId)) {
+        case (?chain) {
+          switch (findEvmToken(chain, asset)) {
+            case (?tok) { tokenName := tok.name; tokenVersion := tok.version };
+            case (null) { return { isValid = false; invalidReason = ?"unsupported_asset"; payer = ?authz.from } };
+          };
+        };
+        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
+      };
+      let verified = Eip712.verifyAuthorization(
+        chainId, EvmUtils.hexToBytes(asset),
+        EvmUtils.hexToBytes(authz.from), EvmUtils.hexToBytes(authz.to),
+        authz.value, authz.validAfter, authz.validBefore,
+        Blob.toArray(authz.nonce), authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
+        tokenName, tokenVersion,
+      );
+      if (not verified) {
+        return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_signature"; payer = ?authz.from };
+      };
+      { isValid = true; invalidReason = null; payer = ?authz.from };
+    };
+
     func extractChainId(network : Text) : ?Nat {
       Utils.extractChainId(network);
     };
@@ -267,13 +414,45 @@ module {
     };
 
     /// Verify and settle a charge payment (ICP via ICRC-2 or EVM via EIP-3009).
-    public func settle(signature : Types.PaymentSignature) : async Types.PaymentResult {
+    ///
+    /// `expectedAmount` is the price the calling resource advertised. It is REQUIRED for a
+    /// conformant x402 client that sends no ic402 server nonce (the EVM rail), and serves as a
+    /// cross-resource guard for server-nonce clients (a nonce whose bound amount doesn't match
+    /// the resource's price is rejected). Pass `null` to fall back to the nonce-bound amount.
+    public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       // H-2: Resolve token to verify nonce is bound to the correct network+token
       let resolvedToken = resolveTokenForNonce(signature.network);
-      // Lock nonce and extract the bound payment amount
-      let amount = switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
-        case (null) { return #expired("Nonce expired or already consumed") };
-        case (?a) { a };
+
+      // Amount + replay model, two paths:
+      //  • Server-nonce (ICP + legacy clients echo the ic402 nonce): lock it for the bound amount,
+      //    and reject a nonce whose amount != the resource's advertised price (cross-resource).
+      //  • Stock x402 (EVM): a conformant client sends NO server nonce. The amount is the
+      //    resource's advertised price, enforced as exact-equality below; replay protection is the
+      //    EIP-3009 authorization.nonce + the on-chain single-use transferWithAuthorization. ICP
+      //    has no on-chain nonce, so it always requires the server nonce.
+      let usesServerNonce = signature.nonce.size() > 0;
+      let amount = if (usesServerNonce) {
+        switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
+          case (null) { return #expired("Nonce expired or already consumed") };
+          case (?a) {
+            switch (expectedAmount) {
+              case (?e) {
+                if (a != e) {
+                  nonceManager.unlock(signature.nonce);
+                  return #policyDenied("Nonce-bound amount " # Nat.toText(a) # " does not match the resource price " # Nat.toText(e));
+                };
+              };
+              case (null) {};
+            };
+            a;
+          };
+        };
+      } else {
+        switch (expectedAmount, isEvmNetwork(signature.network)) {
+          case (?e, true) { e }; // stock EVM client: amount comes from the resource, value==amount below
+          case (_, false) { return #expired("ICP settlement requires the ic402 server nonce") };
+          case (null, _) { return #expired("No server nonce and no resource amount; cannot settle") };
+        };
       };
 
       // Dispatch to EVM settlement via EIP-3009 if eip155:* network
@@ -318,9 +497,12 @@ module {
           nonceManager.unlock(signature.nonce);
           return #invalidSignature("EIP-3009 recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")");
         };
-        if (authz.value < amount) {
+        // v2 §6.1.2: the exact-EVM scheme requires the authorization value to EQUAL the amount
+        // (not merely cover it). A v1 `>=` would accept an overpayment a strict v2 facilitator
+        // rejects. unlock() is a no-op when there is no server nonce (stock EVM client).
+        if (authz.value != amount) {
           nonceManager.unlock(signature.nonce);
-          return #insufficientFunds("Authorization value " # Nat.toText(authz.value) # " < required " # Nat.toText(amount));
+          return #invalidSignature("invalid_exact_evm_payload_authorization_value_mismatch: value " # Nat.toText(authz.value) # " != required " # Nat.toText(amount));
         };
 
         // Verify EIP-712 signature locally
@@ -611,6 +793,17 @@ module {
       await sessionsMgr.recoverEscrow(caller, ledger, sessionId, amount);
     };
 
+    /// 1a: Send an ERC-20 transfer from the canister's EVM address via tECDSA, if EVM is
+    /// configured. Exposed so the marketplace (ServiceRegistry) can settle/refund EVM-paid
+    /// jobs on their native rail rather than from the ICP pool (audit C3). Returns the tx
+    /// hash on success.
+    public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
+      switch (evmSenderInst) {
+        case (?sender) { await sender.sendErc20Transfer(chainId, token, to, amount) };
+        case (null) { #err("EVM not configured (no ecdsaKeyName)") };
+      };
+    };
+
     /// Start recurring timers for session cleanup and policy garbage collection.
     /// Also auto-initializes HMAC seed and derives EVM address if ecdsaKeyName is set.
     /// Must be called from actor context (requires <system> capability).
@@ -658,6 +851,12 @@ module {
     /// Get the effective spending policy for a caller.
     public func getPolicy(caller : Principal) : Types.SpendingPolicy {
       policy.getEffectivePolicy(caller);
+    };
+
+    /// Get the global (null-keyed) spending policy — the one set via setPolicy(null, _).
+    /// Lets a canister expose its configured limits for read-back without naming a caller.
+    public func getGlobalPolicy() : Types.SpendingPolicy {
+      policy.getGlobalPolicy();
     };
 
     /// Get the current daily spend total for a caller.

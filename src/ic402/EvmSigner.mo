@@ -98,12 +98,13 @@ module {
         case (?addr) { addr };
         case (null) {
           let pk = await getPublicKey();
-          let addr = switch (EvmAddress.fromCompressedPublicKey(pk)) {
-            case (#ok(a)) { a };
+          switch (EvmAddress.fromCompressedPublicKey(pk)) {
+            // C2: cache ONLY on success. Previously a transient #err cached "" permanently,
+            // poisoning the signer — every later send used the empty/zero sender address.
+            // Returning "" without caching lets the next call retry the derivation.
+            case (#ok(a)) { cachedEvmAddr := ?a; a };
             case (#err(_)) { "" };
           };
-          cachedEvmAddr := ?addr;
-          addr;
         };
       };
     };
@@ -237,9 +238,11 @@ module {
         let sigHex = EvmUtils.bytesToHex(Array.append(Array.append(r, s), [v + 27]));
         let networkStr = "eip155:" # Nat.toText(chainId);
 
-        // Build x402 v2 payment header
+        // Build the x402 v2 PaymentPayload header. `resource` is optional in the payload and we
+        // don't have a valid ResourceInfo.url here (the canister is paying an external endpoint),
+        // so it is omitted rather than emitted as an invalid empty object. `accepted` echoes the
+        // requirement the caller extracted from the target's 402 challenge.
         let paymentPayload = "{\"x402Version\":2"
-          # ",\"resource\":{}"
           # ",\"accepted\":{\"scheme\":\"exact\""
           # ",\"network\":\"" # networkStr # "\""
           # ",\"amount\":\"" # Nat.toText(amount) # "\""

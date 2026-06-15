@@ -4,6 +4,12 @@ import Types "../src/ic402/Types";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
+import Nat8 "mo:base/Nat8";
+import Array "mo:base/Array";
+import EvmAddress "../src/ic402/EvmAddress";
+import EvmUtils "../src/ic402/EvmUtils";
+import EcdsaLib "mo:ecdsa";
+import EcdsaCurve "mo:ecdsa/Curve";
 import { test; suite } "mo:test";
 
 suite("ServiceRegistry", func() {
@@ -14,9 +20,14 @@ suite("ServiceRegistry", func() {
   let operatorPrincipal = Principal.fromText("2vxsx-fae");
   let buyerPrincipal = Principal.fromText("un4fu-tqaaa-aaaab-qadjq-cai");
 
-  let config : Types.Config = {
+  // Structurally a superset of ServiceRegistry.ServiceConfig (recipient/tokens/ledgerFee);
+  // the extra gateway fields are ignored by the registry constructor via width subtyping.
+  // ledgerFee = 0 here keeps the existing price/amount assertions exact; the A1 fee-threshold
+  // behaviour is covered by its own suite below (feeConfig) and end-to-end in the integration test.
+  let config = {
     recipient = { owner = testPrincipal; subaccount = null };
     tokens = [];
+    ledgerFee = 0;
     evmChains = [];
     evmRpcCanister = null;
     ecdsaKeyName = null;
@@ -308,6 +319,74 @@ suite("ServiceRegistry", func() {
       let svcId = registerAndEnable(reg, operatorPrincipal);
       switch (reg.submitRequest(
         Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(2000), null,
+      )) {
+        case (#ok(_)) {};
+        case (#err(_)) { assert false };
+      };
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // 4b. A1 — ledger-fee threshold (buyer pays price + fee)
+  // ══════════════════════════════════════════════════
+
+  // Same registry but with a real ckUSDC-sized fee, so the buyer must overpay by `fee`
+  // for the canister to afford the outbound settle transfer. Only the (sync) submitRequest
+  // validation is exercised here; the net-of-fee settle accounting needs a live ledger and
+  // is covered end-to-end by the integration test.
+  let feeConfig = { config with ledgerFee = 10_000 };
+  func makeFeeRegistry() : ServiceRegistry.ServiceRegistry {
+    ServiceRegistry.ServiceRegistry(testPrincipal, feeConfig);
+  };
+
+  suite("A1 ledger fee", func() {
+
+    test("Exact: paying exactly the price (no fee) is now insufficient", func() {
+      let reg = makeFeeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal); // price 1000, fee 10_000
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(1000), null,
+      )) {
+        case (#err(e)) { assert Text.contains(e, #text("Insufficient")); assert Text.contains(e, #text("11000")) };
+        case (#ok(_)) { assert false };
+      };
+    });
+
+    test("Exact: paying price + fee succeeds", func() {
+      let reg = makeFeeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(11_000), null,
+      )) {
+        case (#ok(_)) {};
+        case (#err(_)) { assert false };
+      };
+    });
+
+    test("Upto: payment below the fee is rejected", func() {
+      let reg = makeFeeRegistry();
+      let def = { baseDef(operatorPrincipal) with pricing = #Upto(5000) };
+      let svcId = switch (reg.registerService(operatorPrincipal, def)) {
+        case (#ok(id)) { ignore reg.enableService(operatorPrincipal, id); id };
+        case (#err(_)) { assert false; "" };
+      };
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(5000), null,
+      )) {
+        case (#err(e)) { assert Text.contains(e, #text("ledger fee")) };
+        case (#ok(_)) { assert false };
+      };
+    });
+
+    test("Upto: payment above the fee succeeds", func() {
+      let reg = makeFeeRegistry();
+      let def = { baseDef(operatorPrincipal) with pricing = #Upto(5000) };
+      let svcId = switch (reg.registerService(operatorPrincipal, def)) {
+        case (#ok(id)) { ignore reg.enableService(operatorPrincipal, id); id };
+        case (#err(_)) { assert false; "" };
+      };
+      switch (reg.submitRequest(
+        Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("params"), mockReceipt(10_001), null,
       )) {
         case (#ok(_)) {};
         case (#err(_)) { assert false };
@@ -758,6 +837,249 @@ suite("ServiceRegistry", func() {
     test("getService returns null for non-existent ID", func() {
       let reg = makeRegistry();
       assert (reg.getService("nope") == null);
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // S-13: terminal-job GC must also reclaim #Expired jobs
+  // ══════════════════════════════════════════════════
+
+  suite("gcTerminalJobs", func() {
+    let DAY : Int = 24 * 60 * 60 * 1_000_000_000;
+
+    func makeJob(id : Text, status : Types.JobStatus, completedAt : ?Int, createdAt : Int) : Types.Job {
+      {
+        id;
+        serviceId = "svc-1";
+        buyer = Principal.toText(buyerPrincipal);
+        operator = null;
+        params = Text.encodeUtf8("p");
+        paymentReceiptId = "rcpt";
+        amount = 1000;
+        actualCost = null;
+        status;
+        result = null;
+        proof = null;
+        createdAt;
+        expiresAt = 0;
+        completedAt;
+        deliveryCallback = null;
+      };
+    };
+
+    func present(reg : ServiceRegistry.ServiceRegistry, id : Text) : Bool {
+      switch (reg.getJob(id)) { case (?_) { true }; case (null) { false } };
+    };
+
+    test("reclaims Expired/Settled/Refunded jobs older than 24h, keeps recent and active ones", func() {
+      let reg = makeRegistry();
+      // Time.now() is 0 under mo:test, so "older than 24h" means completedAt < -DAY.
+      reg.loadStable({
+        services = [];
+        serviceCounter = 0;
+        jobCounter = 0;
+        evmRails = null;
+        operatorPayouts = null;
+        jobs = [
+          ("old-expired",    makeJob("old-expired",    #Expired,  ?(-2 * DAY), -2 * DAY)),
+          ("old-settled",    makeJob("old-settled",    #Settled,  ?(-2 * DAY), -2 * DAY)),
+          ("old-refunded",   makeJob("old-refunded",   #Refunded, ?(-2 * DAY), -2 * DAY)),
+          ("recent-expired", makeJob("recent-expired", #Expired,  ?0, 0)),
+          ("active-pending", makeJob("active-pending", #Pending,  null, 0)),
+        ];
+      });
+
+      let removed = reg.gcTerminalJobs();
+      // Old code collected only #Settled/#Refunded (removed == 2); the #Expired job leaked.
+      assert (removed == 3);
+      assert (not present(reg, "old-expired"));
+      assert (not present(reg, "old-settled"));
+      assert (not present(reg, "old-refunded"));
+      // A recently-terminal job and an active job must survive the sweep.
+      assert (present(reg, "recent-expired"));
+      assert (present(reg, "active-pending"));
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // S14 (option B): EVM-buyer signed confirm/dispute
+  // ══════════════════════════════════════════════════
+
+  suite("EVM buyer authorization", func() {
+    let buyerPriv : Nat = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80; // Hardhat #0
+    let otherPriv : Nat = 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d; // Hardhat #1
+    let rand : [Nat8] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32];
+
+    func makeEvmJob(id : Text, buyer : Text, status : Types.JobStatus) : Types.Job {
+      {
+        id; serviceId = "svc-1"; buyer; operator = null;
+        params = Text.encodeUtf8("p"); paymentReceiptId = "r"; amount = 1000; actualCost = null;
+        status; result = null; proof = null; createdAt = 0; expiresAt = 0; completedAt = null;
+        deliveryCallback = null;
+      };
+    };
+
+    // Derive the EVM address for a private key (herumi), mirroring evmaddress.test.mo.
+    func addrOf(priv : Nat) : Text {
+      let curve = EcdsaCurve.Curve(#secp256k1);
+      switch (curve.fromJacobi(curve.mul_base(#fr(priv)))) {
+        case (#affine(#fp(px), #fp(py))) {
+          let prefix : Nat8 = if (py % 2 == 0) 0x02 else 0x03;
+          let comp = Array.append<Nat8>([prefix], EvmUtils.natToBytes(px, 32));
+          switch (EvmAddress.fromCompressedPublicKey(comp)) { case (#ok(a)) { a }; case (#err(_)) { assert false; "" } };
+        };
+        case (_) { assert false; "" };
+      };
+    };
+
+    // Build a 65-byte (r||s||v) signature over buyerActionMessage(action, jobId) for `priv`.
+    func signAction(reg : ServiceRegistry.ServiceRegistry, priv : Nat, action : Text, jobId : Text) : [Nat8] {
+      let digest = EvmAddress.keccak256Text(reg.buyerActionMessage(action, jobId));
+      let sec = EcdsaLib.PrivateKey(priv, EcdsaLib.secp256k1Curve());
+      let #ok(sig) = sec.signHashed(digest.vals(), rand.vals()) else { assert false; return [] };
+      let rs = Array.append<Nat8>(EvmUtils.natToBytes(sig.r, 32), EvmUtils.natToBytes(sig.s, 32));
+      let want = addrOf(priv);
+      for (vv in [0, 1].vals()) {
+        let candidate = Array.append<Nat8>(rs, [Nat8.fromNat(vv)]);
+        switch (reg.recoverBuyerActionSigner(action, jobId, candidate)) {
+          case (?a) { if (a == want) return candidate };
+          case (null) {};
+        };
+      };
+      assert false; [];
+    };
+
+    func loadJob(reg : ServiceRegistry.ServiceRegistry, buyer : Text) {
+      reg.loadStable({
+        services = []; serviceCounter = 0; jobCounter = 0; evmRails = null; operatorPayouts = null;
+        jobs = [("job-1", makeEvmJob("job-1", buyer, #Submitted))];
+      });
+    };
+
+    test("recoverBuyerActionSigner recovers the signing EVM address", func() {
+      let reg = makeRegistry();
+      let sig = signAction(reg, buyerPriv, "dispute", "job-1");
+      switch (reg.recoverBuyerActionSigner("dispute", "job-1", sig)) {
+        case (?a) { assert EvmUtils.addressesEqual(a, addrOf(buyerPriv)) };
+        case (null) { assert false };
+      };
+    });
+
+    test("EVM buyer can dispute their job with a valid signature", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      switch (reg.disputeJobEvm("job-1", signAction(reg, buyerPriv, "dispute", "job-1"), "bad result")) {
+        case (#ok) {}; case (#err(_)) { assert false };
+      };
+      switch (reg.getJob("job-1")) { case (?j) { assert j.status == #Disputed }; case (null) { assert false } };
+    });
+
+    test("a different key cannot dispute someone else's job", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      switch (reg.disputeJobEvm("job-1", signAction(reg, otherPriv, "dispute", "job-1"), "x")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+    });
+
+    test("a confirm signature cannot be replayed as a dispute (action-bound)", func() {
+      let reg = makeRegistry();
+      loadJob(reg, addrOf(buyerPriv));
+      // Signature is valid for the "confirm" message; reused on the "dispute" path it
+      // recovers a different address (different digest) and is rejected.
+      switch (reg.disputeJobEvm("job-1", signAction(reg, buyerPriv, "confirm", "job-1"), "x")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+    });
+
+    test("recoverBuyerActionSigner rejects a malformed signature length", func() {
+      let reg = makeRegistry();
+      assert reg.recoverBuyerActionSigner("dispute", "job-1", [0, 1, 2]) == null;
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // 1a: EVM payment-rail tracking (foundation for per-rail settlement / C3)
+  // ══════════════════════════════════════════════════
+
+  suite("EVM rail tracking", func() {
+    let buyer0x = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    func evmReceipt(network : Text, token : Text, amount : Nat) : Types.PaymentReceipt {
+      {
+        id = "rcpt-evm"; amount; token; sender = buyer0x; recipient = "0xcanister";
+        network; timestamp = 0; txHash = ?"0xabc"; sessionId = null; refunded = null;
+      };
+    };
+
+    test("operator EVM payout: set, validate, get, and persist across upgrade", func() {
+      let reg = makeRegistry();
+      // Reject a malformed address.
+      switch (reg.setOperatorEvmPayout(operatorPrincipal, "not-an-address")) {
+        case (#err(_)) {}; case (#ok) { assert false };
+      };
+      // Accept a valid 0x address.
+      let addr = "0x1111111111111111111111111111111111111111";
+      switch (reg.setOperatorEvmPayout(operatorPrincipal, addr)) {
+        case (#ok) {}; case (#err(_)) { assert false };
+      };
+      assert reg.getOperatorEvmPayout(operatorPrincipal) == ?addr;
+      assert reg.getOperatorEvmPayout(buyerPrincipal) == null;
+      // Survives a stable round-trip.
+      let reg2 = makeRegistry();
+      reg2.loadStable(reg.toStable());
+      assert reg2.getOperatorEvmPayout(operatorPrincipal) == ?addr;
+    });
+
+    test("parseChainId parses CAIP-2 eip155 networks, rejects others", func() {
+      let reg = makeRegistry();
+      assert reg.parseChainId("eip155:8453") == ?8453;
+      assert reg.parseChainId("eip155:84532") == ?84532;
+      assert reg.parseChainId("eip155:1") == ?1;
+      assert reg.parseChainId("icp:1") == null; // not eip155
+      assert reg.parseChainId("eip155:") == null; // no digits
+      assert reg.parseChainId("eip155:0x10") == null; // non-decimal
+    });
+
+    test("submitRequest records the EVM rail for a 0x buyer", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(buyer0x, svcId, Text.encodeUtf8("p"),
+        evmReceipt("eip155:8453", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      switch (reg.getEvmRail(jobId)) {
+        case (?rail) {
+          assert rail.network == "eip155:8453";
+          assert rail.token == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+        };
+        case (null) { assert false };
+      };
+    });
+
+    test("submitRequest records NO rail for an ICP (principal) buyer", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(Principal.toText(buyerPrincipal), svcId,
+        Text.encodeUtf8("p"), mockReceipt(1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      assert reg.getEvmRail(jobId) == null;
+    });
+
+    test("the EVM rail survives a toStable/loadStable round-trip", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      let jobId = switch (reg.submitRequest(buyer0x, svcId, Text.encodeUtf8("p"),
+        evmReceipt("eip155:84532", "0xusdc", 1000), null)) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      let reg2 = makeRegistry();
+      reg2.loadStable(reg.toStable());
+      switch (reg2.getEvmRail(jobId)) {
+        case (?rail) { assert rail.network == "eip155:84532" };
+        case (null) { assert false };
+      };
     });
   });
 });

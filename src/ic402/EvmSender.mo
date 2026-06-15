@@ -16,6 +16,38 @@ import Call "mo:ic/Call";
 
 module {
 
+  // ── Pure fee helpers (module scope so they're unit-testable) ──
+
+  /// Pick the latest base fee from one provider's FeeHistory: prefer the forecast
+  /// next-block base fee (index 1, as the original did), then the current block
+  /// (index 0); null on an empty array so callers distinguish "no data" from a real 0.
+  public func latestBaseFee(history : EvmRpc.FeeHistory) : ?Nat {
+    if (history.baseFeePerGas.size() > 1) { ?history.baseFeePerGas[1] } else if (history.baseFeePerGas.size() > 0) {
+      ?history.baseFeePerGas[0];
+    } else { null };
+  };
+
+  /// Convert a base fee into the (maxFeePerGas, maxPriorityFeePerGas) pair — the
+  /// exact formula the original #Consistent path used: priority fee = base fee
+  /// clamped to [1e6, 1.5 gwei]; maxFee = 2*base + priority.
+  ///
+  /// S16: clamp the base fee to a sane ceiling (10_000 gwei — orders of magnitude
+  /// above any real L1/L2 base fee, far below a balance-busting value) FIRST. Since
+  /// fee data no longer requires strict multi-provider agreement (see getFeeData),
+  /// a single hostile or buggy RPC provider could otherwise return an absurd base
+  /// fee that inflates maxFeePerGas into an unpayable upfront gas reservation
+  /// (gasLimit * maxFeePerGas), tripping eth_sendRawTransaction's balance check and
+  /// parking every transfer. The cap bounds that. It also hardens the #Consistent
+  /// path, which previously had no ceiling either.
+  public func feeFromBase(rawBaseFee : Nat) : (Nat, Nat) {
+    let baseFee = Nat.min(rawBaseFee, 10_000_000_000_000);
+    let minPriority = 1_000_000;
+    let priorityFee = if (baseFee > 1_500_000_000) { 1_500_000_000 } else if (baseFee > minPriority) { baseFee } else {
+      minPriority;
+    };
+    (2 * baseFee + priorityFee, priorityFee);
+  };
+
   /// EVM transaction sender with tECDSA signing.
   public class EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) {
 
@@ -23,6 +55,16 @@ module {
     var cachedEvmAddr : ?Text = null;
     // H-1: Serialize EVM transactions to prevent nonce desync on concurrent calls.
     var txInProgress : Bool = false;
+
+    // S10: require multi-provider AGREEMENT on every outbound RPC, so a single compromised
+    // or stale provider can't forge a result — e.g. a fake "confirmed" receipt that would
+    // mint a paid receipt / credit an escrow. `total = null` queries all configured providers;
+    // `min = 2` requires at least two to agree (vs. the prior `null` config, which could act
+    // on a single provider's answer for the 2-provider custom chains).
+    let RPC_CONFIG : ?EvmRpc.RpcConfig = ?{
+      responseSizeEstimate = null;
+      responseConsensus = ?#Threshold({ total = null; min = 2 });
+    };
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -47,12 +89,12 @@ module {
         case (?addr) { addr };
         case (null) {
           let pk = await getPublicKey();
-          let addr = switch (EvmAddress.fromCompressedPublicKey(pk)) {
-            case (#ok(a)) { a };
+          switch (EvmAddress.fromCompressedPublicKey(pk)) {
+            // C2: cache ONLY on success — a transient #err must not permanently cache ""
+            // (which would poison every later send with the empty/zero sender address).
+            case (#ok(a)) { cachedEvmAddr := ?a; a };
             case (#err(_)) { "" };
           };
-          cachedEvmAddr := ?addr;
-          addr;
         };
       };
     };
@@ -94,7 +136,7 @@ module {
         // Reading #Pending each time self-heals and accounts for in-flight txs.
         let nonce = switch (
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-            services, null, { address = senderAddr; block = #Pending },
+            services, RPC_CONFIG, { address = senderAddr; block = #Pending },
           )
         ) {
           case (#Consistent(#Ok(n))) { n };
@@ -142,7 +184,7 @@ module {
         let rawTxBytes = EvmUtils.signedRawTx(txParams, r, s, yParity);
         let rawTxHex = EvmUtils.bytesToHex(rawTxBytes);
 
-        let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, null, rawTxHex);
+        let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
         switch (sendResult) {
           case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
           case (#Consistent(#Ok(#Ok(null)))) { #ok(rawTxHex) };
@@ -215,32 +257,60 @@ module {
       await sendTransaction(chainId, tokenAddress, calldata, 120_000);
     };
 
+    // latestBaseFee + feeFromBase are pure functions defined at module scope (above
+    // the class) so they are unit-testable without constructing an EvmSender.
+
     // H-3: Returns null when fee data is unavailable instead of fabricating a
     // tiny (~0.1 gwei) fee. The previous fallback produced transactions that are
     // unmineable on mainnet/busy L2s yet were still broadcast, jamming the nonce
     // pipeline. Callers must NOT broadcast on null — they return an error so the
     // operation can be retried with fresh fee data.
+    //
+    // S16: fee data is a NON-security gas estimate (the transfer amount + recipient
+    // are bound by the signed tx and enforced on-chain), so unlike the nonce /
+    // sendRawTransaction paths it does NOT require strict multi-provider agreement.
+    // eth_feeHistory(#Latest) returns a per-block base fee, so providers at slightly
+    // different chain tips routinely disagree → #Inconsistent. Rather than park the
+    // CLOSE on that (the prior behaviour), take the MAX base fee across providers
+    // that returned data (overpaying gas is safe; underpaying risks a stuck tx).
+    // Still return null only when NO provider produced a base fee — preserving the
+    // genuine-unavailable retry path. This mirrors the lenient receipt-poll idiom.
     func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async ?(Nat, Nat) {
       try {
         let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_feeHistory(
-          services, null,
+          services, RPC_CONFIG,
           { blockCount = 1; newestBlock = #Latest; rewardPercentiles = null },
         );
         switch (result) {
           case (#Consistent(#Ok(history))) {
-            let baseFee = if (history.baseFeePerGas.size() > 1) {
-              history.baseFeePerGas[1];
-            } else if (history.baseFeePerGas.size() > 0) {
-              history.baseFeePerGas[0];
-            } else {
-              1_000_000_000;
-            };
-            let minPriority = 1_000_000;
-            let priorityFee = if (baseFee > 1_500_000_000) { 1_500_000_000 }
-              else if (baseFee > minPriority) { baseFee }
-              else { minPriority };
-            ?(2 * baseFee + priorityFee, priorityFee);
+            // Empty array → fall back to a sane 1 gwei base, as the original did.
+            let baseFee = switch (latestBaseFee(history)) { case (?b) b; case null 1_000_000_000 };
+            ?feeFromBase(baseFee);
           };
+          case (#Inconsistent(results)) {
+            var maxBase : ?Nat = null;
+            for ((_, r) in results.vals()) {
+              switch (r) {
+                case (#Ok(history)) {
+                  switch (latestBaseFee(history)) {
+                    case (?b) {
+                      switch (maxBase) {
+                        case (?cur) { if (b > cur) { maxBase := ?b } };
+                        case null { maxBase := ?b };
+                      };
+                    };
+                    case null {}; // this provider returned an empty array — skip
+                  };
+                };
+                case (#Err(_)) {}; // this provider errored — skip
+              };
+            };
+            switch (maxBase) {
+              case (?b) { ?feeFromBase(b) };
+              case null { null }; // every provider errored / had no data
+            };
+          };
+          // #Consistent(#Err _): all providers agree fee data is unavailable.
           case (_) { null };
         };
       } catch (_) {
@@ -271,7 +341,7 @@ module {
       label poll while (attempts < maxPolls) {
         attempts += 1;
         let result = try {
-          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, null, txHash);
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
         } catch (_) { return #err("Receipt query failed") };
         switch (result) {
           case (#Consistent(#Ok(?receipt))) {

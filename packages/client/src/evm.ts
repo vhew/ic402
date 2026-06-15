@@ -120,6 +120,25 @@ export interface PaymentOption {
   network: string; // CAIP-2 network string
   asset: string; // token contract address
   ic402Nonce?: string; // H-10: ic402 server nonce (hex) to echo back so settle() can bind the amount
+  rawRequirement?: string; // the verbatim advertised PaymentRequirements entry (JSON), to echo as `accepted`
+}
+
+/**
+ * Echo the server's advertised PaymentRequirements VERBATIM as the v2 PaymentPayload `accepted`,
+ * replacing the field the canister reconstructed. The `accepted` object is NOT covered by the
+ * EIP-712 signature (only the authorization is), so rewriting it post-signing is safe and makes
+ * a strict facilitator's `accepted`-vs-advertised check pass. Returns the header unchanged if
+ * there is no raw requirement or the header can't be parsed.
+ */
+export function applyVerbatimAccepted(headerB64: string, rawRequirementJson?: string): string {
+  if (!rawRequirementJson) return headerB64;
+  try {
+    const payload = JSON.parse(atob(headerB64));
+    payload.accepted = JSON.parse(rawRequirementJson);
+    return btoa(JSON.stringify(payload));
+  } catch {
+    return headerB64;
+  }
 }
 
 /**
@@ -158,7 +177,15 @@ export function findPaymentOption(body: string, chainId: number): PaymentOption 
         tokenVersion: extra.version || '2',
         network: caip2,
         asset: String(e.asset ?? ''),
-        ic402Nonce: e.ic402Nonce ? String(e.ic402Nonce) : undefined,
+        // v2: the non-standard ic402 server nonce lives under `extra` (was top-level in the old
+        // wire). Fall back to the top level for backward compatibility.
+        ic402Nonce: extra.ic402Nonce
+          ? String(extra.ic402Nonce)
+          : e.ic402Nonce
+            ? String(e.ic402Nonce)
+            : undefined,
+        // keep the advertised entry verbatim so it can be echoed as the v2 `accepted`
+        rawRequirement: JSON.stringify(e),
       };
       bestAmount = amount;
     }
@@ -260,14 +287,52 @@ export type ProbeResult =
  * Probe a URL for x402 payment requirements.
  * Returns the payment option if 402, or the response if free/error.
  */
+export interface ProbeOptions {
+  /**
+   * Re-validate each redirect target before following it (SSRF). When provided, redirects
+   * are followed MANUALLY and every Location is passed to this callback, which must THROW
+   * to block an unsafe target. When omitted, redirects are followed normally (the caller is
+   * trusted). The ic402 MCP passes its SSRF validator here so an allowlisted origin cannot
+   * 30x the canister-controller host to an internal/metadata address (audit S2).
+   */
+  validateRedirect?: (url: string) => void;
+  /** Max redirect hops to follow when validateRedirect is set. Default 5. */
+  maxRedirects?: number;
+}
+
+async function fetchWithValidatedRedirects(
+  url: string,
+  init: RequestInit | undefined,
+  validateRedirect: (url: string) => void,
+  maxRedirects: number,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const resp = await fetch(current, { ...init, redirect: 'manual' });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get('location');
+      if (!location) return resp;
+      const next = new URL(location, current).toString();
+      validateRedirect(next); // throws to block an unsafe redirect target
+      current = next;
+      continue;
+    }
+    return resp;
+  }
+  throw new Error(`Too many redirects (> ${maxRedirects}) while probing ${url}`);
+}
+
 export async function probeX402(
   url: string,
   chainId: number,
   init?: RequestInit,
+  opts?: ProbeOptions,
 ): Promise<ProbeResult> {
   let response: Response;
   try {
-    response = await fetch(url, { ...init, redirect: 'follow' });
+    response = opts?.validateRedirect
+      ? await fetchWithValidatedRedirects(url, init, opts.validateRedirect, opts.maxRedirects ?? 5)
+      : await fetch(url, { ...init, redirect: 'follow' });
   } catch (e) {
     return { status: 'error', error: classifyNetworkError(e) };
   }
@@ -356,11 +421,15 @@ export async function fetchX402(
   // H-10: echo the ic402 server nonce from the 402 challenge into the payment
   // payload so the canister can lock the bound amount (server-nonce → amount
   // binding). Without it, an EVM-over-HTTP settlement returns #expired.
+  // Echo the advertised requirement VERBATIM as `accepted` (so a strict facilitator's
+  // accepted-vs-advertised check passes), and echo the ic402 server nonce for the ic402/legacy
+  // rail. Neither is part of the EIP-712-signed authorization, so rewriting is safe.
   let headerToSend = signed.header;
-  if (paymentOption.ic402Nonce) {
+  if (paymentOption.rawRequirement || paymentOption.ic402Nonce) {
     try {
       const obj = JSON.parse(atob(signed.header));
-      obj.ic402Nonce = paymentOption.ic402Nonce;
+      if (paymentOption.rawRequirement) obj.accepted = JSON.parse(paymentOption.rawRequirement);
+      if (paymentOption.ic402Nonce) obj.ic402Nonce = paymentOption.ic402Nonce;
       headerToSend = btoa(JSON.stringify(obj));
     } catch {
       headerToSend = signed.header; // fall back to the canister-signed header as-is

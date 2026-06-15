@@ -1,5 +1,83 @@
 # Changelog
 
+## v2.1.0 — 2026-06-15
+
+x402 **v2 compliance**, the EVM/marketplace settlement paths, live policy
+introspection, and an honest interactive demo.
+
+> ⚠️ **Contains breaking changes despite the minor version.** ic402 is early-stage
+> (the workspace root is still `0.1.0`) and the bump is kept minor deliberately — but
+> if you consume the Motoko library, the `@ic402/client` types, or talk to the canister
+> with a **v1** x402 client, treat this as a breaking upgrade and read the section below.
+
+### Breaking interface changes
+
+- **Motoko library (no overloads/defaults to shim — direct callers must update):**
+  - `Gateway.settle(signature)` → `settle(signature, expectedAmount : ?Nat)` — enforces
+    per-resource exact-equality for nonce-less (stock EVM) clients + cross-resource guard.
+  - `HttpHandler.http402(requirements)` → `http402(requirements, resourceUrl)`.
+  - `HttpHandler.paymentRequiredJson(requirements)` →
+    `paymentRequiredJson(requirements, resourceUrl, errorMsg : ?Text)`.
+  - `Policy.releaseDaily(caller, amount)` → `releaseDaily(caller, day, amount)`.
+- **`@ic402/client`:** the exported `buildX402PaymentHeader` is **removed** (it emitted a
+  conflicting `x402Version:1` payload; use `fetchX402` / `applyVerbatimAccepted`).
+  `X402PaymentRequirement` now **requires** `amount: string` (v2 atomic units);
+  `maxAmountRequired` remains an optional **reader** alias only — constructors must supply `amount`.
+- **Wire (affects a deployed v1 client):** the 402 challenge emits `amount` and no longer
+  `maxAmountRequired` server-side; exact-EVM now requires `value == amount` (a prior
+  **overpayment is rejected**); `ic402Nonce`/`expiry` moved under `extra`; marketplace
+  buyers are charged price **+ ledger fee** so settlement can pay the operator.
+
+### Retained for back-compat
+
+- The canister still accepts the legacy `x-payment` header (prefers `PAYMENT-SIGNATURE`).
+- The EVM rail is now payable **without** the ic402 server nonce (v2); the ICP rail still
+  uses it, and an echoed nonce is still honored.
+- `@ic402/mcp`: every baseline tool name + input schema is unchanged (purely additive).
+
+### Added
+
+- **x402 v2**: v2 wire format + header transport (`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE`
+  / `PAYMENT-RESPONSE`), CORS/OPTIONS, the exact-EVM scheme; self-hosted **facilitator**
+  (`GET /supported`, `POST /verify`, `POST /settle`) and discovery `GET /discovery/resources`.
+  See `docs/x402-compliance.md`.
+- **`getPolicyConfig`** query — read back the live global `SpendingPolicy`; the demo's
+  policy step displays it live instead of hardcoding.
+- Real EVM streaming sessions; on-chain marketplace settlement + refunds to the operator;
+  `quoteServiceRequest` read-only price query.
+- `@ic402/mcp`: 7 new dedicated operator tools (`upload_content`, `delete_content`,
+  `register_service`, `enable_service`, `claim_job`, `submit_job_result`,
+  `sign_typed_data`), default-denied where dangerous. `@ic402/client`: `applyVerbatimAccepted`
+  and an optional `probeX402` redirect-validation option.
+
+### Fixed
+
+- **EVM fee data**: `getFeeData` no longer parks a session close on transient
+  multi-provider `#Inconsistent` base-fee disagreement (takes the max base fee, clamped to
+  a 10 000 gwei ceiling so a hostile/buggy provider can't inflate the gas reservation);
+  nonce/send consensus stays strict.
+- **`verifyPayment`**: resolves the EIP-712 domain from the token matching the paid `asset`
+  (not `tokens[0]`) — a valid signature for a non-first token on a multi-token chain no
+  longer fails; unconfigured assets are rejected.
+- Demo honesty: every reported success/metric is gated on the real canister verdict — a
+  reverted/failed payment no longer renders as completed, and live values replace hardcoded ones.
+
+### Tooling
+
+- One uniform project version: `scripts/version.sh` now bumps **every** place the
+  version lives — `mops.toml` (source of truth), all four `package.json` files
+  (root + `packages/client` + `integrations/mcp` + `example/client`), the
+  `example/zk-verifier` `Cargo.toml` + `Cargo.lock`, and the runtime version
+  literals in the MCP server and demo client (`McpServer`/`Client({ version })`),
+  which had drifted to `0.1.0`. The source-literal seds are guarded (a bump fails
+  loudly if the pattern moves), and a same-version run re-syncs any drifted file.
+
+### Tests
+
+- `mops test`: 16 suites (adds `test/gateway.test.mo` for verifyPayment asset/domain
+  resolution and `test/evmsender.test.mo` for the fee math + ceiling; `getGlobalPolicy`
+  round-trip in `test/policy.test.mo`). Client SDK: 72 vitest tests.
+
 ## v2.0.0 — 2026-06-08
 
 Security release. Fixes all confirmed Critical, High, and Medium findings from the

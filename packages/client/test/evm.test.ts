@@ -1,5 +1,59 @@
-import { describe, it, expect } from 'vitest';
-import { findPaymentOption, Ic402Error } from '../src/evm.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { findPaymentOption, applyVerbatimAccepted, Ic402Error, probeX402 } from '../src/evm.js';
+
+describe('probeX402 redirect re-validation (S2)', () => {
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('BLOCKS a redirect to a private host (validateRedirect throws) and never fetches it', async () => {
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (u: string | URL | Request) => {
+      seen.push(String(u));
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://169.254.169.254/latest/' },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const block = (u: string) => {
+      if (u.includes('169.254')) throw new Error('blocked: cloud metadata');
+    };
+    const res = await probeX402('https://safe.example/x', 8453, undefined, {
+      validateRedirect: block,
+    });
+
+    expect(res.status).toBe('error');
+    // The validated origin was fetched once; the redirect target never was.
+    expect(seen).toEqual(['https://safe.example/x']);
+  });
+
+  it('follows a re-validated redirect to the final 402 and returns the payment option', async () => {
+    const paymentBody = JSON.stringify({
+      accepts: [{ network: 'eip155:8453', payTo: '0xRecipient', amount: '100', asset: '0xUSDC' }],
+    });
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call++;
+      if (call === 1)
+        return new Response(null, {
+          status: 301,
+          headers: { location: 'https://safe.example/final' },
+        });
+      return new Response(paymentBody, { status: 402 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const res = await probeX402('https://safe.example/start', 8453, undefined, {
+      validateRedirect: () => {}, // allow
+    });
+    expect(res.status).toBe('payment_required');
+    expect(call).toBe(2);
+  });
+});
 
 describe('findPaymentOption', () => {
   it('finds option by CAIP-2 network', () => {
@@ -383,5 +437,50 @@ describe('SignedTypedData type', () => {
     expect(mock.v).toBeGreaterThanOrEqual(27);
     expect(mock.r).toHaveLength(66);
     expect(mock.s).toHaveLength(66);
+  });
+});
+
+describe('applyVerbatimAccepted (echo advertised requirement as v2 `accepted`)', () => {
+  it('findPaymentOption captures the advertised requirement verbatim', () => {
+    const req = {
+      scheme: 'exact',
+      network: 'eip155:84532',
+      payTo: '0xRecipient',
+      amount: '1000',
+      asset: '0xUSDC',
+      maxTimeoutSeconds: 120,
+      extra: { name: 'USDC', version: '2', assetTransferMethod: 'eip3009' },
+    };
+    const option = findPaymentOption(JSON.stringify({ accepts: [req] }), 84532);
+    expect(option!.rawRequirement).toBeDefined();
+    expect(JSON.parse(option!.rawRequirement!)).toMatchObject({
+      amount: '1000',
+      maxTimeoutSeconds: 120,
+    });
+  });
+
+  it('rewrites `accepted` verbatim and leaves the signed authorization untouched', () => {
+    const header = btoa(
+      JSON.stringify({
+        x402Version: 2,
+        accepted: { scheme: 'exact', amount: '1000', maxTimeoutSeconds: 300 }, // reconstructed
+        payload: { signature: '0xsig', authorization: { from: '0xA', to: '0xB', value: '1000' } },
+      }),
+    );
+    const raw = JSON.stringify({
+      scheme: 'exact',
+      amount: '1000',
+      maxTimeoutSeconds: 120,
+      extra: { name: 'USDC', version: '2' },
+    });
+    const decoded = JSON.parse(atob(applyVerbatimAccepted(header, raw)));
+    expect(decoded.accepted.maxTimeoutSeconds).toBe(120); // verbatim, not the reconstructed 300
+    expect(decoded.accepted.extra.name).toBe('USDC');
+    expect(decoded.payload.authorization.value).toBe('1000'); // authorization untouched
+  });
+
+  it('returns the header unchanged when there is no raw requirement', () => {
+    const header = btoa(JSON.stringify({ x402Version: 2, payload: {} }));
+    expect(applyVerbatimAccepted(header, undefined)).toBe(header);
   });
 });

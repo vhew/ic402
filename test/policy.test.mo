@@ -1,6 +1,7 @@
 /// Motoko unit tests for Policy engine.
 import Policy "../src/ic402/Policy";
 import Principal "mo:base/Principal";
+import Time "mo:base/Time";
 import { test; suite } "mo:test";
 
 suite("Policy.Engine", func() {
@@ -318,5 +319,96 @@ suite("Policy.Engine", func() {
     // Releasing against the correct day clears it.
     engine.releaseDaily(caller1, day, 50_000);
     assert(engine.getDailySpendAmount(caller1) == 0);
+  });
+
+  // S-21: a caller blocked AFTER a session was opened must not be able to keep
+  // draining it via vouchers — checkVoucher must enforce the allow/block list.
+  test("checkVoucher rejects a blocked caller", func() {
+    let engine = Policy.Engine();
+    engine.setGlobalPolicy({
+      maxPerTransaction = null;
+      maxPerDay = null;
+      rateLimitPerMinute = null;
+      maxSessionDeposit = null;
+      maxConcurrentSessions = null;
+      maxSessionDuration = null;
+      sessionIdleTimeout = null;
+      allowedCallers = null;
+      blockedCallers = ?[caller1];
+    });
+    switch (engine.checkVoucher(caller1, 1_000)) {
+      case (#ok) { assert(false) };
+      case (#denied(_)) {};
+    };
+  });
+
+  // C-9: the deposit is reserved against the daily bucket ONCE, at open. checkVoucher
+  // must not re-charge each voucher delta against the daily limit, or a funded session
+  // whose deposit nears maxPerDay becomes unusable.
+  test("checkVoucher does not double-count the deposit against the daily limit", func() {
+    let engine = Policy.Engine();
+    engine.setGlobalPolicy({
+      maxPerTransaction = null;
+      maxPerDay = ?60_000;
+      rateLimitPerMinute = null;
+      maxSessionDeposit = null;
+      maxConcurrentSessions = null;
+      maxSessionDuration = null;
+      sessionIdleTimeout = null;
+      allowedCallers = null;
+      blockedCallers = null;
+    });
+    // Simulate session-open reserving the full 60_000 deposit against today's bucket.
+    engine.recordSpend(caller1, 60_000);
+    // A subsequent voucher delta must still be permitted — the deposit already covers it.
+    switch (engine.checkVoucher(caller1, 500)) {
+      case (#ok) {};
+      case (#denied(_)) { assert(false) };
+    };
+  });
+
+  // S-11: gcRateLimit() reclaims principals whose rate-limit window has fully aged out,
+  // bounding rateLimitLog so unauthenticated settle attempts cannot grow it without limit.
+  test("gcRateLimit reclaims stale rate-limit entries but keeps fresh ones", func() {
+    let engine = Policy.Engine();
+    let key1 = Principal.toText(caller1);
+    let key2 = Principal.toText(caller2);
+    // Inject one stale (far-past timestamp, guaranteed < now-60s for any clock) and one
+    // fresh (now) entry via stable restore. Using an absolute past value keeps the test
+    // independent of whatever Time.now() the test runtime reports.
+    let base = engine.toStable();
+    engine.loadStable({
+      base with rateLimitEntries = [(key1, [-100_000_000_000]), (key2, [Time.now()])]
+    });
+    assert(engine.rateLimitEntryCount() == 2);
+    engine.gcRateLimit();
+    // The stale principal is reclaimed; the fresh one survives.
+    assert(engine.rateLimitEntryCount() == 1);
+  });
+
+  // getGlobalPolicy reads back exactly what setGlobalPolicy stored — this is what
+  // the canister's getPolicyConfig query exposes for live policy display.
+  test("getGlobalPolicy round-trips the configured policy", func() {
+    let engine = Policy.Engine();
+    let p = {
+      maxPerTransaction = ?50_000;
+      maxPerDay = ?500_000;
+      rateLimitPerMinute = ?120;
+      maxSessionDeposit = ?100_000;
+      maxConcurrentSessions = ?1;
+      maxSessionDuration = ?(24 * 60 * 60 * 1_000_000_000);
+      sessionIdleTimeout = ?(60 * 60 * 1_000_000_000);
+      allowedCallers = null;
+      blockedCallers = null;
+    };
+    engine.setGlobalPolicy(p);
+    let got = engine.getGlobalPolicy();
+    assert(got.maxPerTransaction == ?50_000);
+    assert(got.maxPerDay == ?500_000);
+    assert(got.rateLimitPerMinute == ?120);
+    assert(got.maxSessionDeposit == ?100_000);
+    assert(got.maxConcurrentSessions == ?1);
+    assert(got.sessionIdleTimeout == ?(60 * 60 * 1_000_000_000));
+    assert(got.maxSessionDuration == ?(24 * 60 * 60 * 1_000_000_000));
   });
 });

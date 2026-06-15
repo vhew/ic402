@@ -335,6 +335,7 @@ export const exampleIdlFactory = () =>
     // Admin
     verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
+    getPolicyConfig: IDL.Func([], [SpendingPolicy], ['query']),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
     // Remote signer: sign-only endpoints (client broadcasts)
     signX402Payment: IDL.Func(
@@ -375,6 +376,24 @@ export const exampleIdlFactory = () =>
     enableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
     disableService: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Null, err: IDL.Text })], []),
     listServices: IDL.Func([], [IDL.Vec(ServiceDef)], ['query']),
+    // C4: read-only price quote (no nonce minted) so callers can cap-check before paying.
+    quoteServiceRequest: IDL.Func(
+      [IDL.Text],
+      [
+        IDL.Variant({
+          // A1: amount = service price, fee = ckUSDC ledger fee, total = amount + fee (what the buyer pays).
+          ok: IDL.Record({
+            amount: IDL.Nat,
+            fee: IDL.Nat,
+            total: IDL.Nat,
+            pricingKind: IDL.Text,
+            enabled: IDL.Bool,
+          }),
+          err: IDL.Text,
+        }),
+      ],
+      ['query'],
+    ),
     submitServiceRequest: IDL.Func(
       [IDL.Text, IDL.Vec(IDL.Nat8), IDL.Opt(PaymentSignature)],
       [

@@ -23,6 +23,10 @@ import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import SHA256 "mo:sha2/Sha256";
 import Principal "mo:base/Principal";
+import Char "mo:base/Char";
+import Nat32 "mo:base/Nat32";
+import EvmAddress "EvmAddress";
+import EvmUtils "EvmUtils";
 
 module {
 
@@ -31,6 +35,10 @@ module {
   public type ServiceConfig = {
     recipient : Types.Account;
     tokens : [Types.TokenConfig];
+    // A1: the ICP ledger transfer fee (e.g. ckUSDC = 10_000). Buyers pay `price + ledgerFee`
+    // so the pool can cover the outbound settle/refund transfer (the ledger deducts amount+fee).
+    // Without collecting it, every settle is short by one fee and fails (the audit fee finding).
+    ledgerFee : Nat;
   };
 
   public class ServiceRegistry(
@@ -41,6 +49,121 @@ module {
     var jobs = HashMap.HashMap<Text, Types.Job>(64, Text.equal, Text.hash);
     var serviceCounter : Nat = 0;
     var jobCounter : Nat = 0;
+    // 1a: payment rail (chain + token) for EVM-paid jobs, keyed by jobId. Lets the registry
+    // settle/refund an EVM job on-chain on the rail it was paid on, rather than from the ICP
+    // pool (audit C3). Keyed separately so the public Job type / Candid interface is unchanged.
+    var evmJobRail = HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash);
+
+    // 1a: optional on-chain ERC-20 transfer capability (tECDSA), injected by the consuming
+    // canister (e.g. wired to its Gateway/EvmSender). The registry has no EVM capability of
+    // its own; left null it stays ICP-only. Signature: (chainId, token, toAddress, amount).
+    public type EvmTransferFn = (Nat, Text, Text, Nat) -> async { #ok : Text; #err : Text };
+    var evmTransfer : ?EvmTransferFn = null;
+
+    /// Wire the on-chain ERC-20 transfer used to settle/refund EVM-paid jobs. Call once at init.
+    public func setEvmTransfer(fn : EvmTransferFn) {
+      evmTransfer := ?fn;
+    };
+
+    // 1a: operator EVM payout addresses, keyed by operator principal. An EVM-paid job is
+    // settled on-chain to its operator's registered payout address (no ServiceDefinition /
+    // Candid change). Without one, EVM settlement can't pay the operator and rolls back.
+    var operatorEvmPayout = HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash);
+
+    /// Register the calling operator's EVM payout address (0x, 20 bytes). The consuming
+    /// canister passes msg.caller and should require the caller be a registered operator.
+    public func setOperatorEvmPayout(caller : Principal, address : Text) : { #ok; #err : Text } {
+      if (not Text.startsWith(address, #text "0x") or address.size() != 42) {
+        return #err("Invalid EVM payout address: must be a 0x-prefixed 20-byte address");
+      };
+      operatorEvmPayout.put(caller, address);
+      #ok;
+    };
+
+    /// The operator's registered EVM payout address, if any.
+    public func getOperatorEvmPayout(operator : Principal) : ?Text {
+      operatorEvmPayout.get(operator);
+    };
+
+    /// Parse a CAIP-2 EVM network string ("eip155:8453") to its chain id, or null.
+    public func parseChainId(network : Text) : ?Nat {
+      let prefix = "eip155:";
+      if (not Text.startsWith(network, #text prefix)) return null;
+      let rest = Text.replace(network, #text prefix, "");
+      var n : Nat = 0;
+      var any = false;
+      for (c in rest.chars()) {
+        let d = Char.toNat32(c);
+        if (d < 48 or d > 57) return null;
+        n := n * 10 + Nat32.toNat(d - 48);
+        any := true;
+      };
+      if (any) { ?n } else { null };
+    };
+
+    /// 1a: settle `cost` to the job's operator on the rail it was paid on. ICP jobs pay the
+    /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
+    /// address on-chain — fixing the settle half of the cross-rail flaw (C3). Returns true on
+    /// success (false if no operator / no payout address / no transfer hook / transfer fails).
+    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #err : Text } {
+      switch (evmJobRail.get(jobId)) {
+        case (?rail) {
+          let payout = switch (job.operator) { case (?op) { operatorEvmPayout.get(op) }; case (null) { null } };
+          switch (evmTransfer, parseChainId(rail.network), payout) {
+            case (?transfer, ?chainId, ?addr) {
+              switch (await transfer(chainId, rail.token, addr, cost)) {
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err("EVM settle to operator: " # e) };
+              };
+            };
+            case (?_, _, null) { #err("operator has no registered EVM payout address (call setEvmPayout)") };
+            case (_, _, _) { #err("EVM settle unavailable (no transfer hook / unparseable chain)") };
+          };
+        };
+        case (null) {
+          switch (job.operator) {
+            case (?op) {
+              switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err(e) };
+              };
+            };
+            case (null) { #err("job has no assigned operator") };
+          };
+        };
+      };
+    };
+
+    /// 1a: refund `amount` to the job's buyer on the rail it paid on. ICP buyers via the
+    /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
+    /// injected hook). Returns true on success. Fixes the EVM-buyer refund stranding (S14)
+    /// and the refund half of the cross-rail flaw (C3).
+    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #err : Text } {
+      switch (evmJobRail.get(jobId)) {
+        case (?rail) {
+          switch (evmTransfer, parseChainId(rail.network)) {
+            case (?transfer, ?chainId) {
+              switch (await transfer(chainId, rail.token, job.buyer, amount)) {
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err("EVM refund: " # e) };
+              };
+            };
+            case (_, _) { #err("EVM refund unavailable (no transfer hook / unparseable chain)") };
+          };
+        };
+        case (null) {
+          switch (buyerIcpAccount(job.buyer)) {
+            case (?acct) {
+              switch (await payFromMainAccount(acct, amount)) {
+                case (#ok(_)) { #ok };
+                case (#err(e)) { #err(e) };
+              };
+            };
+            case (null) { #err("buyer is not ICP-refundable and has no EVM rail") };
+          };
+        };
+      };
+    };
 
     // ── Service Registration ──
 
@@ -182,14 +305,18 @@ module {
       };
       if (not svc.enabled) return #err("Service is disabled");
 
-      // Validate amount against pricing
+      // Validate amount against pricing. A1: the buyer must pay `price + ledgerFee` so the pool
+      // can cover the outbound settle transfer; otherwise every settle is short by one fee.
       switch (svc.pricing) {
         case (#Exact(price)) {
-          if (receipt.amount < price) return #err("Insufficient payment: need " # Nat.toText(price) # ", got " # Nat.toText(receipt.amount));
+          let total = price + config.ledgerFee;
+          if (receipt.amount < total) return #err("Insufficient payment: need " # Nat.toText(total) # " (price " # Nat.toText(price) # " + fee " # Nat.toText(config.ledgerFee) # "), got " # Nat.toText(receipt.amount));
         };
-        case (#Upto(maxPrice)) {
-          if (receipt.amount < 1) return #err("Payment required");
-          // Upto: buyer authorizes up to maxPrice, we accept any amount <= max
+        case (#Upto(_maxPrice)) {
+          // A positive payment that covers at least the ledger fee is required, so the job has
+          // something to settle and the pool can afford the outbound transfer.
+          if (receipt.amount < config.ledgerFee + 1) return #err("Payment required: must be at least " # Nat.toText(config.ledgerFee + 1) # " (ledger fee " # Nat.toText(config.ledgerFee) # " + 1) for Upto pricing, got " # Nat.toText(receipt.amount));
+          // Upto: buyer authorizes up to maxPrice + fee; we accept any amount over the fee.
         };
         case (#Session) {}; // Session-based billing handled separately
       };
@@ -216,7 +343,18 @@ module {
         deliveryCallback = callback;
       };
       jobs.put(jobId, job);
+      // 1a: record the EVM payment rail (network + token) for an EVM-paid job, so it can be
+      // settled/refunded on-chain on that rail rather than from the ICP pool (C3).
+      if (Text.startsWith(buyer, #text "0x")) {
+        evmJobRail.put(jobId, { network = receipt.network; token = receipt.token });
+      };
       #ok(jobId);
+    };
+
+    /// 1a: the EVM payment rail recorded for a job, if it was paid on-chain (null for ICP
+    /// jobs). Used by the per-rail settlement path; exposed for tests/observability.
+    public func getEvmRail(jobId : Text) : ?Types.EvmRail {
+      evmJobRail.get(jobId);
     };
 
     /// Operator claims a pending job.
@@ -259,13 +397,18 @@ module {
         case (null) { return #err("Job not assigned") };
       };
 
-      // Validate actualCost for Upto pricing
+      // Validate actualCost for Upto pricing. A1: the buyer paid `price + ledgerFee`, but the
+      // operator may only ever be paid the service amount (the fee covers the outbound transfer).
+      // So the operator's billable ceiling — and the Exact-pricing default — is the amount NET of
+      // the fee, not the full escrowed `job.amount` (which would let the operator claim the fee
+      // and leave the pool short).
+      let serviceAmount = if (job.amount > config.ledgerFee) { job.amount - config.ledgerFee } else { 0 };
       let cost = switch (actualCost) {
         case (?c) {
-          if (c > job.amount) return #err("Actual cost exceeds escrowed amount");
+          if (c > serviceAmount) return #err("Actual cost exceeds escrowed amount (net of ledger fee)");
           c;
         };
-        case (null) { job.amount }; // Exact pricing: full amount
+        case (null) { serviceAmount }; // Exact pricing: full service amount (net of fee)
       };
 
       let updated : Types.Job = {
@@ -319,24 +462,60 @@ module {
           // Stay in #Submitted — buyer must call confirmJob or disputeJob
           #ok;
         };
-        case (#ZkGroth16({ verificationKey; verifierCanister })) {
+        case (#ZkGroth16({ verificationKey; verifierCanister; bindResult })) {
           let proof = switch (job.proof) {
             case (null) { return #err("ZK proof required but not provided") };
             case (?p) { p };
           };
-          // Params are the public inputs — each 32-byte chunk is one serialized field element
-          let publicInputs : [Blob] = if (Blob.toArray(job.params).size() > 0) {
+          let result = switch (job.result) {
+            case (null) { return #err("No result to verify") };
+            case (?r) { r };
+          };
+
+          // Lost-update fix: reserve a non-resolvable interim status SYNCHRONOUSLY before the
+          // cross-canister verifier await. expireJobs / disputeJob / confirmJob all act only on
+          // #Submitted, so #Computing takes this job out of their reach; without this, a refund
+          // or dispute landing DURING the await would be silently clobbered by the stale
+          // write-back below — a refund-and-settle double spend.
+          jobs.put(jobId, { job with status = #Computing });
+
+          // Proof-not-bound fix (OPT-IN, bindResult): bind the DELIVERED result into the public
+          // inputs so the proof attests to (resultHash, params) — not just params. Otherwise an
+          // operator submits a valid proof for the params alongside an ARBITRARY result and is paid
+          // for garbage. This requires a circuit whose public input 0 commits to the result, so it
+          // is opt-in; the default (false) passes the buyer's params only, matching circuits that
+          // prove the computation but not the result string (e.g. the √25 demo).
+          // The hash is reduced to a valid BN254 scalar (clear the top byte so it is < the field
+          // modulus); the circuit must commit to the same reduced value.
+          let publicInputs : [Blob] = if (bindResult) {
+            let h = Blob.toArray(SHA256.fromBlob(#sha256, result));
+            let reduced = Blob.fromArray(Array.tabulate<Nat8>(32, func(i) { if (i == 0) { 0 } else { h[i] } }));
+            if (Blob.toArray(job.params).size() > 0) { [reduced, job.params] } else { [reduced] };
+          } else if (Blob.toArray(job.params).size() > 0) {
             [job.params];
           } else { [] };
 
           let verifier : Types.ZkVerifierActor = actor (Principal.toText(verifierCanister));
           switch (await verifier.verify_groth16(proof, publicInputs, verificationKey)) {
             case (#ok) {
-              jobs.put(jobId, { job with status = #Verified });
-              await settleJob(jobId);
+              // Re-fetch after the await: settle only if no concurrent transition fired (the job
+              // is still our reserved #Computing). Otherwise abort without paying.
+              switch (jobs.get(jobId)) {
+                case (?j2) {
+                  if (j2.status != #Computing) {
+                    return #err("Job changed during verification (status: " # debug_show(j2.status) # ")");
+                  };
+                  jobs.put(jobId, { j2 with status = #Verified });
+                  await settleJob(jobId);
+                };
+                case (null) { #err("Job vanished during verification") };
+              };
             };
             case (#err(msg)) {
-              jobs.put(jobId, { job with status = #Disputed });
+              switch (jobs.get(jobId)) {
+                case (?j2) { jobs.put(jobId, { j2 with status = #Disputed }) };
+                case (null) {};
+              };
               #err("ZK verification failed: " # msg);
             };
           };
@@ -370,6 +549,80 @@ module {
       #ok;
     };
 
+    // ── EVM buyer authorization (S14, option B) ──
+    // EVM-paid buyers have no ICP principal, so the principal-based confirmJob/disputeJob
+    // can NEVER authorize them (job.buyer is a 0x address that Principal.toText can't equal).
+    // These accept a secp256k1 signature over a canister/action/job-bound message, recover the
+    // signer, and authorize it against the stored EVM buyer address. The buyer signs the
+    // keccak256 of buyerActionMessage(action, jobId) with the key that owns job.buyer.
+
+    /// The message an EVM buyer signs to confirm/dispute a job. Binds the action
+    /// ("confirm"/"dispute"), the specific job, and THIS canister — so a signature cannot be
+    /// replayed across actions, jobs, or canisters. Single-use is enforced by the job status
+    /// (each transition requires #Submitted, which the action leaves).
+    public func buyerActionMessage(action : Text, jobId : Text) : Text {
+      "ic402-buyer-action:v1:" # action # ":" # jobId # ":" # Principal.toText(_canisterPrincipal);
+    };
+
+    /// Recover the EVM address that signed buyerActionMessage(action, jobId). `signature` is
+    /// 65 bytes: r[0:32] || s[32:64] || v[64]. Returns the lowercase 0x address, or null.
+    public func recoverBuyerActionSigner(action : Text, jobId : Text, signature : [Nat8]) : ?Text {
+      if (signature.size() != 65) return null;
+      let digest = EvmAddress.keccak256Text(buyerActionMessage(action, jobId));
+      let r = Array.subArray<Nat8>(signature, 0, 32);
+      let s = Array.subArray<Nat8>(signature, 32, 32);
+      var v = signature[64];
+      if (v >= 27) { v -= 27 };
+      switch (EvmAddress.ecRecover(digest, r, s, v)) {
+        case (?pubKey) {
+          switch (EvmAddress.fromCompressedPublicKey(pubKey)) {
+            case (#ok(addr)) { ?addr };
+            case (#err(_)) { null };
+          };
+        };
+        case (null) { null };
+      };
+    };
+
+    /// Authorize an EVM buyer action: the recovered signer must equal job.buyer.
+    func authorizeEvmBuyer(job : Types.Job, action : Text, jobId : Text, signature : [Nat8]) : Bool {
+      switch (recoverBuyerActionSigner(action, jobId, signature)) {
+        case (?signer) { EvmUtils.addressesEqual(signer, job.buyer) };
+        case (null) { false };
+      };
+    };
+
+    /// EVM-buyer counterpart of confirmJob: on a valid signature from the job's EVM buyer,
+    /// settle the job to the operator. (Settlement currently draws the ICP pool — the EVM-rail
+    /// payout for EVM-paid jobs is the cross-rail follow-up, audit C3.)
+    public func confirmJobEvm(jobId : Text, signature : [Nat8]) : async { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      if (job.status != #Submitted) return #err("Job not in submitted status");
+      if (not authorizeEvmBuyer(job, "confirm", jobId, signature)) {
+        return #err("Signature does not authorize this job's EVM buyer");
+      };
+      jobs.put(jobId, { job with status = #Verified });
+      await settleJob(jobId);
+    };
+
+    /// EVM-buyer counterpart of disputeJob: on a valid signature from the job's EVM buyer,
+    /// mark the job disputed (resolved via resolveDispute / timeout). Synchronous.
+    public func disputeJobEvm(jobId : Text, signature : [Nat8], _reason : Text) : { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      if (job.status != #Submitted) return #err("Job not in submitted status");
+      if (not authorizeEvmBuyer(job, "dispute", jobId, signature)) {
+        return #err("Signature does not authorize this job's EVM buyer");
+      };
+      jobs.put(jobId, { job with status = #Disputed });
+      #ok;
+    };
+
     /// M-6 (v2): Resolve a submitted/disputed job. The consuming canister MUST
     /// gate access (e.g. controller-only). `refundBuyer = true` refunds the buyer;
     /// false settles to the operator. Without this, BuyerConfirm jobs the buyer
@@ -384,19 +637,24 @@ module {
         case (_) { return #err("Job is not in a resolvable state (status: " # debug_show(job.status) # ")") };
       };
       if (refundBuyer) {
-        switch (buyerIcpAccount(job.buyer)) {
-          case (?acct) {
-            // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY
-            // before the await so the expireJobs timer (which only acts on
-            // #Submitted/#Disputed/#Pending) cannot also refund this same job
-            // during the await — preventing a double refund. Revert on failure.
-            jobs.put(jobId, { job with status = #Settling });
-            switch (await payFromMainAccount(acct, job.amount)) {
-              case (#ok(_)) { jobs.put(jobId, { job with status = #Refunded }); #ok };
-              case (#err(e)) { jobs.put(jobId, job); #err("Refund failed: " # e) };
-            };
+        // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY before the await so
+        // the expireJobs timer (which only acts on #Submitted/#Disputed/#Pending) cannot also
+        // refund this same job during the await — preventing a double refund. Revert on failure.
+        jobs.put(jobId, { job with status = #Settling });
+        // 1a/A1: refund on the rail the job paid on — ICP pool, or on-chain to an EVM (0x)
+        // buyer (lets EVM buyers actually be refunded; S14 / C3 refund half), net of the
+        // refund's ledger fee (buyer paid price+fee; the fee is consumed by the transfer).
+        let fee = config.ledgerFee;
+        let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+        switch (await refundOnRail(jobId, job, refundAmt)) {
+          case (#ok) {
+            jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
+            #ok;
           };
-          case (null) { #err("EVM buyer cannot be refunded via ICRC; refund out-of-band") };
+          case (#err(e)) {
+            jobs.put(jobId, job); // revert to its prior status
+            #err("Refund failed: " # e);
+          };
         };
       } else {
         jobs.put(jobId, { job with status = #Verified });
@@ -418,44 +676,36 @@ module {
       // now see #Settling (not #Verified) and abort, preventing double payout.
       jobs.put(jobId, { job with status = #Settling });
 
+      // A1: the buyer paid `price + ledgerFee`, so strip the fee to get the service amount the
+      // operator/remainder logic works with. The fee covers the outbound transfer (the ledger
+      // deducts amount+fee), so the pool nets zero per job instead of going short every time.
+      let fee = config.ledgerFee;
+      let serviceAmount = if (job.amount > fee) { job.amount - fee } else { 0 };
       let cost = switch (job.actualCost) {
         case (?c) { c };
-        case (null) { job.amount };
+        case (null) { serviceAmount };
       };
 
-      // C-4: Pay the operator their cost from the platform recipient account.
-      switch (job.operator) {
-        case (?op) {
-          switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
-            case (#err(e)) {
-              jobs.put(jobId, { job with status = #Verified }); // roll back for retry
-              return #err("Settlement failed: " # e);
-            };
-            case (#ok(_)) {};
-          };
+      // C-4 / 1a: pay the operator their cost on the job's rail — ICP from the pool, or on-chain
+      // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
+      switch (await settleToOperator(jobId, job, cost)) {
+        case (#err(e)) {
+          jobs.put(jobId, { job with status = #Verified }); // roll back for retry
+          return #err("Settlement failed: " # e);
         };
-        case (null) {
-          jobs.put(jobId, { job with status = #Verified });
-          return #err("Job has no assigned operator to settle to");
-        };
+        case (#ok) {};
       };
 
-      // C-4/C-5: Refund the Upto remainder to the buyer (ICP buyers only).
-      let refundAmount = if (job.amount > cost) { job.amount - cost } else { 0 };
+      // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail, net of the refund's own
+      // ledger fee. The operator is already paid, so on failure mark #Settled and surface it.
+      let refundAmount = if (serviceAmount > cost + fee) { serviceAmount - cost - fee } else { 0 };
       if (refundAmount > 0) {
-        switch (buyerIcpAccount(job.buyer)) {
-          case (?buyerAccount) {
-            switch (await payFromMainAccount(buyerAccount, refundAmount)) {
-              case (#err(e)) {
-                // Operator was already paid — the job IS settled; surface the
-                // refund problem without rolling back the operator payment.
-                jobs.put(jobId, { job with status = #Settled });
-                return #err("Operator paid but buyer refund failed: " # e);
-              };
-              case (#ok(_)) {};
-            };
+        switch (await refundOnRail(jobId, job, refundAmount)) {
+          case (#err(e)) {
+            jobs.put(jobId, { job with status = #Settled });
+            return #err("Operator paid but buyer remainder refund failed: " # e);
           };
-          case (null) {}; // EVM buyer: Upto remainder is not ICRC-refundable here
+          case (#ok) {};
         };
       };
 
@@ -522,45 +772,51 @@ module {
           case (_) { false };
         };
         if (timedOut) {
-          jobs.put(id, { job with status = #Expired });
+          jobs.put(id, { job with status = #Expired; completedAt = ?now });
           expired.add(id);
 
-          // C-4/C-5: Refund the buyer from the platform recipient account
-          // (ICP buyers only — EVM buyers are refunded out-of-band).
-          switch (buyerIcpAccount(job.buyer)) {
-            case (?buyerAccount) {
-              switch (await payFromMainAccount(buyerAccount, job.amount)) {
-                case (#ok(_)) { jobs.put(id, { job with status = #Refunded }) };
-                case (#err(_)) {}; // leave #Expired; don't block other jobs
-              };
-            };
-            case (null) {};
+          // 1a/A1: refund the buyer on the rail it paid on — ICP from the pool, or on-chain to a
+          // 0x (EVM) buyer — net of the refund's ledger fee. On failure leave #Expired (reclaimed
+          // by gcTerminalJobs after 24h).
+          let fee = config.ledgerFee;
+          let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+          switch (await refundOnRail(id, job, refundAmt)) {
+            case (#ok) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
+            case (#err(_)) {}; // leave #Expired (reclaimed by gcTerminalJobs after 24h)
           };
         };
       };
 
-      // M-5: Remove terminal jobs (Settled/Refunded) older than 24 hours
-      let gcCutoff = now - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
+      // M-5 / S-13: Remove terminal jobs (Settled / Refunded / Expired) older than 24h.
+      ignore gcTerminalJobs();
+
+      Buffer.toArray(expired);
+    };
+
+    /// S-13: Garbage-collect terminal jobs (Settled / Refunded / Expired) older than 24h,
+    /// freeing their retained params/result/proof blobs. Previously #Expired jobs — every
+    /// timed-out EVM-paid job, and every ICP job whose refund failed — were NEVER collected,
+    /// so the jobs map (and the stable snapshot that preupgrade serializes) grew without
+    /// bound: an attacker-cheap state-exhaustion / upgrade-brick vector. Synchronous so it is
+    /// directly unit-testable and can also be driven from the maintenance timer. Returns the
+    /// number of jobs removed.
+    public func gcTerminalJobs() : Nat {
+      let gcCutoff = Time.now() - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
       let staleJobs = Buffer.Buffer<Text>(8);
       for ((id, job) in jobs.entries()) {
         switch (job.status) {
-          case (#Settled or #Refunded) {
+          case (#Settled or #Refunded or #Expired) {
             let completedTime = switch (job.completedAt) {
               case (?t) { t };
               case (null) { job.createdAt }; // fallback if completedAt not set
             };
-            if (completedTime < gcCutoff) {
-              staleJobs.add(id);
-            };
+            if (completedTime < gcCutoff) { staleJobs.add(id) };
           };
           case (_) {};
         };
       };
-      for (id in staleJobs.vals()) {
-        jobs.delete(id);
-      };
-
-      Buffer.toArray(expired);
+      for (id in staleJobs.vals()) { jobs.delete(id); evmJobRail.delete(id) };
+      staleJobs.size();
     };
 
     /// Start the job expiry timer. Call once at canister init.
@@ -579,6 +835,8 @@ module {
         jobs = Iter.toArray(jobs.entries());
         serviceCounter;
         jobCounter;
+        evmRails = ?Iter.toArray(evmJobRail.entries());
+        operatorPayouts = ?Iter.toArray(operatorEvmPayout.entries());
       };
     };
 
@@ -588,6 +846,15 @@ module {
       jobs := HashMap.fromIter(data.jobs.vals(), data.jobs.size(), Text.equal, Text.hash);
       serviceCounter := data.serviceCounter;
       jobCounter := data.jobCounter;
+      // Optional for upgrade compatibility: pre-1a stable records have no evmRails.
+      evmJobRail := switch (data.evmRails) {
+        case (?rails) { HashMap.fromIter(rails.vals(), rails.size(), Text.equal, Text.hash) };
+        case (null) { HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash) };
+      };
+      operatorEvmPayout := switch (data.operatorPayouts) {
+        case (?p) { HashMap.fromIter(p.vals(), p.size(), Principal.equal, Principal.hash) };
+        case (null) { HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash) };
+      };
     };
   };
 };

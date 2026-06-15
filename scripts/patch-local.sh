@@ -71,12 +71,18 @@ register_patch_trap() {
   trap 'restore_source' EXIT INT TERM
 }
 
-# Verify a mainnet pattern was replaced (no longer present in the file)
+# Verify a mainnet pattern was replaced (no longer present in the file).
+# S20: HARD-FAIL (return 1) rather than warn — under `set -euo pipefail` this aborts the
+# deploy. Previously this only printed a warning that scrolled past the (heavily
+# output-suppressed) setup, so a failed ckUSDC/EVM-recipient patch silently shipped a
+# LOCAL build still wired to MAINNET values.
 assert_patched() {
   local file="$1" pattern="$2" label="$3"
   if grep -q "$pattern" "$file" 2>/dev/null; then
-    echo "  WARNING: '$label' pattern still present after patch"
+    echo "  ERROR: '$label' mainnet pattern still present after patch — refusing to build a local deployment with mainnet values." >&2
+    return 1
   fi
+  return 0
 }
 
 # Patch ckUSDC ledger principal

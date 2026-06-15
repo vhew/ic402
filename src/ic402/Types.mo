@@ -564,7 +564,12 @@ module {
 
   /// How the canister verifies the operator's result before settling.
   public type VerificationMethod = {
-    #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal };
+    // bindResult: when true, the canister prepends a field element derived from SHA-256(result)
+    // as public input 0, so the proof attests to the DELIVERED result (not just the params). This
+    // requires a circuit built to commit to that input — so it is OPT-IN. When false (default),
+    // the public inputs are the buyer's params only (a circuit that proves the computation but not
+    // the result string — e.g. the √25 demo).
+    #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal; bindResult : Bool };
     #HashMatch;                              // sha256(result) must match buyer-provided hash
     #BuyerConfirm : { disputeWindowSeconds : Nat }; // buyer approves or disputes
     #AutoSettle;                             // trust the operator (reputation-gated)
@@ -621,12 +626,24 @@ module {
     deliveryCallback : ?Text;  // optional callback URL
   };
 
+  /// 1a: the on-chain payment rail of an EVM-paid job — the CAIP-2 network
+  /// (e.g. "eip155:8453") and the ERC-20 token address it was paid in. Recorded at
+  /// submitRequest so the job can be settled/refunded on the SAME rail it was paid on,
+  /// instead of from the ICP ckUSDC pool (audit C3).
+  public type EvmRail = {
+    network : Text;
+    token : Text;
+  };
+
   /// Serializable service registry state for canister upgrades.
   public type StableServiceRegistryState = {
     services : [(Text, ServiceDefinition)];
     jobs : [(Text, Job)];
     serviceCounter : Nat;
     jobCounter : Nat;
+    // Optional for upgrade compatibility: pre-1a stable records have no EVM rails / payouts.
+    evmRails : ?[(Text, EvmRail)];
+    operatorPayouts : ?[(Principal, Text)];
   };
 
   /// Interface for a ZK Groth16 verification canister.

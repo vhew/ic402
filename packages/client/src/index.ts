@@ -40,12 +40,12 @@ export {
   usdcDomain,
   TRANSFER_WITH_AUTHORIZATION_TYPES,
   buildTransferAuthorizationMessage,
-  buildX402PaymentHeader,
 } from './eip712.js';
 export {
   Ic402Error,
   classifyNetworkError,
   findPaymentOption,
+  applyVerbatimAccepted,
   probeX402,
   fetchX402,
   createEvmClient,

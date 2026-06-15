@@ -227,6 +227,49 @@ describe('ic402 integration', () => {
       expect(verifyResult).toHaveProperty('ok');
     });
 
+    // C1 finding 2: a nonce binds amount/token/network but NOT the resource. A nonce minted at
+    // the cheap `search` endpoint (1000) must not buy the pricier `getContent` (5000). The fix
+    // makes each resource reject a settlement that doesn't cover its own price.
+    it('rejects a cheap nonce redeemed at a pricier resource (cross-resource underpayment)', async () => {
+      if (skip) return;
+
+      // 1. Mint a CHEAP nonce via search (amount 1000), not getContent (5000).
+      const searchReq = await actor.search('underpay probe', []);
+      const icpReq = searchReq.paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      expect(BigInt(icpReq.amount)).toBe(1_000n);
+
+      // 2. Approve + present that cheap nonce to getContent.
+      await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      const caller = await agent.getPrincipal();
+      const cheapSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const result = await actor.getContent('int-test-doc', [cheapSig]);
+
+      // The 1000-nonce must NOT unlock the 5000 content. The gateway now rejects the
+      // amount/resource mismatch BEFORE settling (no funds move), rather than after.
+      expect(result).toHaveProperty('error');
+      const err = result.error.toLowerCase();
+      expect(err).toContain('does not match the resource price');
+    });
+
     it('delete content', async () => {
       if (skip) return;
       const result = await actor.deleteContent('int-test-doc');
@@ -278,7 +321,25 @@ describe('ic402 integration', () => {
       expect(result).toHaveProperty('paymentRequired');
       const reqs = result.paymentRequired;
       expect(Array.isArray(reqs)).toBe(true);
-      expect(reqs[0].amount).toBe(500n);
+      // A1: the buyer is charged price (500) + ledger fee (10_000) so the canister can settle.
+      expect(reqs[0].amount).toBe(10_500n);
+    });
+
+    it('quoteServiceRequest returns price + fee + total as a read-only query (C4/A1)', async () => {
+      if (skip) return;
+      const result = await actor.quoteServiceRequest('svc-1');
+      expect(result).toHaveProperty('ok');
+      expect(result.ok.amount).toBe(500n); // service price
+      expect(result.ok.fee).toBe(10_000n); // ckUSDC ledger fee
+      expect(result.ok.total).toBe(10_500n); // what the buyer actually pays
+      expect(result.ok.enabled).toBe(true);
+      expect(result.ok.pricingKind).toBe('Exact');
+    });
+
+    it('quoteServiceRequest errors for a missing service', async () => {
+      if (skip) return;
+      const result = await actor.quoteServiceRequest('no-such-service');
+      expect(result).toHaveProperty('err');
     });
 
     it('claim nonexistent job fails', async () => {
@@ -297,6 +358,62 @@ describe('ic402 integration', () => {
       if (skip) return;
       const result = await actor.getJobResult('nonexistent-job');
       expect(result).toEqual([]);
+    });
+
+    // A1: the full marketplace lifecycle that the prior suite never exercised — the exact path
+    // the ledger-fee bug broke. Buyer pays price + fee, operator fulfils, and the job must reach
+    // #Settled, which only happens if settleToOperator actually paid out of the pool (a settle
+    // that was short by one fee would roll the job back to #Verified instead).
+    it('settles a service job to the operator (buyer pays price + fee)', async () => {
+      if (skip) return;
+      const params = new TextEncoder().encode('settle-flow params');
+
+      // 1. Probe for the payment requirement (mints a nonce). svc-1 is Exact 500 + AutoSettle,
+      //    with the test identity as its operator — so the same identity is buyer and operator.
+      const probe = await actor.submitServiceRequest('svc-1', params, []);
+      expect(probe).toHaveProperty('paymentRequired');
+      const icpReq = probe.paymentRequired.find((r: { network: string }) => r.network === 'icp:1');
+      expect(icpReq).toBeDefined();
+      expect(BigInt(icpReq.amount)).toBe(10_500n); // 500 price + 10_000 fee
+
+      // 2. Approve the example canister to pull the charge (+ buffer for the transfer_from fee).
+      const approve = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: BigInt(icpReq.amount) + 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approve).toHaveProperty('Ok');
+
+      // 3. Pay → a job is created.
+      const caller = await agent.getPrincipal();
+      const paymentSig = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const submitted = await actor.submitServiceRequest('svc-1', params, [paymentSig]);
+      expect(submitted).toHaveProperty('ok');
+      const jobId = submitted.ok.jobId;
+
+      // 4. Operator claims and submits a result → AutoSettle runs settleJob → pays the operator.
+      const claimed = await actor.claimJob(jobId);
+      expect(claimed).toHaveProperty('ok');
+      const done = await actor.submitJobResult(jobId, new TextEncoder().encode('result'), [], []);
+      expect(done).toHaveProperty('ok');
+
+      // 5. Settle succeeded ⇒ terminal status is Settled (not rolled back to Verified).
+      const status = await actor.getJobStatus(jobId);
+      expect(status.length).toBe(1);
+      expect(status[0]).toHaveProperty('Settled');
     });
   });
 
@@ -620,6 +737,185 @@ describe('ic402 integration', () => {
       });
       // If we get here without throwing, the policy was accepted
       expect(true).toBe(true);
+    });
+  });
+
+  // ── x402 v2 HTTP wire format ──
+
+  describe('x402 v2 http', () => {
+    const raw = () => `http://${exampleId}.raw.localhost:4944`;
+
+    it('GET a paid resource returns a v2 PaymentRequired challenge', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/search?q=probe`);
+      expect(res.status).toBe(402);
+      // v2 header transport: the challenge travels in the base64 PAYMENT-REQUIRED header.
+      const hdr = res.headers.get('payment-required');
+      expect(hdr).toBeTruthy();
+      const fromHeader = JSON.parse(Buffer.from(hdr as string, 'base64').toString('utf8'));
+      expect(fromHeader.x402Version).toBe(2);
+
+      const body = await res.json();
+      expect(body.x402Version).toBe(2);
+      expect(body.error).toBeTruthy();
+      expect(typeof body.resource?.url).toBe('string'); // ResourceInfo
+      expect(Array.isArray(body.accepts)).toBe(true);
+      const evm = body.accepts.find((a: { network: string }) => a.network.startsWith('eip155:'));
+      expect(evm).toBeDefined();
+      expect(evm.scheme).toBe('exact');
+      expect(evm.amount).toBe('1000'); // v2 `amount`, not maxAmountRequired
+      expect(evm.payTo).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(evm.extra.assetTransferMethod).toBe('eip3009');
+      // v1 field name must be gone; non-standard ic402 fields live under extra
+      expect(JSON.stringify(body)).not.toContain('maxAmountRequired');
+      expect(evm.ic402Nonce).toBeUndefined();
+      expect(typeof evm.extra.ic402Nonce).toBe('string');
+    });
+
+    it('missing PAYMENT-SIGNATURE on a POST-style retry is reported as such', async () => {
+      if (skip) return;
+      // No payment header at all → the update path returns the v2 challenge / guidance.
+      const res = await fetch(`${raw()}/search?q=x`, { method: 'GET' });
+      expect(res.status).toBe(402);
+      const body = await res.json();
+      expect(body.error).toContain('PAYMENT-SIGNATURE');
+    });
+
+    it('GET /supported advertises the v2 EVM kinds + signer', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/supported`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.kinds)).toBe(true);
+      expect(body.kinds.length).toBeGreaterThan(0);
+      for (const k of body.kinds) {
+        expect(k.x402Version).toBe(2);
+        expect(k.scheme).toBe('exact');
+        expect(k.network).toMatch(/^eip155:/); // ICP omitted from the standard kinds
+      }
+      // signers maps the EVM namespace to the canister's own address
+      expect(body.signers['eip155:*'][0]).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    });
+
+    it('GET /discovery/resources lists paid resources with v2 accepts', async () => {
+      if (skip) return;
+      const res = await fetch(`${raw()}/discovery/resources`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(Array.isArray(body.resources)).toBe(true);
+      const search = body.resources.find((r: { resource: string }) =>
+        r.resource.endsWith('/search'),
+      );
+      expect(search).toBeDefined();
+      expect(search.x402Version).toBe(2);
+      expect(Array.isArray(search.accepts)).toBe(true);
+      const evm = search.accepts.find((a: { network: string }) => a.network.startsWith('eip155:'));
+      expect(evm.amount).toBe('1000');
+      expect(evm.extra.assetTransferMethod).toBe('eip3009');
+    });
+
+    // Facilitator POST /verify, exercised with an authorization the CANISTER itself signs
+    // (signX402Payment), so no external crypto is needed and the EIP-712 domain matches the
+    // canister's own chain config.
+    const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+    async function signedVerifyBody(amountInReq: bigint) {
+      const payTo = await actor.getEvmAddress();
+      const signed = await actor.signX402Payment(
+        84532n,
+        BASE_SEPOLIA_USDC,
+        payTo,
+        1000n,
+        'USDC',
+        '2',
+      );
+      const header = signed.ok.header as string;
+      const paymentPayload = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+      return {
+        payTo,
+        body: JSON.stringify({
+          x402Version: 2,
+          paymentPayload,
+          paymentRequirements: {
+            scheme: 'exact',
+            network: 'eip155:84532',
+            amount: amountInReq.toString(),
+            asset: BASE_SEPOLIA_USDC,
+            payTo,
+            extra: { name: 'USDC', version: '2' },
+          },
+        }),
+      };
+    }
+
+    it('POST /verify returns isValid for a correctly-signed authorization', async () => {
+      if (skip) return;
+      const { payTo, body } = await signedVerifyBody(1000n); // requirement amount == signed value
+      const res = await fetch(`${raw()}/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(res.status).toBe(200);
+      const v = await res.json();
+      expect(v.isValid).toBe(true);
+      expect(String(v.payer).toLowerCase()).toBe(String(payTo).toLowerCase());
+    });
+
+    it('POST /verify rejects a value/amount mismatch with the v2 reason code', async () => {
+      if (skip) return;
+      const { body } = await signedVerifyBody(999n); // requirement 999 != signed 1000
+      const res = await fetch(`${raw()}/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      const v = await res.json();
+      expect(v.isValid).toBe(false);
+      expect(v.invalidReason).toBe('invalid_exact_evm_payload_authorization_value_mismatch');
+    });
+
+    it('POST /settle returns a well-formed v2 SettlementResponse', async () => {
+      if (skip) return;
+      // The Base Sepolia USDC reverts EIP-3009 on-chain (documented), and the local replica
+      // can't reach it anyway — so this asserts the response is a valid v2 SettlementResponse,
+      // not that the on-chain transfer succeeds.
+      const { body } = await signedVerifyBody(1000n);
+      const res = await fetch(`${raw()}/settle`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+      expect(res.status).toBe(200);
+      const s = await res.json();
+      expect(typeof s.success).toBe('boolean');
+      expect(s).toHaveProperty('transaction');
+      expect(s.network).toBe('eip155:84532');
+      if (!s.success) expect(typeof s.errorReason).toBe('string');
+    });
+
+    it('an HTTP settlement failure returns a v2 SettlementResponse, not a plain error', async () => {
+      if (skip) return;
+      // Sign an authorization to the canister for 1000, then present it at /content (needs 5000):
+      // settle fails on the value check BEFORE any broadcast, exercising the failure response.
+      const canisterAddr = await actor.getEvmAddress();
+      const signed = await actor.signX402Payment(
+        84532n,
+        BASE_SEPOLIA_USDC,
+        canisterAddr,
+        1000n,
+        'USDC',
+        '2',
+      );
+      const res = await fetch(`${raw()}/content/probe`, {
+        method: 'GET',
+        headers: { 'PAYMENT-SIGNATURE': signed.ok.header as string },
+      });
+      expect(res.status).toBe(402);
+      const s = await res.json();
+      expect(s.success).toBe(false);
+      expect(typeof s.errorReason).toBe('string');
+      expect(s.errorReason.length).toBeGreaterThan(0);
+      expect(s.transaction).toBe('');
     });
   });
 });

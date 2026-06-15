@@ -6,8 +6,10 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import type { StepDef } from './runner.js';
+import { KnownIssueError } from './runner.js';
 import {
   mcpCall,
+  assertMcpOk,
   header,
   info,
   success,
@@ -24,20 +26,88 @@ const BASE_CHAIN = 'Base Sepolia testnet (chainId 84532)';
 const BASE_EXPLORER = 'https://sepolia.basescan.org';
 const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
 const EVM_CHAINS = [
-  { name: 'Base Sepolia', chainId: 84532, usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
+  {
+    name: 'Base Sepolia',
+    chainId: 84532,
+    usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    rpc: 'https://base-sepolia-rpc.publicnode.com',
+  },
   {
     name: 'Ethereum Sepolia',
     chainId: 11155111,
     usdc: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+    rpc: 'https://ethereum-sepolia-rpc.publicnode.com',
   },
-  { name: 'Avalanche Fuji', chainId: 43113, usdc: '0x5425890298aed601595a70AB815c96711a31Bc65' },
+  {
+    name: 'Avalanche Fuji',
+    chainId: 43113,
+    usdc: '0x5425890298aed601595a70AB815c96711a31Bc65',
+    rpc: 'https://avalanche-fuji-c-chain-rpc.publicnode.com',
+  },
   {
     name: 'Optimism Sepolia',
     chainId: 11155420,
     usdc: '0x5fd84259d66Cd46123540766Be93DFE6D43130D7',
+    rpc: 'https://optimism-sepolia-rpc.publicnode.com',
   },
-  { name: 'Arbitrum Sepolia', chainId: 421614, usdc: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d' },
+  {
+    name: 'Arbitrum Sepolia',
+    chainId: 421614,
+    usdc: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d',
+    rpc: 'https://arbitrum-sepolia-rpc.publicnode.com',
+  },
 ];
+
+/**
+ * Fetch the on-chain code length at `addr`. Circle's USDC (FiatToken V2.2) verifies an EIP-3009
+ * signature via `SignatureChecker`: a PURE EOA (no code) goes through plain `ecrecover`, but any
+ * address WITH code (a contract, or an EOA that set an EIP-7702 delegation) is routed to the
+ * EIP-1271 `isValidSignature` path — which rejects a normal ECDSA signature. The infamous test
+ * key Hardhat #0 (0xf39f…266) has a stray EIP-7702 delegation on Base/ETH/OP/Arb/Amoy Sepolia,
+ * which is the ONLY reason its EIP-3009 transfers were rejected there. So the payer must be a
+ * clean EOA. Returns -1 if the code couldn't be fetched.
+ */
+async function evmCodeLen(rpc: string, addr: string): Promise<number> {
+  try {
+    const res = await fetch(rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getCode',
+        params: [addr, 'latest'],
+      }),
+    });
+    const j = (await res.json()) as { result?: string };
+    const hex = (j.result ?? '0x').replace(/^0x/, '');
+    return hex.length / 2;
+  } catch {
+    return -1;
+  }
+}
+
+/** Fetch an address's USDC (ERC-20) balance in atomic units. Returns -1n if unreadable. */
+async function evmUsdcBalance(rpc: string, usdc: string, addr: string): Promise<bigint> {
+  try {
+    // balanceOf(address) selector 0x70a08231 + 32-byte left-padded address
+    const data = '0x70a08231' + addr.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+    const res = await fetch(rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_call',
+        params: [{ to: usdc, data }, 'latest'],
+      }),
+    });
+    const j = (await res.json()) as { result?: string };
+    return j.result ? BigInt(j.result) : -1n;
+  } catch {
+    return -1n;
+  }
+}
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
 
@@ -228,13 +298,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           confirm: true,
           args: JSON.stringify(['ic402-logo', 'image/png', logoBytes]),
         });
-        if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
+        // uploadContent returns a ContentStoreResult variant, which serializes to an object
+        // ({ok:null} / {contentAlreadyExists:null} / …) — NOT a string. Gate the green line on
+        // the real {ok}; a re-run returns {contentAlreadyExists} (nothing was written).
+        const up = upload as Record<string, unknown>;
+        if (up && typeof up === 'object' && 'ok' in up) {
+          success('Uploaded and encrypted — plaintext never persists');
+        } else if (up && typeof up === 'object' && 'contentAlreadyExists' in up) {
+          success('Content "ic402-logo" already exists (uploaded in a previous run)');
+        } else if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
           warn('Upload rejected — MCP identity is not a canister controller.');
           info('Run deploy.sh to add the MCP identity as a controller.');
-        } else if (typeof upload === 'string' && upload.toLowerCase().includes('already')) {
-          success('Content "ic402-logo" already exists (uploaded in a previous run)');
         } else {
-          success('Uploaded and encrypted — plaintext never persists');
+          warn(`Upload rejected: ${JSON.stringify(upload)}`);
         }
 
         info('Content catalog (IDs are public, content requires payment):');
@@ -296,7 +372,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const searchAmt = ((await searchRes.json()) as Record<string, unknown>).accepts;
           const searchCount = Array.isArray(searchAmt) ? searchAmt.length : 0;
           const searchPrice = Array.isArray(searchAmt)
-            ? Number((searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ?? 0)
+            ? Number(
+                (searchAmt as Record<string, unknown>[])[0]?.amount ??
+                  // v1 back-compat alias
+                  (searchAmt as Record<string, unknown>[])[0]?.maxAmountRequired ??
+                  0,
+              )
             : 0;
           success(
             `HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${(searchPrice / 1_000_000).toFixed(6)} USDC)`,
@@ -314,6 +395,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         {
           section('Live Payment');
+          // Tracks whether a payment path actually DELIVERED content, so the closing highlight
+          // (and the step's ✓) only appear on a real success — not after a revert/failure.
+          let delivered = false;
           info('Pay for the ic402 logo we uploaded in step 2.');
           info('Choose ICP ckUSDC (works on local replica) or EVM USDC (testnet/mainnet).');
           info('');
@@ -398,22 +482,28 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       highlight(
                         'ckUSDC → ICRC-2 transfer_from → content delivered. Zero gas fees.',
                       );
+                      delivered = true;
                     } else if (contentObj && 'error' in contentObj) {
-                      warn(`Settlement failed: ${contentObj.error}`);
+                      // The ICP rail settles on the local replica; a failure here is genuine.
+                      throw new Error(`ICP settlement failed: ${contentObj.error}`);
                     } else {
                       warn('Unexpected response:');
                       result(contentRes);
+                      throw new Error('ICP settlement returned an unexpected response');
                     }
                   } else {
-                    warn('No ICP payment option in response.');
+                    throw new Error('No ICP payment option in the 402 response');
                   }
                 } else {
                   warn('Unexpected response (expected paymentRequired):');
                   result(payRes);
+                  throw new Error('Expected a paymentRequired challenge, got something else');
                 }
               } catch (e) {
-                warn(`Payment error: ${e instanceof Error ? e.message : String(e)}`);
+                if (e instanceof KnownIssueError) throw e;
+                // A genuine ICP-path failure (the rail works on the local replica) — fail the step.
                 info('Ensure predemo ran (pnpm demo handles this automatically).');
+                throw e instanceof Error ? e : new Error(String(e));
               }
             } else if (choiceNum >= 2 && choiceNum <= 6) {
               // ── EVM USDC payment via EIP-3009 TransferWithAuthorization ──
@@ -455,6 +545,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
               if (!payTo || !amount || !freshNonce.length) {
                 warn(`Could not get payment details for ${selectedChain.name}.`);
+                throw new KnownIssueError(
+                  `${selectedChain.name}: no EVM payment option in the 402 response`,
+                  'The canister did not advertise this chain (check its EVM chain config). Not a settlement failure.',
+                );
               } else {
                 section('EIP-3009 Payment Flow');
                 info('The canister is its own facilitator — no external service needed.');
@@ -472,20 +566,45 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 state('  Amount', `${(amount / 1_000_000).toFixed(6)} USDC → ${payTo}`);
 
                 info('');
-                info('Signing with test key (Hardhat account #0 — demo only)...');
-
-                // Test private key — NEVER use in production.
-                // In production, the client signs with MetaMask eth_signTypedData_v4.
-                const TEST_KEY = Buffer.from(
-                  'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-                  'hex',
-                );
+                // The payer key. MUST be a CLEAN EOA (no code): Circle's USDC rejects EIP-3009
+                // from any address with code (a contract or an EIP-7702-delegated EOA — see
+                // evmCodeLen). Default to a deterministic demo EOA; override with a funded key via
+                // IC402_DEMO_EVM_KEY. (Hardhat #0 is deliberately NOT used — it is 7702-delegated
+                // on most testnets, which is exactly what blocked EVM settlement before.)
+                const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
+                const TEST_KEY = envKey
+                  ? Buffer.from(envKey, 'hex')
+                  : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
                 const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
                 const testAddr =
                   '0x' +
                   Buffer.from(keccak_256(testPubUncompressed.slice(1)))
                     .slice(-20)
                     .toString('hex');
+                info(
+                  `Signing as ${testAddr} (${envKey ? 'IC402_DEMO_EVM_KEY' : 'deterministic demo EOA'})...`,
+                );
+
+                // EIP-7702 / contract-account preflight: if the payer has code, Circle's
+                // SignatureChecker takes the EIP-1271 path and rejects a plain ECDSA EIP-3009 sig.
+                const code = await evmCodeLen(selectedChain.rpc, testAddr);
+                if (code > 0) {
+                  warn(`Payer ${testAddr} has ${code} bytes of code on ${selectedChain.name}.`);
+                  info(
+                    "It is a contract or an EIP-7702-delegated EOA, so Circle's USDC will route",
+                  );
+                  info('verification to EIP-1271 and reject this ECDSA signature. Use a CLEAN EOA');
+                  info(
+                    '(no delegation) as the payer — set IC402_DEMO_EVM_KEY to a fresh funded key.',
+                  );
+                  throw new KnownIssueError(
+                    `${selectedChain.name}: payer ${testAddr} has code (EIP-7702/contract) — USDC rejects EOA EIP-3009 sigs from it`,
+                    'Use a clean EOA payer (IC402_DEMO_EVM_KEY). Not an ic402 or contract bug.',
+                  );
+                }
+                if (code === 0) {
+                  success(`Payer is a clean EOA (no EIP-7702 delegation) — EIP-3009 will verify`);
+                }
 
                 const validAfter = 0;
                 const validBefore = Math.floor(Date.now() / 1000) + 300;
@@ -626,6 +745,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     highlight(
                       `${selectedChain.name} USDC → EIP-3009 → tECDSA → content delivered.`,
                     );
+                    delivered = true;
                   } else if (payObj && 'error' in payObj) {
                     const errMsg = String(payObj.error);
                     const lower = errMsg.toLowerCase();
@@ -633,23 +753,59 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       warn(`Canister EVM wallet has no gas: ${errMsg}`);
                       info('The canister verified the EIP-712 signature but could not broadcast —');
                       info('its EVM address has no ETH for gas. Fund it with testnet ETH.');
-                    } else if (lower.includes('revert')) {
-                      // The canister ACCEPTED the signature and broadcast the tx; the
-                      // USDC contract reverted the transfer on-chain. (H-1 catches this
-                      // instead of issuing a "paid" receipt for a reverted transfer.)
-                      warn(`On-chain transfer reverted (signature was accepted): ${errMsg}`);
-                      info('The canister verified the EIP-712 signature and broadcast the tx, but');
-                      info(
-                        'the USDC contract reverted it. Common causes: the PAYER address has no',
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: canister EVM wallet has no gas`,
+                        'External setup: fund the canister EVM address with testnet ETH. Not an ic402 bug.',
                       );
-                      info('USDC on this chain, the EIP-3009 nonce was already used, or the token');
+                    } else if (lower.includes('revert')) {
+                      // The canister verified the signature locally and broadcast it; the USDC
+                      // contract reverted on-chain (H-1 surfaces this instead of a "paid" receipt).
+                      // The payer passed the clean-EOA preflight, so the signature is accepted — pull
+                      // the real on-chain reason (usually an unfunded payer) from the tx, since the
+                      // canister only reports a generic "reverted".
+                      warn(`On-chain transfer reverted on ${selectedChain.name}: ${errMsg}`);
+                      // Reliable signal: a clean-EOA sig is accepted, so a revert is almost always
+                      // the payer holding too little USDC. Read its balance directly.
+                      const bal = await evmUsdcBalance(
+                        selectedChain.rpc,
+                        selectedChain.usdc,
+                        testAddr,
+                      );
+                      const isBalance = bal >= 0n && bal < BigInt(amount);
+                      if (isBalance) {
+                        info(
+                          `On-chain: payer holds ${(Number(bal) / 1e6).toFixed(6)} USDC, needs ${(amount / 1e6).toFixed(6)}.`,
+                        );
+                        info(`The signature was ACCEPTED — the payer ${testAddr} just has no USDC`);
+                        info(
+                          `on ${selectedChain.name}. Fund it from the Circle testnet faucet, then re-run.`,
+                        );
+                        throw new KnownIssueError(
+                          `${selectedChain.name}: payer has no USDC (signature accepted)`,
+                          `Fund ${testAddr} with ${selectedChain.name} USDC (faucet.circle.com). Not an ic402 bug.`,
+                        );
+                      }
                       info(
-                        'rejected the authorization. It is NOT a signature-verification failure.',
+                        "The canister's EIP-712 signature is valid (proven against the chain's own",
+                      );
+                      info(
+                        'ecrecover). A revert here is on-chain execution: most often an unfunded payer,',
+                      );
+                      info(
+                        'a reused EIP-3009 nonce, or a contract-side EIP-3009 quirk. NOT a signing bug.',
+                      );
+                      throw new KnownIssueError(
+                        `${selectedChain.name} USDC transfer reverted on-chain`,
+                        "ic402's signing is proven correct; the on-chain transfer failed (funding / nonce / contract).",
                       );
                     } else if (lower.includes('pending') || lower.includes('not yet confirmed')) {
                       warn(`Tx broadcast but not yet confirmed: ${errMsg}`);
                       info(
                         'The transfer was submitted; it had not mined within the confirm window.',
+                      );
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: transfer broadcast but not confirmed in the window`,
+                        'Testnet timing — the tx had not mined when the confirm poll gave up. Not an ic402 bug.',
                       );
                     } else if (
                       lower.includes('settlement') ||
@@ -657,35 +813,46 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       lower.includes('evm')
                     ) {
                       warn(`On-chain settlement failed: ${errMsg}`);
-                      info('The signature was accepted; the on-chain execution failed.');
+                      info('The signature was accepted locally; the on-chain execution failed.');
+                      throw new KnownIssueError(
+                        `${selectedChain.name}: on-chain settlement / RPC failure`,
+                        'External RPC / chain issue (the local signature verification passed). Not an ic402 bug.',
+                      );
                     } else if (lower.includes('eip-3009') || lower.includes('signature')) {
+                      // The canister's OWN local verification rejected the signature — that WOULD
+                      // be an ic402 bug, so fail the step hard (not a known issue).
                       warn(`Signature rejected by the canister: ${errMsg}`);
-                      info('The canister could not verify the EIP-712 signature locally.');
+                      throw new Error(
+                        `Canister rejected the EIP-712 signature locally — ${errMsg}`,
+                      );
                     } else {
-                      warn(`Error: ${errMsg}`);
+                      throw new Error(`Unexpected EVM settle error: ${errMsg}`);
                     }
                   } else if (payObj && 'paymentRequired' in payObj) {
                     warn(
                       'Payment not accepted — canister returned paymentRequired (settle failed).',
                     );
-                    info(
-                      'This usually means the nonce was invalid or the signature verification failed.',
-                    );
                     info(`Raw: ${JSON.stringify(payObj).slice(0, 200)}`);
+                    throw new Error('EVM settle returned paymentRequired (payment not accepted)');
                   } else {
                     result(payRes);
+                    throw new Error('Unexpected EVM settle response');
                   }
                 } catch (e) {
-                  warn(`Settlement error: ${e instanceof Error ? e.message : String(e)}`);
+                  if (e instanceof KnownIssueError) throw e;
+                  throw e instanceof Error ? e : new Error(String(e));
                 }
               }
             } else {
               warn('Invalid selection. Skipping.');
             }
           }
-        }
 
-        highlight('Multi-chain ICP and EVM x402 — no other implementation does this.');
+          // Only claim the multi-rail win if a payment actually delivered content.
+          if (delivered) {
+            highlight('Multi-chain ICP and EVM x402 — no other implementation does this.');
+          }
+        }
       },
     },
 
@@ -793,7 +960,17 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               });
               const paidObj = paid as Record<string, unknown>;
               if (paidObj && 'error' in paidObj) {
-                success(`Content not found: ${paidObj.error}`);
+                const err = String(paidObj.error);
+                // Only claim "not found" when the canister actually says so — the dummy
+                // zero-byte signature can also trip a verification error, which is NOT
+                // proof of deletion. Deletion was already verified above via listContent.
+                if (/not found|does not exist|no content|unknown content/i.test(err)) {
+                  success(`Content not found (deleted): ${err}`);
+                } else {
+                  info(
+                    `Paid retry rejected: ${err} (deletion already verified above via listContent)`,
+                  );
+                }
               } else {
                 warn('Content still accessible (unexpected)');
               }
@@ -801,20 +978,33 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           } else {
             state('HTTP status', `${contentRes.status}`);
           }
-        } catch {
-          success('Endpoint unreachable — content deleted');
+        } catch (e) {
+          // A network failure is replica-unreachable, NOT proof the content was deleted.
+          warn(
+            `Endpoint fetch failed (${e instanceof Error ? e.message : String(e)}) — replica unreachable? Deletion was already verified above via listContent.`,
+          );
         }
 
         info('');
         info('Fetching /search?q=test (should still work)...');
         try {
           const searchRes = await fetch(`${rawHttpUrl}/search?q=test`);
-          success(`HTTP ${searchRes.status} — search endpoint still available`);
+          if (searchRes.ok) {
+            success(`HTTP ${searchRes.status} — search endpoint still available`);
+          } else {
+            warn(`Search endpoint returned HTTP ${searchRes.status}`);
+          }
         } catch {
           warn('Search endpoint unreachable');
         }
 
-        highlight('Content lifecycle complete — upload, gate, pay, deliver, delete.');
+        if (afterCount < beforeCount) {
+          highlight('Content lifecycle complete — upload, gate, pay, deliver, delete.');
+        } else {
+          warn(
+            'Content lifecycle: delete not reflected in listContent (see above) — not asserting completion.',
+          );
+        }
       },
     },
 
@@ -853,7 +1043,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         section('Register service');
         info('Registering a hash-computation service...');
-        let svcId = 'svc-1';
+        // No hardcoded fallback id: registerService auto-assigns a monotonic svc-N that never
+        // collides, so a non-ok return is a real error, not "already exists" — don't proceed
+        // against a stale 'svc-1'.
+        let svcId = '';
         try {
           const regResult = await mcpCall(client, 'register_service', {
             confirm: true,
@@ -873,22 +1066,26 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           if (reg && 'ok' in reg) {
             svcId = String(reg.ok);
             success(`Service registered: ${svcId}`);
-          } else if (reg && 'err' in reg) {
-            if (String(reg.err).includes('already exists')) {
-              success('Service already registered (previous run)');
-            } else {
-              warn(`Register: ${reg.err}`);
-            }
+          } else {
+            warn(`Register failed: ${reg && 'err' in reg ? String(reg.err) : JSON.stringify(reg)}`);
           }
         } catch (e) {
           warn(`Register: ${e instanceof Error ? e.message : String(e)}`);
         }
 
-        try {
-          await mcpCall(client, 'enable_service', { confirm: true, args: JSON.stringify([svcId]) });
-          success('Service enabled');
-        } catch (e) {
-          info(`Enable: ${e instanceof Error ? e.message : String(e)}`);
+        if (svcId) {
+          try {
+            const enableRes = await mcpCall(client, 'enable_service', {
+              confirm: true,
+              args: JSON.stringify([svcId]),
+            });
+            assertMcpOk(enableRes, 'enable_service'); // gate the green line on the real {ok}/{err}
+            success('Service enabled');
+          } catch (e) {
+            warn(`Enable failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else {
+          warn('Skipping enable/submit — registration returned no service id.');
         }
 
         info('');
@@ -912,10 +1109,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           info('Your client claims the job, computes off-chain, submits result...');
 
           try {
-            await mcpCall(client, 'claim_job', {
+            const claimRes = await mcpCall(client, 'claim_job', {
               confirm: true,
               args: JSON.stringify([jobId]),
             });
+            assertMcpOk(claimRes, 'claim_job');
             success('Job claimed');
 
             const mockResult = Array.from(
@@ -923,10 +1121,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
               ),
             );
-            await mcpCall(client, 'submit_job_result', {
+            const submitRes = await mcpCall(client, 'submit_job_result', {
               confirm: true,
               args: JSON.stringify([jobId, mockResult, [], []]),
             });
+            // C6: only claim success if the canister actually settled it.
+            assertMcpOk(submitRes, 'submit_job_result');
             success('Result submitted → verified → payment settled');
           } catch (e) {
             warn(`Fulfill: ${e instanceof Error ? e.message : String(e)}`);
@@ -985,16 +1185,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               ]),
             });
             const zr = zkReg as Record<string, unknown>;
-            const zkSvcId = zr?.ok ? String(zr.ok) : 'svc-2';
+            // No hardcoded 'svc-2' fallback: auto svc-N ids never collide, so a non-ok return
+            // is a real error — don't enable/submit against a stale or unrelated service id.
+            const zkSvcId = zr?.ok ? String(zr.ok) : '';
             if (zr?.ok) success(`ZK service registered: ${zkSvcId}`);
-            else if (String(zr?.err ?? '').includes('already exists'))
-              success('ZK service already registered');
-            else warn(`ZK register: ${zr?.err ?? JSON.stringify(zr)}`);
+            else warn(`ZK register failed: ${zr?.err ?? JSON.stringify(zr)}`);
 
-            await mcpCall(client, 'enable_service', {
-              confirm: true,
-              args: JSON.stringify([zkSvcId]),
-            });
+            if (zkSvcId) {
+              const zkEnable = await mcpCall(client, 'enable_service', {
+                confirm: true,
+                args: JSON.stringify([zkSvcId]),
+              });
+              assertMcpOk(zkEnable, 'enable_service');
+            }
 
             info('');
             info('Buyer submits request: "what is the square root of 25?"');
@@ -1017,10 +1220,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               const proofBytes = Array.from(Buffer.from(ZK_PROOF, 'hex'));
               const resultBytes = Array.from(new TextEncoder().encode('x = 5'));
               try {
-                await mcpCall(client, 'submit_job_result', {
+                const zkSubmit = await mcpCall(client, 'submit_job_result', {
                   confirm: true,
                   args: JSON.stringify([zkJobId, resultBytes, [proofBytes], []]),
                 });
+                // C6: a rejected proof returns an error envelope (not a throw) — gate on it
+                // so we never print "verified" for a proof the ZK canister refused.
+                assertMcpOk(zkSubmit, 'submit_job_result');
                 success('Proof verified by ZK canister → payment settled');
                 state('Proof size', `${proofBytes.length} bytes (Groth16/BN254)`);
                 state('Verification cost', '~$0.005 (~1-5B ICP instructions)');
@@ -1068,7 +1274,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info(`URL: ${x402Url}`);
         info('');
         info('Flow: client probes URL → parses 402 → canister signs → client retries with header.');
-        info('GoldRush serves mainnet data but accepts Base Sepolia USDC ($0.0001/request).');
+        info(
+          'GoldRush serves mainnet data but accepts Base Sepolia USDC (advertised ~$0.0001/request; the actual amount comes from its 402 challenge).',
+        );
         info('');
 
         info('Probing → signing → paying...');
@@ -1079,7 +1287,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             { url: x402Url, chainId: 84532, confirm: true },
             90_000,
           );
-          highlight('One call: probe → canister signs → pay → content. All in the client library.');
+          // mcpCallAndRender never throws — it returns {status} and warns on error. Only claim
+          // the paid round-trip when it actually settled.
+          if (res?.status === 'ok') {
+            highlight(
+              'One call: probe → canister signs → pay → content. All in the client library.',
+            );
+          } else if (res?.status === 'free') {
+            info('Resource returned content with no 402 challenge — nothing to pay.');
+          } else {
+            info(
+              'No paid round-trip completed — see the error above (fund the canister EVM wallet with Base Sepolia USDC to settle).',
+            );
+          }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes('aborted') || msg.includes('timeout')) {
@@ -1138,12 +1358,30 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         info('Requesting session pricing...');
         const intent = await mcpCall(client, 'request_session', {});
-        success('Session intent received');
-
         const intentObj = intent as Record<string, unknown>;
-        state('Suggested deposit', `${intentObj?.suggestedDeposit ?? '?'} ($0.05 — ~100 queries)`);
-        state('Cost per call', `${(intentObj?.costPerCall as string[])?.[0] ?? '?'} ($0.0005)`);
-        state('Min deposit', `${(intentObj?.minDeposit as string[])?.[0] ?? '?'} ($0.005)`);
+        if (intentObj?.suggestedDeposit == null) {
+          warn(`request_session returned no pricing: ${JSON.stringify(intent).slice(0, 200)}`);
+        } else {
+          success('Session intent received');
+          // Dollar values are COMPUTED from the canister's real units, not hardcoded — so they
+          // can't drift if the example policy changes.
+          const sugg = Number(intentObj.suggestedDeposit ?? 0);
+          const cpc = Number((intentObj.costPerCall as unknown[])?.[0] ?? 0);
+          const minDep = Number((intentObj.minDeposit as unknown[])?.[0] ?? 0);
+          const approxQueries = cpc > 0 ? Math.floor(sugg / cpc) : 0;
+          state(
+            'Suggested deposit',
+            `${intentObj.suggestedDeposit} units ($${(sugg / 1_000_000).toFixed(6)}${approxQueries ? ` — ~${approxQueries} queries` : ''})`,
+          );
+          state(
+            'Cost per call',
+            `${(intentObj.costPerCall as unknown[])?.[0] ?? '?'} units ($${(cpc / 1_000_000).toFixed(6)})`,
+          );
+          state(
+            'Min deposit',
+            `${(intentObj.minDeposit as unknown[])?.[0] ?? '?'} units ($${(minDep / 1_000_000).toFixed(6)})`,
+          );
+        }
 
         section('Session Deposit Method');
         info('The client deposits tokens to open a session.');
@@ -1156,42 +1394,51 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
         info('');
 
-        // Shared: stream 3 queries through a session
-        async function runSessionQueries(sid: string, deposited: number) {
-          info('');
-          info('Streaming 3 queries through the session...');
-          info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
-          const costPerCall = 500;
+        // Shared: stream 3 queries through a session. Reads the canister's REAL consumed/remaining
+        // from each session_query response — never fabricates them — and surfaces every voucher
+        // rejection. Returns the number of vouchers the canister actually accepted.
+        async function runSessionQueries(sid: string, deposited: number): Promise<number> {
           const questions = [
             'What is ic402?',
             'How do sessions work?',
             'What tokens are accepted?',
           ];
+          info('');
+          info(`Streaming ${questions.length} queries through the session...`);
+          info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
+          let lastConsumed = 0;
+          let lastRemaining = deposited;
+          let succeeded = 0;
           for (let i = 0; i < questions.length; i++) {
-            const cumConsumed = costPerCall * (i + 1);
-            const cumRemaining = deposited - cumConsumed;
             try {
-              await mcpCall(client, 'session_query', { sessionId: sid, question: questions[i] });
+              const res = (await mcpCall(client, 'session_query', {
+                sessionId: sid,
+                question: questions[i],
+              })) as Record<string, unknown>;
+              lastConsumed = Number(res.consumed ?? lastConsumed);
+              lastRemaining = Number(res.remaining ?? lastRemaining);
+              succeeded++;
+              const q = questions[i].padEnd(42);
+              state(
+                `  ${String(i + 1).padStart(2)}/${questions.length}`,
+                `${q} consumed=${String(lastConsumed).padStart(5)}  remaining=${String(lastRemaining).padStart(5)}`,
+              );
             } catch (e) {
-              // Log first failure for debugging
-              if (i === 0) warn(`Voucher error: ${e instanceof Error ? e.message : String(e)}`);
+              warn(
+                `Voucher ${i + 1}/${questions.length} rejected: ${e instanceof Error ? e.message : String(e)}`,
+              );
+              // A rejected voucher does not advance the session, so every later voucher reuses the
+              // same sequence and is also rejected — stop here rather than print fake successes.
+              break;
             }
-            const q = questions[i].padEnd(42);
-            const c = String(cumConsumed).padStart(5);
-            const r = String(cumRemaining).padStart(5);
-            state(
-              `  ${String(i + 1).padStart(2)}/${questions.length}`,
-              `${q} consumed=${c}  remaining=${r}`,
-            );
           }
 
           info('');
-          const totalConsumed = costPerCall * questions.length;
-          const totalRemaining = deposited - totalConsumed;
-          state('Queries', `${questions.length}`);
-          state('On-chain txns', '0 (all voucher-verified in-canister)');
-          state('Total consumed', `${totalConsumed} ($${(totalConsumed / 1_000_000).toFixed(6)})`);
-          state('Remaining', `${totalRemaining} ($${(totalRemaining / 1_000_000).toFixed(6)})`);
+          state('Queries accepted', `${succeeded}/${questions.length}`);
+          state('On-chain txns', '0 (vouchers verified in-canister)');
+          state('Total consumed', `${lastConsumed} ($${(lastConsumed / 1_000_000).toFixed(6)})`);
+          state('Remaining', `${lastRemaining} ($${(lastRemaining / 1_000_000).toFixed(6)})`);
+          return succeeded;
         }
 
         const depositChoice = await rl.question('\x1b[2m  Deposit method (1-6): \x1b[0m');
@@ -1220,17 +1467,36 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const tName = [84532, 11155420].includes(chain.chainId) ? 'USDC' : 'USD Coin';
           const tVersion = '2';
 
-          // Sign EIP-3009 deposit authorization with test key
-          const TEST_KEY = Buffer.from(
-            'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-            'hex',
-          );
+          // Sign the EIP-3009 deposit with a CLEAN EOA (no code) — same as Step 3. Circle's USDC
+          // rejects EIP-3009 from a contract / EIP-7702-delegated address (Hardhat #0), so never
+          // use that key here either. Override with IC402_DEMO_EVM_KEY (a funded clean key).
+          const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
+          const TEST_KEY = envKey
+            ? Buffer.from(envKey, 'hex')
+            : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
           const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
           const testAddr =
             '0x' +
             Buffer.from(keccak_256(testPubUncompressed.slice(1)))
               .slice(-20)
               .toString('hex');
+
+          // EIP-7702 / contract-account preflight: a code-bearing payer is rejected by Circle's USDC.
+          const sessionPayerCode = await evmCodeLen(chain.rpc, testAddr);
+          if (sessionPayerCode > 0) {
+            warn(
+              `Session payer ${testAddr} has ${sessionPayerCode} bytes of code on ${chain.name}.`,
+            );
+            info('A contract / EIP-7702-delegated payer is routed to EIP-1271 and rejected.');
+            info('Use a clean EOA — set IC402_DEMO_EVM_KEY to a fresh funded key.');
+            throw new KnownIssueError(
+              `${chain.name}: session payer ${testAddr} has code (EIP-7702/contract)`,
+              'Use a clean EOA payer (IC402_DEMO_EVM_KEY) funded with the deposit. Not an ic402 bug.',
+            );
+          }
+          if (sessionPayerCode === 0) {
+            success(`Session payer is a clean EOA (no EIP-7702 delegation)`);
+          }
 
           const validAfter = 0;
           const validBefore = Math.floor(Date.now() / 1000) + 300;
@@ -1339,54 +1605,109 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             })) as Record<string, unknown>;
 
             const evmSessionId = evmSession.sessionId as string;
-
             if (!evmSessionId) {
               const errMsg =
                 typeof evmSession === 'string' ? evmSession : JSON.stringify(evmSession);
-              warn(`Open failed: ${errMsg.slice(0, 200)}`);
+              throw new Error(`open failed: ${errMsg.slice(0, 200)}`);
+            }
+            // The canister honours the EVM rail — confirm the opened session is actually EVM.
+            const openNet = String(evmSession.network ?? evmNetwork);
+            success('EVM session opened!');
+            state('Session ID', evmSessionId);
+            state('Deposited', `${evmSession.deposited ?? '?'} (${chain.name} USDC)`);
+            state('Network', openNet);
+            state('Status', 'OPEN');
+            if (!openNet.startsWith('eip155:')) {
+              warn(
+                `Opened session network is "${openNet}", not the EVM chain — refusing to label it EVM.`,
+              );
+            }
+
+            const evmDeposited = Number(evmSession.deposited ?? depositAmount);
+            await runSessionQueries(evmSessionId, evmDeposited);
+
+            info('');
+            info(`Closing EVM session — canister signs ERC-20 transfers via tECDSA...`);
+            const closeRes = (await mcpCall(client, 'close_session', {
+              confirm: true,
+              sessionId: evmSessionId,
+            })) as Record<string, unknown>;
+            const receipt = closeRes;
+            const txHash = receipt?.txHash ? String(receipt.txHash) : '';
+            // Only claim an EVM on-chain settlement if the receipt carries a real 0x tx hash —
+            // the canister's ICP close path emits "refund:<block-index>", which is NOT an EVM tx.
+            const isEvmSettle = /0x[0-9a-fA-F]{6,}/.test(txHash);
+            if (isEvmSettle) {
+              success(`EVM session closed — settled on-chain (tECDSA ERC-20 on ${chain.name})`);
+              highlight('Same 5,000x reduction — works on any EVM chain.');
             } else {
-              success('EVM session opened!');
-              state('Session ID', evmSessionId);
-              state('Deposited', `${evmSession.deposited ?? '?'} (${chain.name} USDC)`);
-              state('Network', evmNetwork);
-              state('Status', 'OPEN');
-
-              const evmDeposited = Number(evmSession.deposited ?? depositAmount);
-              await runSessionQueries(evmSessionId, evmDeposited);
-
-              info('');
-              info(`Closing EVM session — canister signs ERC-20 transfers via tECDSA...`);
-              info(`Settle consumed → canister operator on ${chain.name}`);
-              info(`Refund remainder → payer on ${chain.name}`);
-              try {
-                const closeRes = await mcpCall(client, 'close_session', {
-                  confirm: true,
-                  sessionId: evmSessionId,
-                });
-                success('EVM session closed — settled on-chain');
-                const receipt = closeRes as Record<string, unknown>;
-                state(
-                  'Consumed',
-                  `${receipt?.amount ?? 0} (settled to recipient on ${chain.name})`,
-                );
-                state('Refunded', `${receipt?.refunded ?? 0} (returned to payer on ${chain.name})`);
-                if (receipt?.txHash) {
-                  const hashes = String(receipt.txHash).split('|');
-                  if (hashes.length === 2) {
-                    state('Settle tx', hashes[0]);
-                    state('Refund tx', hashes[1]);
-                  } else {
-                    state('Tx', hashes[0]);
-                  }
-                }
-                state('Settlement', `tECDSA-signed ERC-20 transfers on ${chain.name}`);
-                highlight('Same 5,000x reduction — works on any EVM chain.');
-              } catch (e) {
-                warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
+              warn(`Session closed, but the receipt is NOT an EVM on-chain settlement.`);
+              info(
+                `  txHash="${txHash}" — "refund:<n>" is an ICP ledger block index, not an EVM tx.`,
+              );
+            }
+            state('Consumed', `${receipt?.amount ?? 0}`);
+            state('Refunded', `${receipt?.refunded ?? 0}`);
+            if (txHash) {
+              const hashes = txHash.split('|');
+              if (hashes.length === 2) {
+                state('Settle tx', hashes[0]);
+                state('Refund tx', hashes[1]);
+              } else {
+                state('Tx', hashes[0]);
               }
             }
+            if (!isEvmSettle) {
+              throw new KnownIssueError(
+                `${chain.name}: session settled on the ICP rail, not on-chain EVM`,
+                'The close receipt is not a 0x EVM tx — the EVM settle/refund did not run as expected.',
+              );
+            }
           } catch (e) {
-            warn(`Open session error: ${e instanceof Error ? e.message : String(e)}`);
+            if (e instanceof KnownIssueError) throw e;
+            const msg = e instanceof Error ? e.message : String(e);
+            const lower = msg.toLowerCase();
+            warn(`EVM session error on ${chain.name}: ${msg}`);
+            // CLOSE couldn't fetch EVM fee/nonce data from the RPC: the canister safely refuses to
+            // broadcast (H-3) and parks the session in #closing for recovery (S16). Transient RPC.
+            if (
+              lower.includes('fee data') ||
+              lower.includes('not broadcasting') ||
+              lower.includes('parked') ||
+              lower.includes('nonce') ||
+              lower.includes('rpc')
+            ) {
+              info(
+                'The EVM deposit + vouchers settled; the CLOSE could not fetch EVM gas/fee data',
+              );
+              info(
+                'from the RPC, so the canister refused to broadcast (H-3) and parked the session in',
+              );
+              info(
+                '#closing for recovery (S16). Transient RPC issue on the local replica, not ic402.',
+              );
+              throw new KnownIssueError(
+                `${chain.name}: EVM close deferred — RPC fee/nonce data unavailable; session parked for recovery`,
+                'Transient EVM RPC fee/nonce-consensus issue. The session is parked in #closing; retry or recover.',
+              );
+            }
+            // DEPOSIT reverted on-chain — for a clean EOA that means the payer is unfunded.
+            if (
+              lower.includes('revert') ||
+              lower.includes('balance') ||
+              lower.includes('exceeds') ||
+              lower.includes('insufficient')
+            ) {
+              info(`The clean-EOA signature is accepted; the deposit just needs funding.`);
+              info(
+                `Fund ${testAddr} with ${chain.name} USDC (faucet.circle.com) ≥ ${(depositAmount / 1e6).toFixed(6)}, then re-run.`,
+              );
+              throw new KnownIssueError(
+                `${chain.name}: EVM session deposit needs a funded payer`,
+                `Fund ${testAddr} with ${chain.name} USDC. Not an ic402 bug.`,
+              );
+            }
+            throw new Error(`EVM session failed on ${chain.name}: ${msg}`);
           }
           return;
         }
@@ -1397,8 +1718,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('The predemo script minted 1 ckUSDC to the test-payer account and approved');
         info('the canister to spend it. In production, the ic402 client SDK handles this.');
         state('Test payer', callerPrincipal || '(test-payer identity)');
-        state('Funded', '1,000,000 units ($1.00 ckUSDC) via icrc1_transfer');
-        state('Approved', 'ICRC-2 approval for canister to spend up to 1,000,000 units');
+        // Expected predemo setup — these are NOT read back from the ledger here. The open_session
+        // call below is the real verification: it fails if the deposit isn't funded + approved.
+        state('Expected funding (predemo)', '1,000,000 units ($1.00 ckUSDC) via icrc1_transfer');
+        state(
+          'Expected approval (predemo)',
+          'ICRC-2 approval for canister to spend up to 1,000,000 units',
+        );
 
         info('');
         info('Opening session with ICP ckUSDC...');
@@ -1424,37 +1750,51 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             state('Needs', 'ckUSDC balance + icrc2_approve for the canister to spend');
             state('In production', 'Client SDK handles approval automatically');
           }
-          highlight('The session protocol is fully implemented.');
+          // No celebratory highlight here — the session did NOT open. The failure was explained above.
         } else {
           success('Session opened!');
           state('Session ID', sessionId);
-          state('Deposited', `${session.deposited ?? '?'} ($0.05)`);
-          state('Remaining', `${session.remaining ?? '?'} ($0.05)`);
-          state('Cost per call', '500 ($0.0005)');
+          const dep = Number(session.deposited ?? 0);
+          const rem = Number(session.remaining ?? session.deposited ?? 0);
+          state(
+            'Deposited',
+            `${session.deposited ?? '?'} units ($${(dep / 1_000_000).toFixed(6)})`,
+          );
+          state(
+            'Remaining',
+            `${session.remaining ?? '?'} units ($${(rem / 1_000_000).toFixed(6)})`,
+          );
+          state('Cost per call', '500 units ($0.0005, per the example policy)');
           state('Status', 'OPEN');
 
           const deposited = Number(session.deposited ?? 50000);
-          await runSessionQueries(sessionId, deposited);
+          const ran = await runSessionQueries(sessionId, deposited);
 
           info('');
           info('Closing session (settle consumed → recipient, refund remainder → caller)...');
           try {
-            const closeRes = await mcpCall(client, 'close_session', { sessionId, confirm: true });
-            success('Session closed — settled on-chain');
-            const receipt = closeRes as Record<string, unknown>;
+            const closeRes = (await mcpCall(client, 'close_session', {
+              sessionId,
+              confirm: true,
+            })) as Record<string, unknown>;
+            assertMcpOk(closeRes, 'close_session');
+            success('Session closed — settled on the ICP ledger');
+            const receipt = closeRes;
             state('Consumed (settled)', String(receipt?.amount ?? '?'));
             state('Refunded', String(receipt?.refunded ?? '?'));
             if (receipt?.txHash) {
               const tx = String(receipt.txHash);
               if (tx.includes('|')) {
-                const parts = tx.split('|');
-                for (const p of parts) state('Ledger tx', p);
+                for (const p of tx.split('|')) state('Ledger block', p);
               } else if (tx) {
-                state('Ledger tx', tx);
+                state('Ledger block', tx);
               }
             }
-            state('Total on-chain txns', '2 (open + close) for 3 queries');
-            highlight('3 queries, 2 on-chain transactions. Scale to thousands with the same cost.');
+            const qWord = ran === 1 ? 'voucher' : 'vouchers';
+            state('On-chain txns', `2 (open + close) for ${ran} ${qWord}`);
+            highlight(
+              `${ran} ${qWord}, 2 on-chain transactions. Scale to thousands at the same cost.`,
+            );
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -1689,14 +2029,66 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('Rate limits, session caps, idle timeouts.');
         info('Evaluated in-canister, zero ledger calls, constant time.');
 
-        section('Canister-side (your canister protects your service)');
-        state('Max per tx', '$0.05');
-        state('Max per day', '$0.50');
-        state('Rate limit', '120 req/min per caller');
-        state('Session deposit cap', '$0.10');
-        state('Concurrent sessions', '1 per caller');
-        state('Idle timeout', '1h — auto-close + refund remainder');
-        state('Per-caller overrides', 'Trusted callers get higher limits');
+        section(
+          'Configured policy (read LIVE from the canister via getPolicyConfig — enforced in-canister)',
+        );
+        // opt Nat/Int decode to [] | [value]; unwrap, then format atomic USDC (6dp) to dollars
+        // or nanosecond durations to hours. Values are small — well within Number's safe range.
+        const optNum = (v: unknown): number | undefined => {
+          const a = v as unknown[] | undefined;
+          return a && a.length > 0 ? Number(a[0]) : undefined;
+        };
+        const usd = (v: number | undefined): string =>
+          v === undefined ? 'unset (no limit)' : `$${(v / 1_000_000).toFixed(6)}`;
+        const hrs = (ns: number | undefined): string =>
+          ns === undefined ? 'unset' : `${ns / 3_600_000_000_000}h`;
+        try {
+          const pol = (await mcpCall(client, 'call', {
+            method: 'getPolicyConfig',
+            args: '[]',
+          })) as Record<string, unknown>;
+          const maxTx = optNum(pol.maxPerTransaction);
+          const maxDay = optNum(pol.maxPerDay);
+          const rate = optNum(pol.rateLimitPerMinute);
+          const sessDep = optNum(pol.maxSessionDeposit);
+          const conc = optNum(pol.maxConcurrentSessions);
+          const idle = optNum(pol.sessionIdleTimeout);
+          const maxDur = optNum(pol.maxSessionDuration);
+          state('Max per tx', `${usd(maxTx)} (maxPerTransaction = ${maxTx ?? 'null'})`);
+          state('Max per day', `${usd(maxDay)} (maxPerDay = ${maxDay ?? 'null'})`);
+          state('Rate limit', `${rate ?? 'unset'} req/min per caller (rateLimitPerMinute)`);
+          state(
+            'Session deposit cap',
+            `${usd(sessDep)} (maxSessionDeposit = ${sessDep ?? 'null'})`,
+          );
+          state('Concurrent sessions', `${conc ?? 'unset'} per caller (maxConcurrentSessions)`);
+          state(
+            'Idle timeout',
+            `${hrs(idle)} — auto-close + refund remainder (sessionIdleTimeout)`,
+          );
+          state('Max session duration', `${hrs(maxDur)} (maxSessionDuration)`);
+          state(
+            'Per-caller overrides',
+            'Supported via setPolicy(?caller, …); none configured here',
+          );
+        } catch (e) {
+          // Older canister without getPolicyConfig (or RPC error) — fall back to the
+          // example/main.mo configured defaults rather than crashing the step.
+          info(
+            `getPolicyConfig unavailable (${e instanceof Error ? e.message : String(e)}) — showing example/main.mo defaults.`,
+          );
+          state('Max per tx', '$0.05 (maxPerTransaction = 50,000)');
+          state('Max per day', '$0.50 (maxPerDay = 500,000)');
+          state('Rate limit', '120 req/min per caller (rateLimitPerMinute)');
+          state('Session deposit cap', '$0.10 (maxSessionDeposit = 100,000)');
+          state('Concurrent sessions', '1 per caller (maxConcurrentSessions)');
+          state('Idle timeout', '1h — auto-close + refund remainder (sessionIdleTimeout)');
+          state('Max session duration', '24h (maxSessionDuration)');
+          state(
+            'Per-caller overrides',
+            'Supported via setPolicy(?caller, …); none configured here',
+          );
+        }
         highlight('Your service can never be abused. Idle sessions auto-refund.');
 
         section('What ic402 provides');

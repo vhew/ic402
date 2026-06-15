@@ -23,6 +23,45 @@ export async function mcpCall(
   }
 }
 
+/**
+ * C6: Detect an MCP error envelope. The MCP's admin/signing tools (uploadContent,
+ * submit_job_result, claim_job, sign_typed_data, …) return failures as a NON-isError
+ * result whose JSON is `{status:'error', …}` or a Candid `{err: …}`/`{error: …}` — so
+ * `mcpCall` does NOT throw for them. Steps that printed `success(...)` unconditionally
+ * after such a call reported a green "payment settled" even when the canister rejected
+ * the job. Use this (via assertMcpOk) to gate success on the actual canister verdict.
+ */
+export function isMcpErrorEnvelope(value: unknown): boolean {
+  if (value == null || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (v.status === 'ok' || v.status === 'free') return false;
+  if (v.status === 'error') return true;
+  if ('err' in v) return true;
+  if ('error' in v) return true;
+  return false;
+}
+
+/** Best-effort human-readable message from an MCP error envelope. */
+export function mcpErrorMessage(value: unknown): string {
+  if (value && typeof value === 'object') {
+    const v = value as Record<string, unknown>;
+    const err = v.error ?? v.err;
+    if (typeof err === 'string') return err;
+    if (err && typeof err === 'object' && 'message' in (err as Record<string, unknown>)) {
+      return String((err as Record<string, unknown>).message);
+    }
+  }
+  return 'MCP tool returned an error';
+}
+
+/** Throw if the MCP result is an error envelope — so a step cannot print success() over
+ *  a canister-side failure (C6). */
+export function assertMcpOk(value: unknown, action: string): void {
+  if (isMcpErrorEnvelope(value)) {
+    throw new Error(`${action} failed: ${mcpErrorMessage(value)}`);
+  }
+}
+
 /** Pretty-print a JSON value with 2-space indent. */
 export function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);

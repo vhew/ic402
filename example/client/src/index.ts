@@ -35,6 +35,10 @@ async function main(): Promise<void> {
   let env = 'local';
   let canisterId = '';
   let host = '';
+  // Non-interactive "smoke test" mode: run every step without prompting and exit non-zero
+  // if any step failed. Enabled by --ci/--non-interactive/--yes or CI / IC402_DEMO_CI env.
+  let nonInteractive =
+    process.env.CI === '1' || process.env.CI === 'true' || process.env.IC402_DEMO_CI === '1';
   const positional: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -44,6 +48,8 @@ async function main(): Promise<void> {
       canisterId = args[++i];
     } else if (args[i] === '--host' && i + 1 < args.length) {
       host = args[++i];
+    } else if (args[i] === '--ci' || args[i] === '--non-interactive' || args[i] === '--yes') {
+      nonInteractive = true;
     } else if (!args[i].startsWith('--')) {
       positional.push(args[i]);
     }
@@ -107,16 +113,25 @@ async function main(): Promise<void> {
   console.log(`  Canister:    ${canisterId}`);
   console.log(`  Host:        ${host}\x1b[0m`);
 
-  // Spawn the MCP server as a subprocess (inherit env for ICP_IDENTITY_PEM)
+  // Spawn the MCP server as a subprocess (inherit env for ICP_IDENTITY_PEM).
+  // The demo is a trusted, operator-run context that deliberately exercises the
+  // dangerous MCP primitives (sign_typed_data, delete_content) and configure({localDev}),
+  // so it opts in explicitly. Production deployments must NOT set these — the MCP defaults
+  // them off so a prompt-injected LLM cannot reach a raw signing oracle or raise its own
+  // caps (audit S1/S8/S9).
   const transport = new StdioClientTransport({
     command: 'node',
     args: [serverPath],
-    env: Object.fromEntries(
-      Object.entries(process.env).filter((e): e is [string, string] => e[1] != null),
-    ),
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter((e): e is [string, string] => e[1] != null),
+      ),
+      IC402_MCP_ALLOW_SECURITY_CHANGES: '1',
+      IC402_MCP_ALLOW_DANGEROUS_TOOLS: '1',
+    },
   });
 
-  const client = new Client({ name: 'ic402-demo', version: '0.1.0' });
+  const client = new Client({ name: 'ic402-demo', version: '2.1.0' });
   await client.connect(transport);
 
   try {
@@ -125,7 +140,17 @@ async function main(): Promise<void> {
     console.log(`\x1b[2m  Connected — ${tools.length} MCP tools available\x1b[0m`);
 
     const steps = buildSteps(client, canisterId, host);
-    await runSteps(steps);
+    if (nonInteractive) {
+      console.log(
+        `\x1b[2m  Non-interactive smoke-test mode — running all ${steps.length} steps\x1b[0m`,
+      );
+    }
+    const summary = await runSteps(steps, { autoRun: nonInteractive });
+    if (summary.failed > 0) {
+      console.error(
+        `\x1b[31m  ${summary.failed} step(s) FAILED: ${summary.failedNames.join(', ')}\x1b[0m`,
+      );
+    }
   } finally {
     await client.close();
   }

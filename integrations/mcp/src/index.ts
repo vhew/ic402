@@ -5,10 +5,25 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
-import { Ic402Client, Ic402Error, probeX402, exampleIdlFactory } from '@ic402/client';
+import {
+  Ic402Client,
+  Ic402Error,
+  probeX402,
+  applyVerbatimAccepted,
+  exampleIdlFactory,
+} from '@ic402/client';
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
+import { validateFetchUrl, safeFetch } from './security.js';
+import {
+  parseAtomicAmount,
+  checkSpend,
+  resolveSecurityConfig,
+  isToolAllowed,
+  resolveOperatorConfig,
+  type OperatorConfig,
+} from './guards.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,6 +62,13 @@ interface SecurityConfig {
 const DEFAULT_PER_CALL_MAX_ATOMIC = 1_000_000n; // 1.00 USDC
 const DEFAULT_SESSION_MAX_ATOMIC = 5_000_000n; // 5.00 USDC
 
+// S8/S1/S9: operator-only security posture. Resolved at STARTUP in main() from an optional
+// config file + env vars (both out-of-band — the LLM cannot influence them). The `configure`
+// tool cannot loosen these unless the operator set allowSecurityChanges, and the dangerous
+// signing/destructive tools are off unless allowDangerousTools. Defaults are conservative.
+let allowSecurityChanges = false;
+let allowDangerousTools = false;
+
 const securityConfig: SecurityConfig = {
   localDev: false,
   perCallMaxAtomic: DEFAULT_PER_CALL_MAX_ATOMIC,
@@ -63,22 +85,7 @@ let sessionSpentAtomic = 0n;
  * pass commit:true to reserve up-front. Throws on violation.
  */
 function spendGuard(amountAtomic: bigint, opts: { commit?: boolean } = {}): void {
-  if (amountAtomic < 0n) {
-    throw new Error(`Invalid negative amount: ${amountAtomic}`);
-  }
-  if (amountAtomic > securityConfig.perCallMaxAtomic) {
-    throw new Error(
-      `Amount ${amountAtomic} exceeds per-call cap ${securityConfig.perCallMaxAtomic} (atomic units). ` +
-        `Raise perCallMaxAtomic via the "configure" tool if this spend is intended.`,
-    );
-  }
-  if (sessionSpentAtomic + amountAtomic > securityConfig.sessionMaxAtomic) {
-    throw new Error(
-      `Amount ${amountAtomic} would exceed the cumulative session cap ${securityConfig.sessionMaxAtomic} ` +
-        `(already spent ${sessionSpentAtomic} atomic units). ` +
-        `Raise sessionMaxAtomic via the "configure" tool if this spend is intended.`,
-    );
-  }
+  checkSpend(amountAtomic, securityConfig, sessionSpentAtomic);
   if (opts.commit) sessionSpentAtomic += amountAtomic;
 }
 
@@ -139,121 +146,14 @@ function requireConfirmation(args: {
 // SSRF guard — used by every outbound fetch path
 // ---------------------------------------------------------------------------
 
-/** Parse a dotted-quad IPv4 string to a 32-bit unsigned int, or null. */
-function ipv4ToInt(host: string): number | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (!m) return null;
-  const parts = m.slice(1, 5).map((p) => Number(p));
-  if (parts.some((p) => p > 255)) return null;
-  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
-}
+// The SSRF helpers (ipv4ToInt / isPrivateIpv4 / isPrivateIpv6 / validateFetchUrl) and the
+// redirect-safe `safeFetch` now live in ./security.ts so they can be unit-tested in
+// isolation (see test/mcp-security.test.ts). validateFetchUrl/safeFetch take the localDev
+// flag explicitly rather than reading the module global.
 
-/** True if a literal IPv4 falls in a private/loopback/link-local/metadata range. */
-function isPrivateIpv4(host: string): boolean {
-  const ip = ipv4ToInt(host);
-  if (ip === null) return false;
-  const inRange = (cidrBase: string, bits: number) => {
-    const base = ipv4ToInt(cidrBase);
-    if (base === null) return false;
-    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-    return (ip & mask) === (base & mask);
-  };
-  return (
-    inRange('10.0.0.0', 8) ||
-    inRange('172.16.0.0', 12) ||
-    inRange('192.168.0.0', 16) ||
-    inRange('127.0.0.0', 8) ||
-    inRange('169.254.0.0', 16) || // link-local incl. 169.254.169.254 metadata
-    inRange('0.0.0.0', 8)
-  );
-}
-
-/** True if a host string is a loopback/link-local/ULA/metadata IPv6 literal. */
-function isPrivateIpv6(host: string): boolean {
-  // URL hostnames keep IPv6 in brackets; strip them.
-  let h = host;
-  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  h = h.toLowerCase();
-  if (h === '::1' || h === '::') return true;
-  // Unique-local fc00::/7 → first byte 0xfc or 0xfd.
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  // Link-local fe80::/10.
-  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb'))
-    return true;
-  // IPv4-mapped (::ffff:...) — extract the embedded IPv4 and re-check it.
-  const embedded = extractMappedIpv4(h);
-  if (embedded !== null && isPrivateIpv4(embedded)) return true;
-  return false;
-}
-
-/**
- * Extract the embedded IPv4 from an IPv4-mapped IPv6 address (::ffff:…), in BOTH
- * the dotted form (::ffff:169.254.169.254) and the hex-compressed form
- * (::ffff:a9fe:a9fe) that `new URL()` normalizes it to. Without the hex case an
- * attacker reaches e.g. the cloud-metadata endpoint via http://[::ffff:169.254.169.254]/
- * (SSRF), since the URL parser rewrites it to the hex form the dotted regex misses.
- */
-function extractMappedIpv4(h: string): string | null {
-  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (dotted) return dotted[1];
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-  if (hex) {
-    const hi = parseInt(hex[1], 16);
-    const lo = parseInt(hex[2], 16);
-    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-  }
-  return null;
-}
-
-/**
- * Validate an outbound fetch URL against SSRF. Requires https: (or
- * http://localhost|127.0.0.1 when securityConfig.localDev is set) and rejects
- * hosts that are literal/internal private, loopback, link-local, or metadata
- * addresses, plus obvious internal TLDs. Returns the parsed URL or throws.
- */
-function validateFetchUrl(raw: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`Invalid URL: ${raw}`);
-  }
-  const host = parsed.hostname.toLowerCase();
-  const isLocalHost =
-    host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-
-  if (parsed.protocol === 'http:') {
-    if (!(securityConfig.localDev && isLocalHost)) {
-      throw new Error(
-        `Refusing http:// URL (${raw}). Only https:// is allowed; ` +
-          `http://localhost is permitted only when localDev is enabled via "configure".`,
-      );
-    }
-    return parsed;
-  }
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`Refusing non-http(s) URL scheme "${parsed.protocol}" (${raw}).`);
-  }
-
-  // https path — still block internal targets unless explicitly local-dev'd.
-  if (isLocalHost && !securityConfig.localDev) {
-    throw new Error(`Refusing localhost/loopback target (${raw}). Enable localDev to allow it.`);
-  }
-  // Literal IP checks.
-  if (isPrivateIpv4(host) && !securityConfig.localDev) {
-    throw new Error(`Refusing private/loopback/link-local/metadata IPv4 target (${raw}).`);
-  }
-  if (host === '169.254.169.254') {
-    throw new Error(`Refusing cloud metadata endpoint (${raw}).`);
-  }
-  if (isPrivateIpv6(host) && !securityConfig.localDev) {
-    throw new Error(`Refusing private/loopback/link-local IPv6 target (${raw}).`);
-  }
-  // Internal TLDs.
-  if (host.endsWith('.local') || host.endsWith('.internal')) {
-    throw new Error(`Refusing internal TLD host (${raw}).`);
-  }
-  return parsed;
+/** Per-request SSRF options derived from the (mutable) server security config. */
+function ssrfOpts(): { localDev: boolean } {
+  return { localDev: securityConfig.localDev };
 }
 
 /**
@@ -348,7 +248,7 @@ function serialize(value: unknown): unknown {
 
 const server = new McpServer({
   name: 'ic402',
-  version: '0.1.0',
+  version: '2.1.0',
 });
 
 // ---------------------------------------------------------------------------
@@ -456,23 +356,24 @@ server.tool(
 
     defaultCanisterId = canisterId;
 
-    // Apply security config (caps, localDev, opt-in auto-payment).
-    securityConfig.localDev = localDev;
-    securityConfig.autoPayment = autoPayment;
-    if (perCallMaxAtomic !== undefined) {
-      try {
-        securityConfig.perCallMaxAtomic = BigInt(perCallMaxAtomic);
-      } catch {
-        throw new Error(`Invalid perCallMaxAtomic: ${perCallMaxAtomic}`);
-      }
-    }
-    if (sessionMaxAtomic !== undefined) {
-      try {
-        securityConfig.sessionMaxAtomic = BigInt(sessionMaxAtomic);
-      } catch {
-        throw new Error(`Invalid sessionMaxAtomic: ${sessionMaxAtomic}`);
-      }
-    }
+    // S8: Apply the security knobs ONLY if the operator allowed LLM-driven changes;
+    // otherwise the request's localDev/autoPayment/caps are ignored and the
+    // operator/default config stands. This stops a prompt-injected model from raising
+    // its own caps or enabling localDev/autoPayment via the configure tool.
+    const resolved = resolveSecurityConfig(
+      securityConfig,
+      { localDev, autoPayment, perCallMaxAtomic, sessionMaxAtomic },
+      allowSecurityChanges,
+    );
+    securityConfig.localDev = resolved.config.localDev;
+    securityConfig.autoPayment = resolved.config.autoPayment;
+    securityConfig.perCallMaxAtomic = resolved.config.perCallMaxAtomic;
+    securityConfig.sessionMaxAtomic = resolved.config.sessionMaxAtomic;
+    const ignoredNote =
+      resolved.ignored.length > 0
+        ? ` IGNORED security params ${JSON.stringify(resolved.ignored)} — operator did not enable ` +
+          `LLM security changes (set IC402_MCP_ALLOW_SECURITY_CHANGES=1 to allow).`
+        : '';
 
     client = new Ic402Client({
       canisterId,
@@ -493,7 +394,8 @@ server.tool(
           text:
             `Connected to ${canisterId} at ${host} (network: ${network}, identity: ${identity ? identity.getPrincipal().toText() : 'anonymous'}). ` +
             `autoPayment=${securityConfig.autoPayment}, localDev=${securityConfig.localDev}, ` +
-            `perCallMaxAtomic=${securityConfig.perCallMaxAtomic}, sessionMaxAtomic=${securityConfig.sessionMaxAtomic}.`,
+            `perCallMaxAtomic=${securityConfig.perCallMaxAtomic}, sessionMaxAtomic=${securityConfig.sessionMaxAtomic}.` +
+            ignoredNote,
         },
       ],
     };
@@ -626,9 +528,9 @@ server.tool(
       .object({
         from: z.string(),
         to: z.string(),
-        value: z.number(),
-        validAfter: z.number(),
-        validBefore: z.number(),
+        value: z.union([z.string(), z.number()]),
+        validAfter: z.union([z.string(), z.number()]),
+        validBefore: z.union([z.string(), z.number()]),
         nonce: z.array(z.number()),
         v: z.number(),
         r: z.array(z.number()),
@@ -689,7 +591,16 @@ server.tool(
     if (evmSender) prefs.evmSender = evmSender;
     if (evmToken) prefs.evmToken = evmToken;
     if (evmRecipient) prefs.evmRecipient = evmRecipient;
-    if (authorization) prefs.authorization = authorization;
+    if (authorization) {
+      // C5: normalize the EIP-3009 numeric fields to bigint, REJECTING JS numbers that
+      // would have already lost precision (a uint256 must be passed as a decimal string).
+      prefs.authorization = {
+        ...authorization,
+        value: parseAtomicAmount(authorization.value, 'authorization.value'),
+        validAfter: parseAtomicAmount(authorization.validAfter, 'authorization.validAfter'),
+        validBefore: parseAtomicAmount(authorization.validBefore, 'authorization.validBefore'),
+      };
+    }
 
     // Generate Ed25519 keypair for voucher signing
     const voucherIdentity = Ed25519KeyIdentity.generate();
@@ -894,9 +805,9 @@ server.tool(
         typeof del.inline === 'string' ? Buffer.from(del.inline, 'hex') : Buffer.from(del.inline);
       resultText = buf.toString('utf-8');
     } else if ('httpUrl' in del) {
-      // H11: SSRF guard — httpUrl comes from an untrusted ContentDelivery payload.
-      const target = validateFetchUrl(String(del.httpUrl));
-      const resp = await globalThis.fetch(target.toString());
+      // H11/S2: SSRF guard — httpUrl comes from an untrusted ContentDelivery payload.
+      // safeFetch validates the URL and re-validates every redirect hop.
+      const resp = await safeFetch(String(del.httpUrl), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
       resultText = await resp.text();
     } else if ('assetCanister' in del) {
@@ -907,8 +818,7 @@ server.tool(
       // Treat the supplied path as a path only; URL() resolves/normalizes it
       // and cannot change the origin we constructed above.
       url.pathname = String(del.assetCanister.path ?? '/');
-      validateFetchUrl(url.toString());
-      const resp = await globalThis.fetch(url.toString());
+      const resp = await safeFetch(url.toString(), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`Asset fetch ${resp.status}: ${resp.statusText}`);
       resultText = await resp.text();
     } else if ('canisterQuery' in del) {
@@ -1014,7 +924,7 @@ server.tool(
     // C2: SSRF guard — the URL is attacker-influenceable. Validate before any fetch.
     let target: URL;
     try {
-      target = validateFetchUrl(url);
+      target = validateFetchUrl(url, ssrfOpts());
     } catch (e) {
       return errorResult(e);
     }
@@ -1026,7 +936,19 @@ server.tool(
       const timeout = setTimeout(() => controller.abort(), 15_000);
       let probeResult;
       try {
-        probeResult = await probeX402(safeUrl, chainId, { signal: controller.signal });
+        probeResult = await probeX402(
+          safeUrl,
+          chainId,
+          { signal: controller.signal },
+          {
+            // S2: re-validate every redirect hop so an allowlisted origin cannot 30x us to
+            // an internal/metadata target during the x402 probe.
+            validateRedirect: (u) => {
+              validateFetchUrl(u, ssrfOpts());
+            },
+            maxRedirects: 5,
+          },
+        );
       } finally {
         clearTimeout(timeout);
       }
@@ -1077,6 +999,10 @@ server.tool(
         );
       }
       const signed = signResult.ok as { header: string; paidAmount: bigint };
+      // Echo the external server's advertised requirement VERBATIM as the v2 `accepted` (the
+      // canister reconstructs it; this makes a strict facilitator's accepted check pass). The
+      // `accepted` is not EIP-712-signed, so rewriting it is safe.
+      const headerToSend = applyVerbatimAccepted(signed.header, opt.rawRequirement);
 
       // Record the spend against the cumulative session cap now that signing
       // succeeded.
@@ -1087,10 +1013,14 @@ server.tool(
       const retryTimeout = setTimeout(() => retryController.abort(), 15_000);
       let paidResponse: Response;
       try {
-        paidResponse = await globalThis.fetch(safeUrl, {
-          headers: { 'X-Payment': signed.header, 'Payment-Signature': signed.header },
-          signal: retryController.signal,
-        });
+        paidResponse = await safeFetch(
+          safeUrl,
+          {
+            headers: { 'X-Payment': headerToSend, 'Payment-Signature': headerToSend },
+            signal: retryController.signal,
+          },
+          ssrfOpts(),
+        );
       } finally {
         clearTimeout(retryTimeout);
       }
@@ -1153,7 +1083,7 @@ server.tool(
     // and require explicit confirmation. No USDC amount, so no spend cap.
     if (rpcUrl !== undefined) {
       try {
-        validateFetchUrl(rpcUrl);
+        validateFetchUrl(rpcUrl, ssrfOpts());
       } catch (e) {
         return errorResult(e);
       }
@@ -1224,66 +1154,76 @@ server.tool(
     const encoded = new TextEncoder().encode(params);
 
     try {
-      // H12: dry-run with no payment signature to discover whether payment is
-      // required and, if so, how much / to whom — BEFORE auto-paying.
+      // C4: discover the price via a READ-ONLY query (no nonce minted), instead of the prior
+      // state-changing submitServiceRequest "dry-run" probe. The client's submitServiceRequest
+      // still does the single probe+pay; this removes the redundant extra update call.
       const actor = actorFactory(cid);
-      const probe = (await actor.submitServiceRequest(
-        serviceId,
-        Array.from(encoded),
-        [],
-      )) as Record<string, unknown>;
-
-      // Free / already-accepted path: no payment needed.
-      if (probe && typeof probe === 'object' && 'ok' in probe) {
-        const ok = probe.ok as { jobId: string };
-        return textResult({ status: 'ok', jobId: ok.jobId });
+      const quote = (await actor.quoteServiceRequest(serviceId)) as Record<string, unknown>;
+      if (quote && typeof quote === 'object' && 'err' in quote) {
+        return errorResult(new Ic402Error('unknown', String(quote.err)));
       }
-      if (probe && typeof probe === 'object' && 'error' in probe) {
-        return errorResult(new Ic402Error('sign_failed', String(probe.error)));
-      }
-
-      if (probe && typeof probe === 'object' && 'paymentRequired' in probe) {
-        // H12: auto-payment must be opt-in.
-        if (!securityConfig.autoPayment) {
-          return textResult({
-            status: 'payment_required',
-            serviceId,
-            requirements: serialize(probe.paymentRequired),
-            instruction:
-              'This service requires payment. Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
-          });
+      const q = (
+        quote as {
+          ok?: {
+            amount: bigint;
+            fee: bigint;
+            total: bigint;
+            pricingKind: string;
+            enabled: boolean;
+          };
         }
+      ).ok;
+      if (!q) {
+        return errorResult(
+          new Ic402Error('unknown', `Unexpected quote: ${JSON.stringify(serialize(quote))}`),
+        );
+      }
+      if (!q.enabled) {
+        return errorResult(new Ic402Error('unknown', `Service "${serviceId}" is disabled`));
+      }
+      // A1: the buyer actually pays price + ledger fee. Cap-check and commit against the TOTAL
+      // (what really moves), not the bare service price, so the spend guard isn't under-counting.
+      const price = BigInt(String(q.amount));
+      const fee = BigInt(String(q.fee ?? 0n));
+      const amountAtomic = BigInt(String(q.total ?? price + fee));
 
-        const reqs = probe.paymentRequired as Array<Record<string, unknown>>;
-        const req = Array.isArray(reqs) && reqs.length > 0 ? reqs[0] : undefined;
-        const amountAtomic = req?.amount !== undefined ? BigInt(String(req.amount)) : 0n;
-        const recipient = req?.recipient !== undefined ? String(req.recipient) : cid;
-        const asset = req?.token !== undefined ? String(req.token) : undefined;
-
-        // H12 + H13: cap + confirmation before any auto-approval/payment.
-        const gate = requireConfirmation({
-          action: 'submit_request',
-          confirm,
-          amountAtomic,
-          recipient,
-          asset,
-          note: `Auto-pay for service "${serviceId}" on canister ${cid}`,
-        });
-        if (gate) return gate;
-
-        // Confirmed and within caps — let the client perform approve + retry.
+      // Free / session-billed services quote total 0 — submit directly (no payment).
+      if (amountAtomic === 0n) {
         const result = await c.submitServiceRequest(serviceId, encoded);
-        commitSpend(amountAtomic);
+        return textResult({ status: 'ok', jobId: result.jobId });
+      }
+
+      // Paid: H12 auto-payment must be opt-in.
+      if (!securityConfig.autoPayment) {
         return textResult({
-          status: 'ok',
-          jobId: result.jobId,
-          paidAmount: amountAtomic.toString(),
+          status: 'payment_required',
+          serviceId,
+          amount: amountAtomic.toString(),
+          price: price.toString(),
+          fee: fee.toString(),
+          instruction:
+            'This service requires payment (price + ledger fee). Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
         });
       }
 
-      return errorResult(
-        new Ic402Error('unknown', `Unexpected response: ${JSON.stringify(serialize(probe))}`),
-      );
+      // H12 + H13: cap + confirmation before any auto-approval/payment.
+      const gate = requireConfirmation({
+        action: 'submit_request',
+        confirm,
+        amountAtomic,
+        recipient: cid,
+        note: `Auto-pay ${amountAtomic} (price ${price} + ledger fee ${fee}) for service "${serviceId}" on canister ${cid}`,
+      });
+      if (gate) return gate;
+
+      // Confirmed and within caps — the client performs the single probe + approve + pay.
+      const result = await c.submitServiceRequest(serviceId, encoded);
+      commitSpend(amountAtomic);
+      return textResult({
+        status: 'ok',
+        jobId: result.jobId,
+        paidAmount: amountAtomic.toString(),
+      });
     } catch (e) {
       return errorResult(e);
     }
@@ -1357,6 +1297,7 @@ const READONLY_CALL_ALLOWLIST = new Set<string>([
   'getJob',
   'getJobResult',
   'keccak256',
+  'getPolicyConfig', // pure read-only query; contains the blocked 'policy' substring, so it must be allowlisted
 ]);
 
 // Substrings that must NEVER be reachable through the generic `call` path —
@@ -1384,6 +1325,12 @@ const CALL_BLOCK_SUBSTRINGS = [
 
 function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
   const lower = method.toLowerCase();
+  // The explicit, curated read-only allowlist is authoritative: it wins over the
+  // substring heuristic below. This is required for genuine read-only getters
+  // whose name happens to contain a blocked substring (e.g. getPolicyConfig
+  // contains 'policy', a future getSettings would contain 'set'). ONLY add
+  // verified non-state-changing query methods to READONLY_CALL_ALLOWLIST.
+  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
   // Hard block on any signing/admin/value-moving name, even if it would
   // otherwise match a read-only prefix.
   for (const bad of CALL_BLOCK_SUBSTRINGS) {
@@ -1394,7 +1341,6 @@ function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
       };
     }
   }
-  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
   // Fall back to read-only name prefixes for forward-compat with new query
   // getters, but only after the blocklist above has cleared the name.
   if (/^(get|list|fetch|is)[A-Z]/.test(method) || /^(get|list|fetch|is)$/.test(method)) {
@@ -1492,6 +1438,18 @@ function adminTool(
       confirm: z.boolean().default(false).describe('Authorize this state-changing/signing action.'),
     },
     async ({ args, canisterId, confirm }) => {
+      // S1/S9: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
+      // delete) unless the operator enabled them at startup — they bypass/ignore the
+      // spend caps, so a prompt-injected LLM must not be able to reach them.
+      if (!isToolAllowed(toolName, allowDangerousTools)) {
+        return errorResult(
+          new Error(
+            `Tool "${toolName}" is disabled: it is a dangerous primitive (raw EIP-712 signing / ` +
+              `destructive content deletion) that bypasses or ignores the spend caps. An operator ` +
+              `must enable it explicitly with IC402_MCP_ALLOW_DANGEROUS_TOOLS=1.`,
+          ),
+        );
+      }
       const cid = canisterId ?? defaultCanisterId;
       if (!cid) throw new Error('No canister ID.');
       requireAgent();
@@ -1560,7 +1518,62 @@ adminTool(
 // Start
 // ---------------------------------------------------------------------------
 
+function cliFlag(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : undefined;
+}
+
+/** Print the effective security posture to STDERR (stdout is the MCP JSON-RPC channel and
+ *  must not be polluted). Lets the operator verify what's active before the agent connects. */
+function printSecurityBanner(cfg: OperatorConfig, source: string | null): void {
+  const L = (s: string) => console.error(s);
+  L('───────────────────────────────────────────────────────────────');
+  L(' ic402 MCP — effective security config (operator-set, out-of-band)');
+  L(`   source                 : ${source ? `config file: ${source}` : 'env vars / defaults'}`);
+  L(`   perCallMaxAtomic       : ${cfg.security.perCallMaxAtomic}`);
+  L(`   sessionMaxAtomic       : ${cfg.security.sessionMaxAtomic}`);
+  L(`   localDev               : ${cfg.security.localDev}`);
+  L(`   autoPayment            : ${cfg.security.autoPayment}`);
+  L(
+    `   allowSecurityChanges   : ${cfg.allowSecurityChanges}  (LLM may retune caps via "configure")`,
+  );
+  L(`   allowDangerousTools    : ${cfg.allowDangerousTools}  (sign_typed_data / delete_content)`);
+  if (cfg.allowSecurityChanges || cfg.allowDangerousTools) {
+    L(
+      '   ⚠  a loosened knob is enabled — only do this in a TRUSTED context (no prompt-injection risk).',
+    );
+  }
+  L('───────────────────────────────────────────────────────────────');
+}
+
 async function main() {
+  // Operator config (out-of-band): optional JSON file via `--config <path>` or IC402_MCP_CONFIG,
+  // merged with env vars (env wins). The LLM can influence neither, so the security boundary
+  // stays operator-set (audit S8).
+  const configPath = cliFlag('--config') ?? process.env.IC402_MCP_CONFIG ?? null;
+  let fileJson: Record<string, unknown> | null = null;
+  if (configPath) {
+    try {
+      fileJson = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    } catch (e) {
+      console.error(
+        `ic402-mcp: failed to read config file ${configPath}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      process.exit(1);
+    }
+  }
+  const cfg = resolveOperatorConfig(fileJson, process.env, {
+    perCallMaxAtomic: DEFAULT_PER_CALL_MAX_ATOMIC,
+    sessionMaxAtomic: DEFAULT_SESSION_MAX_ATOMIC,
+  });
+  securityConfig.localDev = cfg.security.localDev;
+  securityConfig.autoPayment = cfg.security.autoPayment;
+  securityConfig.perCallMaxAtomic = cfg.security.perCallMaxAtomic;
+  securityConfig.sessionMaxAtomic = cfg.security.sessionMaxAtomic;
+  allowSecurityChanges = cfg.allowSecurityChanges;
+  allowDangerousTools = cfg.allowDangerousTools;
+  printSecurityBanner(cfg, configPath);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

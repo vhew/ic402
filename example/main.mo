@@ -34,6 +34,11 @@ persistent actor KnowledgeBase {
 
   // The ckUSDC ledger principal (mainnet). Deploy scripts patch for testnet.
   let CKUSDC = "xevnm-gaaaa-aaaar-qafnq-cai";
+  // A1: ckUSDC ICRC-1 transfer fee (atomic units). Buyers of marketplace services pay
+  // `price + CKUSDC_FEE` so the canister can cover the outbound settle transfer to the operator
+  // (the ledger deducts amount+fee). NOTE: at 10_000 the fee dwarfs sub-cent service prices —
+  // the quote shows it so the (uneconomical) breakdown is visible.
+  let CKUSDC_FEE : Nat = 10_000;
 
   transient let gate = Ic402.Gateway(
     {
@@ -129,9 +134,16 @@ persistent actor KnowledgeBase {
     {
       recipient = { owner = Principal.fromActor(KnowledgeBase); subaccount = null };
       tokens = [{ ledger = Principal.fromText(CKUSDC); symbol = "ckUSDC"; decimals = 6 : Nat8 }];
+      ledgerFee = CKUSDC_FEE;
     },
   );
   registry.startTimers<system>();
+
+  // 1a: wire the marketplace's on-chain settlement/refund to the Gateway's tECDSA EVM sender,
+  // so EVM-paid jobs are refunded/settled on their native rail instead of the ICP pool (C3).
+  registry.setEvmTransfer(func(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
+    await gate.sendErc20Transfer(chainId, token, to, amount);
+  });
 
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
@@ -174,8 +186,16 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
-        switch (await gate.settle(sig)) {
-          case (#ok(_)) { #ok(doSearch(searchQuery)) };
+        switch (await gate.settle(sig, ?amount)) {
+          // A nonce binds amount/token/network but NOT the resource, so a nonce minted at a
+          // cheaper endpoint could be redeemed here. Verify the settled amount covers THIS
+          // resource's price (cross-resource underpayment).
+          case (#ok(receipt)) {
+            if (receipt.amount < amount) {
+              return #error("Underpayment: search requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
+            };
+            #ok(doSearch(searchQuery));
+          };
           case (#policyDenied(r)) { #error("Policy: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
@@ -195,6 +215,13 @@ persistent actor KnowledgeBase {
 
   public query func http_request(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
+
+    // CORS preflight for the v2 custom `PAYMENT-SIGNATURE` request header.
+    if (request.method == "OPTIONS") { return Http.httpOptions() };
+
+    // Facilitator POST endpoints run in the update context (verify reads chain config; settle
+    // broadcasts), so upgrade the query to an update call.
+    if (path == "/verify" or path == "/settle") { return Http.httpUpgrade() };
 
     // Free: canister info
     if (path == "/" or path == "") {
@@ -251,39 +278,126 @@ persistent actor KnowledgeBase {
       };
     };
 
+    // x402 facilitator: advertise the (x402Version, scheme, network) kinds this canister can
+    // settle, plus its on-chain signer address. ic402 self-hosts the facilitator role.
+    if (path == "/supported") {
+      return Http.http200Json(gate.supportedJson());
+    };
+
+    // x402 discovery (Bazaar): list the paid resources with their v2 accepts[] (non-minting —
+    // describeAll advertises price/asset without burning a server nonce; clients hit the
+    // resource for a live challenge).
+    if (path == "/discovery/resources") {
+      var items = Http.discoveryItemJson(
+        Http.buildResourceUrl(request.headers, "/search"),
+        "http",
+        Http.acceptsArrayJson(gate.describeAll(1_000)),
+      );
+      for (entry in store.list().vals()) {
+        items #= "," # Http.discoveryItemJson(
+          Http.buildResourceUrl(request.headers, "/content/" # entry.id),
+          "http",
+          Http.acceptsArrayJson(gate.describeAll(5_000)),
+        );
+      };
+      for (svc in registry.listServices(true).vals()) {
+        let amt = switch (svc.pricing) {
+          case (#Exact(p)) { p + CKUSDC_FEE };
+          case (#Upto(p)) { p + CKUSDC_FEE };
+          case (#Session) { 0 };
+        };
+        if (amt > 0) {
+          items #= "," # Http.discoveryItemJson(
+            Http.buildResourceUrl(request.headers, "/service/" # svc.id),
+            "http",
+            Http.acceptsArrayJson(gate.describeAll(amt)),
+          );
+        };
+      };
+      return Http.http200Json("{\"resources\":[" # items # "]}");
+    };
+
     Http.httpError(404, "Not found");
+  };
+
+  // Map a settle PaymentResult to a v2 SettlementResponse JSON, mapping ic402's result variants
+  // to the x402 v2 error-reason vocabulary. Used by the facilitator /settle endpoint and by HTTP
+  // resource settlement failures.
+  func settleResultJson(result : Ic402.PaymentResult, network : Text, payer : Text, amount : Nat) : Text {
+    switch (result) {
+      case (#ok(receipt)) { Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null) };
+      case (#invalidSignature(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_exact_evm_payload_authorization_signature") };
+      case (#insufficientFunds(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"insufficient_funds") };
+      case (#expired(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_exact_evm_payload_authorization_valid_before") };
+      case (#networkNotSupported(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_network") };
+      case (#tokenNotAccepted(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unsupported_scheme") };
+      case (#policyDenied(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unexpected_settle_error") };
+      // settlementFailed (on-chain revert / RPC), settlementPending, and any other variant.
+      case (_) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_transaction_state") };
+    };
   };
 
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
+    if (request.method == "OPTIONS") { return Http.httpOptions() };
 
-    // H-9: When there is no payment yet, issue the 402 challenge HERE (update
-    // context) so gate.requireAll persists the server nonce that settlement binds.
-    let paymentHeader = switch (Http.getHeader(request.headers, "x-payment")) {
+    // x402 v2 facilitator endpoints (POST { paymentPayload, paymentRequirements }).
+    // /verify validates the exact/EVM authorization off-chain; /settle broadcasts on-chain.
+    if (path == "/verify" or path == "/settle") {
+      let body = switch (Text.decodeUtf8(request.body)) {
+        case (?t) { t };
+        case (null) { return Http.httpError(400, "Invalid request body") };
+      };
+      let parsed = switch (Http.parseFacilitatorRequest(body)) {
+        case (?p) { p };
+        case (null) { return Http.httpError(400, "Invalid facilitator request (need paymentPayload + paymentRequirements)") };
+      };
+      if (path == "/verify") {
+        let v = gate.verifyPayment(parsed.sig, parsed.amount, parsed.payTo, parsed.asset);
+        return Http.http200Json(Http.verifyResponseJson(v.isValid, v.invalidReason, v.payer));
+      } else {
+        let result = await gate.settle(parsed.sig, ?parsed.amount);
+        return Http.http200Json(settleResultJson(result, parsed.sig.network, parsed.sig.sender, parsed.amount));
+      };
+    };
+
+    // x402 v2 ResourceInfo.url — absolute URL built from the Host header (ICP request.url is path-only).
+    let resourceUrl = Http.buildResourceUrl(request.headers, request.url);
+
+    // v2: a stock client sends the payment in PAYMENT-SIGNATURE; accept the legacy x-payment as a
+    // fallback. H-9: with no payment yet, issue the 402 challenge HERE (update context) so
+    // gate.requireAll persists the server nonce that the ICP/legacy rail binds to.
+    let paymentHeader = switch (Http.getHeader(request.headers, "payment-signature")) {
       case (?p) { p };
       case (null) {
-        if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000)) };
-        if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000)) };
-        if (Text.startsWith(path, #text "/service/")) {
-          let serviceId = switch (Text.stripStart(path, #text "/service/")) {
-            case (?id) { id };
-            case (null) { return Http.httpError(400, "Missing service ID") };
-          };
-          switch (registry.getService(serviceId)) {
-            case (null) { return Http.httpError(404, "Service not found") };
-            case (?svc) {
-              if (not svc.enabled) return Http.httpError(404, "Service not available");
-              switch (svc.pricing) {
-                // #Session is billed against an existing session deposit, not a
-                // per-request 402 charge — requireAll(0) would trap.
-                case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
-                case (#Exact(p)) { return Http.http402(gate.requireAll(p)) };
-                case (#Upto(p)) { return Http.http402(gate.requireAll(p)) };
+        switch (Http.getHeader(request.headers, "x-payment")) {
+          case (?p) { p };
+          case (null) {
+            if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/service/")) {
+              let serviceId = switch (Text.stripStart(path, #text "/service/")) {
+                case (?id) { id };
+                case (null) { return Http.httpError(400, "Missing service ID") };
+              };
+              switch (registry.getService(serviceId)) {
+                case (null) { return Http.httpError(404, "Service not found") };
+                case (?svc) {
+                  if (not svc.enabled) return Http.httpError(404, "Service not available");
+                  switch (svc.pricing) {
+                    // #Session is billed against an existing session deposit, not a
+                    // per-request 402 charge — requireAll(0) would trap.
+                    case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+                    // A1: charge price + ledger fee so the canister can cover the outbound settle.
+                    case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                    case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                  };
+                };
               };
             };
+            return Http.httpError(400, "Missing PAYMENT-SIGNATURE header");
           };
         };
-        return Http.httpError(400, "Missing X-PAYMENT header");
       };
     };
     let sig = switch (Http.parseX402PaymentHeader(paymentHeader)) {
@@ -291,7 +405,7 @@ persistent actor KnowledgeBase {
       case (null) {
         switch (Http.parsePaymentHeader(paymentHeader)) {
           case (?s) { s };
-          case (null) { return Http.httpError(400, "Invalid X-PAYMENT header") };
+          case (null) { return Http.httpError(400, "Invalid PAYMENT-SIGNATURE header") };
         };
       };
     };
@@ -302,40 +416,51 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
       };
-      switch (await gate.settle(sig)) {
+      let contentResult = await gate.settle(sig, ?5_000);
+      switch (contentResult) {
         case (#ok(receipt)) {
+          // Cross-resource underpayment: the nonce binds amount/token/network but not the
+          // resource, so reject a settlement that doesn't cover this content's price.
+          if (receipt.amount < 5_000) {
+            return Http.httpError(402, "Underpayment: content requires 5000, settled " # Nat.toText(receipt.amount));
+          };
+          let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let metadata = switch (store.getMetadata(contentId)) {
             case (null) { return Http.httpError(404, "Content not found") };
             case (?m) { m };
           };
           if (metadata.chunkCount <= 1) {
             switch (store.get(contentId)) {
-              case (?blob) { return Http.http200(blob, metadata.mimeType) };
+              case (?blob) { return Http.http200WithSettlement(blob, metadata.mimeType, settlement) };
               case (null) { return Http.httpError(500, "Read failed") };
             };
           } else {
-            return Http.http200Json("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}");
+            return Http.http200JsonWithSettlement("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}", settlement);
           };
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        // v2: emit a SettlementResponse (success:false + error reason) on any settle failure.
+        case (_) { return Http.http402WithSettlement(settleResultJson(contentResult, sig.network, sig.sender, 5_000)) };
       };
     };
 
     if (Text.startsWith(path, #text "/search")) {
       let q = switch (Http.getQueryParam(request.url, "q")) { case (?q) { q }; case (null) { "ic402" } };
-      switch (await gate.settle(sig)) {
-        case (#ok(_)) {
+      let searchResult = await gate.settle(sig, ?1_000);
+      switch (searchResult) {
+        case (#ok(receipt)) {
+          if (receipt.amount < 1_000) {
+            return Http.httpError(402, "Underpayment: search requires 1000, settled " # Nat.toText(receipt.amount));
+          };
+          let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let results = doSearch(q);
           var json = "[";
           for (i in results.keys()) {
             if (i > 0) { json #= "," };
             json #= "\"" # results[i] # "\"";
           };
-          return Http.http200Json("{\"results\":" # json # "]}");
+          return Http.http200JsonWithSettlement("{\"results\":" # json # "]}", settlement);
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        case (_) { return Http.http402WithSettlement(settleResultJson(searchResult, sig.network, sig.sender, 1_000)) };
       };
     };
 
@@ -345,20 +470,23 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing service ID") };
       };
-      switch (await gate.settle(sig)) {
+      let serviceResult = await gate.settle(sig, null);
+      switch (serviceResult) {
         case (#ok(receipt)) {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
           // Pass it through as Text — do NOT coerce to Principal (that trapped for
           // EVM senders AFTER the on-chain transfer had already executed).
+          // submitRequest enforces receipt.amount >= price + fee (cross-resource safe).
           switch (registry.submitRequest(receipt.sender, serviceId, request.body, receipt, null)) {
             case (#ok(jobId)) {
-              return Http.http202Json("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}");
+              let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
+              return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
             };
             case (#err(e)) { return Http.httpError(400, e) };
           };
         };
-        case (#policyDenied(r)) { return Http.httpError(403, "Policy: " # r) };
-        case (_) { return Http.httpError(402, "Payment failed") };
+        // amount unknown on a failed service settle (varies per service); 0 in the response.
+        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, 0)) };
       };
     };
 
@@ -396,12 +524,38 @@ persistent actor KnowledgeBase {
     config : Ic402.SessionConfig,
     sig : Ic402.PaymentSignature,
   ) : async { #ok : Ic402.SessionState; #err : Text } {
-    let intent = await requestSession();
+    // Honour the rail the client signed for: an EVM (eip155:*) signature opens an EVM session
+    // (deposit via EIP-3009, settle/refund on that chain via tECDSA); anything else is the default
+    // ICP ckUSDC session. Previously this always built the ICP intent, so an "EVM session" silently
+    // became an ICP one and the EIP-3009 authorization was ignored.
+    let intent = if (Text.startsWith(sig.network, #text "eip155:")) {
+      switch (gate.evmSessionParams(sig.network)) {
+        case (?p) {
+          gate.offerSession({
+            network = sig.network;
+            token = p.token;
+            recipient = p.recipient;
+            suggestedDeposit = 50_000;
+            minDeposit = ?5_000;
+            expiry = Time.now() + 300_000_000_000;
+            costPerCall = ?500;
+            description = ?"Knowledge base session (EVM)";
+          });
+        };
+        case (null) {
+          return #err("EVM session unavailable for " # sig.network # " (chain not configured or canister EVM address not derived yet)");
+        };
+      };
+    } else {
+      await requestSession();
+    };
     switch (await gate.openSession(msg.caller, intent, config, sig)) {
       case (#ok(state)) { #ok(state) };
       case (#err(#policyDenied(r))) { #err("Policy: " # r) };
       case (#err(#depositBelowMinimum(min))) { #err("Min deposit: " # Nat.toText(min)) };
       case (#err(#settlementFailed(r))) { #err("Settlement failed: " # r) };
+      case (#err(#settlementPending(r))) { #err("Settlement pending: " # r) };
+      case (#err(#networkNotSupported(r))) { #err("Network not supported: " # r) };
       case (#err(#expired(r))) { #err("Expired: " # r) };
       case (#err(#tokenNotAccepted(r))) { #err("Token not accepted: " # r) };
       case (#err(#insufficientFunds(r))) { #err("Insufficient funds: " # r) };
@@ -411,11 +565,16 @@ persistent actor KnowledgeBase {
   };
 
   public shared func sessionQuery(voucher : Ic402.Voucher, question : Text) : async { #ok : Text; #error : Text } {
+    // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
+    // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
     switch (gate.consumeVoucher(voucher)) {
       case (#ok(_)) { #ok(doQuery(question)) };
-      case (#insufficientDeposit) { #error("Budget exhausted") };
+      case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
-      case (_) { #error("Invalid voucher") };
+      case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
+      case (#invalidSignature) { #error("Invalid voucher: Ed25519 signature does not verify against the session's registered public key") };
+      case (#sessionNotOpen) { #error("Invalid voucher: session not open (unknown id, closed, expired, or idle-timed-out)") };
+      case (#payloadOverflow) { #error("Invalid voucher: cumulativeAmount or sequence exceeds the Nat64 maximum") };
     };
   };
 
@@ -463,8 +622,13 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
-        switch (await gate.settle(sig)) {
+        switch (await gate.settle(sig, ?amount)) {
           case (#ok(receipt)) {
+            // Cross-resource underpayment: the nonce binds amount/token/network but not the
+            // resource, so reject a settlement that doesn't cover this content's price.
+            if (receipt.amount < amount) {
+              return #error("Underpayment: content requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
+            };
             let metadata = switch (store.getMetadata(contentId)) {
               case (null) { return #error("Not found") };
               case (?m) { m };
@@ -533,9 +697,17 @@ persistent actor KnowledgeBase {
     let verification : Ic402.VerificationMethod = switch (verificationMethod) {
       case ("AutoSettle") { #AutoSettle };
       case ("HashMatch") { #HashMatch };
-      case ("ZkGroth16") {
+      // "ZkGroth16" = params-only public inputs (default). "ZkGroth16:bind" = also bind
+      // SHA-256(result) as public input 0 — only with a circuit built to commit to it.
+      case ("ZkGroth16" or "ZkGroth16:bind") {
         switch (verifierCanisterId, verificationKey) {
-          case (?cid, ?vk) { #ZkGroth16({ verifierCanister = Principal.fromText(cid); verificationKey = vk }) };
+          case (?cid, ?vk) {
+            #ZkGroth16({
+              verifierCanister = Principal.fromText(cid);
+              verificationKey = vk;
+              bindResult = (verificationMethod == "ZkGroth16:bind");
+            });
+          };
           case (_, _) { return #err("ZkGroth16 requires verifierCanisterId and verificationKey") };
         };
       };
@@ -580,6 +752,30 @@ persistent actor KnowledgeBase {
     registry.listServices(true);
   };
 
+  // C4: read-only price quote for a service. Lets a client (e.g. the MCP) discover the amount
+  // to enforce its spend cap WITHOUT invoking the state-changing submitServiceRequest probe
+  // (which mints a nonce). A query — no state change, no inter-canister calls.
+  // A1: the quote is the transparency surface for the ledger fee. `amount` is the service
+  // price; `fee` is the ckUSDC transfer fee added on top; `total` (= amount + fee) is what the
+  // buyer must actually pay. #Session services bill against a deposit, so no per-request fee.
+  public query func quoteServiceRequest(serviceId : Text) : async {
+    #ok : { amount : Nat; fee : Nat; total : Nat; pricingKind : Text; enabled : Bool };
+    #err : Text;
+  } {
+    switch (registry.getService(serviceId)) {
+      case (null) { #err("Service not found") };
+      case (?svc) {
+        let (amount, kind) = switch (svc.pricing) {
+          case (#Exact(p)) { (p, "Exact") };
+          case (#Upto(p)) { (p, "Upto") };
+          case (#Session) { (0, "Session") };
+        };
+        let fee = switch (svc.pricing) { case (#Session) { 0 }; case (_) { CKUSDC_FEE } };
+        #ok({ amount; fee; total = amount + fee; pricingKind = kind; enabled = svc.enabled });
+      };
+    };
+  };
+
   // Paid: submit a service request (charge per request, then create job)
   public shared(msg) func submitServiceRequest(
     serviceId : Text,
@@ -604,11 +800,12 @@ persistent actor KnowledgeBase {
       // against requireAll(0), which traps.
       case (null) {
         if (amount == 0) { #error("Service uses session billing — open a session instead") } else {
-          #paymentRequired(gate.requireAll(amount));
+          // A1: quote price + ledger fee (matches quoteServiceRequest.total).
+          #paymentRequired(gate.requireAll(amount + CKUSDC_FEE));
         };
       };
       case (?sig) {
-        switch (await gate.settle(sig)) {
+        switch (await gate.settle(sig, null)) {
           case (#ok(receipt)) {
             switch (registry.submitRequest(Principal.toText(msg.caller), serviceId, params, receipt, null)) {
               case (#ok(jobId)) { #ok({ jobId }) };
@@ -631,6 +828,12 @@ persistent actor KnowledgeBase {
   // Operator: claim and fulfill jobs
   public shared(msg) func claimJob(jobId : Text) : async { #ok; #err : Text } {
     registry.claimJob(msg.caller, jobId);
+  };
+
+  // 1a: operators register their EVM payout address so EVM-paid jobs they fulfil are settled
+  // on-chain to it (rather than from the ICP pool — audit C3).
+  public shared(msg) func setEvmPayout(address : Text) : async { #ok; #err : Text } {
+    registry.setOperatorEvmPayout(msg.caller, address);
   };
 
   public shared(msg) func submitJobResult(jobId : Text, result : Blob, proof : ?Blob, actualCost : ?Nat) : async { #ok; #err : Text } {
@@ -772,6 +975,14 @@ persistent actor KnowledgeBase {
   public shared(msg) func setPolicy(p : Ic402.SpendingPolicy) : async () {
     assert(Principal.isController(msg.caller));
     gate.setPolicy(null, p);
+  };
+
+  // Read back the LIVE global spending policy (the one set via setPolicy(null, _)).
+  // Public read-only query: the limits are non-secret (they're advertised in the 402
+  // challenge anyway) and this lets clients/the demo display the in-canister policy
+  // instead of hardcoding it.
+  public query func getPolicyConfig() : async Ic402.SpendingPolicy {
+    gate.getGlobalPolicy();
   };
 
   public shared(msg) func forceCloseSession(sessionId : Text) : async Ic402.PaymentResult {

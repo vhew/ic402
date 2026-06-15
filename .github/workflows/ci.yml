@@ -52,3 +52,42 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:client
       - run: pnpm test:client
+
+  # Root vitest: SDK integration + MCP SSRF (security.ts) + MCP guards (guards.ts).
+  # The MCP tests import the source modules directly; integration tests skip (pass)
+  # without a local replica.
+  test-ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:client
+      - run: pnpm exec vitest run
+
+  # Type-check the MCP server and the demo client (catches wiring regressions in the
+  # extracted security/guards modules and the demo's MCP integration).
+  build-integrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:demo
+
+  # S19/S20: fail the build if example/main.mo's mainnet markers drift from what
+  # scripts/patch-local.sh rewrites (a drifted pattern silently no-ops, shipping a
+  # local build with mainnet values).
+  verify-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-patch-patterns.sh

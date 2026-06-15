@@ -827,7 +827,8 @@ module {
       let sender = switch (evmSender) {
         case (?s) { s };
         case (null) {
-          session.status := #open;
+          // S16/C1: leave #closing (set above) — do NOT revert to #open, which the 60s expiry
+          // timer would re-select and retry every tick. Park for recovery instead.
           return #settlementFailed("EVM sender not configured (ecdsaKeyName missing)");
         };
       };
@@ -840,8 +841,11 @@ module {
         );
         switch (settleResult) {
           case (#err(msg)) {
-            session.status := #open;
-            return #settlementFailed("EVM settle: " # msg);
+            // S16/C1: do NOT revert to #open. The 60s expiry timer would re-select this session
+            // and re-broadcast the settle on EVERY tick (draining cycles + gas); and if the
+            // failed send actually landed on-chain, a re-broadcast double-pays the recipient.
+            // Park in #closing (set above) for manual recovery instead.
+            return #settlementFailed("EVM settle failed (session parked for recovery): " # msg);
           };
           case (#ok(hash)) { settleTxHash := ?hash };
         };
@@ -872,7 +876,14 @@ module {
       // Deallocate from EVM escrow
       ignore evmEscrowManager.deallocate(session.id);
 
-      session.status := if (wasExpired) { #expired } else { #closed };
+      // S-3: A successful EVM close is TERMINAL. The expiry timer sets #expired BEFORE
+      // calling close, so ending in #expired again leaves the session in a state the
+      // re-close guard (closeSessionInternal) does NOT reject — letting the payer trigger
+      // a SECOND on-chain settle+refund from the canister's shared EVM balance and drain
+      // other payers' pooled deposits. End in #closed so any re-close is rejected.
+      // (ICP sessions don't need this: the per-session subaccount is already drained, so a
+      // second settle/refund fails with InsufficientFunds.)
+      session.status := #closed;
 
       // M-9 (v2): Credit the unused deposit back against the daily limit.
       if (session.deposited > session.consumed) {

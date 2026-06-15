@@ -98,11 +98,16 @@ suite("HttpHandler", func() {
         tokenName = null;
         tokenVersion = null;
       }];
-      let json = HttpHandler.paymentRequiredJson(reqs);
-      assert(Text.contains(json, #text "\"x402Version\":1"));
+      let json = HttpHandler.paymentRequiredJson(reqs, "https://host/content/x", null);
+      assert(Text.contains(json, #text "\"x402Version\":2"));
       assert(Text.contains(json, #text "\"scheme\":\"exact\""));
       assert(Text.contains(json, #text "\"network\":\"icp:1\""));
-      assert(Text.contains(json, #text "\"maxAmountRequired\":\"1000\""));
+      // v2 renames maxAmountRequired -> amount
+      assert(Text.contains(json, #text "\"amount\":\"1000\""));
+      assert(not Text.contains(json, #text "maxAmountRequired"));
+      // v2 PaymentRequired carries ResourceInfo + default asset-transfer method
+      assert(Text.contains(json, #text "\"resource\":{\"url\":\"https://host/content/x\"}"));
+      assert(Text.contains(json, #text "\"assetTransferMethod\":\"eip3009\""));
     });
 
     test("multiple requirements", func() {
@@ -120,7 +125,7 @@ suite("HttpHandler", func() {
           tokenName = null; tokenVersion = null;
         },
       ];
-      let json = HttpHandler.paymentRequiredJson(reqs);
+      let json = HttpHandler.paymentRequiredJson(reqs, "https://host/r", null);
       // Should contain comma-separated accepts
       assert(Text.contains(json, #text "\"accepts\":[{"));
       assert(Text.contains(json, #text "},{"));
@@ -138,7 +143,7 @@ suite("HttpHandler", func() {
         tokenName = null;
         tokenVersion = null;
       }];
-      let json = HttpHandler.paymentRequiredJson(reqs);
+      let json = HttpHandler.paymentRequiredJson(reqs, "https://host/r", null);
       // Escaped values should be present, raw ones should not
       assert(Text.contains(json, #text "test\\\"net"));
       assert(Text.contains(json, #text "tok\\\\en"));
