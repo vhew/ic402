@@ -8,6 +8,27 @@ security audit and `CHANGELOG.md` for what shipped.
 
 ## Blockers (must clear before a production deploy)
 
+- [x] **B0 — Canister WASM was un-installable on the current IC (IC0505) — FIXED + VERIFIED.**
+  `icp deploy example` is rejected: *"Wasm module contains a function at index 35 with
+  **2081 locals** that exceeds the maximum allowed number of locals **2000**."* The 2000-locals
+  cap is a standard IC replica validation limit (mainnet too), not a local quirk. Root cause:
+  the fully-unrolled SHA-256 compressor in `mo:sha2` (`process_blocks_from_iter`), compiled by
+  the pinned moc 1.9.0 which unrolls it; sibling `mo:sha2`/`mo:sha3` functions sit near the cap
+  too (sha512 `process` ≈ 1846), and `keccak256` (`mo:sha3`, used by `EvmAddress`/`Eip712`) may
+  also be over once sha2 is fixed. This is why `setup:local` fails here and why **B3 can't run**
+  — the canister has no installed module. **This supersedes the other blockers: the canister
+  currently deploys nowhere.** Verified by reproducing IC0505 locally (2026-06-16).
+  **FIX FOUND + PROVEN (no crypto rewrite):** a `wasm-opt -O --all-features` build step takes the
+  SHA-256 function from **2081 → 96 locals**; the optimized wasm **installs successfully and runs**
+  (Candid intact, `getPolicyConfig` returns the real policy). The unrolled schedule coalesces
+  because only ~16 words are live at once. ⚠️ Needs binaryen **≥ v130** — `ic-wasm`'s bundled
+  wasm-opt is too old (fails on moc's 64-bit table). **LANDED + VERIFIED:** (1) `scripts/build-example.sh`
+  runs `moc → wasm-opt -O → check-wasm-locals.js` and `setup.sh` installs that optimized module
+  (`icp canister install --wasm`); (2) `scripts/fetch-binaryen.sh` pins binaryen v130 (SHA-checked,
+  mac+linux); (3) a `wasm-locals` CI job builds+optimizes and fails if any function exceeds the
+  budget. `pnpm setup:local` now completes clean end-to-end (example installs, tECDSA EVM recipient
+  derives, test-payer funded) — confirming no IC0505 and no crypto rewrite. A loop-based
+  SHA-256/Keccak rewrite was NOT needed.
 - [ ] **B1 — Upgrade incompatibility from v2.0.0 (undocumented).** `main.mo` is a
   `persistent actor` (EOP); v2.1.0 added stable fields (`evmRails`/`operatorPayouts`,
   optional) and a required `bindResult` to `#ZkGroth16`, so an in-place upgrade is

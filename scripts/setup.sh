@@ -223,14 +223,24 @@ register_patch_trap
 
 patch_for_local "$CKUSDC_ID"
 
-# Deploy example canister (first pass — need it to exist for tECDSA)
-icp deploy example -e local >/dev/null 2>&1
+# Build + OPTIMIZE the example wasm, then install it. The optimize step is REQUIRED, not
+# cosmetic: moc unrolls SHA-256 (mo:sha2) past the IC's 2000-locals-per-function limit, so a
+# plain `icp deploy example` is rejected at install with IC0505. build-example.sh runs
+# moc -> wasm-opt -> a locals-budget check; we then install the optimized module directly.
+deploy_example_optimized() {
+  bash "$SCRIPT_DIR/build-example.sh" .icp/example.wasm
+  icp canister create example -e local >/dev/null 2>&1 || true
+  icp canister install example --wasm .icp/example.wasm --mode reinstall -e local
+}
+
+# First pass — need it installed for the tECDSA EVM-address derivation
+deploy_example_optimized
 EXAMPLE_ID=$(icp canister status example -e local --id-only)
 echo "  Example canister: $EXAMPLE_ID"
 
-# Derive tECDSA EVM address and redeploy
+# Derive tECDSA EVM address, re-patch main.mo, and re-deploy (re-optimized)
 patch_evm_recipient
-icp deploy example -e local >/dev/null 2>&1
+deploy_example_optimized
 
 # Restore source
 restore_source

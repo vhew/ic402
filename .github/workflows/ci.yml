@@ -91,3 +91,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/check-patch-patterns.sh
+
+  # B0: the example canister must stay INSTALLABLE on the IC. moc unrolls SHA-256
+  # (mo:sha2) into >2000 Wasm locals in one function, over the IC's per-function install
+  # limit (IC0505), so the build MUST run wasm-opt to coalesce them. This gate compiles +
+  # optimizes the example and fails if any function exceeds the locals budget — catching an
+  # un-installable wasm here instead of at a mainnet deploy, without needing a replica.
+  wasm-locals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ZenVoich/setup-mops@v1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: mops install
+      - run: bash scripts/build-example.sh /tmp/example.wasm
