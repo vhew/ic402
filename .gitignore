@@ -2,6 +2,7 @@ node_modules/
 dist/
 out/
 .icp/cache/
+.icp/tools/
 .mops/
 .pnpm-store/
 *.wasm
