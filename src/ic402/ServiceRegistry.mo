@@ -57,7 +57,15 @@ module {
     // 1a: optional on-chain ERC-20 transfer capability (tECDSA), injected by the consuming
     // canister (e.g. wired to its Gateway/EvmSender). The registry has no EVM capability of
     // its own; left null it stays ICP-only. Signature: (chainId, token, toAddress, amount).
-    public type EvmTransferFn = (Nat, Text, Text, Nat) -> async { #ok : Text; #err : Text };
+    // B2: the hook CONFIRMS the transfer mined before returning, so the registry can
+    // finalize a job's terminal state only on a confirmed on-chain transfer (not on a
+    // mere mempool ack). #confirmed/#reverted/#pending/#err mirror EvmSender.
+    public type EvmTransferFn = (Nat, Text, Text, Nat) -> async {
+      #confirmed : Text;
+      #reverted : Text;
+      #pending : Text;
+      #err : Text;
+    };
     var evmTransfer : ?EvmTransferFn = null;
 
     /// Wire the on-chain ERC-20 transfer used to settle/refund EVM-paid jobs. Call once at init.
@@ -105,14 +113,19 @@ module {
     /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
     /// address on-chain — fixing the settle half of the cross-rail flaw (C3). Returns true on
     /// success (false if no operator / no payout address / no transfer hook / transfer fails).
-    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #err : Text } {
+    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #pending : Text; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           let payout = switch (job.operator) { case (?op) { operatorEvmPayout.get(op) }; case (null) { null } };
           switch (evmTransfer, parseChainId(rail.network), payout) {
             case (?transfer, ?chainId, ?addr) {
+              // B2: finalize only on a CONFIRMED on-chain transfer. #reverted -> no funds
+              // moved (treat as #err, caller rolls back); #pending -> broadcast but
+              // unconfirmed (it may have landed, so caller must NOT re-drive -> double-pay).
               switch (await transfer(chainId, rail.token, addr, cost)) {
-                case (#ok(_)) { #ok };
+                case (#confirmed(_)) { #ok };
+                case (#reverted(h)) { #err("EVM settle to operator reverted on-chain (tx " # h # ")") };
+                case (#pending(h)) { #pending("EVM settle to operator broadcast but unconfirmed (tx " # h # ")") };
                 case (#err(e)) { #err("EVM settle to operator: " # e) };
               };
             };
@@ -138,13 +151,16 @@ module {
     /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
     /// injected hook). Returns true on success. Fixes the EVM-buyer refund stranding (S14)
     /// and the refund half of the cross-rail flaw (C3).
-    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #err : Text } {
+    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #pending : Text; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           switch (evmTransfer, parseChainId(rail.network)) {
             case (?transfer, ?chainId) {
+              // B2: finalize only on #confirmed (see settleToOperator).
               switch (await transfer(chainId, rail.token, job.buyer, amount)) {
-                case (#ok(_)) { #ok };
+                case (#confirmed(_)) { #ok };
+                case (#reverted(h)) { #err("EVM refund reverted on-chain (tx " # h # ")") };
+                case (#pending(h)) { #pending("EVM refund broadcast but unconfirmed (tx " # h # ")") };
                 case (#err(e)) { #err("EVM refund: " # e) };
               };
             };
@@ -651,8 +667,13 @@ module {
             jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
             #ok;
           };
+          case (#pending(e)) {
+            // B2: broadcast but unconfirmed — do NOT revert to the prior status (a resolve/
+            // expire re-drive would re-broadcast and double-refund). Leave parked in #Settling.
+            #err("Refund pending (parked in #Settling, do not retry): " # e);
+          };
           case (#err(e)) {
-            jobs.put(jobId, job); // revert to its prior status
+            jobs.put(jobId, job); // revert to its prior status (no funds moved)
             #err("Refund failed: " # e);
           };
         };
@@ -690,8 +711,14 @@ module {
       // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
       switch (await settleToOperator(jobId, job, cost)) {
         case (#err(e)) {
-          jobs.put(jobId, { job with status = #Verified }); // roll back for retry
+          jobs.put(jobId, { job with status = #Verified }); // roll back for retry (no funds moved)
           return #err("Settlement failed: " # e);
+        };
+        case (#pending(e)) {
+          // B2: broadcast but unconfirmed — it MAY have landed, so do NOT roll back to
+          // #Verified (the next tick would re-broadcast and double-pay). Leave it parked
+          // in #Settling (set above) for confirm-only recovery; surface the pending state.
+          return #err("Settlement pending (parked in #Settling, do not retry): " # e);
         };
         case (#ok) {};
       };
@@ -704,6 +731,13 @@ module {
           case (#err(e)) {
             jobs.put(jobId, { job with status = #Settled });
             return #err("Operator paid but buyer remainder refund failed: " # e);
+          };
+          case (#pending(e)) {
+            // B2: operator is paid (confirmed); the remainder refund is broadcast-but-
+            // unconfirmed. The job IS settled — mark #Settled and surface the pending
+            // remainder (do not re-drive: a #pending refund may have landed).
+            jobs.put(jobId, { job with status = #Settled });
+            return #err("Operator paid; buyer remainder refund pending (do not retry): " # e);
           };
           case (#ok) {};
         };
@@ -782,7 +816,9 @@ module {
           let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
           switch (await refundOnRail(id, job, refundAmt)) {
             case (#ok) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
-            case (#err(_)) {}; // leave #Expired (reclaimed by gcTerminalJobs after 24h)
+            // B2: #pending (broadcast, unconfirmed — may have landed) or #err: leave #Expired
+            // (reclaimed by gcTerminalJobs after 24h). Do NOT re-drive a #pending refund.
+            case (_) {}; // leave #Expired
           };
         };
       };

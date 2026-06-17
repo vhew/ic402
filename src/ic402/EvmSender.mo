@@ -106,13 +106,16 @@ module {
       toAddress : Text,
       calldata : [Nat8],
       gasLimit : Nat,
-    ) : async { #ok : Text; #err : Text } {
+    ) : async { #ok : Text; #err : Text; #maybeSent : Text } {
       // H-1: Reject concurrent transactions to prevent nonce desync.
       if (txInProgress) {
         return #err("Transaction in progress, retry later");
       };
       txInProgress := true;
-      let result : { #ok : Text; #err : Text } = try {
+      // B2: #err means the tx was definitely NOT broadcast (safe to roll back + retry);
+      // #maybeSent means it may have reached a provider's mempool (caller must NOT
+      // re-broadcast — the outbound rail has no on-chain replay protection).
+      let result : { #ok : Text; #err : Text; #maybeSent : Text } = try {
         let pubKey = await getPublicKey();
         let senderAddr = await getEvmAddress();
 
@@ -184,18 +187,28 @@ module {
         let rawTxBytes = EvmUtils.signedRawTx(txParams, r, s, yParity);
         let rawTxHex = EvmUtils.bytesToHex(rawTxBytes);
 
-        let sendResult = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
+        // B2: isolate the broadcast so a network error AFTER dispatch (which may have
+        // reached a provider's mempool) is reported as #maybeSent, not #err.
+        let sendResult = try {
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
+        } catch (e) {
+          txInProgress := false;
+          return #maybeSent("EVM send failed after dispatch (may have broadcast): " # Error.message(e));
+        };
         switch (sendResult) {
           case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
           case (#Consistent(#Ok(#Ok(null)))) { #ok(rawTxHex) };
           case (#Consistent(#Ok(#NonceTooLow))) { #err("Nonce too low — retry") };
-          case (#Consistent(#Ok(#NonceTooHigh))) { #err("Nonce too high") };
+          // Queued in the mempool (nonce ahead) — it can still mine, so treat as maybe-sent.
+          case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent("Nonce too high (tx may be queued in mempool)") };
           case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas") };
           case (#Consistent(#Err(e))) { #err("RPC error: " # EvmRpc.rpcErrorToText(e)) };
-          case (#Inconsistent(_)) { #err("Inconsistent RPC responses") };
+          // Providers disagree — exactly one may have accepted the tx into its mempool.
+          case (#Inconsistent(_)) { #maybeSent("Inconsistent RPC responses (a provider may have accepted the tx)") };
         };
       } catch (e) {
-        #err("EVM tx failed: " # Error.message(e));
+        // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
+        #err("EVM tx failed before broadcast: " # Error.message(e));
       };
       txInProgress := false;
       result;
@@ -207,7 +220,7 @@ module {
       tokenAddress : Text,
       recipientAddress : Text,
       amount : Nat,
-    ) : async { #ok : Text; #err : Text } {
+    ) : async { #ok : Text; #err : Text; #maybeSent : Text } {
       let selector = EvmUtils.functionSelector("transfer(address,uint256)");
       let recipientBytes = EvmUtils.hexToBytes(recipientAddress);
       let calldata = EvmUtils.abiEncodeFunctionCall(
@@ -218,6 +231,40 @@ module {
         ],
       );
       await sendTransaction(chainId, tokenAddress, calldata, 65_000);
+    };
+
+    /// Send an ERC-20 transfer AND confirm it mined (status==1) before returning a
+    /// terminal result — the OUTBOUND analogue of executeTransferWithAuthorization's
+    /// H-1 confirmation. Returns:
+    ///   #confirmed(hash) — mined, status==1: safe to finalize.
+    ///   #reverted(hash)  — mined, status==0: no funds moved; safe to roll back.
+    ///   #pending(hash)   — broadcast but not confirmed (incl. confirmation RPC
+    ///                      unavailable): it MAY have landed, so callers MUST NOT
+    ///                      finalize AND MUST NOT auto-retry by re-calling this (a
+    ///                      re-broadcast signs a fresh nonce and double-pays) — re-poll
+    ///                      confirmTransaction on the hash, or recover manually.
+    ///   #err(msg)        — failed BEFORE broadcast (no tx sent): safe to roll back.
+    public func sendErc20TransferConfirmed(
+      chainId : Nat,
+      tokenAddress : Text,
+      recipientAddress : Text,
+      amount : Nat,
+      maxPolls : Nat,
+    ) : async { #confirmed : Text; #reverted : Text; #pending : Text; #err : Text } {
+      switch (await sendErc20Transfer(chainId, tokenAddress, recipientAddress, amount)) {
+        case (#err(msg)) { #err(msg) }; // definitely not broadcast — safe to roll back
+        case (#maybeSent(msg)) { #pending(msg) }; // may have broadcast — park, do NOT re-send
+        case (#ok(txHash)) {
+          switch (await confirmTransaction(chainId, txHash, maxPolls)) {
+            case (#confirmed) { #confirmed(txHash) };
+            case (#reverted) { #reverted(txHash) };
+            case (#pending) { #pending(txHash) };
+            // Confirmation RPC unavailable, but the tx WAS broadcast — treat as pending
+            // (not failed), mirroring the inbound path (Gateway.settle #err arm).
+            case (#err(_)) { #pending(txHash) };
+          };
+        };
+      };
     };
 
     /// Execute an EIP-3009 `transferWithAuthorization` on a USDC contract.
@@ -254,7 +301,15 @@ module {
         ],
       );
       // transferWithAuthorization uses more gas than a simple transfer (~80k)
-      await sendTransaction(chainId, tokenAddress, calldata, 120_000);
+      // B2: collapse #maybeSent → #err. Unlike the outbound rail, the INBOUND EIP-3009
+      // path is replay-protected on-chain (the authorization's token nonce is single-use),
+      // so re-submitting the same authorization reverts rather than double-paying — the
+      // caller (Gateway.settle) safely treats an ambiguous send as failed.
+      switch (await sendTransaction(chainId, tokenAddress, calldata, 120_000)) {
+        case (#ok(h)) { #ok(h) };
+        case (#err(e)) { #err(e) };
+        case (#maybeSent(e)) { #err(e) };
+      };
     };
 
     // latestBaseFee + feeFromBase are pure functions defined at module scope (above

@@ -141,9 +141,18 @@ persistent actor KnowledgeBase {
 
   // 1a: wire the marketplace's on-chain settlement/refund to the Gateway's tECDSA EVM sender,
   // so EVM-paid jobs are refunded/settled on their native rail instead of the ICP pool (C3).
-  registry.setEvmTransfer(func(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
-    await gate.sendErc20Transfer(chainId, token, to, amount);
-  });
+  registry.setEvmTransfer(
+    func(chainId : Nat, token : Text, to : Text, amount : Nat) : async {
+      #confirmed : Text;
+      #reverted : Text;
+      #pending : Text;
+      #err : Text;
+    } {
+      // B2: confirmed transfer — the registry finalizes #Settled/#Refunded only after the
+      // on-chain transfer is confirmed mined, not on a mempool ack.
+      await gate.sendErc20TransferConfirmed(chainId, token, to, amount);
+    }
+  );
 
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
