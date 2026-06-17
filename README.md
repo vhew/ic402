@@ -124,6 +124,7 @@ Client provides nonce+gas → canister signs tx → client broadcasts
 | **x402 charges** | Standard HTTP 402, works with any x402 client |
 | **Streaming sessions** | Escrow + Ed25519 vouchers, 5,000x cheaper than per-call |
 | **Paid services** | Coordinator pattern: escrow, assign, verify (ZK/hash/buyer), settle |
+| **Cross-rail settlement** | Marketplace jobs and streaming sessions settle/refund on their native rail — ICP from the pool, or on-chain to the EVM payout address (confirmed broadcast) |
 | **EIP-712 signing** | Generic typed data signing — DEX agent wallets, permits, any EIP-712 protocol |
 | **5 EVM chains** | Base, Ethereum, Avalanche, Optimism, Arbitrum |
 | **Remote signing** | Canister signs, client broadcasts — no EVM RPC dependency for outbound |
@@ -166,6 +167,17 @@ pnpm demo           # interactive walkthrough (10 steps)
 
 </details>
 
+## Testing
+
+| Command | Covers |
+|---------|--------|
+| `mops test` | Motoko unit suites (16: gateway, sessions, escrow, serviceregistry, evmverify, evmsender, evmescrow, evmaddress, evmutils, eip712, nonce, policy, grant, contentstore, httphandler, utils) |
+| `pnpm test:client` | TypeScript client SDK (`@ic402/client`, vitest) |
+| `pnpm exec vitest run` | Root vitest — MCP guards + SSRF/security units (source-imported), plus the integration suite |
+| `pnpm test:integration` | Replica-backed end-to-end (needs `pnpm setup:local`) |
+
+The integration suite returns early (green) when no local replica is reachable. Set `IC402_REQUIRE_REPLICA=1` to turn that silent skip into a hard failure — CI does not set it today, so the replica-backed assertions are not enforced in CI.
+
 ## API Reference
 
 ### Gateway
@@ -173,12 +185,14 @@ pnpm demo           # interactive walkthrough (10 steps)
 | Method | Description |
 |--------|-------------|
 | `requireAll(amount)` | Generate ICP + all EVM payment requirements |
-| `settle(signature)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM) |
+| `settle(signature, expectedAmount?)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM); `expectedAmount` binds the on-chain amount on the facilitator path |
+| `verifyPayment(signature, expectedAmount, payTo, asset)` | Off-chain x402 verify verdict (`{isValid, invalidReason?, payer?}`) — no nonce, no broadcast, EVM only |
 | `offerSession(intent)` | Create session offer |
 | `openSession(...)` | Deposit escrow, create session |
 | `consumeVoucher(voucher)` | Verify + consume session voucher |
 | `closeSession(caller, id)` | Settle consumed, refund remainder |
 | `setPolicy(caller?, policy)` | Set spending policy |
+| `getGlobalPolicy()` | Read back the live global spending policy (example exposes it as the `getPolicyConfig` query) |
 | `issueGrant(...)` / `verifyGrant(caller, grant)` | HMAC access grants (non-transferable — `caller` must equal `grant.grantee`) |
 | `startTimers<system>()` | Start background timers |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
@@ -258,11 +272,29 @@ These primitives enable consumers to build EIP-712 messages for any protocol (Hy
 
 | Method | Description |
 |--------|-------------|
-| `http402(requirements)` | Build HTTP 402 response |
+| `http402(requirements, resourceUrl)` | Build HTTP 402 response (x402 v2 `PaymentRequired`) |
+| `paymentRequiredJson(requirements, resourceUrl, errorMsg?)` | Render the v2 `PaymentRequired` JSON object |
+| `http402WithSettlement(settlementJson)` | 402 carrying a v2 `SettlementResponse` (settlement failure on a paid request) |
+| `settlementResponseJson(success, txHash?, network, payer, amount, errorReason?)` | Render the v2 `SettlementResponse` (emitted in `PAYMENT-RESPONSE`) |
+| `verifyResponseJson(isValid, invalidReason?, payer?)` | Render the facilitator `POST /verify` response |
+| `discoveryItemJson(resourceUrl, resType, acceptsJson)` | One entry in the `GET /discovery/resources` listing |
 | `http200Json(json)` / `http200(body, mimeType)` | Build HTTP 200 |
 | `http202Json(json)` | Build HTTP 202 Accepted (async services) |
 | `httpUpgrade()` | Signal upgrade to update call |
 | `parseX402PaymentHeader(base64)` | Parse x402 v2 header |
+
+### x402 facilitator (self-hosted)
+
+The canister IS the facilitator — it advertises and settles its own payments, no third party. The example ([`example/main.mo`](example/main.mo)) wires the standard v2 facilitator endpoints over HTTP:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /supported` | Advertise the `(x402Version, scheme, network)` kinds it can settle + signer address (`Gateway.supportedJson`) |
+| `POST /verify` | Off-chain authorization verdict (`Gateway.verifyPayment` → `verifyResponseJson`) |
+| `POST /settle` | Broadcast + settle on-chain (`Gateway.settle` → `settlementResponseJson`) |
+| `GET /discovery/resources` | List paid resources with their v2 `accepts[]` (Bazaar discovery, non-minting) |
+
+See [`docs/x402-compliance.md`](docs/x402-compliance.md) for the full v2 conformance status of the EVM rail.
 
 ## Project structure
 

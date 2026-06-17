@@ -61,12 +61,12 @@ security audit and `CHANGELOG.md` for what shipped.
 
 - [x] AUDIT.md reconciled (header/banner/remediation-status — 2026-06-16).
 - [x] CHANGELOG.md:9 false "root still 0.1.0" claim corrected.
-- [ ] **README.md** API tables are stale (`settle(signature)` → `settle(signature,
-  expectedAmount?)`; `http402(requirements)` → `+resourceUrl`) and omit every v2.1.0
-  feature (facilitator endpoints, `getPolicyConfig`, `verifyPayment`, new HttpHandler
-  helpers). No test-running section.
-- [ ] Add **`integrations/mcp/README.md`** (tool inventory + security model) and a
-  top-level **`SECURITY.md`** (remediation status, WASM pinning, disclosure contact).
+- [x] **README.md** brought current with v2.1.0 — fixed the stale `settle`/`http402`
+  signatures, added the facilitator endpoints + `getPolicyConfig`/`verifyPayment` + the
+  new HttpHandler helpers, and added a Testing section.
+- [x] Added **`integrations/mcp/README.md`** (tool inventory + security model) and a
+  top-level **`SECURITY.md`** (remediation status, threat models, WASM pinning, disclosure).
+  Note: SECURITY.md leaves a `[maintainer: set a security contact]` placeholder to fill.
 - [ ] Add per-finding `STATUS:` annotations inline in AUDIT.md (currently summarized in
   the Remediation-status table only).
 
