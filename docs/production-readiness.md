@@ -71,11 +71,16 @@ security audit and `CHANGELOG.md` for what shipped.
 - [~] **SEC-1 — PARTIAL (v2.1.1).** Rate-limit/gate the unauthenticated facilitator **update**
   endpoints (`POST /verify`, `/settle`): they run in `http_request_update` (cost the canister
   cycles) and parse attacker JSON before any policy rate-limit → **cycle/DoS** surface.
-  (No theft — C-1 binding holds — but spam is unmetered.) **DONE:** the unbounded-state half is
-  closed — `policy.gcRateLimit()` is now wired into the hourly maintenance timer (it existed but
-  was never called, so `rateLimitLog` grew unbounded under attacker-minted payer principals).
-  **Still open:** a pre-policy global cycle/rate guard ahead of the ecrecover/RPC work, and
-  `canister_inspect_message`.
+  (No theft — C-1 binding holds — but spam is unmetered.) **DONE (v2.1.1):** (1) `policy.gcRateLimit()`
+  wired into the hourly timer (closes the unbounded-`rateLimitLog` growth under attacker-minted
+  principals); (2) a **GLOBAL caller-agnostic admission gate** — `Gateway.facilitatorAdmit()` (pure,
+  unit-tested `tokenBucketStep` + a 500B cycle floor) runs FIRST in the `/verify`+`/settle` branch,
+  before the body parse / ecrecover / settle, returning 429/503. The bucket keys on nothing, so the
+  attacker can't mint fresh per-`from` buckets; the floor (above the 120B broadcast floor) self-
+  disables the facilitator before a drain reaches freezing. Adversarially reviewed SAFE/EFFECTIVE.
+  **Still open (follow-up, lesser):** the paid `/content`/`/search`/`/service` settle paths run
+  ecrecover on attacker input without the global gate (same drain class, but they require a parseable
+  payment header) — extend the gate to them; and (optional) `canister_inspect_message` to bound ingress.
 - [ ] **SEC-2** — `getFeeData` hostile-RPC grief-park: one persistently bad provider can
   park every EVM close/settle (max-base-fee picks the outlier; the 10k-gwei ceiling
   bounds but doesn't eliminate). Ship a recovery path (`recoverEscrow`/confirm-only

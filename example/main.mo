@@ -362,6 +362,14 @@ persistent actor KnowledgeBase {
     // x402 v2 facilitator endpoints (POST { paymentPayload, paymentRequirements }).
     // /verify validates the exact/EVM authorization off-chain; /settle broadcasts on-chain.
     if (path == "/verify" or path == "/settle") {
+      // SEC-1: GLOBAL rate + cycle gate BEFORE parsing attacker JSON or running ecrecover/settle.
+      // These unauthenticated endpoints run in the update context (cost cycles); the per-caller
+      // policy limit is bypassable, so gate the TOTAL facilitator rate here, caller-agnostic.
+      switch (gate.facilitatorAdmit()) {
+        case (#ok) {};
+        case (#throttled) { return Http.httpError(429, "Facilitator rate limit exceeded — retry shortly") };
+        case (#lowCycles) { return Http.httpError(503, "Facilitator temporarily unavailable (canister low on cycles)") };
+      };
       let body = switch (Text.decodeUtf8(request.body)) {
         case (?t) { t };
         case (null) { return Http.httpError(400, "Invalid request body") };

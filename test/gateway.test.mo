@@ -92,3 +92,42 @@ suite("Gateway.verifyPayment", func() {
     assert(v.invalidReason == ?"invalid_exact_evm_payload_authorization_value_mismatch");
   });
 });
+
+// ── SEC-1: global facilitator rate gate (pure token bucket) ──
+suite("Gateway.tokenBucketStep", func() {
+  let SEC : Int = 1_000_000_000;
+
+  test("full bucket admits and decrements one token", func() {
+    let r = Gateway.tokenBucketStep(10, 0, 0, 10, 2);
+    assert(r.admit);
+    assert(r.tokens == 9);
+  });
+
+  test("empty bucket with no elapsed time throttles", func() {
+    let r = Gateway.tokenBucketStep(0, 0, 0, 10, 2);
+    assert(not r.admit);
+    assert(r.tokens == 0);
+  });
+
+  test("refills by whole-seconds * rate, capped at capacity", func() {
+    let r = Gateway.tokenBucketStep(0, 0, 5 * SEC, 10, 2); // 5s * 2 = 10 refilled
+    assert(r.admit);
+    assert(r.tokens == 9);
+    let big = Gateway.tokenBucketStep(0, 0, 100 * SEC, 10, 2); // would be 200; capped at 10
+    assert(big.tokens == 9); // 10 refilled, 1 consumed — never unbounded
+  });
+
+  test("fractional second carries over (lastRefill advances by whole seconds only)", func() {
+    let r = Gateway.tokenBucketStep(0, 0, 1_500_000_000, 10, 2); // 1.5s -> credit 1s (2 tokens)
+    assert(r.admit);
+    assert(r.tokens == 1);
+    assert(r.lastRefill == SEC); // advanced by 1s, not 1.5s — the 0.5s is not lost
+  });
+
+  test("a burst depletes the bucket then throttles (no refill within the instant)", func() {
+    let c1 = Gateway.tokenBucketStep(2, 0, 0, 2, 1);
+    let c2 = Gateway.tokenBucketStep(c1.tokens, c1.lastRefill, 0, 2, 1);
+    let c3 = Gateway.tokenBucketStep(c2.tokens, c2.lastRefill, 0, 2, 1);
+    assert(c1.admit and c2.admit and not c3.admit);
+  });
+});

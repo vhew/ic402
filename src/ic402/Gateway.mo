@@ -28,8 +28,27 @@ import EvmSender "EvmSender";
 import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
 import Debug "mo:base/Debug";
+import Cycles "mo:base/ExperimentalCycles";
 
 module {
+
+  /// SEC-1: pure token-bucket step (module-level → unit-testable). Refills `tokens` by the WHOLE
+  /// seconds elapsed since `lastRefill` (× refillPerSec, capped at `capacity`), advancing
+  /// `lastRefill` only by the credited whole seconds so fractional time carries over, then admits
+  /// one token if available. Used as a GLOBAL (caller-agnostic) gate on the facilitator endpoints.
+  public func tokenBucketStep(tokens : Nat, lastRefill : Int, now : Int, capacity : Nat, refillPerSec : Nat) : {
+    tokens : Nat;
+    lastRefill : Int;
+    admit : Bool;
+  } {
+    let elapsedNs : Int = if (now > lastRefill) { now - lastRefill } else { 0 };
+    let wholeSec : Int = elapsedNs / 1_000_000_000;
+    let refilled : Nat = Nat.min(capacity, tokens + Int.abs(wholeSec) * refillPerSec);
+    let newLastRefill : Int = lastRefill + wholeSec * 1_000_000_000;
+    if (refilled >= 1) { { tokens = refilled - 1; lastRefill = newLastRefill; admit = true } } else {
+      { tokens = refilled; lastRefill = newLastRefill; admit = false };
+    };
+  };
 
   /// Main payment gateway. Orchestrates charges, sessions, grants, escrow, and policy.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
@@ -47,6 +66,29 @@ module {
     var receiptCounter : Nat = 0;
     // Self-derived EVM address (from tECDSA key). Populated by deriveEvmRecipient().
     var evmRecipient : ?Text = null;
+
+    // SEC-1: a GLOBAL (caller-agnostic) admission gate for the UNAUTHENTICATED facilitator update
+    // endpoints (POST /verify, /settle). The per-caller policy rate limit is bypassable — an
+    // attacker varies the EVM `from`/derived principal to mint fresh buckets — so this is keyed on
+    // NOTHING: one shared token bucket caps the TOTAL facilitator-update rate, plus a cycle floor
+    // so the canister stops doing attacker-triggerable ecrecover/RPC/sign work well before it can
+    // be drained toward the freezing threshold. Transient (resets full on upgrade).
+    let FACILITATOR_BUCKET_CAPACITY : Nat = 60; // burst allowance
+    let FACILITATOR_REFILL_PER_SEC : Nat = 2; // 120/min sustained, GLOBAL
+    let FACILITATOR_MIN_CYCLES : Nat = 500_000_000_000; // refuse facilitator work below ~500B
+    var facilitatorTokens : Nat = 60;
+    var facilitatorLastRefill : Int = 0;
+
+    /// SEC-1 gate — call BEFORE parsing the facilitator body or running verifyPayment/settle.
+    /// Returns #throttled when the global rate is exceeded, #lowCycles when the balance is below
+    /// the floor (so an attacker can't drain the canister via the unmetered facilitator path).
+    public func facilitatorAdmit() : { #ok; #throttled; #lowCycles } {
+      if (Cycles.balance() < FACILITATOR_MIN_CYCLES) { return #lowCycles };
+      let step = tokenBucketStep(facilitatorTokens, facilitatorLastRefill, Time.now(), FACILITATOR_BUCKET_CAPACITY, FACILITATOR_REFILL_PER_SEC);
+      facilitatorTokens := step.tokens;
+      facilitatorLastRefill := step.lastRefill;
+      if (step.admit) { #ok } else { #throttled };
+    };
 
     let sessionsMgr = SessionsMod.Sessions(
       selfPrincipal, config, policy, escrowManager,
