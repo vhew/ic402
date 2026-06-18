@@ -261,6 +261,12 @@ module {
         }, {
           url = "https://avalanche-fuji-c-chain-rpc.publicnode.com";
           headers = null;
+        }, {
+          // NEW-4: a 3rd provider so 2-of-3 responseConsensus tolerates ONE flaky/down RPC.
+          // With 2-of-2 a single failing provider parked every settle/close on this chain.
+          // (Security is unchanged: receipts still need 2 providers to AGREE, just not these 2.)
+          url = "https://avalanche-fuji.drpc.org";
+          headers = null;
         }];
       });
     };
@@ -275,6 +281,9 @@ module {
         }, {
           url = "https://base-sepolia-rpc.publicnode.com";
           headers = null;
+        }, {
+          url = "https://base-sepolia.drpc.org"; // NEW-4: 3rd provider → 2-of-3 resilience
+          headers = null;
         }];
       });
     };
@@ -287,6 +296,9 @@ module {
         }, {
           url = "https://optimism-sepolia-rpc.publicnode.com";
           headers = null;
+        }, {
+          url = "https://optimism-sepolia.drpc.org"; // NEW-4: 3rd provider → 2-of-3 resilience
+          headers = null;
         }];
       });
     };
@@ -298,6 +310,9 @@ module {
           headers = null;
         }, {
           url = "https://arbitrum-sepolia-rpc.publicnode.com";
+          headers = null;
+        }, {
+          url = "https://arbitrum-sepolia.drpc.org"; // NEW-4: 3rd provider → 2-of-3 resilience
           headers = null;
         }];
       });
