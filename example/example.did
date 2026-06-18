@@ -349,6 +349,10 @@ service : {
                                 });
   endSession: (sessionId: text) -> (PaymentResult);
   forceCloseSession: (sessionId: text) -> (PaymentResult);
+  forceResolveSession: (sessionId: text) -> (variant {
+                                               err: text;
+                                               ok;
+                                             });
   getAgentCard: () -> (AgentCard) query;
   getAgentId: () -> (opt nat) query;
   getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
@@ -364,11 +368,33 @@ service : {
   getJobResult: (jobId: text) -> (opt blob) query;
   getJobStatus: (jobId: text) -> (opt JobStatus) query;
   getPolicyConfig: () -> (SpendingPolicy) query;
+  health: () ->
+   (record {
+      cyclesBalance: nat;
+      jobs:
+       record {
+         active: nat;
+         expired: nat;
+         refunded: nat;
+         settled: nat;
+         settling: nat;
+         total: nat;
+       };
+      sessions:
+       record {
+         closed: nat;
+         closing: nat;
+         expired: nat;
+         open: nat;
+         total: nat;
+       };
+    }) query;
   http_request: (request: HttpRequest) -> (HttpResponse) query;
   http_request_update: (request: HttpRequest) -> (HttpResponse);
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   keccak256: (data: vec nat8) -> (vec nat8) query;
   listContent: () -> (vec ContentEntry) query;
+  listJobs: (serviceId: text, statusFilter: opt JobStatus) -> (vec Job) query;
   listServices: () -> (vec ServiceDefinition) query;
   openSession: (config: SessionConfig, sig: PaymentSignature) ->
    (variant {
@@ -395,6 +421,10 @@ service : {
                        ok: text;
                      });
   requestSession: () -> (SessionIntent);
+  resolveJob: (jobId: text, terminal: JobStatus) -> (variant {
+                                                       err: text;
+                                                       ok;
+                                                     });
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;

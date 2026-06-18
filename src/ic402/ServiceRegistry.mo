@@ -836,6 +836,30 @@ module {
     /// bound: an attacker-cheap state-exhaustion / upgrade-brick vector. Synchronous so it is
     /// directly unit-testable and can also be driven from the maintenance timer. Returns the
     /// number of jobs removed.
+    /// Operator escape hatch for a job STUCK in #Settling (an outbound EVM settle/refund that
+    /// broadcast but never confirmed within the poll budget). The operator verifies the on-chain
+    /// outcome THEMSELVES, then forces the job to a terminal state so it stops pinning memory and
+    /// becomes GC-eligible. This is a STATE assertion only — it moves NO funds; if the parked
+    /// transfer never landed, the operator must reconcile the funds out-of-band (or via an EVM
+    /// sweep). The consumer MUST gate this on Principal.isController. (A future confirm-only
+    /// reconcileJob would automate the on-chain check; this is the manual remedy.)
+    public func resolveJob(jobId : Text, terminal : Types.JobStatus) : { #ok; #err : Text } {
+      let job = switch (jobs.get(jobId)) {
+        case (null) { return #err("Job not found") };
+        case (?j) { j };
+      };
+      if (job.status != #Settling) {
+        return #err("Job is not stuck in #Settling (status: " # debug_show (job.status) # ")");
+      };
+      switch (terminal) {
+        case (#Settled or #Refunded or #Expired) {
+          jobs.put(jobId, { job with status = terminal; completedAt = ?Time.now() });
+          #ok;
+        };
+        case (_) { #err("resolveJob target must be a terminal status (#Settled / #Refunded / #Expired)") };
+      };
+    };
+
     public func gcTerminalJobs() : Nat {
       let gcCutoff = Time.now() - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
       let staleJobs = Buffer.Buffer<Text>(8);
@@ -853,6 +877,27 @@ module {
       };
       for (id in staleJobs.vals()) { jobs.delete(id); evmJobRail.delete(id) };
       staleJobs.size();
+    };
+
+    /// Observability (NEW-4): counts of jobs by status for an operator health view.
+    /// `settling` is the parked / in-flight-settlement count — a non-zero, non-decreasing
+    /// `settling` means funds are parked mid-settlement (an EVM transfer that broadcast but
+    /// hasn't confirmed); that's the metric to watch and reconcile.
+    public func jobCounts() : {
+      total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat;
+    } {
+      var total = 0; var settling = 0; var settled = 0; var refunded = 0; var expired = 0; var active = 0;
+      for ((_, job) in jobs.entries()) {
+        total += 1;
+        switch (job.status) {
+          case (#Settling) { settling += 1 };
+          case (#Settled) { settled += 1 };
+          case (#Refunded) { refunded += 1 };
+          case (#Expired) { expired += 1 };
+          case (_) { active += 1 };
+        };
+      };
+      { total; settling; settled; refunded; expired; active };
     };
 
     /// Start the job expiry timer. Call once at canister init.

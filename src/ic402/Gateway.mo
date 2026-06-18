@@ -842,6 +842,10 @@ module {
       // Garbage-collect stale policy data and revoked grants every hour
       ignore Timer.recurringTimer<system>(#seconds 3600, func() : async () {
         policy.gcDailySpend();
+        // SEC-1: rateLimitLog is keyed on the (attacker-influenceable) payer principal on the
+        // unauthenticated /settle path, so it can grow unbounded without this GC. gcRateLimit
+        // was written for exactly this attack but was never wired to a timer — wire it here.
+        policy.gcRateLimit();
         grants.gcRevokedGrants();
       });
 
@@ -887,6 +891,20 @@ module {
     /// Get the current daily spend total for a caller.
     public func dailySpend(caller : Principal) : Nat {
       policy.getDailySpendAmount(caller);
+    };
+
+    /// Observability (NEW-4): session status counts (parked #closing sessions are the watch
+    /// metric — a deposit whose close broadcast but hasn't confirmed).
+    public func sessionCounts() : {
+      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat;
+    } {
+      sessionsMgr.sessionCounts();
+    };
+
+    /// Operator escape hatch: force a session stuck in #closing to a terminal state so it's
+    /// GC-eligible (state assertion only — moves no funds). Controller-gate at the consumer.
+    public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
+      sessionsMgr.forceResolveSession(sessionId);
     };
 
     // ── Content Delivery (delegates to Grants module) ──

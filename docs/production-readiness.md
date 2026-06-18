@@ -29,7 +29,9 @@ security audit and `CHANGELOG.md` for what shipped.
   budget. `pnpm setup:local` now completes clean end-to-end (example installs, tECDSA EVM recipient
   derives, test-payer funded) — confirming no IC0505 and no crypto rewrite. A loop-based
   SHA-256/Keccak rewrite was NOT needed.
-- [ ] **B1 — Upgrade incompatibility from v2.0.0 (undocumented).** `main.mo` is a
+- [~] **B1 — Upgrade incompatibility from v2.0.0 — WAIVED for the single-operator deploy.**
+  The operator accepts a state-dropping fresh deploy (the library has no external consumers
+  relying on in-place upgrade), so this is not a blocker for that context. Original note: `main.mo` is a
   `persistent actor` (EOP); v2.1.0 added stable fields (`evmRails`/`operatorPayouts`,
   optional) and a required `bindResult` to `#ZkGroth16`, so an in-place upgrade is
   rejected (M0170 — verified with `moc --stable-compatible`). No migration function; a
@@ -66,10 +68,14 @@ security audit and `CHANGELOG.md` for what shipped.
   (`/verify`, `/settle`, `/supported`, `/discovery`), the marketplace cross-rail
   settle/refund, the EVM session close, and the 7 new MCP admin tools. *(Requested
   explicitly.)* Specifically cover SEC-1..3 below as part of it.
-- [ ] **SEC-1** — Rate-limit/gate the unauthenticated facilitator **update** endpoints
-  (`POST /verify`, `/settle`): they run in `http_request_update` (cost the canister
+- [~] **SEC-1 — PARTIAL (v2.1.1).** Rate-limit/gate the unauthenticated facilitator **update**
+  endpoints (`POST /verify`, `/settle`): they run in `http_request_update` (cost the canister
   cycles) and parse attacker JSON before any policy rate-limit → **cycle/DoS** surface.
-  (No theft — C-1 binding holds — but spam is unmetered.)
+  (No theft — C-1 binding holds — but spam is unmetered.) **DONE:** the unbounded-state half is
+  closed — `policy.gcRateLimit()` is now wired into the hourly maintenance timer (it existed but
+  was never called, so `rateLimitLog` grew unbounded under attacker-minted payer principals).
+  **Still open:** a pre-policy global cycle/rate guard ahead of the ecrecover/RPC work, and
+  `canister_inspect_message`.
 - [ ] **SEC-2** — `getFeeData` hostile-RPC grief-park: one persistently bad provider can
   park every EVM close/settle (max-base-fee picks the outlier; the 10k-gwei ceiling
   bounds but doesn't eliminate). Ship a recovery path (`recoverEscrow`/confirm-only
@@ -77,9 +83,43 @@ security audit and `CHANGELOG.md` for what shipped.
 - [ ] **SEC-3** — MCP admin tools (`register_service`, `enable_service`, `claim_job`,
   `submit_job_result`, `upload_content`) are **default-enabled**, gated only by an in-band
   `confirm` flag a prompt-injected LLM can set. Re-examine the trust model.
-- [ ] **SEC-4** — `getPolicyConfig` is a public query returning the full `SpendingPolicy`
-  incl. `allowedCallers`/`blockedCallers`; decide whether to redact the access-control
-  roster (null in the example, but a footgun for real operators).
+- [x] **SEC-4 — FIXED (v2.1.1).** `getPolicyConfig` now redacts `allowedCallers`/
+  `blockedCallers` (returns them null), so the public query no longer exposes the access-control
+  roster; the spend limits (non-secret — advertised in the 402 challenge) still read back.
+
+## Stuck-state recovery & operability (fresh assessment 2026-06-18)
+
+A grounded re-assessment (single-operator, real-funds context, B1 waived) confirmed there is
+**no money-theft path** (recipient binding, `value==amount`, nonce lock, confirm-before-finalize
+all hold). The real remaining gap is **recoverability + observability of funds that get STUCK** —
+a direct consequence of the B2 fix (it correctly stopped finalizing on unconfirmed broadcasts, so
+a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling` / the session in
+`#closing`).
+
+- [x] **Observability — DONE (v2.1.1).** Controller-only `health()` (cycle balance + job/session
+  status counts; watch `jobs.settling` / `sessions.closing`) and `listJobs(serviceId, ?status)`.
+  The operator can now SEE parked funds.
+- [x] **Manual recovery escape hatch — DONE (v2.1.1).** Controller-only `resolveJob(jobId,
+  terminal)` (a `#Settling` job → `#Settled`/`#Refunded`/`#Expired`) and `forceResolveSession`
+  (a `#closing` session → `#closed`). **State assertion only — moves no funds**: the operator
+  verifies the on-chain outcome, then unsticks the record so it stops pinning memory and becomes
+  GC-eligible. Funds for a never-landed transfer are reconciled out-of-band (or via EVM sweep).
+- [ ] **Auto confirm-only reconcile — TODO (designed).** Persist the parked tx hash + leg on the
+  Job/Session (stable-field addition; fine under the B1 fresh-deploy waiver) and add
+  `reconcileJob`/`reconcileSession` that re-poll the stored hash via a **read-only** confirm hook
+  and finalize ONLY on a mined `status==1` — never re-broadcast (re-broadcast risks double-pay).
+- [ ] **`sweepEvm(chainId, token, to, amount)` — TODO.** Controller-only escape hatch to drain the
+  canister's EVM balance (key/subnet-compromise response, or to settle a never-landed refund),
+  reusing the confirmed-transfer sender.
+- [ ] **Cycle-balance guard — TODO.** Each EVM settle burns ~60B cycles over ~6 HTTPS outcalls; add
+  a pre-settle floor check so the canister never broadcasts a transfer it can't afford to confirm
+  (a freeze mid-settle is what parks funds). `health()` now surfaces the balance.
+- [ ] **Confirmation depth / reorg — TODO.** `status==1` is treated as final with no confirmation
+  depth; require N confs on deposits + outbound confirms. Low probability, real on L2s.
+- [ ] **2-provider chains park on one flaky RPC — TODO (broader than SEC-2).** 2-of-2 consensus on
+  the nonce/broadcast path means one bad provider parks every settle (testnets + any 2-provider
+  chain; mainnet Base/ETH/OP/Arb use resilient 2-of-3). Add a 3rd provider / provider-count-aware
+  min + operator RPC override; pairs with the reconcile path above.
 
 ## Docs (some stale / missing)
 

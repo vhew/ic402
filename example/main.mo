@@ -16,6 +16,7 @@ import Nat "mo:base/Nat";
 import Int "mo:base/Int";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
+import Cycles "mo:base/ExperimentalCycles";
 
 persistent actor KnowledgeBase {
 
@@ -867,6 +868,13 @@ persistent actor KnowledgeBase {
     registry.getJob(jobId);
   };
 
+  // Observability (controller-only): list a service's jobs, optionally filtered by status —
+  // e.g. statusFilter = ?#Settling to enumerate jobs parked mid-settlement.
+  public shared query (msg) func listJobs(serviceId : Text, statusFilter : ?Ic402.JobStatus) : async [Ic402.Job] {
+    assert(Principal.isController(msg.caller));
+    registry.listJobs(serviceId, statusFilter);
+  };
+
   public query func getJobResult(jobId : Text) : async ?Blob {
     registry.getJobResult(jobId);
   };
@@ -995,12 +1003,48 @@ persistent actor KnowledgeBase {
   // challenge anyway) and this lets clients/the demo display the in-canister policy
   // instead of hardcoding it.
   public query func getPolicyConfig() : async Ic402.SpendingPolicy {
-    gate.getGlobalPolicy();
+    // SEC-4: this is a PUBLIC query, so redact the access-control roster — the spend
+    // limits are non-secret (advertised in the 402 challenge) but allowedCallers /
+    // blockedCallers are an access-control list that shouldn't be world-readable.
+    let p = gate.getGlobalPolicy();
+    { p with allowedCallers = null; blockedCallers = null };
+  };
+
+  // Operator health / metrics (controller-only): cycle balance + job/session status counts.
+  // NEW-4 observability: watch `jobs.settling` and `sessions.closing` — those are funds parked
+  // mid-settlement (an EVM transfer that broadcast but hasn't confirmed). Each EVM settle burns
+  // ~60B cycles across ~6 outcalls, so cyclesBalance is the other key thing to watch.
+  public shared query (msg) func health() : async {
+    cyclesBalance : Nat;
+    jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat };
+    sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat };
+  } {
+    assert(Principal.isController(msg.caller));
+    {
+      cyclesBalance = Cycles.balance();
+      jobs = registry.jobCounts();
+      sessions = gate.sessionCounts();
+    };
   };
 
   public shared(msg) func forceCloseSession(sessionId : Text) : async Ic402.PaymentResult {
     assert(Principal.isController(msg.caller));
     await gate.forceCloseSession(sessionId);
+  };
+
+  // Operator escape hatches (controller-only) for funds parked mid-settlement. Use `health`/
+  // `listJobs` to find them, verify the on-chain outcome yourself, then force the record to a
+  // terminal state so it stops pinning memory. STATE assertion only — these move NO funds; if a
+  // parked transfer never landed, reconcile the funds out-of-band. (Automated confirm-only
+  // reconcile is the planned next step.)
+  public shared(msg) func resolveJob(jobId : Text, terminal : Ic402.JobStatus) : async { #ok; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    registry.resolveJob(jobId, terminal);
+  };
+
+  public shared(msg) func forceResolveSession(sessionId : Text) : async { #ok; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    gate.forceResolveSession(sessionId);
   };
 
   public shared query (msg) func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {

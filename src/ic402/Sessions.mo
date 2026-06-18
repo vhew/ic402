@@ -791,6 +791,42 @@ module {
     };
 
     /// H-1: Remove closed/expired sessions older than the retention period from memory.
+    /// Observability (NEW-4): counts of sessions by status. `closing` is the parked count —
+    /// an EVM session close that broadcast a settle/refund but hasn't confirmed; a non-zero,
+    /// non-decreasing `closing` means a client deposit is parked mid-close and needs attention.
+    public func sessionCounts() : {
+      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat;
+    } {
+      var total = 0; var nOpen = 0; var nClosing = 0; var nClosed = 0; var nExpired = 0;
+      for ((_, s) in sessions.entries()) {
+        total += 1;
+        switch (s.status) {
+          case (#open) { nOpen += 1 };
+          case (#closing) { nClosing += 1 };
+          case (#closed) { nClosed += 1 };
+          case (#expired) { nExpired += 1 };
+        };
+      };
+      { total; open = nOpen; closing = nClosing; closed = nClosed; expired = nExpired };
+    };
+
+    /// Operator escape hatch for a session STUCK in #closing (an EVM close whose settle/refund
+    /// broadcast but never confirmed). State assertion only — moves NO funds; the operator
+    /// reconciles the EVM pool out-of-band. Forces the session to #closed so GC can reclaim it.
+    /// The consumer MUST gate this on Principal.isController.
+    public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
+      switch (sessions.get(sessionId)) {
+        case (null) { #err("Session not found") };
+        case (?s) {
+          if (s.status != #closing) {
+            return #err("Session is not stuck in #closing (status: " # debug_show (s.status) # ")");
+          };
+          s.status := #closed;
+          #ok;
+        };
+      };
+    };
+
     /// Called after closeExpiredSessions to prevent unbounded HashMap growth.
     public func gcClosedSessions() {
       let retentionNanos = 24 * 60 * 60 * 1_000_000_000; // 24 hours
