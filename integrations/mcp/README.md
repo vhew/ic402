@@ -10,10 +10,10 @@ The server identifies itself to MCP clients as:
 
 ```
 name:    ic402
-version: 2.1.0
+version: 2.1.1
 ```
 
-(see `src/index.ts`, the `new McpServer({ name: 'ic402', version: '2.1.0' })` registration).
+(see `src/index.ts`, the `new McpServer({ name: 'ic402', version: '2.1.1' })` registration).
 
 > **Security note up front.** This server is driven by an LLM whose inputs may be influenced by
 > untrusted web content (prompt injection) while it holds a controller identity capable of
@@ -315,5 +315,5 @@ When `allowSecurityChanges` or `allowDangerousTools` is enabled, the banner adds
   `resolveSecurityConfig`, `isToolAllowed` / `DANGEROUS_TOOLS`, `resolveOperatorConfig`.
 - `src/security.ts` — pure SSRF validation (`validateFetchUrl` and the IPv4/IPv6 helpers) and the
   redirect-safe `safeFetch`.
-- `package.json` — `@ic402/mcp` v2.1.0; `build` runs `tsc`, `start` runs `node dist/index.js`,
+- `package.json` — `@ic402/mcp` v2.1.1; `build` runs `tsc`, `start` runs `node dist/index.js`,
   and the `ic402-mcp` bin maps to `dist/index.js`.

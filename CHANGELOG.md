@@ -1,5 +1,76 @@
 # Changelog
 
+## v2.1.1 — 2026-06-17
+
+Patch release. Makes the example canister installable on the current IC (the
+critical fix), confirms outbound EVM transfers before finalizing, fixes four
+issues found running the demo end-to-end on Base Sepolia, and surfaces on-chain
+settlement proof on content delivery. No wire/HTTP or `@ic402/client` breaking
+changes; two Motoko-library breaking changes for direct consumers (below).
+
+### Breaking (Motoko library — direct consumers only)
+
+- **`ServiceRegistry.EvmTransferFn`** return type widened from `{#ok; #err}` to
+  `{#confirmed; #reverted; #pending; #err}` (the B2 confirmation fix). A canister
+  that wires the marketplace EVM-transfer hook via `setEvmTransfer` must update
+  its callback's return type — no shim. `Gateway`/`EvmSender` gained a matching
+  `sendErc20TransferConfirmed` (tri-state); the old `sendErc20Transfer` is retained.
+- **`Types.ContentDelivery`** gained a `settlementTxHash : ?Text` field, so Motoko
+  code *constructing* a `ContentDelivery` must supply it. Readers are unaffected,
+  and the Candid / `@ic402/client` decoders treat it as additive.
+
+### Fixed
+
+- **Installability (critical):** the example WASM was rejected at install time —
+  `moc` unrolls `mo:sha2`'s SHA-256 compressor into **2081 Wasm locals** in one
+  function, over the IC's 2000-locals-per-function limit (IC0505). The build now
+  runs `wasm-opt -O` (binaryen ≥ v130) to coalesce them (2081 → 96 locals);
+  `setup.sh` installs the optimized module, and a `wasm-locals` CI job +
+  `scripts/check-wasm-locals.js` gate it. No crypto rewrite. (B0)
+- **Outbound settlement confirmation:** marketplace `settleJob`/`refundOnRail`
+  and EVM session close now confirm the transfer mined (`status==1`) before
+  finalizing `#Settled`/`#Refunded`/`#closed` — an unconfirmed or reverted
+  broadcast no longer marks a job/session paid. `EvmSender.sendTransaction`
+  distinguishes maybe-broadcast from pre-broadcast failure to avoid double-pay. (B2)
+- **Demo Step 8 (Agent Identity):** raised the ERC-8004 register gas limit
+  (350k → 600k; a real mint needs ~396k) so it no longer reverts out-of-gas, and
+  the client SDK now throws on a reverted receipt so a revert is reported
+  honestly instead of as `register_agent succeeded / Awaiting confirmation`.
+- **Demo Step 4 (delete):** the post-delete payment probe encoded the nonce as
+  hex *characters* (Candid `Invalid vec nat8`) and mislabeled the result as a
+  replica outage; decode the nonce to bytes (clean rejection, no charge) and
+  report a paid-endpoint 402 as the expected gated response, not a warning.
+- **Demo Step 2:** corrected the content-encryption label to **ChaCha20-Poly1305
+  AEAD (RFC 8439)** — it had incorrectly said "SHA-256-CTR".
+- Integration test suite made deterministic vs replica state (binds to its own
+  registered service id, not a hardcoded `svc-1`). (P0)
+
+### Added
+
+- **`ContentDelivery.settlementTxHash : ?Text`** — `getContent` now returns the
+  on-chain settlement proof (EVM tx hash / ICP ledger block index) of the payment
+  that unlocked the content; the demo's Step 3 prints it. Added to the Motoko
+  library type (constructors must supply it — see Breaking), the `@ic402/client`
+  IDL/TS type, and the example `.did`.
+
+### Changed
+
+- Non-interactive demo (`IC402_DEMO_CI=1`) exercises the Base Sepolia EVM path by
+  default (override with `IC402_DEMO_DEFAULT_CHOICE=1`).
+- zk-verifier: the prebuilt deploy artifact moved to
+  `example/zk-verifier/prebuilt/zk_verifier.wasm.gz`; the Rust `target/` build
+  tree is no longer tracked (gitignored), so local builds stop dirtying the tree.
+- Docs: reconciled `AUDIT.md`, brought `README.md` current, added
+  `integrations/mcp/README.md`, `SECURITY.md`, and a production-readiness backlog
+  (`docs/production-readiness.md`).
+
+> **Not production-ready yet.** This patch closes B0/B2 and the demo issues, and
+> a funded Base Sepolia run now completes end-to-end (real `status==1` settle,
+> session close+refund, and an ERC-721 mint). Remaining blockers — B1 (upgrade
+> migration from v2.0.0), a Foundry-fork/CI replay for the EVM rail (B3), a
+> replica-backed CI job (B4), and the composed-system security pass (SEC-0..4) —
+> are tracked in `docs/production-readiness.md` and are **not** closed here.
+
 ## v2.1.0 — 2026-06-15
 
 x402 **v2 compliance**, the EVM/marketplace settlement paths, live policy

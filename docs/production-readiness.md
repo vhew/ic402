@@ -36,7 +36,7 @@ security audit and `CHANGELOG.md` for what shipped.
   fresh deploy drops all escrow/session/grant/nonce/registry state. **Do:** add a
   `migration` function **or** document a state-dropping fresh-deploy in the CHANGELOG
   (as v2.0.0 did). Under EOP you cannot add *any* stable field without a migration.
-- [ ] **B2 — Unconfirmed broadcast treated as settled (H1-class, new in v2.1.0).** The
+- [x] **B2 — Unconfirmed broadcast treated as settled (H1-class) — FIXED + VERIFIED (v2.1.1).** The
   EVM *outbound* paths (`ServiceRegistry.settleJob`/`refundOnRail`, Sessions EVM
   `closeEvmSessionInternal`) finalize state (`#Settled`/`#Refunded`/`#closed`) on mempool
   acceptance, without `confirmTransaction` — unlike the hardened inbound `Gateway.settle`.
@@ -45,6 +45,9 @@ security audit and `CHANGELOG.md` for what shipped.
   mirroring `executeTransferWithAuthorization`), widen the `EvmTransferFn` hook, and
   finalize only on `#confirmed` (park on pending via the existing `#closing`/`#Settling`
   idiom; reuse `#settlementPending`; **no new stable field/variant** — EOP-safe).
+  **Landed (f579545):** `sendErc20TransferConfirmed` tri-state added, `EvmTransferFn`
+  hook widened, and settle/refund/close finalize only on `#confirmed` — verified on
+  Base Sepolia this release (mined `status==1` settle + session close+refund).
 - [ ] **B3 — EVM rail never verified end-to-end.** No funded on-chain settle/close has
   ever completed through ic402's tECDSA sender. **Do:** one observed green settle + one
   green session close+refund on a funded clean-EOA payer (Base Sepolia), capturing mined
@@ -109,4 +112,4 @@ Mainnet constants correct (chain IDs, 5 USDC addresses, ckUSDC ledger, `key_1`, 
 canister); money-**theft** paths guarded (C-1 recipient binding, `value==amount`, local
 EIP-712 verify before broadcast, H-4 synchronous daily reservation, S-3 terminal close);
 unit-level math/guards well-pinned (16 mops + 72 client + MCP guard/security tests);
-cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.1.0.
+cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.1.1.

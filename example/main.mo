@@ -940,8 +940,9 @@ persistent actor KnowledgeBase {
       84532,
       identity.getCard(),
       // register(string,string,string,string[],string[],bool) writes 5 strings/arrays and
-      // emits AgentRegistered; 350_000 was insufficient and the tx reverted with gasUsed ==
-      // limit (out of gas). Raise the limit so a real registration mints successfully.
+      // emits AgentRegistered; 350_000 was insufficient (reverted out of gas, gasUsed ==
+      // limit). An observed successful mint on Base Sepolia used ~396,621 gas; 600_000
+      // gives headroom (unused gas is refunded — only consumed gas is charged).
       600_000,
       nonce,
       maxFeePerGas,
