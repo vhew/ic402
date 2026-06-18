@@ -43,12 +43,48 @@ module {
     cumulativeGasUsed : Nat;
   };
 
-  /// EVM RPC error.
+  /// EVM RPC error — a FAITHFUL mirror of evm_rpc.did's RpcError. These types MUST match the
+  /// canister's wire types exactly: a multi-provider response is Candid-decoded WHOLE before our
+  /// consensus logic ever runs, so if ANY single provider returns ProviderError / HttpOutcallError
+  /// / ValidationError (all of which are VARIANTS on the wire, not flat {code;message} records) the
+  /// entire decode TRAPS when the arm is mis-typed. That is exactly what made openSession fail with
+  /// "unexpected IDL type when parsing {code : Int32; message : Text}" whenever a provider hit a
+  /// transient JSON-RPC / HTTP-outcall error — even though 2-of-3 consensus would otherwise tolerate it.
+  public type RejectionCode = {
+    #NoError;
+    #SysFatal;
+    #SysTransient;
+    #DestinationInvalid;
+    #CanisterReject;
+    #CanisterError;
+    #Unknown;
+  };
+
+  public type ProviderError = {
+    #TooFewCycles : { expected : Nat; received : Nat };
+    #MissingRequiredProvider;
+    #ProviderNotFound;
+    #NoPermission;
+    #InvalidRpcConfig : Text;
+  };
+
+  public type ValidationError = {
+    #Custom : Text;
+    #InvalidHex : Text;
+  };
+
+  public type HttpOutcallError = {
+    #IcError : { code : RejectionCode; message : Text };
+    #InvalidHttpJsonRpcResponse : { status : Nat16; body : Text; parsingError : ?Text };
+  };
+
+  public type JsonRpcError = { code : Int64; message : Text };
+
   public type RpcError = {
-    #ProviderError : { code : Int32; message : Text };
-    #HttpOutcallError : { code : Int32; message : Text };
-    #JsonRpcError : { code : Int64; message : Text };
-    #ValidationError : Text;
+    #JsonRpcError : JsonRpcError;
+    #ProviderError : ProviderError;
+    #ValidationError : ValidationError;
+    #HttpOutcallError : HttpOutcallError;
   };
 
   // ── Service variants ──
@@ -324,10 +360,28 @@ module {
   /// Format an RpcError as human-readable text.
   public func rpcErrorToText(err : RpcError) : Text {
     switch (err) {
-      case (#ProviderError({ message })) { "Provider: " # message };
-      case (#HttpOutcallError({ message })) { "HTTP outcall: " # message };
       case (#JsonRpcError({ message })) { "JSON-RPC: " # message };
-      case (#ValidationError(msg)) { "Validation: " # msg };
+      case (#ProviderError(pe)) {
+        switch (pe) {
+          case (#TooFewCycles(_)) { "Provider: too few cycles" };
+          case (#MissingRequiredProvider) { "Provider: missing required provider" };
+          case (#ProviderNotFound) { "Provider: provider not found" };
+          case (#NoPermission) { "Provider: no permission" };
+          case (#InvalidRpcConfig(m)) { "Provider: invalid RPC config: " # m };
+        };
+      };
+      case (#ValidationError(ve)) {
+        switch (ve) {
+          case (#Custom(m)) { "Validation: " # m };
+          case (#InvalidHex(m)) { "Validation: invalid hex: " # m };
+        };
+      };
+      case (#HttpOutcallError(he)) {
+        switch (he) {
+          case (#IcError({ message })) { "HTTP outcall: " # message };
+          case (#InvalidHttpJsonRpcResponse({ body })) { "HTTP outcall: invalid JSON-RPC response: " # body };
+        };
+      };
     };
   };
 };

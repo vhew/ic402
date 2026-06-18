@@ -564,7 +564,7 @@ module {
     };
 
     /// Buyer disputes a result (for BuyerConfirm verification).
-    public func disputeJob(buyer : Principal, jobId : Text, reason : Text) : { #ok; #err : Text } {
+    public func disputeJob(buyer : Principal, jobId : Text, _reason : Text) : { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
         case (null) { return #err("Job not found") };
         case (?j) { j };

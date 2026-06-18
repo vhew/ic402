@@ -113,13 +113,6 @@ module {
       Utils.findLedger(config.tokens, identifier);
     };
 
-    func recipientText() : Text {
-      switch (config.recipient.subaccount) {
-        case (null) { Principal.toText(config.recipient.owner) };
-        case (?_) { Principal.toText(config.recipient.owner) };
-      };
-    };
-
     func recipientAccount() : Types.Account {
       { owner = config.recipient.owner; subaccount = config.recipient.subaccount };
     };

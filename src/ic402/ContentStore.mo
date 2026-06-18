@@ -80,8 +80,8 @@ module {
   func decryptChunkData(masterKey : [Nat8], salt : Nat, contentId : Text, chunkIndex : Nat, data : Blob) : ?Blob {
     let bytes = Blob.toArray(data);
     if (bytes.size() < 16) return null;
-    let ciphertext = Array.subArray(bytes, 0, bytes.size() - 16);
-    let tag = Array.subArray(bytes, bytes.size() - 16, 16);
+    let ciphertext = Array.subArray(bytes, 0, Utils.satSub(bytes.size(), 16));
+    let tag = Array.subArray(bytes, Utils.satSub(bytes.size(), 16), 16);
     let key = deriveChunkKey(masterKey, salt, contentId, chunkIndex);
     let nonce = deriveNonce(salt, contentId, chunkIndex);
     switch (ChaCha.aeadDecryptWithNonce(ciphertext, tag, [], key, nonce)) {
@@ -165,7 +165,7 @@ module {
       let salt = saltCounter;
       let dataSize = data.size();
       let numChunks = if (dataSize == 0) { 1 } else {
-        (dataSize + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+        (dataSize + Utils.satSub(MAX_CHUNK_SIZE, 1)) / MAX_CHUNK_SIZE;
       };
       let chunks = Array.init<Blob>(numChunks, "");
       let dataBytes = Blob.toArray(data);

@@ -16,6 +16,7 @@ import Iter "mo:base/Iter";
 import Char "mo:base/Char";
 import EvmAddress "EvmAddress";
 import EvmRpc "EvmRpc";
+import Utils "Utils";
 
 module {
 
@@ -218,9 +219,9 @@ module {
     if (chars.size() >= 2 and chars[0] == '0' and (chars[1] == 'x' or chars[1] == 'X')) {
       start := 2;
     };
-    let hexOnly = Array.subArray(chars, start, chars.size() - start);
+    let hexOnly = Array.subArray(chars, start, Utils.satSub(chars.size(), start));
     if (hexOnly.size() < 40) return "";
-    let addrStart = hexOnly.size() - 40;
+    let addrStart = Utils.satSub(hexOnly.size(), 40);
     var addr = "0x";
     var k = addrStart;
     while (k < hexOnly.size()) {

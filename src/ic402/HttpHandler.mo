@@ -437,7 +437,7 @@ module {
     if (chars.size() >= 2 and chars[0] == '0' and (chars[1] == 'x' or chars[1] == 'X')) {
       start := 2;
     };
-    let hexLen = chars.size() - start;
+    let hexLen = Utils.satSub(chars.size(), start);
     if (hexLen % 2 != 0) return [];
     let buf = Buffer.Buffer<Nat8>(hexLen / 2);
     var i = start;

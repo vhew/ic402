@@ -12,14 +12,13 @@ import Char "mo:base/Char";
 import Buffer "mo:base/Buffer";
 import Iter "mo:base/Iter";
 import EvmAddress "EvmAddress";
+import Utils "Utils";
 
 module {
 
   // ═══════════════════════════════════════════════════════════════════════
   // Hex Utilities
   // ═══════════════════════════════════════════════════════════════════════
-
-  let hexChars : [Text] = ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"];
 
   /// Encode bytes as lowercase hex with 0x prefix.
   public func bytesToHex(bytes : [Nat8]) : Text {
@@ -34,7 +33,7 @@ module {
     if (chars.size() >= 2 and chars[0] == '0' and (chars[1] == 'x' or chars[1] == 'X')) {
       start := 2;
     };
-    let hexLen = chars.size() - start;
+    let hexLen = Utils.satSub(chars.size(), start);
     if (hexLen % 2 != 0) return [];
 
     let buf = Buffer.Buffer<Nat8>(hexLen / 2);

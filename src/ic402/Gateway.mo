@@ -15,7 +15,6 @@ import Principal "mo:base/Principal";
 import Timer "mo:base/Timer";
 import Error "mo:base/Error";
 import Nat32 "mo:base/Nat32";
-import Char "mo:base/Char";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import HashMap "mo:base/HashMap";
@@ -164,16 +163,6 @@ module {
         case (null) { 300 };
       };
       seconds * 1_000_000_000;
-    };
-
-    // H-5: Validate that a text string contains only hex characters [0-9a-fA-F]
-    func isHexString(s : Text) : Bool {
-      for (c in s.chars()) {
-        let n = Char.toNat32(c);
-        let isHex = (n >= 48 and n <= 57) or (n >= 97 and n <= 102) or (n >= 65 and n <= 70);
-        if (not isHex) return false;
-      };
-      true;
     };
 
     // ── Convenience helpers ──
