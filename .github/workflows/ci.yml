@@ -133,6 +133,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local
+      # setup:local adds test-payer as a controller + funds it, but does NOT export the PEM the
+      # suite loads (test/helpers.ts → .local/test-payer.pem). predemo exports it (and re-confirms
+      # controller + funding + ICRC-2 approval). Without it the suite falls back to an ANONYMOUS
+      # identity and every controller-gated method (content/service/policy/sign) traps — 24/50.
+      - name: Prepare test identity (export test-payer PEM + funding)
+        run: bash scripts/predemo.sh
       - name: Integration suite (replica-enforced)
         run: IC402_REQUIRE_REPLICA=1 pnpm test:integration
 
