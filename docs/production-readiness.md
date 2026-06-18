@@ -54,11 +54,19 @@ security audit and `CHANGELOG.md` for what shipped.
   ever completed through ic402's tECDSA sender. **Do:** one observed green settle + one
   green session close+refund on a funded clean-EOA payer (Base Sepolia), capturing mined
   `status==1` tx hashes; plus a Foundry-fork replay for CI/offline.
-- [ ] **B4 — CI green is hollow for the substance.** The only e2e suite
-  (`test/integration.test.ts`, 49 cases) **always skips in CI** (no replica) and **fails
-  3/49 locally** (hardcoded `svc-1`/price assumptions). **Do:** make the suite
-  deterministic (bind to its own registered service id, not `svc-1`) and add a
-  replica-backed CI job that fails if skipped.
+- [~] **B4 — CI green is hollow for the substance — MOSTLY FIXED (v2.1.1).** The only e2e suite
+  (`test/integration.test.ts`, now 50 cases) used to **silently pass in CI** (every case is
+  `if (skip) return`; with no replica vitest counts them as passed) and failed locally on
+  hardcoded `svc-1`/price assumptions. **DONE:** (1) the suite is now deterministic — it binds to
+  its own registered service id and is hermetic (every fetch hits the local replica; the EVM cases
+  are sign-only, no broadcast); (2) a **`test-integration` CI job** deploys a real local replica
+  (`pnpm setup:local`) and runs it with `IC402_REQUIRE_REPLICA=1`, turning a missing replica into a
+  HARD failure (verified 50/50 enforced locally); (3) a `did-sync` gate fails on a drifted
+  `example.did`. **Still open:** the suite covers the LOCAL money/protocol paths but NOT the EVM
+  OUTBOUND broadcast money paths (settle/refund/session-close to Base) — those need a funded
+  testnet or a Foundry-fork mock (can't be hermetic) and the full async `reconcileJob`/
+  `reconcileSession` loop (only their pure decision matrices are unit-tested). First CI run also
+  validates the ubuntu `icp` network-launcher path.
 
 ## Security (fresh composed-system pass before tagging "production-ready")
 
