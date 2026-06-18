@@ -154,6 +154,7 @@ const DeliveryMethod = IDL.Variant({
 const ContentDelivery = IDL.Record({
   grant: AccessGrant,
   delivery: DeliveryMethod,
+  settlementTxHash: IDL.Opt(IDL.Text),
 });
 
 const GetContentResult = IDL.Variant({

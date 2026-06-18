@@ -618,6 +618,18 @@ export async function registerAgent(
     );
   }
 
+  // 4b. The tx was mined but may have REVERTED on-chain (status 0). A revert still
+  // produces a receipt and emits no AgentRegistered event, so without this check the flow
+  // would silently return { tokenId: null } as a "success" — and the caller would print
+  // "Awaiting confirmation" over a registration that never happened. Surface the revert.
+  if (receipt.status === 'reverted') {
+    throw new Ic402Error(
+      'broadcast_failed',
+      `Registration tx ${txHash} reverted on-chain (status 0) — registration did not complete`,
+      { txHash, receipt },
+    );
+  }
+
   // 5. Parse event
   const tokenId = parseAgentRegisteredEvent(receipt);
 

@@ -141,9 +141,18 @@ persistent actor KnowledgeBase {
 
   // 1a: wire the marketplace's on-chain settlement/refund to the Gateway's tECDSA EVM sender,
   // so EVM-paid jobs are refunded/settled on their native rail instead of the ICP pool (C3).
-  registry.setEvmTransfer(func(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
-    await gate.sendErc20Transfer(chainId, token, to, amount);
-  });
+  registry.setEvmTransfer(
+    func(chainId : Nat, token : Text, to : Text, amount : Nat) : async {
+      #confirmed : Text;
+      #reverted : Text;
+      #pending : Text;
+      #err : Text;
+    } {
+      // B2: confirmed transfer — the registry finalizes #Settled/#Refunded only after the
+      // on-chain transfer is confirmed mined, not on a mempool ack.
+      await gate.sendErc20TransferConfirmed(chainId, token, to, amount);
+    }
+  );
 
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
@@ -640,11 +649,11 @@ persistent actor KnowledgeBase {
             let grant = gate.issueGrant(contentRef, msg.caller, receipt.id, 5 * 60 * 1_000_000_000);
             if (metadata.chunkCount <= 1) {
               switch (store.get(contentId)) {
-                case (?blob) { #ok({ grant; delivery = #inline(blob) }) };
+                case (?blob) { #ok({ grant; delivery = #inline(blob); settlementTxHash = receipt.txHash }) };
                 case (null) { #error("Read failed") };
               };
             } else {
-              #ok({ grant; delivery = #canisterQuery({ method = "getChunk"; chunkCount = metadata.chunkCount }) });
+              #ok({ grant; delivery = #canisterQuery({ method = "getChunk"; chunkCount = metadata.chunkCount }); settlementTxHash = receipt.txHash });
             };
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
@@ -930,7 +939,10 @@ persistent actor KnowledgeBase {
       "0x140D228d099367c273fDCD3C4Bfd87342ad7a8D2",
       84532,
       identity.getCard(),
-      350_000,
+      // register(string,string,string,string[],string[],bool) writes 5 strings/arrays and
+      // emits AgentRegistered; 350_000 was insufficient and the tx reverted with gasUsed ==
+      // limit (out of gas). Raise the limit so a real registration mints successfully.
+      600_000,
       nonce,
       maxFeePerGas,
       maxPriorityFeePerGas,

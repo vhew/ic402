@@ -112,9 +112,12 @@ export async function runSteps(
   const results: StepResult[] = [];
 
   if (autoRunMode) {
-    // Non-interactive: auto-answer any in-step prompt (e.g. the payment-method menu) with a
-    // default so nothing blocks waiting on stdin.
-    const defaultAnswer = process.env.IC402_DEMO_DEFAULT_CHOICE ?? '1';
+    // Non-interactive: auto-answer the in-step menus (Step 3 payment method, Step 7 deposit
+    // method) so nothing blocks on stdin. Default to "2" = Base Sepolia (option 1 is ICP) so a
+    // non-interactive run exercises the EVM/Base on-chain settlement path (B3 verification).
+    // Override with IC402_DEMO_DEFAULT_CHOICE (e.g. =1 for the ICP-only path — no testnet funds
+    // needed, but it does not settle on-chain).
+    const defaultAnswer = process.env.IC402_DEMO_DEFAULT_CHOICE ?? '2';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (rl as any).question = async (q: string): Promise<string> => {
       console.log(`${DIM}${q}${defaultAnswer}${RESET}`);

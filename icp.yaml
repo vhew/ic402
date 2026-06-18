@@ -35,7 +35,7 @@ canisters:
     recipe:
       type: '@dfinity/prebuilt@v2.0.0'
       configuration:
-        path: example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm.gz
+        path: example/zk-verifier/prebuilt/zk_verifier.wasm.gz
         candid: example/zk-verifier/zk_verifier.did
 
 networks:

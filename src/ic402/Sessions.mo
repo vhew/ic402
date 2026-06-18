@@ -833,21 +833,31 @@ module {
         };
       };
 
-      // Settle consumed amount to recipient
+      // Settle consumed amount to recipient.
+      // B2: confirm the transfer mined (status==1) before treating it as settled — a mempool
+      // ack is NOT finality. Finalize (#closed) only on #confirmed; otherwise stay parked in
+      // #closing (set above) for recovery and NEVER re-broadcast (a #pending tx may have landed,
+      // so re-driving double-pays).
       var settleTxHash : ?Text = null;
       if (session.consumed > 0) {
-        let settleResult = await sender.sendErc20Transfer(
-          deposit.chainId, deposit.tokenAddress, session.recipient, session.consumed,
-        );
-        switch (settleResult) {
+        switch (
+          await sender.sendErc20TransferConfirmed(
+            deposit.chainId, deposit.tokenAddress, session.recipient, session.consumed, 4,
+          )
+        ) {
+          case (#confirmed(hash)) { settleTxHash := ?hash };
+          case (#reverted(hash)) {
+            // Mined but reverted — no funds moved. Park in #closing; do NOT mark #closed.
+            return #settlementFailed("EVM settle reverted on-chain (session parked for recovery; tx " # hash # ")");
+          };
+          case (#pending(hash)) {
+            // Broadcast but not confirmed — it MAY have landed; park for confirm-only recovery.
+            return #settlementPending("EVM settle broadcast but not confirmed (session parked for recovery; tx " # hash # ")");
+          };
           case (#err(msg)) {
-            // S16/C1: do NOT revert to #open. The 60s expiry timer would re-select this session
-            // and re-broadcast the settle on EVERY tick (draining cycles + gas); and if the
-            // failed send actually landed on-chain, a re-broadcast double-pays the recipient.
-            // Park in #closing (set above) for manual recovery instead.
+            // Failed before broadcast (e.g. fee data unavailable) — park in #closing.
             return #settlementFailed("EVM settle failed (session parked for recovery): " # msg);
           };
-          case (#ok(hash)) { settleTxHash := ?hash };
         };
       };
 
@@ -858,18 +868,27 @@ module {
       } else { 0 };
 
       if (refunded > 0) {
-        let refundResult = await sender.sendErc20Transfer(
-          deposit.chainId, deposit.tokenAddress, deposit.payerEvmAddress, refunded,
-        );
-        switch (refundResult) {
+        switch (
+          await sender.sendErc20TransferConfirmed(
+            deposit.chainId, deposit.tokenAddress, deposit.payerEvmAddress, refunded, 4,
+          )
+        ) {
+          case (#confirmed(hash)) { refundTxHash := ?hash };
+          case (#reverted(hash)) {
+            // C-1: settle confirmed but refund reverted — leave #closing so the unconsumed
+            // funds are not silently discarded. Recovery for an EVM session is MANUAL (an
+            // admin re-drives the refund / re-polls; recoverEscrow handles ICP escrow only,
+            // not the shared EVM balance). Do NOT mark #closed.
+            return #settlementFailed("EVM refund reverted on-chain (settle succeeded, session left in #closing; tx " # hash # ")");
+          };
+          case (#pending(hash)) {
+            // Broadcast but not confirmed — park in #closing; the refund may have landed,
+            // so recovery must re-poll the hash rather than re-broadcast.
+            return #settlementPending("EVM refund broadcast but not confirmed (settle succeeded, session left in #closing; tx " # hash # ")");
+          };
           case (#err(msg)) {
-            // C-1: Settlement succeeded but refund failed — leave session in #closing
-            // so the unconsumed funds are not lost. The payer (or admin) can call
-            // recoverEscrow() to retrieve the stuck refund amount.
-            // DO NOT mark as #closed — that would silently discard the refund.
             return #settlementFailed("EVM refund failed (settle succeeded, session left in #closing): " # msg);
           };
-          case (#ok(hash)) { refundTxHash := ?hash };
         };
       };
 

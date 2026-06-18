@@ -5,8 +5,8 @@
 x402 **v2 compliance**, the EVM/marketplace settlement paths, live policy
 introspection, and an honest interactive demo.
 
-> ⚠️ **Contains breaking changes despite the minor version.** ic402 is early-stage
-> (the workspace root is still `0.1.0`) and the bump is kept minor deliberately — but
+> ⚠️ **Contains breaking changes despite the minor version.** ic402 is early-stage and
+> the minor bump is deliberate — but
 > if you consume the Motoko library, the `@ic402/client` types, or talk to the canister
 > with a **v1** x402 client, treat this as a breaking upgrade and read the section below.
 

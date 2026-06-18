@@ -794,12 +794,37 @@ module {
     };
 
     /// 1a: Send an ERC-20 transfer from the canister's EVM address via tECDSA, if EVM is
-    /// configured. Exposed so the marketplace (ServiceRegistry) can settle/refund EVM-paid
-    /// jobs on their native rail rather than from the ICP pool (audit C3). Returns the tx
-    /// hash on success.
+    /// configured. Returns the tx hash on mempool acceptance.
+    ///
+    /// ⚠️ UNCONFIRMED: #ok is only a mempool ack, NOT settlement finality, and #maybeSent
+    /// is collapsed to #err here — callers MUST NOT finalize terminal state on #ok. Prefer
+    /// `sendErc20TransferConfirmed` for any settle/refund path (B2). Retained for callers
+    /// that confirm independently.
     public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
       switch (evmSenderInst) {
-        case (?sender) { await sender.sendErc20Transfer(chainId, token, to, amount) };
+        case (?sender) {
+          switch (await sender.sendErc20Transfer(chainId, token, to, amount)) {
+            case (#ok(h)) { #ok(h) };
+            case (#err(e)) { #err(e) };
+            case (#maybeSent(e)) { #err(e) };
+          };
+        };
+        case (null) { #err("EVM not configured (no ecdsaKeyName)") };
+      };
+    };
+
+    /// Confirmed variant: broadcasts AND polls the receipt, returning a tri-state so the
+    /// caller finalizes state ONLY on #confirmed. The marketplace settle/refund + EVM
+    /// session-close paths use this so an unconfirmed/reverted transfer is never treated
+    /// as settled (B2). See EvmSender.sendErc20TransferConfirmed.
+    public func sendErc20TransferConfirmed(chainId : Nat, token : Text, to : Text, amount : Nat) : async {
+      #confirmed : Text;
+      #reverted : Text;
+      #pending : Text;
+      #err : Text;
+    } {
+      switch (evmSenderInst) {
+        case (?sender) { await sender.sendErc20TransferConfirmed(chainId, token, to, amount, 4) };
         case (null) { #err("EVM not configured (no ecdsaKeyName)") };
       };
     };

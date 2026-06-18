@@ -288,6 +288,7 @@ type ContentDelivery =
  record {
    delivery: DeliveryMethod;
    grant: AccessGrant;
+   settlementTxHash: opt text;
  };
 type AgentCard = 
  record {

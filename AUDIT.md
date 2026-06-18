@@ -1,11 +1,29 @@
 # ic402 — Security Audit & Code Review
 
-**Target:** ic402 v1.0.0 (production Motoko payment library for ICP)
-**Commit:** `9cd7db3` · working tree clean
+**Audited at:** ic402 v1.0.0 · commit `9cd7db3` (the as-reviewed baseline — the findings below were observed against this commit)
+**Document current as of:** v2.1.0 · commit `388c473`
 **Scope:** `src/ic402/**` (6.7k LOC Motoko), `packages/client/**` (TS SDK), `integrations/mcp/**` (MCP server), `example/main.mo`, `scripts/**`
-**Status:** review only — no source files were modified.
+**Status:** **Remediated.** All Critical (C1–C5), High (H1–H14), and Medium (M1–M11) findings were fixed in v2.0.0; a v2.0.0 re-audit (`40e561f`) fixed 8 follow-on HIGH + 2 medium regressions. This file is kept as the historical audit-of-record — see **Remediation status** below and `CHANGELOG.md`.
 
-> ⚠️ **Two issues are exploitable today and lead to fund theft / free service: C1 (`authz.to` not validated) and C3 (MCP `call` tool). Treat C1–C5 as release blockers.**
+> ✅ **Resolved — not a live risk.** The two issues this banner once called "exploitable today" (C1 `authz.to`, C3 MCP `call` tool) and all of C1–C5 were fixed in **v2.0.0 (2026-06-08)**. Do **not** read the per-finding sections below as describing current behaviour — they are the original v1.0.0 observations, mapped to their fixes in the next section.
+
+## Remediation status (as of v2.1.0)
+
+The per-finding sections that follow are the **original v1.0.0 observations**, retained for the record. Current status:
+
+| Group | Status | Where |
+|---|---|---|
+| **C1–C5** (Critical) | ✅ Fixed in v2.0.0 | `c7e4307`; CHANGELOG v2.0.0 "Critical fixes" (C5 also re-hardened in `40e561f`) |
+| **H1–H14** (High) | ✅ Fixed in v2.0.0 | `c7e4307`; CHANGELOG v2.0.0 "High fixes" (H1 confirm-status + H4 day-bucket follow-ups in `40e561f`) |
+| **M1–M11** (Medium) | ✅ Fixed in v2.0.0 | CHANGELOG v2.0.0 "Medium fixes"; M3/M4 covered by the H8/H4 fixes; M2 re-hardened in `40e561f` |
+| **L1–L11 / I1–I6** (Low/Info) | ◻️ Deferred — not individually addressed | except **I1** (missing `authz.to` regression test), now covered by `test/gateway.test.mo` |
+| **Uncertain** — Sessions EVM close double-transfer (below) | ⚠️ Partially addressed by S16/S3 (`c5cdea2`, `7a032f8`) | but see the v2.1.0 open item below |
+
+### v2.0.0 re-audit + v2.1.0 hardening (not in the original v1.0.0 audit)
+
+A re-audit of the v2.0.0 fixes (`40e561f`) found and fixed **8 HIGH + 2 medium regressions** the fixes themselves introduced: nonce ring-buffer stale-blob leak; `releaseDaily` wrong day-bucket across UTC midnight; `resolveDispute` double-refund race; ContentStore salt-boundary re-key (M2 re-open); `confirmTransaction` treating a missing receipt status as confirmed (H1 re-open); client BigInt crash; `#Session requireAll(0)` trap. The v2.1.0 series added S-coded hardening with no original-audit entry: **S10** multi-provider RPC consensus (`c42bbec`), **S11/S21** rate-limit GC + voucher fixes (`c4ee58e`), **S13/S14** job GC + EVM-buyer signed confirm/dispute (`319bb56`), **S16** park failed EVM closes (`c5cdea2`), **S19/S20** patch-local hard-fail (`6e99338`), **S1/S2/S8/S9/S23** MCP SSRF + signing lockdown (`72b6eb5`), plus C6/C8/C9/A1.
+
+> ⚠️ **Open (introduced in v2.1.0, not from this audit):** the v2.1.0 EVM additions reintroduced an H1-class gap — marketplace settle/refund and EVM session close finalize state on an **unconfirmed** broadcast (no `confirmTransaction`), and v2.1.0 is **not in-place-upgrade-compatible** from v2.0.0. Tracked in `docs/production-readiness.md`.
 
 ---
 

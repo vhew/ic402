@@ -120,6 +120,8 @@ export type DeliveryMethod =
 export interface ContentDelivery {
   grant: AccessGrant;
   delivery: DeliveryMethod;
+  /** On-chain proof of the settling payment: EVM tx hash or ICP ledger block index. */
+  settlementTxHash?: string;
 }
 
 // ── Content Store ──

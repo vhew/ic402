@@ -449,9 +449,14 @@ module {
   };
 
   /// Access grant paired with its delivery method.
+  /// `settlementTxHash` is the on-chain proof of the inbound payment that unlocked this
+  /// content: the EVM tx hash (EIP-3009 / EVM charges) or the ICP ledger block index
+  /// (ICP charges), or null if the underlying receipt carried no hash. Lets a caller
+  /// verify the settlement (e.g. on a block explorer) without a second round-trip.
   public type ContentDelivery = {
     grant : AccessGrant;
     delivery : DeliveryMethod;
+    settlementTxHash : ?Text;
   };
 
   /// Stable storage format for grant subsystem state.

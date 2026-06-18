@@ -2,6 +2,7 @@ node_modules/
 dist/
 out/
 .icp/cache/
+.icp/tools/
 .mops/
 .pnpm-store/
 *.wasm
@@ -38,6 +39,10 @@ deploy/
 # Foundry build artifacts
 contracts/out/
 contracts/cache/
+
+# Rust (zk-verifier) build dir — the prebuilt deploy artifact lives in
+# example/zk-verifier/prebuilt/zk_verifier.wasm.gz (committed); target/ is build cache.
+example/zk-verifier/target/
 
 # Claude Code
 .claude/

@@ -27,6 +27,11 @@ describe('ic402 integration', () => {
   let exampleId: string;
   let ledgerId: string;
   let skip = false;
+  // The id of the service THIS run registers. registerService auto-assigns svc-N and the
+  // counter survives prior demo/test runs, so a literal 'svc-1' on a non-pristine replica is
+  // some OTHER service with a different price. Capturing the registered id makes the
+  // assertions below deterministic regardless of replica state.
+  let testSvcId = '';
 
   beforeAll(async () => {
     try {
@@ -37,6 +42,20 @@ describe('ic402 integration', () => {
       ledger = createLedgerActor(agent, ledgerId);
     } catch {
       skip = true;
+    }
+  });
+
+  // Skip-enforcement: this suite returns early (green) when no local replica is reachable,
+  // which lets a "no replica" CI run look like it passed without testing anything. Set
+  // IC402_REQUIRE_REPLICA=1 (e.g. in a replica-backed CI job) to turn that silent skip into
+  // a hard failure. Without the flag, a skip just warns so local `vitest run` stays green.
+  it('local replica is reachable (enforced when IC402_REQUIRE_REPLICA=1)', () => {
+    if (process.env.IC402_REQUIRE_REPLICA === '1') {
+      expect(skip).toBe(false);
+    } else if (skip) {
+      console.warn(
+        '[integration] no local replica — suite SKIPPED. Run `pnpm setup:local` and set IC402_REQUIRE_REPLICA=1 to enforce.',
+      );
     }
   });
 
@@ -297,7 +316,19 @@ describe('ic402 integration', () => {
         true,
       );
 
-      const enableResult = await actor.enableService(result.ok ?? 'svc-1');
+      // Bind to the id we just registered (or look it up by name if it already existed).
+      if ('ok' in result) {
+        testSvcId = result.ok;
+      } else {
+        const all = await actor.listServices();
+        const mine = all.find(
+          (s: { id: string; name: string }) => s.name === 'Integration Test Service',
+        );
+        testSvcId = mine?.id ?? '';
+      }
+      expect(testSvcId).not.toBe('');
+
+      const enableResult = await actor.enableService(testSvcId);
       expect('ok' in enableResult).toBe(true);
     });
 
@@ -314,7 +345,7 @@ describe('ic402 integration', () => {
     it('submitServiceRequest returns paymentRequired', async () => {
       if (skip) return;
       const result = await actor.submitServiceRequest(
-        'svc-1',
+        testSvcId,
         new TextEncoder().encode('test params'),
         [],
       );
@@ -327,7 +358,7 @@ describe('ic402 integration', () => {
 
     it('quoteServiceRequest returns price + fee + total as a read-only query (C4/A1)', async () => {
       if (skip) return;
-      const result = await actor.quoteServiceRequest('svc-1');
+      const result = await actor.quoteServiceRequest(testSvcId);
       expect(result).toHaveProperty('ok');
       expect(result.ok.amount).toBe(500n); // service price
       expect(result.ok.fee).toBe(10_000n); // ckUSDC ledger fee
@@ -368,9 +399,9 @@ describe('ic402 integration', () => {
       if (skip) return;
       const params = new TextEncoder().encode('settle-flow params');
 
-      // 1. Probe for the payment requirement (mints a nonce). svc-1 is Exact 500 + AutoSettle,
+      // 1. Probe for the payment requirement (mints a nonce). testSvcId is Exact 500 + AutoSettle,
       //    with the test identity as its operator — so the same identity is buyer and operator.
-      const probe = await actor.submitServiceRequest('svc-1', params, []);
+      const probe = await actor.submitServiceRequest(testSvcId, params, []);
       expect(probe).toHaveProperty('paymentRequired');
       const icpReq = probe.paymentRequired.find((r: { network: string }) => r.network === 'icp:1');
       expect(icpReq).toBeDefined();
@@ -400,7 +431,7 @@ describe('ic402 integration', () => {
         nonce: icpReq.nonce,
         authorization: [],
       };
-      const submitted = await actor.submitServiceRequest('svc-1', params, [paymentSig]);
+      const submitted = await actor.submitServiceRequest(testSvcId, params, [paymentSig]);
       expect(submitted).toHaveProperty('ok');
       const jobId = submitted.ok.jobId;
 
@@ -675,8 +706,10 @@ describe('ic402 integration', () => {
 
     it('/service/<id> returns 402 or 404', async () => {
       if (skip) return;
-      const response = await fetch(`http://${exampleId}.raw.localhost:4944/service/svc-1`);
-      // 402 if service was registered in previous test, 404 if not
+      const response = await fetch(
+        `http://${exampleId}.raw.localhost:4944/service/${testSvcId || 'svc-1'}`,
+      );
+      // 402 if the service is registered + enabled, 404 if not
       expect([402, 404]).toContain(response.status);
     });
 

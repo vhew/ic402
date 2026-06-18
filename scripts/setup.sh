@@ -191,13 +191,18 @@ else
 fi
 echo "  EVM RPC:       $EVM_RPC_ID"
 
-# Build and deploy ZK verifier (Rust canister, optional)
-ZK_WASM="$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm.gz"
-if command -v cargo &>/dev/null; then
-  echo "  Building ZK verifier..."
+# Deploy ZK verifier (Rust canister). The gzipped wasm is committed under
+# example/zk-verifier/prebuilt/ so the canister deploys WITHOUT a Rust toolchain.
+# Only (re)build it when the prebuilt is MISSING and cargo is available — a normal
+# run uses the committed artifact and never dirties the (gitignored) target/ tree.
+ZK_WASM="$PROJECT_ROOT/example/zk-verifier/prebuilt/zk_verifier.wasm.gz"
+if [ ! -f "$ZK_WASM" ] && command -v cargo &>/dev/null; then
+  echo "  Building ZK verifier (prebuilt missing)..."
   (cd "$PROJECT_ROOT/example/zk-verifier" && cargo build --target wasm32-unknown-unknown --release --quiet 2>/dev/null)
-  if [ -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm" ]; then
-    gzip -k -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm"
+  ZK_RAW="$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm"
+  if [ -f "$ZK_RAW" ]; then
+    mkdir -p "$PROJECT_ROOT/example/zk-verifier/prebuilt"
+    gzip -c "$ZK_RAW" > "$ZK_WASM"
   fi
 fi
 if [ -f "$ZK_WASM" ]; then
@@ -223,14 +228,24 @@ register_patch_trap
 
 patch_for_local "$CKUSDC_ID"
 
-# Deploy example canister (first pass — need it to exist for tECDSA)
-icp deploy example -e local >/dev/null 2>&1
+# Build + OPTIMIZE the example wasm, then install it. The optimize step is REQUIRED, not
+# cosmetic: moc unrolls SHA-256 (mo:sha2) past the IC's 2000-locals-per-function limit, so a
+# plain `icp deploy example` is rejected at install with IC0505. build-example.sh runs
+# moc -> wasm-opt -> a locals-budget check; we then install the optimized module directly.
+deploy_example_optimized() {
+  bash "$SCRIPT_DIR/build-example.sh" .icp/example.wasm
+  icp canister create example -e local >/dev/null 2>&1 || true
+  icp canister install example --wasm .icp/example.wasm --mode reinstall -e local
+}
+
+# First pass — need it installed for the tECDSA EVM-address derivation
+deploy_example_optimized
 EXAMPLE_ID=$(icp canister status example -e local --id-only)
 echo "  Example canister: $EXAMPLE_ID"
 
-# Derive tECDSA EVM address and redeploy
+# Derive tECDSA EVM address, re-patch main.mo, and re-deploy (re-optimized)
 patch_evm_recipient
-icp deploy example -e local >/dev/null 2>&1
+deploy_example_optimized
 
 # Restore source
 restore_source
