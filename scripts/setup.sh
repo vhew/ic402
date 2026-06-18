@@ -173,6 +173,20 @@ echo ""
 echo "--- Deploying canisters ---"
 echo ""
 
+# The committed ckUSDC init args hardcode the original author's local-dev as the ledger's
+# minting account + archive controller. On a fresh machine / in CI, `local-dev` is a DIFFERENT
+# principal, so `predemo` (which mints as the deployer) would transfer from a NON-minter account:
+# the call returns Err while the CLI still exits 0, silently leaving the payer at 0 balance and
+# breaking every settle test. Repoint the minter/controller at the LIVE deployer. This is a no-op
+# when they already match (the common local case), so it never dirties the working tree there.
+INIT_CANDID="$PROJECT_ROOT/.icp/ckusdc-ledger-init.candid"
+PLACEHOLDER_MINTER="j4utn-gav76-3hfsp-uzvyt-zeriq-65gn5-dlt3z-r6fmo-wu4oz-jmkbs-wae"
+if [ -f "$INIT_CANDID" ] && [ -n "$MY_PRINCIPAL" ] && [ "$MY_PRINCIPAL" != "$PLACEHOLDER_MINTER" ]; then
+  tmp=$(mktemp)
+  sed "s/$PLACEHOLDER_MINTER/$MY_PRINCIPAL/g" "$INIT_CANDID" >"$tmp" && mv "$tmp" "$INIT_CANDID"
+  echo "  ckUSDC minter: repointed to live deployer"
+fi
+
 # Deploy ckUSDC ledger
 if icp canister status ckusdc_ledger -e local >/dev/null 2>&1; then
   CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --id-only)

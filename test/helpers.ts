@@ -108,7 +108,26 @@ export function createLedgerActor(agent: HttpAgent, canisterId: string) {
             expires_at: IDL.Opt(IDL.Nat64),
           }),
         ],
-        [IDL.Variant({ Ok: IDL.Nat, Err: IDL.Text })],
+        // Must match the real ckUSDC ledger's ApproveResult. The Err arm is a record-variant
+        // (ApproveError), NOT text — declaring it as IDL.Text makes a genuine approve failure
+        // (e.g. InsufficientFunds) decode-crash with a cryptic "type on the wire" error instead
+        // of surfacing the actual reason.
+        [
+          IDL.Variant({
+            Ok: IDL.Nat,
+            Err: IDL.Variant({
+              GenericError: IDL.Record({ message: IDL.Text, error_code: IDL.Nat }),
+              TemporarilyUnavailable: IDL.Null,
+              Duplicate: IDL.Record({ duplicate_of: IDL.Nat }),
+              BadFee: IDL.Record({ expected_fee: IDL.Nat }),
+              AllowanceChanged: IDL.Record({ current_allowance: IDL.Nat }),
+              CreatedInFuture: IDL.Record({ ledger_time: IDL.Nat64 }),
+              TooOld: IDL.Null,
+              Expired: IDL.Record({ ledger_time: IDL.Nat64 }),
+              InsufficientFunds: IDL.Record({ balance: IDL.Nat }),
+            }),
+          }),
+        ],
         [],
       ),
     });

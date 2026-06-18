@@ -48,13 +48,16 @@ fi
 # 3. Clean up expired sessions
 icp canister call "$EXAMPLE_ID" closeExpiredSessions '()' -e local >/dev/null 2>&1 || true
 
-# 4. Mint ckUSDC
-if icp canister call ckusdc_ledger icrc1_transfer \
+# 4. Mint ckUSDC. Check the RESULT variant, not just the exit code: a non-minter transfer
+# returns `Err` while the CLI still exits 0, so an exit-code-only check would print a false
+# "Funded" and leave the payer at 0 (this is exactly what broke CI before the setup.sh minter fix).
+MINT_OUT=$(icp canister call ckusdc_ledger icrc1_transfer \
   "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 100_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
-  -e local >/dev/null 2>&1; then
+  -e local 2>&1 || true)
+if echo "$MINT_OUT" | grep -q "Ok ="; then
   echo "  Funded: 100 ckUSDC to test-payer"
 else
-  echo "  WARNING: Failed to mint ckUSDC"
+  echo "  WARNING: Failed to mint ckUSDC — $MINT_OUT"
 fi
 
 # 5. Set ICRC-2 approval
