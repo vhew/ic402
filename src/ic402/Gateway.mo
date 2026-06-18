@@ -916,6 +916,11 @@ module {
       };
     };
 
+    /// Recovery: confirm-only reconcile an EVM session parked in #closing (delegates to Sessions).
+    public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
+      await sessionsMgr.reconcileSession(sessionId);
+    };
+
     // ── Content Delivery (delegates to Grants module) ──
 
     /// Initialize HMAC seed from randomness. Call once on first deployment.

@@ -104,15 +104,18 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
   (a `#closing` session → `#closed`). **State assertion only — moves no funds**: the operator
   verifies the on-chain outcome, then unsticks the record so it stops pinning memory and becomes
   GC-eligible. Funds for a never-landed transfer are reconciled out-of-band (or via EVM sweep).
-- [~] **Auto confirm-only reconcile — JOBS DONE (v2.1.1); sessions remaining.** Jobs:
-  `Job.parkedTx` (stable) persists the parked settle/refund tx + leg at every `#pending` park
-  site; `reconcileJob` re-polls it via a **read-only** confirm hook and finalizes #Settled/
-  #Refunded ONLY on a mined `status==1` (never re-broadcasts); the finalize matrix is a pure,
-  unit-tested `reconcileDecision` (7 branch tests covering the golden rules); `gcTerminalJobs`
-  won't reclaim a job that still carries a parkedTx; `health` reports `jobs.parked`. Adversarially
-  reviewed SAFE (no double-pay / false-finalize / lost-park / GC-drop). **Remaining:** the
-  symmetric `reconcileSession` (two legs — consumed-settle + remainder-refund — on the streaming
-  session). The manual `forceResolveSession` already gives sessions an operator remedy today.
+- [x] **Auto confirm-only reconcile — DONE (v2.1.1), jobs + sessions.** Both re-poll a STORED
+  parked tx via a **read-only** confirm path and finalize ONLY on a mined `status==1` — never
+  re-broadcast (no double-pay); each has a pure, unit-tested decision matrix; both adversarially
+  reviewed SAFE (no double-pay / false-finalize / double-credit / lost-park / GC-drop).
+  - **Jobs:** `Job.parkedTx` (stable) at every `#pending` park site; `reconcileJob` + the pure
+    `reconcileDecision` (7 branch tests); `gcTerminalJobs` won't reclaim a job carrying a parkedTx;
+    `resolveJob` clears it; `health` reports `jobs.parked`.
+  - **Sessions:** the close is TWO-PHASE (settle consumed → refund remainder), so `reconcileSession`
+    + the pure `sessionReconcileDecision` (5 branch tests) finalize `#closed` when confirming the
+    parked leg completes the close (a confirmed refund, or a confirmed settle with no remainder). A
+    confirmed settle WITH a remainder owed can't be auto-completed confirm-only (the refund is
+    unsent) → `forceResolveSession` + `sweepEvm` returns it. Parked leg+hash in a transient side-map.
 - [x] **`sweepEvm(chainId, token, to, amount)` — DONE (v2.1.1).** Controller-only escape hatch that
   drains the canister's OWN EVM balance to an operator address (key/subnet-compromise response, or
   to settle a never-landed refund), via the confirmed-transfer sender (reports `#confirmed` only on

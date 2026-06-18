@@ -1064,6 +1064,16 @@ persistent actor KnowledgeBase {
     gate.forceResolveSession(sessionId);
   };
 
+  // Recovery (controller-only): CONFIRM-ONLY auto-reconcile of an EVM session parked in #closing.
+  // Re-polls the stored parked close tx and finalizes #closed only on a mined status==1 (never
+  // re-broadcasts). A confirmed settle with a remainder still owed can't be auto-completed (the
+  // refund is unsent) — use forceResolveSession + sweepEvm there. Find parked sessions via
+  // `health` (sessions.closing).
+  public shared(msg) func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await gate.reconcileSession(sessionId);
+  };
+
   // Operator EVM escape hatch (controller-only): transfer `amount` of an ERC-20 (e.g. USDC) from
   // the canister's OWN tECDSA-derived EVM address to `to` on `chainId`, via the confirmed-transfer
   // sender (reports #confirmed only after a mined status==1). Use it to evacuate the address on a

@@ -55,6 +55,39 @@ module {
     Utils.extractChainId(network);
   };
 
+  /// Pure decision for reconcileSession (module-level → unit-testable without a Sessions instance).
+  /// An EVM session close is TWO-PHASE: settle consumed → operator, THEN refund remainder → payer.
+  /// Rules (golden): finalize ONLY on #confirmed; never on #pending/#reverted/#err. A confirmed
+  /// REFUND completes the close (settle already confirmed before the refund leg ran). A confirmed
+  /// SETTLE completes only if no remainder is owed; otherwise the refund is still UNSENT and can't
+  /// be auto-broadcast confirm-only → defer to the manual hatch (forceResolveSession + sweepEvm).
+  public type SessionReconcileResult = {
+    #finalizeClose : Text; // settle+refund resolved → #closed (dealloc + daily credit-back)
+    #settleDoneRefundOwed : Text; // settle confirmed but remainder unsent → manual
+    #stay : Text; // no change; surface the reason
+  };
+  public func sessionReconcileDecision(
+    outcome : { #confirmed; #reverted; #pending; #err : Text },
+    leg : { #Settle; #Refund },
+    refundOwed : Nat,
+  ) : SessionReconcileResult {
+    switch (outcome) {
+      case (#pending) { #stay("Parked close tx still pending — stay parked") };
+      case (#reverted) { #stay("Parked close tx reverted on-chain; no funds moved — use forceResolveSession") };
+      case (#err(e)) { #stay("Confirm RPC failed — stay parked: " # e) };
+      case (#confirmed) {
+        switch (leg) {
+          case (#Refund) { #finalizeClose("Refund confirmed on-chain; session #closed") };
+          case (#Settle) {
+            if (refundOwed == 0) { #finalizeClose("Settle confirmed on-chain (no remainder); session #closed") } else {
+              #settleDoneRefundOwed("Settle confirmed on-chain but the remainder refund is unsent — forceResolveSession + sweepEvm to return it");
+            };
+          };
+        };
+      };
+    };
+  };
+
   /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
   public class Sessions(
     canisterPrincipal : Principal,
@@ -68,6 +101,10 @@ module {
 
     var sessions = HashMap.HashMap<Text, Types.InternalSessionState>(16, Text.equal, Text.hash);
     var sessionCounter : Nat = 0;
+    // Recovery: a session whose EVM close settle/refund parked (#pending) records the parked leg
+    // + tx hash here so reconcileSession can re-poll it confirm-only. Transient (not in
+    // StableSession; a parked session mid-upgrade falls under the B1 fresh-deploy waiver).
+    let closeParkedTxs = HashMap.HashMap<Text, { leg : { #Settle; #Refund }; txHash : Text }>(8, Text.equal, Text.hash);
     // Per-caller lock to prevent concurrent openSession TOCTOU.
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
     let sessionOpenLocks = HashMap.HashMap<Principal, Int>(8, Principal.equal, Principal.hash);
@@ -822,8 +859,43 @@ module {
             return #err("Session is not stuck in #closing (status: " # debug_show (s.status) # ")");
           };
           s.status := #closed;
+          closeParkedTxs.delete(sessionId);
           #ok;
         };
+      };
+    };
+
+    /// v2.1.1 recovery (controller-only via the consumer): CONFIRM-ONLY finalize an EVM session
+    /// parked in #closing. Re-polls the stored parked close tx and applies sessionReconcileDecision
+    /// — NEVER broadcasts. A confirmed refund (or a confirmed settle with no remainder) → #closed;
+    /// a confirmed settle WITH a remainder still owed can't be auto-completed confirm-only (the
+    /// refund is unsent) → forceResolveSession + sweepEvm. #pending/#reverted/#err → stay parked.
+    public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
+      let session = switch (sessions.get(sessionId)) { case (null) { return #err("Session not found") }; case (?s) { s } };
+      if (session.status != #closing) return #err("Session is not parked in #closing (status: " # debug_show (session.status) # ")");
+      let parked = switch (closeParkedTxs.get(sessionId)) { case (null) { return #err("Session is #closing but has no parked tx — use forceResolveSession") }; case (?p) { p } };
+      let deposit = switch (session.evmDeposit) { case (null) { return #err("Session has no EVM deposit data") }; case (?d) { d } };
+      let sender = switch (evmSender) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
+      let outcome = await sender.confirmTransaction(deposit.chainId, parked.txHash, 1);
+      // Re-fetch after the await: a concurrent transition may have moved the session.
+      let s2 = switch (sessions.get(sessionId)) { case (null) { return #err("Session vanished during reconcile") }; case (?s) { s } };
+      if (s2.status != #closing) return #err("Session no longer #closing (status: " # debug_show (s2.status) # ")");
+      let refundOwed = if (s2.deposited > s2.consumed) { s2.deposited - s2.consumed } else { 0 };
+      switch (sessionReconcileDecision(outcome, parked.leg, refundOwed)) {
+        case (#finalizeClose(msg)) {
+          ignore evmEscrowManager.deallocate(s2.id);
+          s2.status := #closed;
+          closeParkedTxs.delete(sessionId);
+          if (s2.deposited > s2.consumed) { policy.releaseDaily(s2.payer, s2.spendDay, s2.deposited - s2.consumed) };
+          #ok(msg # " (tx " # parked.txHash # ")");
+        };
+        case (#settleDoneRefundOwed(msg)) {
+          // Settle confirmed; clear the (now-resolved) settle park so a re-reconcile doesn't loop.
+          // The remainder refund is unsent — operator forceResolveSession + sweepEvm to return it.
+          closeParkedTxs.delete(sessionId);
+          #err(msg # " (tx " # parked.txHash # ")");
+        };
+        case (#stay(err)) { #err(err # " (tx " # parked.txHash # ")") };
       };
     };
 
@@ -888,7 +960,8 @@ module {
           };
           case (#pending(hash)) {
             // Broadcast but not confirmed — it MAY have landed; park for confirm-only recovery.
-            return #settlementPending("EVM settle broadcast but not confirmed (session parked for recovery; tx " # hash # ")");
+            closeParkedTxs.put(session.id, { leg = #Settle; txHash = hash });
+            return #settlementPending("EVM settle broadcast but not confirmed (session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
             // Failed before broadcast (e.g. fee data unavailable) — park in #closing.
@@ -920,7 +993,8 @@ module {
           case (#pending(hash)) {
             // Broadcast but not confirmed — park in #closing; the refund may have landed,
             // so recovery must re-poll the hash rather than re-broadcast.
-            return #settlementPending("EVM refund broadcast but not confirmed (settle succeeded, session left in #closing; tx " # hash # ")");
+            closeParkedTxs.put(session.id, { leg = #Refund; txHash = hash });
+            return #settlementPending("EVM refund broadcast but not confirmed (settle succeeded, session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
             return #settlementFailed("EVM refund failed (settle succeeded, session left in #closing): " # msg);
@@ -939,6 +1013,7 @@ module {
       // (ICP sessions don't need this: the per-session subaccount is already drained, so a
       // second settle/refund fails with InsufficientFunds.)
       session.status := #closed;
+      closeParkedTxs.delete(session.id); // close fully succeeded — clear any prior park
 
       // M-9 (v2): Credit the unused deposit back against the daily limit.
       if (session.deposited > session.consumed) {

@@ -68,4 +68,29 @@ suite("Sessions", func() {
       };
     });
   });
+
+  // ── sessionReconcileDecision (v2.1.1 recovery — two-phase close) ──
+
+  suite("sessionReconcileDecision (confirm-only close matrix)", func() {
+    // GOLDEN RULE: finalize ONLY on #confirmed; never on #pending/#reverted/#err.
+    test("#pending / #reverted / #err always stay parked", func() {
+      switch (Sessions.sessionReconcileDecision(#pending, #Settle, 100)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (Sessions.sessionReconcileDecision(#pending, #Refund, 0)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (Sessions.sessionReconcileDecision(#reverted, #Settle, 0)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (Sessions.sessionReconcileDecision(#reverted, #Refund, 100)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (Sessions.sessionReconcileDecision(#err("rpc"), #Refund, 0)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+    // A confirmed REFUND always completes the close (settle already confirmed before refund ran).
+    test("#confirmed #Refund -> finalizeClose for any refundOwed", func() {
+      switch (Sessions.sessionReconcileDecision(#confirmed, #Refund, 0)) { case (#finalizeClose(_)) {}; case (_) { assert false } };
+      switch (Sessions.sessionReconcileDecision(#confirmed, #Refund, 100)) { case (#finalizeClose(_)) {}; case (_) { assert false } };
+    });
+    // A confirmed SETTLE completes the close ONLY when no remainder is owed.
+    test("#confirmed #Settle with no remainder -> finalizeClose", func() {
+      switch (Sessions.sessionReconcileDecision(#confirmed, #Settle, 0)) { case (#finalizeClose(_)) {}; case (_) { assert false } };
+    });
+    test("#confirmed #Settle WITH remainder owed -> settleDoneRefundOwed (no auto-broadcast)", func() {
+      switch (Sessions.sessionReconcileDecision(#confirmed, #Settle, 100)) { case (#settleDoneRefundOwed(_)) {}; case (_) { assert false } };
+    });
+  });
 });

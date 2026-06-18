@@ -433,6 +433,10 @@ service : {
                                     err: text;
                                     ok: text;
                                   });
+  reconcileSession: (sessionId: text) -> (variant {
+                                            err: text;
+                                            ok: text;
+                                          });
   registerService: (name: text, description: text, serviceType: ServiceType,
    pricing: PricingScheme, verificationMethod: text, verifierCanisterId:
    opt text, verificationKey: opt blob, delivery: ServiceDeliveryMethod,
