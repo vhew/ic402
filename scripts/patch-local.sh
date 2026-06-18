@@ -85,11 +85,24 @@ assert_patched() {
   return 0
 }
 
+# Portable in-place sed. BSD/macOS needs `sedi` while GNU/Linux needs `sed -i` (no arg) — the
+# same invocation can't satisfy both, and on Linux `sedi 's/x/y/' f` mis-reads the script as a
+# filename ("can't read s/...: No such file"). Route every in-place edit through a temp file so it
+# works on both and leaves no stray .bak. Usage mirrors sed: sedi [exprs/options...] <file> (last).
+sedi() {
+  # Collect every arg except the LAST (the target file) without array-index math, so it behaves
+  # identically under bash and zsh. After the loop, $1 is the file.
+  local exprs=() tmp
+  while [ "$#" -gt 1 ]; do exprs+=("$1"); shift; done
+  tmp="$(mktemp)"
+  sed "${exprs[@]}" "$1" >"$tmp" && mv "$tmp" "$1"
+}
+
 # Patch ckUSDC ledger principal
 patch_ledger() {
   local ckusdc_id="${1:-}"
   if [ -n "$ckusdc_id" ] && [ "$ckusdc_id" != "$MAINNET_LEDGER" ] && [ "$ckusdc_id" != "unknown" ]; then
-    sed -i '' "s/$MAINNET_LEDGER/$ckusdc_id/g" example/main.mo
+    sedi "s/$MAINNET_LEDGER/$ckusdc_id/g" example/main.mo
     assert_patched example/main.mo "$MAINNET_LEDGER" "ckUSDC ledger"
     echo "  Patched ckUSDC ledger: $ckusdc_id"
   fi
@@ -98,7 +111,7 @@ patch_ledger() {
 # Patch mainnet EVM chain IDs + USDC addresses to testnet
 patch_evm_testnet() {
   echo "  Patching EVM chains: mainnet → testnet..."
-  sed -i '' \
+  sedi \
     -e 's/chainId = 8453;/chainId = 84532;/g' \
     -e 's/8453,           \/\/ Base (mainnet)/84532,          \/\/ Base Sepolia/g' \
     -e 's/chainId = 1;/chainId = 11155111;/g' \
@@ -119,7 +132,7 @@ patch_evm_testnet() {
   # Patch EIP-712 token names where testnet differs from mainnet.
   # Base Sepolia and Optimism Sepolia USDC use name="USDC" instead of "USD Coin".
   echo "  Patching EIP-712 token names for testnet..."
-  sed -i '' \
+  sedi \
     -e '/0x036CbD53842c5426634e7929541eC2318f3dCF7e/s/name = null/name = ?"USDC"/' \
     -e '/0x5fd84259d66Cd46123540766Be93DFE6D43130D7/s/name = null/name = ?"USDC"/' \
     example/main.mo
@@ -139,7 +152,7 @@ patch_evm_rpc() {
     done
   fi
   if [ -n "$evm_rpc_id" ]; then
-    sed -i '' "s/evmRpcCanister = null/evmRpcCanister = ?\"$evm_rpc_id\"/g" example/main.mo
+    sedi "s/evmRpcCanister = null/evmRpcCanister = ?\"$evm_rpc_id\"/g" example/main.mo
     assert_patched example/main.mo "evmRpcCanister = null" "EVM RPC canister"
     echo "  EVM RPC canister: $evm_rpc_id"
   else
@@ -168,7 +181,7 @@ patch_evm_recipient() {
   fi
 
   if [ -n "$EVM_ADDR" ]; then
-    sed -i '' "s/$EVM_PLACEHOLDER/$EVM_ADDR/g" example/main.mo
+    sedi "s/$EVM_PLACEHOLDER/$EVM_ADDR/g" example/main.mo
     assert_patched example/main.mo "$EVM_PLACEHOLDER" "EVM recipient"
     echo "  EVM recipient: $EVM_ADDR"
   else
@@ -178,7 +191,7 @@ patch_evm_recipient() {
 
 # Patch tECDSA key name: mainnet "key_1" → local "dfx_test_key"
 patch_ecdsa_key() {
-  sed -i '' 's/"key_1"/"dfx_test_key"/g' example/main.mo
+  sedi 's/"key_1"/"dfx_test_key"/g' example/main.mo
   echo "  Patched tECDSA key: dfx_test_key"
 }
 
