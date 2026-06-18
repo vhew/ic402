@@ -111,6 +111,15 @@ async function evmUsdcBalance(rpc: string, usdc: string, addr: string): Promise<
 const EXTERNAL_CONTENT_URL =
   'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
 
+/**
+ * Normalize the optional Candid `settlementTxHash` field (agent-js renders ?Text as `[]` /
+ * `[hash]`; a bare string is also tolerated) into a printable hash, or '' if absent.
+ */
+function settlementTxHashOf(raw: unknown): string {
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  return typeof v === 'string' && v ? v : '';
+}
+
 function pubkeyToEvmAddress(compressedHex: string): string | null {
   try {
     const point = secp256k1.Point.fromHex(compressedHex);
@@ -287,7 +296,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         }
 
         section('Encryption (automatic on upload)');
-        state('Algorithm', 'SHA-256-CTR — per-content key derived from canister secret');
+        state(
+          'Algorithm',
+          'ChaCha20-Poly1305 AEAD (RFC 8439) — per-content key derived from canister secret',
+        );
         state('Layer 1', "ICP subnet memory isolation (node operators can't read memory)");
         state('Layer 2', 'Application encryption (raw memory dumps are ciphertext)');
         state('Storage', 'Canister stable memory — survives upgrades, write-once enforced');
@@ -454,6 +466,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     if (contentObj && 'ok' in contentObj) {
                       success('PAYMENT VERIFIED — content delivered!');
                       const delivery = contentObj.ok as Record<string, unknown>;
+                      // ICP rail: the settlement "tx" is the ckUSDC ledger block index.
+                      const settleHash = settlementTxHashOf(delivery?.settlementTxHash);
+                      if (settleHash)
+                        state('Settle tx', `${settleHash} (ckUSDC ledger block index)`);
                       const grant = delivery?.grant as Record<string, unknown>;
                       if (grant) {
                         state(
@@ -718,6 +734,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                   if (payObj && 'ok' in payObj) {
                     success('EIP-3009 VERIFIED — content delivered!');
                     const delivery = payObj.ok as Record<string, unknown>;
+                    // Surface the inbound on-chain settlement tx hash (mirrors Step 7's
+                    // "Settle tx:" line) so the EVM settle is verifiable on a block explorer.
+                    const settleHash = settlementTxHashOf(delivery?.settlementTxHash);
+                    if (settleHash) state('Settle tx', settleHash);
                     const grant = delivery?.grant as Record<string, unknown>;
                     if (grant) {
                       state(
@@ -945,14 +965,23 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       signature: Array.from(new Uint8Array(64)),
                       publicKey: [],
                       sender: '',
-                      nonce: Array.from(
-                        ((
+                      // The MCP `call` tool serializes a vec nat8 nonce to a HEX STRING.
+                      // Array.from(hexString) would split it into hex CHARACTERS (["4","8",…])
+                      // and Candid rejects it ("Invalid vec nat8 … \"4\""). Decode hex → bytes
+                      // the same robust way Step 3's working ICP/EVM rails do. (sender stays ''
+                      // so the canister cleanly rejects this probe — settle runs before the
+                      // deleted-content check, so a valid sender would actually charge for it.)
+                      nonce: (() => {
+                        const raw = (
                           (payObj.paymentRequired as Record<string, unknown>[])?.[0] as Record<
                             string,
                             unknown
                           >
-                        )?.nonce as number[]) ?? [],
-                      ),
+                        )?.nonce;
+                        return Array.isArray(raw)
+                          ? (raw as number[])
+                          : Array.from(Buffer.from(String(raw ?? ''), 'hex'));
+                      })(),
                       authorization: [],
                     },
                   ],
@@ -979,9 +1008,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             state('HTTP status', `${contentRes.status}`);
           }
         } catch (e) {
-          // A network failure is replica-unreachable, NOT proof the content was deleted.
-          warn(
-            `Endpoint fetch failed (${e instanceof Error ? e.message : String(e)}) — replica unreachable? Deletion was already verified above via listContent.`,
+          // Deletion was already verified above via listContent; this post-delete probe is
+          // best-effort. Don't speculate about a "replica outage" (every other step reached
+          // the replica) — just report the error.
+          info(
+            `Post-delete probe error: ${e instanceof Error ? e.message : String(e)} — deletion already verified above via listContent.`,
           );
         }
 
@@ -989,8 +1020,16 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('Fetching /search?q=test (should still work)...');
         try {
           const searchRes = await fetch(`${rawHttpUrl}/search?q=test`);
-          if (searchRes.ok) {
-            success(`HTTP ${searchRes.status} — search endpoint still available`);
+          if (searchRes.ok || searchRes.status === 402) {
+            // /search is a PAID endpoint — a 402 is the CORRECT gated response and proves the
+            // endpoint still works (it returns payment options, not an error).
+            success(
+              `HTTP ${searchRes.status} — search endpoint still available${
+                searchRes.status === 402
+                  ? ' (402 = payment required, expected for a paid endpoint)'
+                  : ''
+              }`,
+            );
           } else {
             warn(`Search endpoint returned HTTP ${searchRes.status}`);
           }
@@ -1856,21 +1895,44 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('nonce + gas → canister signs → broadcast → poll receipt → parse event.');
         info('');
 
-        try {
-          const reg = await mcpCallAndRender(client, 'register_agent', { confirm: true });
-          if (reg?.status === 'ok') {
-            if (reg.tokenId) {
-              state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
-            }
+        // mcpCallAndRender RETURNS (does not throw) on a tool error, so inspect reg.status
+        // here. register_agent now reports status:'error' when the on-chain tx reverts (the
+        // SDK checks receipt.status) — we must NOT print "Awaiting confirmation" over a tx
+        // that never registered. The canister's EVM address is deterministic (stable tECDSA
+        // key) across deploys, so a re-run can legitimately revert as "already registered";
+        // the receipt carries no decoded revert reason, so classify by the SDK error KIND:
+        // an on-chain / external outcome (revert, no gas, broadcast-not-confirmed, transient)
+        // is a KNOWN ISSUE (⚠, not a failure); an ic402-side error (signing refused, bad
+        // config) is a real bug and fails the run.
+        const reg = await mcpCallAndRender(client, 'register_agent', { confirm: true });
+        if (reg?.status === 'ok' && reg.tokenId) {
+          // Confirmed mint: the SDK parsed an AgentRegistered event from a status==1 receipt.
+          state('Contract', `${BASE_EXPLORER}/address/${BASE_REGISTRY}`);
+        } else if (reg?.status === 'ok') {
+          // status ok but no tokenId ⇒ tx mined without an AgentRegistered event: not a
+          // confirmed mint, but not an ic402 logic bug either.
+          throw new KnownIssueError(
+            'register_agent: tx mined but no AgentRegistered event',
+            'Registration not confirmed on-chain (no mint event) — not an ic402 logic bug.',
+          );
+        } else {
+          const err = reg?.error as Record<string, unknown> | undefined;
+          const kind = String(err?.kind ?? 'unknown');
+          const m = String(err?.message ?? err ?? 'register_agent returned no result');
+          const onChainOrExternal = [
+            'broadcast_failed',
+            'insufficient_funds',
+            'not_confirmed',
+            'transient',
+          ];
+          if (onChainOrExternal.includes(kind)) {
+            throw new KnownIssueError(
+              `register_agent did not confirm on-chain (${kind})`,
+              `${m} — e.g. already registered (the canister EVM address is stable), no ETH for gas, or not yet mined. Not an ic402 logic bug.`,
+            );
           }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          if (msg.includes('insufficient') || msg.includes('have 0')) {
-            warn('Canister EVM wallet has no ETH for gas — fund it to register on Base.');
-            info(`Send Base Sepolia ETH to: ${evmAddress || '(derive with getEvmAddress)'}`);
-          } else {
-            warn(`Registration failed: ${msg}`);
-          }
+          // An ic402-side failure (sign_failed, config_error, unknown) is a real bug.
+          throw new Error(`register_agent failed (${kind}): ${m}`);
         }
 
         highlight('ICP canister, discoverable from any EVM chain. No directory, no API key.');
