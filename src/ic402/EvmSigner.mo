@@ -209,7 +209,7 @@ module {
         let pubKey = await getPublicKey();
         let tokenAddr = EvmUtils.hexToBytes(tokenAddress);
         let now : Nat = Int.abs(Time.now() / 1_000_000_000);
-        let validAfter = if (now > 600) { now - 600 } else { 0 };
+        let validAfter = Utils.satSub(now, 600);
         let validBefore = now + 300;
 
         // M-6: Use nanosecond timestamp for nonce uniqueness (survives upgrades)

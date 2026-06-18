@@ -1,6 +1,7 @@
 /// ic402 — Shared internal utilities (not exported via lib.mo).
 import Types "Types";
 import Nat "mo:base/Nat";
+import Int "mo:base/Int";
 import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
 import Array "mo:base/Array";
@@ -11,6 +12,15 @@ import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 
 module {
+
+  /// Saturating Nat subtraction: `a - b`, clamped to 0 — NEVER underflow-traps. Computed in Int so
+  /// the subtraction itself can't trap; this replaces the `if (a > b) { a - b } else { 0 }` idiom
+  /// and silences M0155 at the call site. Use ONLY where clamp-to-0 is the intended semantic (fees,
+  /// refunds, remainders) — NOT for array bounds, where a trap on a broken precondition is correct.
+  public func satSub(a : Nat, b : Nat) : Nat {
+    let diff : Int = (a : Int) - (b : Int);
+    if (diff > 0) { Int.abs(diff) } else { 0 };
+  };
 
   /// Encode a Nat as a big-endian 8-byte array.
   /// WARNING: truncates to the low 64 bits. Use ONLY for genuine 64-bit counters

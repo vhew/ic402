@@ -16,6 +16,7 @@ import Buffer "mo:base/Buffer";
 import Iter "mo:base/Iter";
 import Nat "mo:base/Nat";
 import Int "mo:base/Int";
+import Utils "Utils";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
 import Timer "mo:base/Timer";
@@ -429,7 +430,7 @@ module {
       // So the operator's billable ceiling — and the Exact-pricing default — is the amount NET of
       // the fee, not the full escrowed `job.amount` (which would let the operator claim the fee
       // and leave the pool short).
-      let serviceAmount = if (job.amount > config.ledgerFee) { job.amount - config.ledgerFee } else { 0 };
+      let serviceAmount = Utils.satSub(job.amount, config.ledgerFee);
       let cost = switch (actualCost) {
         case (?c) {
           if (c > serviceAmount) return #err("Actual cost exceeds escrowed amount (net of ledger fee)");
@@ -672,7 +673,7 @@ module {
         // buyer (lets EVM buyers actually be refunded; S14 / C3 refund half), net of the
         // refund's ledger fee (buyer paid price+fee; the fee is consumed by the transfer).
         let fee = config.ledgerFee;
-        let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+        let refundAmt = Utils.satSub(job.amount, fee);
         switch (await refundOnRail(jobId, job, refundAmt)) {
           case (#ok) {
             jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
@@ -713,7 +714,7 @@ module {
       // operator/remainder logic works with. The fee covers the outbound transfer (the ledger
       // deducts amount+fee), so the pool nets zero per job instead of going short every time.
       let fee = config.ledgerFee;
-      let serviceAmount = if (job.amount > fee) { job.amount - fee } else { 0 };
+      let serviceAmount = Utils.satSub(job.amount, fee);
       let cost = switch (job.actualCost) {
         case (?c) { c };
         case (null) { serviceAmount };
@@ -738,7 +739,7 @@ module {
 
       // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail, net of the refund's own
       // ledger fee. The operator is already paid, so on failure mark #Settled and surface it.
-      let refundAmount = if (serviceAmount > cost + fee) { serviceAmount - cost - fee } else { 0 };
+      let refundAmount = Utils.satSub(serviceAmount, cost + fee);
       if (refundAmount > 0) {
         switch (await refundOnRail(jobId, job, refundAmount)) {
           case (#err(e)) {
@@ -888,7 +889,7 @@ module {
           // 0x (EVM) buyer — net of the refund's ledger fee. On failure leave #Expired (reclaimed
           // by gcTerminalJobs after 24h).
           let fee = config.ledgerFee;
-          let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
+          let refundAmt = Utils.satSub(job.amount, fee);
           switch (await refundOnRail(id, job, refundAmt)) {
             case (#ok) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
             case (#pending(p)) {

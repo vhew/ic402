@@ -734,11 +734,9 @@ module {
       };
 
       let settleFees = if (session.consumed > 0) { fee } else { 0 };
-      let escrowBalance = if (session.deposited >= session.consumed + settleFees) {
-        session.deposited - session.consumed - settleFees;
-      } else { 0 };
+      let escrowBalance = Utils.satSub(session.deposited, session.consumed + settleFees);
       var refundBlockIndex : ?Nat = null;
-      let refunded = if (escrowBalance > fee) { escrowBalance - fee } else { 0 };
+      let refunded = Utils.satSub(escrowBalance, fee);
       if (refunded > 0) {
         let refundResult = await escrowManager.refund(
           ledger,
@@ -880,7 +878,7 @@ module {
       // Re-fetch after the await: a concurrent transition may have moved the session.
       let s2 = switch (sessions.get(sessionId)) { case (null) { return #err("Session vanished during reconcile") }; case (?s) { s } };
       if (s2.status != #closing) return #err("Session no longer #closing (status: " # debug_show (s2.status) # ")");
-      let refundOwed = if (s2.deposited > s2.consumed) { s2.deposited - s2.consumed } else { 0 };
+      let refundOwed = Utils.satSub(s2.deposited, s2.consumed);
       switch (sessionReconcileDecision(outcome, parked.leg, refundOwed)) {
         case (#finalizeClose(msg)) {
           ignore evmEscrowManager.deallocate(s2.id);
@@ -972,9 +970,7 @@ module {
 
       // Refund remainder to payer (no ledger fees to subtract for EVM — gas is in ETH)
       var refundTxHash : ?Text = null;
-      let refunded = if (session.deposited > session.consumed) {
-        session.deposited - session.consumed;
-      } else { 0 };
+      let refunded = Utils.satSub(session.deposited, session.consumed);
 
       if (refunded > 0) {
         switch (
@@ -1065,9 +1061,7 @@ module {
             };
           };
           // H-5: Cap recovery amount to unconsumed portion
-          let maxRecoverable = if (session.deposited > session.consumed) {
-            session.deposited - session.consumed;
-          } else { 0 };
+          let maxRecoverable = Utils.satSub(session.deposited, session.consumed);
           let cappedAmount = if (amount > maxRecoverable) { maxRecoverable } else { amount };
           if (cappedAmount == 0) {
             return #err("No recoverable funds: deposit fully consumed");
