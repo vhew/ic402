@@ -124,12 +124,23 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
   a 120B cycle floor (a full settle ≈ ~100B over ~7 outcalls + a tECDSA sign), returning a
   pre-broadcast `#err` so the canister never broadcasts a transfer it can't afford to confirm (a
   freeze mid-settle is what parks funds). `health()` surfaces the balance.
-- [ ] **Confirmation depth / reorg — TODO.** `status==1` is treated as final with no confirmation
-  depth; require N confs on deposits + outbound confirms. Low probability, real on L2s.
-- [ ] **2-provider chains park on one flaky RPC — TODO (broader than SEC-2).** 2-of-2 consensus on
-  the nonce/broadcast path means one bad provider parks every settle (testnets + any 2-provider
-  chain; mainnet Base/ETH/OP/Arb use resilient 2-of-3). Add a 3rd provider / provider-count-aware
-  min + operator RPC override; pairs with the reconcile path above.
+- [x] **2-provider chains park on one flaky RPC — DONE (v2.1.1).** Added a verified 3rd RPC provider
+  (drpc.org) to each 2-of-2 testnet chain (Base/OP/Arb Sepolia, Avalanche Fuji) → 2-of-3, which
+  tolerates one provider failing. No consensus relaxation (receipts still need 2 to AGREE); mainnet
+  Base/ETH/OP/Arb already use resilient managed 2-of-3 sets. An operator-configurable RPC override
+  is a possible future nicety but no longer needed for resilience.
+- [ ] **Confirmation depth / reorg — DEFERRED (genuine tradeoff; low practical risk).** `status==1`
+  is treated as final with no confirmation-depth check on inbound deposits/charges (`EvmVerify`) or
+  outbound confirms (`EvmSender.confirmTransaction`); a shallow reorg could un-mine a credited
+  deposit. **Why deferred, not rushed:** (1) it needs a chain-head read — the EVM-RPC interface
+  here exposes no `eth_getBlockByNumber`, so it must be added to `EvmRpc.EvmRpcCanister` (+ a Block
+  result type) or derived from `eth_feeHistory.oldestBlock`; (2) it touches the security-sensitive
+  inbound deposit-verification path; (3) it changes confirm SEMANTICS/timing for every settle (more
+  `#pending` → more parking → leans on the reconcile path), so it needs a funded e2e re-verify. The
+  practical risk is LOW here (mostly USDC on optimistic L2s, whose centralized sequencer rarely
+  reorgs the tip). **Recommendation:** ship as a FOCUSED change — configurable depth (default ~2 for
+  L2s) + the head-read addition + a demo re-run — or accept as a documented low-probability risk for
+  the single-operator L2 context.
 
 ## Docs (some stale / missing)
 
