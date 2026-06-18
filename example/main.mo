@@ -1013,7 +1013,8 @@ persistent actor KnowledgeBase {
   // Operator health / metrics (controller-only): cycle balance + job/session status counts.
   // NEW-4 observability: watch `jobs.settling` and `sessions.closing` — those are funds parked
   // mid-settlement (an EVM transfer that broadcast but hasn't confirmed). Each EVM settle burns
-  // ~60B cycles across ~6 outcalls, so cyclesBalance is the other key thing to watch.
+  // ~100B cycles (~7 EVM-RPC outcalls + a tECDSA sign), so cyclesBalance is the other key thing
+  // to watch — and EvmSender refuses to broadcast below a 120B floor (MIN_BROADCAST_CYCLES).
   public shared query (msg) func health() : async {
     cyclesBalance : Nat;
     jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat };
@@ -1045,6 +1046,22 @@ persistent actor KnowledgeBase {
   public shared(msg) func forceResolveSession(sessionId : Text) : async { #ok; #err : Text } {
     assert(Principal.isController(msg.caller));
     gate.forceResolveSession(sessionId);
+  };
+
+  // Operator EVM escape hatch (controller-only): transfer `amount` of an ERC-20 (e.g. USDC) from
+  // the canister's OWN tECDSA-derived EVM address to `to` on `chainId`, via the confirmed-transfer
+  // sender (reports #confirmed only after a mined status==1). Use it to evacuate the address on a
+  // key/subnet-compromise suspicion, or to settle a never-landed refund for a job/session you had
+  // to force-resolve. The operator supplies `amount` (read the on-chain balance off-chain) so no
+  // balanceOf RPC is needed; the chain enforces the actual balance.
+  public shared(msg) func sweepEvm(chainId : Nat, token : Text, to : Text, amount : Nat) : async {
+    #confirmed : Text;
+    #reverted : Text;
+    #pending : Text;
+    #err : Text;
+  } {
+    assert(Principal.isController(msg.caller));
+    await gate.sendErc20TransferConfirmed(chainId, token, to, amount);
   };
 
   public shared query (msg) func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {

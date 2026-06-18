@@ -491,6 +491,13 @@ service : {
       ok: record {jobId: text;};
       paymentRequired: vec PaymentRequirement;
     });
+  sweepEvm: (chainId: nat, token: text, to: text, amount: nat) ->
+   (variant {
+      confirmed: text;
+      err: text;
+      pending: text;
+      reverted: text;
+    });
   uploadContent: (id: text, mimeType: text, data: blob) ->
    (ContentStoreResult);
   uploadContentChunk: (id: text, index: nat, data: blob) ->

@@ -108,12 +108,14 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
   Job/Session (stable-field addition; fine under the B1 fresh-deploy waiver) and add
   `reconcileJob`/`reconcileSession` that re-poll the stored hash via a **read-only** confirm hook
   and finalize ONLY on a mined `status==1` — never re-broadcast (re-broadcast risks double-pay).
-- [ ] **`sweepEvm(chainId, token, to, amount)` — TODO.** Controller-only escape hatch to drain the
-  canister's EVM balance (key/subnet-compromise response, or to settle a never-landed refund),
-  reusing the confirmed-transfer sender.
-- [ ] **Cycle-balance guard — TODO.** Each EVM settle burns ~60B cycles over ~6 HTTPS outcalls; add
-  a pre-settle floor check so the canister never broadcasts a transfer it can't afford to confirm
-  (a freeze mid-settle is what parks funds). `health()` now surfaces the balance.
+- [x] **`sweepEvm(chainId, token, to, amount)` — DONE (v2.1.1).** Controller-only escape hatch that
+  drains the canister's OWN EVM balance to an operator address (key/subnet-compromise response, or
+  to settle a never-landed refund), via the confirmed-transfer sender (reports `#confirmed` only on
+  a mined `status==1`).
+- [x] **Cycle-balance guard — DONE (v2.1.1).** `EvmSender.sendTransaction` refuses to broadcast below
+  a 120B cycle floor (a full settle ≈ ~100B over ~7 outcalls + a tECDSA sign), returning a
+  pre-broadcast `#err` so the canister never broadcasts a transfer it can't afford to confirm (a
+  freeze mid-settle is what parks funds). `health()` surfaces the balance.
 - [ ] **Confirmation depth / reorg — TODO.** `status==1` is treated as final with no confirmation
   depth; require N confs on deposits + outbound confirms. Low probability, real on L2s.
 - [ ] **2-provider chains park on one flaky RPC — TODO (broader than SEC-2).** 2-of-2 consensus on

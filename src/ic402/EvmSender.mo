@@ -11,6 +11,7 @@ import Array "mo:base/Array";
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
 import Error "mo:base/Error";
+import Cycles "mo:base/ExperimentalCycles";
 import IC "mo:ic";
 import Call "mo:ic/Call";
 
@@ -66,6 +67,14 @@ module {
       responseConsensus = ?#Threshold({ total = null; min = 2 });
     };
 
+    // Ops cycle floor: refuse to BROADCAST a tx the canister can't afford to also CONFIRM.
+    // A full settle is ~7 EVM-RPC outcalls (fee + nonce + send + up to 4 receipt polls) plus a
+    // tECDSA sign — on the order of 100B cycles. Below this floor sendTransaction returns a
+    // PRE-broadcast #err (no funds move; every caller rolls back safely) instead of broadcasting
+    // and then freezing mid-confirm — which is exactly what leaves a transfer parked. Top up the
+    // canister to clear it. (Surfaced via the example's `health` query cycle balance.)
+    let MIN_BROADCAST_CYCLES : Nat = 120_000_000_000;
+
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
       switch (cachedPubKey) {
@@ -107,6 +116,11 @@ module {
       calldata : [Nat8],
       gasLimit : Nat,
     ) : async { #ok : Text; #err : Text; #maybeSent : Text } {
+      // Cycle floor (see MIN_BROADCAST_CYCLES): never broadcast a tx we can't afford to confirm.
+      // Pre-broadcast #err => no funds move and callers roll back safely.
+      if (Cycles.balance() < MIN_BROADCAST_CYCLES) {
+        return #err("Insufficient cycles to safely broadcast and confirm; top up the canister");
+      };
       // H-1: Reject concurrent transactions to prevent nonce desync.
       if (txInProgress) {
         return #err("Transaction in progress, retry later");
