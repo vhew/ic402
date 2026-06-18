@@ -107,3 +107,43 @@ jobs:
           node-version: 22
       - run: mops install
       - run: bash scripts/build-example.sh /tmp/example.wasm
+
+  # B4: the integration suite (test/integration.test.ts, 50 cases) exercises the canister
+  # END-TO-END, but every case is gated `if (skip) return` and SILENTLY PASSES (counts as passed,
+  # not skipped) when no replica is reachable — so the plain `test-ts` vitest run can't catch a
+  # money-path regression. This job deploys a REAL local replica via `pnpm setup:local` and runs
+  # the suite with IC402_REQUIRE_REPLICA=1, which turns a missing replica into a HARD failure
+  # (test/integration.test.ts:52-55). Determinism: the suite binds to its own registered service
+  # id and is hermetic (every fetch hits the local replica; the EVM cases are sign-only, no
+  # broadcast). No Rust toolchain needed — the zk-verifier prebuilt is committed (setup only
+  # builds it when missing); binaryen for wasm-opt is fetched (SHA-pinned, Linux/x86_64).
+  test-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: ZenVoich/setup-mops@v1
+      - name: Install icp CLI
+        run: npm install -g @icp-sdk/icp-cli
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy local replica + canisters
+        run: pnpm setup:local
+      - name: Integration suite (replica-enforced)
+        run: IC402_REQUIRE_REPLICA=1 pnpm test:integration
+
+  # Keep example/example.did in sync with example/main.mo — a drifted .did ships a stale Candid
+  # interface (and the @ic402/client + MCP IDL are mirrored from it). Regenerate and fail on a diff.
+  did-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ZenVoich/setup-mops@v1
+      - run: mops install
+      - run: bash scripts/gen-did.sh
+      - name: Fail if example.did is stale (run scripts/gen-did.sh and commit)
+        run: git diff --exit-code example/example.did
