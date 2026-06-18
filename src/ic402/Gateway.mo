@@ -907,6 +907,15 @@ module {
       sessionsMgr.forceResolveSession(sessionId);
     };
 
+    /// Read-only EVM tx confirmation (re-poll a receipt; NEVER broadcasts) — wired into the
+    /// registry/sessions reconcile paths so a parked tx can be confirmed without re-sending it.
+    public func confirmEvmTransaction(chainId : Nat, txHash : Text) : async { #confirmed; #reverted; #pending; #err : Text } {
+      switch (evmSenderInst) {
+        case (?sender) { await sender.confirmTransaction(chainId, txHash, 1) };
+        case (null) { #err("EVM sender not configured") };
+      };
+    };
+
     // ── Content Delivery (delegates to Grants module) ──
 
     /// Initialize HMAC seed from randomness. Call once on first deployment.

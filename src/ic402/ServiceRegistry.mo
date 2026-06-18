@@ -73,6 +73,16 @@ module {
       evmTransfer := ?fn;
     };
 
+    // Recovery: a READ-ONLY confirm hook (re-polls a tx receipt; NEVER broadcasts). Distinct from
+    // evmTransfer precisely so reconcileJob can never re-broadcast a parked tx (no double-pay).
+    public type EvmConfirmFn = (Nat, Text) -> async { #confirmed; #reverted; #pending; #err : Text };
+    var evmConfirm : ?EvmConfirmFn = null;
+
+    /// Wire the read-only EVM tx-confirmation used by reconcileJob. Call once at init.
+    public func setEvmConfirm(fn : EvmConfirmFn) {
+      evmConfirm := ?fn;
+    };
+
     // 1a: operator EVM payout addresses, keyed by operator principal. An EVM-paid job is
     // settled on-chain to its operator's registered payout address (no ServiceDefinition /
     // Candid change). Without one, EVM settlement can't pay the operator and rolls back.
@@ -113,7 +123,7 @@ module {
     /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
     /// address on-chain — fixing the settle half of the cross-rail flaw (C3). Returns true on
     /// success (false if no operator / no payout address / no transfer hook / transfer fails).
-    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #pending : Text; #err : Text } {
+    func settleToOperator(jobId : Text, job : Types.Job, cost : Nat) : async { #ok; #pending : { txHash : Text; chainId : Nat; token : Text }; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           let payout = switch (job.operator) { case (?op) { operatorEvmPayout.get(op) }; case (null) { null } };
@@ -125,7 +135,7 @@ module {
               switch (await transfer(chainId, rail.token, addr, cost)) {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #err("EVM settle to operator reverted on-chain (tx " # h # ")") };
-                case (#pending(h)) { #pending("EVM settle to operator broadcast but unconfirmed (tx " # h # ")") };
+                case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
                 case (#err(e)) { #err("EVM settle to operator: " # e) };
               };
             };
@@ -151,7 +161,7 @@ module {
     /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
     /// injected hook). Returns true on success. Fixes the EVM-buyer refund stranding (S14)
     /// and the refund half of the cross-rail flaw (C3).
-    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #pending : Text; #err : Text } {
+    func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async { #ok; #pending : { txHash : Text; chainId : Nat; token : Text }; #err : Text } {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
           switch (evmTransfer, parseChainId(rail.network)) {
@@ -160,7 +170,7 @@ module {
               switch (await transfer(chainId, rail.token, job.buyer, amount)) {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #err("EVM refund reverted on-chain (tx " # h # ")") };
-                case (#pending(h)) { #pending("EVM refund broadcast but unconfirmed (tx " # h # ")") };
+                case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
                 case (#err(e)) { #err("EVM refund: " # e) };
               };
             };
@@ -357,6 +367,7 @@ module {
         expiresAt = now + svc.timeout * 1_000_000_000; // seconds → nanos
         completedAt = null;
         deliveryCallback = callback;
+        parkedTx = null;
       };
       jobs.put(jobId, job);
       // 1a: record the EVM payment rail (network + token) for an EVM-paid job, so it can be
@@ -667,10 +678,11 @@ module {
             jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
             #ok;
           };
-          case (#pending(e)) {
-            // B2: broadcast but unconfirmed — do NOT revert to the prior status (a resolve/
-            // expire re-drive would re-broadcast and double-refund). Leave parked in #Settling.
-            #err("Refund pending (parked in #Settling, do not retry): " # e);
+          case (#pending(p)) {
+            // B2/recovery: broadcast but unconfirmed — do NOT revert (a re-drive would double-
+            // refund). Persist the parked refund (leg #Refund); stay parked in #Settling.
+            jobs.put(jobId, { job with status = #Settling; parkedTx = ?{ txHash = p.txHash; leg = #Refund; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
+            #err("Refund pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
           };
           case (#err(e)) {
             jobs.put(jobId, job); // revert to its prior status (no funds moved)
@@ -714,11 +726,12 @@ module {
           jobs.put(jobId, { job with status = #Verified }); // roll back for retry (no funds moved)
           return #err("Settlement failed: " # e);
         };
-        case (#pending(e)) {
-          // B2: broadcast but unconfirmed — it MAY have landed, so do NOT roll back to
-          // #Verified (the next tick would re-broadcast and double-pay). Leave it parked
-          // in #Settling (set above) for confirm-only recovery; surface the pending state.
-          return #err("Settlement pending (parked in #Settling, do not retry): " # e);
+        case (#pending(p)) {
+          // B2/recovery: broadcast but unconfirmed — it MAY have landed, so do NOT roll back to
+          // #Verified (re-broadcast would double-pay). Persist the parked tx (leg #Settle) so a
+          // controller can confirm-only reconcile it; stay parked in #Settling (set above).
+          jobs.put(jobId, { job with status = #Settling; parkedTx = ?{ txHash = p.txHash; leg = #Settle; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
+          return #err("Settlement pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
         };
         case (#ok) {};
       };
@@ -732,12 +745,12 @@ module {
             jobs.put(jobId, { job with status = #Settled });
             return #err("Operator paid but buyer remainder refund failed: " # e);
           };
-          case (#pending(e)) {
-            // B2: operator is paid (confirmed); the remainder refund is broadcast-but-
-            // unconfirmed. The job IS settled — mark #Settled and surface the pending
-            // remainder (do not re-drive: a #pending refund may have landed).
-            jobs.put(jobId, { job with status = #Settled });
-            return #err("Operator paid; buyer remainder refund pending (do not retry): " # e);
+          case (#pending(p)) {
+            // B2/recovery: operator is paid (confirmed); the remainder refund is broadcast-but-
+            // unconfirmed. The job IS settled — mark #Settled and record the parked remainder
+            // (leg #UptoRemainder) so reconcileJob can confirm/clear it (no re-drive).
+            jobs.put(jobId, { job with status = #Settled; parkedTx = ?{ txHash = p.txHash; leg = #UptoRemainder; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
+            return #err("Operator paid; buyer remainder refund pending (reconcileJob to confirm): tx " # p.txHash);
           };
           case (#ok) {};
         };
@@ -745,6 +758,68 @@ module {
 
       jobs.put(jobId, { job with status = #Settled });
       #ok;
+    };
+
+    /// Pure decision for reconcileJob (sync, unit-testable): given the on-chain confirm OUTCOME,
+    /// the parked leg, and the job's CURRENT status, decide the transition. Keeping this pure lets
+    /// the #confirmed/#pending/#reverted/#err × leg matrix be tested without async/RPC. The golden
+    /// rules it encodes: finalize ONLY on #confirmed; #reverted/#err/#pending never move state
+    /// (no double-pay, no false finalize); a #confirmed leg only finalizes from its parked status.
+    public type ReconcileResult = {
+      #finalize : { status : Types.JobStatus; msg : Text }; // set status + clear parkedTx + completedAt
+      #clearParked : { msg : Text }; // clear parkedTx only (Upto remainder confirmed)
+      #stay : { err : Text }; // no state change; surface the reason
+    };
+    public func reconcileDecision(
+      outcome : { #confirmed; #reverted; #pending; #err : Text },
+      leg : Types.ParkedLeg,
+      status : Types.JobStatus,
+    ) : ReconcileResult {
+      switch (outcome) {
+        case (#pending) { #stay({ err = "Parked tx still pending — stay parked" }) };
+        case (#reverted) { #stay({ err = "Parked tx reverted on-chain; no funds moved — use resolveJob" }) };
+        case (#err(e)) { #stay({ err = "Confirm RPC failed — stay parked: " # e }) };
+        case (#confirmed) {
+          switch (leg) {
+            case (#Settle) {
+              if (status != #Settling) {
+                #stay({ err = "Job no longer #Settling (status: " # debug_show (status) # ")" });
+              } else { #finalize({ status = #Settled; msg = "Settle confirmed on-chain; job #Settled" }) };
+            };
+            case (#Refund) {
+              switch (status) {
+                case (#Settling or #Expired) { #finalize({ status = #Refunded; msg = "Refund confirmed on-chain; job #Refunded" }) };
+                case (_) { #stay({ err = "Job not in a refund-parked state (status: " # debug_show (status) # ")" }) };
+              };
+            };
+            // operator already settled+confirmed; a confirmed remainder just clears the parked tx.
+            case (#UptoRemainder) { #clearParked({ msg = "Upto remainder refund confirmed; parked tx cleared" }) };
+          };
+        };
+      };
+    };
+
+    /// v2.1.1 recovery (controller-only via the consumer): CONFIRM-ONLY finalize a job whose
+    /// outbound settle/refund parked (#pending). Re-polls the STORED parked tx via the read-only
+    /// confirm hook and applies reconcileDecision. NEVER re-broadcasts (that risks double-pay).
+    public func reconcileJob(jobId : Text) : async { #ok : Text; #err : Text } {
+      let job = switch (jobs.get(jobId)) { case (null) { return #err("Job not found") }; case (?j) { j } };
+      let parked = switch (job.parkedTx) { case (null) { return #err("Job has no parked tx to reconcile") }; case (?p) { p } };
+      let confirm = switch (evmConfirm) { case (null) { return #err("No confirm hook wired") }; case (?f) { f } };
+      let outcome = await confirm(parked.chainId, parked.txHash);
+      // Re-fetch after the await: a concurrent transition may have moved the job.
+      let j2 = switch (jobs.get(jobId)) { case (null) { return #err("Job vanished during reconcile") }; case (?j) { j } };
+      switch (reconcileDecision(outcome, parked.leg, j2.status)) {
+        case (#finalize({ status; msg })) {
+          jobs.put(jobId, { j2 with status; parkedTx = null; completedAt = ?Time.now() });
+          #ok(msg # " (tx " # parked.txHash # ")");
+        };
+        case (#clearParked({ msg })) {
+          jobs.put(jobId, { j2 with parkedTx = null });
+          #ok(msg # " (tx " # parked.txHash # ")");
+        };
+        case (#stay({ err })) { #err(err # " (tx " # parked.txHash # ")") };
+      };
     };
 
     // ── Query ──
@@ -816,9 +891,14 @@ module {
           let refundAmt = if (job.amount > fee) { job.amount - fee } else { 0 };
           switch (await refundOnRail(id, job, refundAmt)) {
             case (#ok) { jobs.put(id, { job with status = #Refunded; completedAt = ?now }) };
-            // B2: #pending (broadcast, unconfirmed — may have landed) or #err: leave #Expired
-            // (reclaimed by gcTerminalJobs after 24h). Do NOT re-drive a #pending refund.
-            case (_) {}; // leave #Expired
+            case (#pending(p)) {
+              // B2/recovery: broadcast but unconfirmed — keep #Expired but ATTACH the parked
+              // refund (leg #Refund) so reconcileJob can confirm it; gcTerminalJobs will NOT
+              // reclaim a job that still carries a parkedTx (so a possibly-landed refund isn't
+              // dropped). Do NOT re-drive (re-broadcast would double-refund).
+              jobs.put(id, { job with status = #Expired; completedAt = ?now; parkedTx = ?{ txHash = p.txHash; leg = #Refund; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
+            };
+            case (#err(_)) {}; // no funds moved — leave #Expired (reclaimed after 24h)
           };
         };
       };
@@ -853,7 +933,9 @@ module {
       };
       switch (terminal) {
         case (#Settled or #Refunded or #Expired) {
-          jobs.put(jobId, { job with status = terminal; completedAt = ?Time.now() });
+          // Clear parkedTx: this is the operator asserting the dead/handled tx is resolved, so the
+          // job becomes GC-eligible again (gcTerminalJobs skips jobs that still carry a parkedTx).
+          jobs.put(jobId, { job with status = terminal; completedAt = ?Time.now(); parkedTx = null });
           #ok;
         };
         case (_) { #err("resolveJob target must be a terminal status (#Settled / #Refunded / #Expired)") };
@@ -870,7 +952,10 @@ module {
               case (?t) { t };
               case (null) { job.createdAt }; // fallback if completedAt not set
             };
-            if (completedTime < gcCutoff) { staleJobs.add(id) };
+            // Recovery: do NOT reclaim a terminal job that still carries an unresolved parkedTx
+            // (a broadcast-but-unconfirmed settle/refund) — reconcileJob must be able to confirm
+            // a possibly-landed transfer first. It GCs normally once reconcile clears parkedTx.
+            if (job.parkedTx == null and completedTime < gcCutoff) { staleJobs.add(id) };
           };
           case (_) {};
         };
@@ -884,9 +969,9 @@ module {
     /// `settling` means funds are parked mid-settlement (an EVM transfer that broadcast but
     /// hasn't confirmed); that's the metric to watch and reconcile.
     public func jobCounts() : {
-      total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat;
+      total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat;
     } {
-      var total = 0; var settling = 0; var settled = 0; var refunded = 0; var expired = 0; var active = 0;
+      var total = 0; var settling = 0; var settled = 0; var refunded = 0; var expired = 0; var active = 0; var parked = 0;
       for ((_, job) in jobs.entries()) {
         total += 1;
         switch (job.status) {
@@ -896,8 +981,11 @@ module {
           case (#Expired) { expired += 1 };
           case (_) { active += 1 };
         };
+        // `parked` is the true funds-parked count: it spans all three legs (settle #Settling,
+        // refund #Settling/#Expired, Upto remainder on a #Settled job) — the metric to reconcile.
+        switch (job.parkedTx) { case (?_) { parked += 1 }; case (null) {} };
       };
-      { total; settling; settled; refunded; expired; active };
+      { total; settling; settled; refunded; expired; active; parked };
     };
 
     /// Start the job expiry timer. Call once at canister init.

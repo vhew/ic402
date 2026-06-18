@@ -104,10 +104,15 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
   (a `#closing` session → `#closed`). **State assertion only — moves no funds**: the operator
   verifies the on-chain outcome, then unsticks the record so it stops pinning memory and becomes
   GC-eligible. Funds for a never-landed transfer are reconciled out-of-band (or via EVM sweep).
-- [ ] **Auto confirm-only reconcile — TODO (designed).** Persist the parked tx hash + leg on the
-  Job/Session (stable-field addition; fine under the B1 fresh-deploy waiver) and add
-  `reconcileJob`/`reconcileSession` that re-poll the stored hash via a **read-only** confirm hook
-  and finalize ONLY on a mined `status==1` — never re-broadcast (re-broadcast risks double-pay).
+- [~] **Auto confirm-only reconcile — JOBS DONE (v2.1.1); sessions remaining.** Jobs:
+  `Job.parkedTx` (stable) persists the parked settle/refund tx + leg at every `#pending` park
+  site; `reconcileJob` re-polls it via a **read-only** confirm hook and finalizes #Settled/
+  #Refunded ONLY on a mined `status==1` (never re-broadcasts); the finalize matrix is a pure,
+  unit-tested `reconcileDecision` (7 branch tests covering the golden rules); `gcTerminalJobs`
+  won't reclaim a job that still carries a parkedTx; `health` reports `jobs.parked`. Adversarially
+  reviewed SAFE (no double-pay / false-finalize / lost-park / GC-drop). **Remaining:** the
+  symmetric `reconcileSession` (two legs — consumed-settle + remainder-refund — on the streaming
+  session). The manual `forceResolveSession` already gives sessions an operator remedy today.
 - [x] **`sweepEvm(chainId, token, to, amount)` — DONE (v2.1.1).** Controller-only escape hatch that
   drains the canister's OWN EVM balance to an operator address (key/subnet-compromise response, or
   to settle a never-landed refund), via the confirmed-transfer sender (reports `#confirmed` only on

@@ -182,6 +182,20 @@ type PaymentReceipt =
    token: text;
    txHash: opt text;
  };
+type ParkedTx = 
+ record {
+   chainId: nat;
+   leg: ParkedLeg;
+   parkedAt: int;
+   token: text;
+   txHash: text;
+ };
+type ParkedLeg = 
+ variant {
+   Refund;
+   Settle;
+   UptoRemainder;
+ };
 type JobStatus = 
  variant {
    Assigned;
@@ -207,6 +221,7 @@ type Job =
    id: text;
    operator: opt principal;
    params: blob;
+   parkedTx: opt ParkedTx;
    paymentReceiptId: text;
    proof: opt blob;
    result: opt blob;
@@ -375,6 +390,7 @@ service : {
        record {
          active: nat;
          expired: nat;
+         parked: nat;
          refunded: nat;
          settled: nat;
          settling: nat;
@@ -413,6 +429,10 @@ service : {
          total: nat;
        };
     }) query;
+  reconcileJob: (jobId: text) -> (variant {
+                                    err: text;
+                                    ok: text;
+                                  });
   registerService: (name: text, description: text, serviceType: ServiceType,
    pricing: PricingScheme, verificationMethod: text, verifierCanisterId:
    opt text, verificationKey: opt blob, delivery: ServiceDeliveryMethod,

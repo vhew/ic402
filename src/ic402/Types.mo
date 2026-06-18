@@ -612,6 +612,23 @@ module {
     #Refunded;   // funds returned to buyer
   };
 
+  /// A parked OUTBOUND EVM transfer whose settle/refund broadcast but did not confirm within the
+  /// poll budget (#pending). Persisted so a controller can re-poll it CONFIRM-ONLY (never
+  /// re-broadcast — that risks double-pay) and finalize. `leg` says which terminal state a mined
+  /// status==1 implies; `chainId`/`token` let the reconcile re-poll the exact tx.
+  public type ParkedLeg = {
+    #Settle; // settle-to-operator → on confirm ⇒ #Settled
+    #Refund; // dispute/expire refund-to-buyer → on confirm ⇒ #Refunded
+    #UptoRemainder; // Upto buyer remainder; operator already paid+confirmed → confirm clears parkedTx
+  };
+  public type ParkedTx = {
+    txHash : Text;
+    leg : ParkedLeg;
+    chainId : Nat;
+    token : Text;
+    parkedAt : Int;
+  };
+
   /// Public view of a job.
   public type Job = {
     id : Text;
@@ -629,6 +646,9 @@ module {
     expiresAt : Int;
     completedAt : ?Int;
     deliveryCallback : ?Text;  // optional callback URL
+    // v2.1.1: an in-flight EVM settle/refund that broadcast but did not confirm. null for ICP
+    // jobs and jobs with no outstanding parked tx. Re-polled by reconcileJob (confirm-only).
+    parkedTx : ?ParkedTx;
   };
 
   /// 1a: the on-chain payment rail of an EVM-paid job — the CAIP-2 network

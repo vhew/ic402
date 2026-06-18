@@ -864,6 +864,7 @@ suite("ServiceRegistry", func() {
         expiresAt = 0;
         completedAt;
         deliveryCallback = null;
+        parkedTx = null;
       };
     };
 
@@ -915,7 +916,7 @@ suite("ServiceRegistry", func() {
         id; serviceId = "svc-1"; buyer; operator = null;
         params = Text.encodeUtf8("p"); paymentReceiptId = "r"; amount = 1000; actualCost = null;
         status; result = null; proof = null; createdAt = 0; expiresAt = 0; completedAt = null;
-        deliveryCallback = null;
+        deliveryCallback = null; parkedTx = null;
       };
     };
 
@@ -1080,6 +1081,56 @@ suite("ServiceRegistry", func() {
         case (?rail) { assert rail.network == "eip155:84532" };
         case (null) { assert false };
       };
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  // reconcileJob decision matrix (v2.1.1 recovery) — pure + sync-testable
+  // ══════════════════════════════════════════════════
+
+  suite("reconcileDecision (confirm-only finalize matrix)", func() {
+    let reg = makeRegistry();
+
+    // GOLDEN RULE 1: never finalize except on #confirmed (no double-pay / no false finalize).
+    test("#pending stays parked for every leg/status", func() {
+      switch (reg.reconcileDecision(#pending, #Settle, #Settling)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (reg.reconcileDecision(#pending, #Refund, #Expired)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (reg.reconcileDecision(#pending, #UptoRemainder, #Settled)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+    test("#reverted stays parked (no funds moved) for every leg", func() {
+      switch (reg.reconcileDecision(#reverted, #Settle, #Settling)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (reg.reconcileDecision(#reverted, #Refund, #Settling)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+    test("#err stays parked", func() {
+      switch (reg.reconcileDecision(#err("rpc down"), #Settle, #Settling)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+
+    // GOLDEN RULE 2: a #confirmed leg finalizes ONLY from its own parked status.
+    test("#confirmed #Settle from #Settling -> finalize #Settled", func() {
+      switch (reg.reconcileDecision(#confirmed, #Settle, #Settling)) {
+        case (#finalize({ status; msg = _ })) { assert status == #Settled };
+        case (_) { assert false };
+      };
+    });
+    test("#confirmed #Settle from a non-#Settling status -> stay (no re-finalize)", func() {
+      switch (reg.reconcileDecision(#confirmed, #Settle, #Settled)) { case (#stay(_)) {}; case (_) { assert false } };
+      switch (reg.reconcileDecision(#confirmed, #Settle, #Refunded)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+    test("#confirmed #Refund from #Settling or #Expired -> finalize #Refunded", func() {
+      switch (reg.reconcileDecision(#confirmed, #Refund, #Settling)) {
+        case (#finalize({ status; msg = _ })) { assert status == #Refunded };
+        case (_) { assert false };
+      };
+      switch (reg.reconcileDecision(#confirmed, #Refund, #Expired)) {
+        case (#finalize({ status; msg = _ })) { assert status == #Refunded };
+        case (_) { assert false };
+      };
+    });
+    test("#confirmed #Refund from a non-parked status -> stay", func() {
+      switch (reg.reconcileDecision(#confirmed, #Refund, #Settled)) { case (#stay(_)) {}; case (_) { assert false } };
+    });
+    test("#confirmed #UptoRemainder -> clearParked (operator already settled)", func() {
+      switch (reg.reconcileDecision(#confirmed, #UptoRemainder, #Settled)) { case (#clearParked(_)) {}; case (_) { assert false } };
     });
   });
 });

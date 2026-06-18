@@ -155,6 +155,14 @@ persistent actor KnowledgeBase {
     }
   );
 
+  // Recovery: wire the READ-ONLY confirm hook so reconcileJob can re-poll a parked tx without
+  // re-broadcasting it (the confirm path can never send a transaction).
+  registry.setEvmConfirm(
+    func(chainId : Nat, txHash : Text) : async { #confirmed; #reverted; #pending; #err : Text } {
+      await gate.confirmEvmTransaction(chainId, txHash);
+    }
+  );
+
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
     switch (stableContent) { case (?d) { store.loadStable(d) }; case (null) {} };
@@ -1011,13 +1019,14 @@ persistent actor KnowledgeBase {
   };
 
   // Operator health / metrics (controller-only): cycle balance + job/session status counts.
-  // NEW-4 observability: watch `jobs.settling` and `sessions.closing` — those are funds parked
-  // mid-settlement (an EVM transfer that broadcast but hasn't confirmed). Each EVM settle burns
-  // ~100B cycles (~7 EVM-RPC outcalls + a tECDSA sign), so cyclesBalance is the other key thing
-  // to watch — and EvmSender refuses to broadcast below a 120B floor (MIN_BROADCAST_CYCLES).
+  // NEW-4 observability: watch `jobs.parked` and `sessions.closing` — those are funds parked
+  // mid-settlement (an EVM transfer that broadcast but hasn't confirmed); reconcileJob /
+  // forceResolveSession clear them. Each EVM settle burns ~100B cycles (~7 EVM-RPC outcalls + a
+  // tECDSA sign), so cyclesBalance is the other key thing to watch — and EvmSender refuses to
+  // broadcast below a 120B floor (MIN_BROADCAST_CYCLES).
   public shared query (msg) func health() : async {
     cyclesBalance : Nat;
-    jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat };
+    jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat };
     sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat };
   } {
     assert(Principal.isController(msg.caller));
@@ -1033,11 +1042,18 @@ persistent actor KnowledgeBase {
     await gate.forceCloseSession(sessionId);
   };
 
-  // Operator escape hatches (controller-only) for funds parked mid-settlement. Use `health`/
-  // `listJobs` to find them, verify the on-chain outcome yourself, then force the record to a
-  // terminal state so it stops pinning memory. STATE assertion only — these move NO funds; if a
-  // parked transfer never landed, reconcile the funds out-of-band. (Automated confirm-only
-  // reconcile is the planned next step.)
+  // Recovery (controller-only): CONFIRM-ONLY auto-reconcile of a job parked mid-settlement. Finds
+  // the stored parked tx, re-polls it on-chain, and finalizes #Settled/#Refunded ONLY on a mined
+  // status==1 — never re-broadcasts. Use `health`/`listJobs` to find parked jobs (#Settling).
+  public shared(msg) func reconcileJob(jobId : Text) : async { #ok : Text; #err : Text } {
+    assert(Principal.isController(msg.caller));
+    await registry.reconcileJob(jobId);
+  };
+
+  // Manual escape hatches (controller-only) for a parked record whose tx is genuinely dead
+  // (reverted / never mined, so reconcileJob can't finalize it). Verify the on-chain outcome
+  // yourself, then force the record to a terminal state so it stops pinning memory. STATE
+  // assertion only — these move NO funds; reconcile any real fund movement out-of-band.
   public shared(msg) func resolveJob(jobId : Text, terminal : Ic402.JobStatus) : async { #ok; #err : Text } {
     assert(Principal.isController(msg.caller));
     registry.resolveJob(jobId, terminal);
