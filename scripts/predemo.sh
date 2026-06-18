@@ -10,7 +10,7 @@ set -euo pipefail
 #   1. Exports the test-payer identity to a PEM file
 #   2. Ensures test-payer is a canister controller (for uploadContent)
 #   3. Cleans up expired sessions
-#   4. Mints 1 ckUSDC to test-payer
+#   4. Mints 100 ckUSDC to test-payer (generous: the integration suite runs ~10 settles)
 #   5. Sets ICRC-2 approval so the canister can spend it
 # =============================================================================
 
@@ -50,16 +50,16 @@ icp canister call "$EXAMPLE_ID" closeExpiredSessions '()' -e local >/dev/null 2>
 
 # 4. Mint ckUSDC
 if icp canister call ckusdc_ledger icrc1_transfer \
-  "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
+  "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 100_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
   -e local >/dev/null 2>&1; then
-  echo "  Funded: 1 ckUSDC to test-payer"
+  echo "  Funded: 100 ckUSDC to test-payer"
 else
   echo "  WARNING: Failed to mint ckUSDC"
 fi
 
 # 5. Set ICRC-2 approval
 if icp canister call ckusdc_ledger icrc2_approve \
-  "(record { spender = record { owner = principal \"$EXAMPLE_ID\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null; expected_allowance = null; expires_at = null })" \
+  "(record { spender = record { owner = principal \"$EXAMPLE_ID\"; subaccount = null }; amount = 100_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null; expected_allowance = null; expires_at = null })" \
   -e local --identity test-payer >/dev/null 2>&1; then
   echo "  Approved: ICRC-2 allowance for canister"
 else
