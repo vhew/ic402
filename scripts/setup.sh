@@ -191,13 +191,18 @@ else
 fi
 echo "  EVM RPC:       $EVM_RPC_ID"
 
-# Build and deploy ZK verifier (Rust canister, optional)
-ZK_WASM="$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm.gz"
-if command -v cargo &>/dev/null; then
-  echo "  Building ZK verifier..."
+# Deploy ZK verifier (Rust canister). The gzipped wasm is committed under
+# example/zk-verifier/prebuilt/ so the canister deploys WITHOUT a Rust toolchain.
+# Only (re)build it when the prebuilt is MISSING and cargo is available — a normal
+# run uses the committed artifact and never dirties the (gitignored) target/ tree.
+ZK_WASM="$PROJECT_ROOT/example/zk-verifier/prebuilt/zk_verifier.wasm.gz"
+if [ ! -f "$ZK_WASM" ] && command -v cargo &>/dev/null; then
+  echo "  Building ZK verifier (prebuilt missing)..."
   (cd "$PROJECT_ROOT/example/zk-verifier" && cargo build --target wasm32-unknown-unknown --release --quiet 2>/dev/null)
-  if [ -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm" ]; then
-    gzip -k -f "$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm"
+  ZK_RAW="$PROJECT_ROOT/example/zk-verifier/target/wasm32-unknown-unknown/release/zk_verifier.wasm"
+  if [ -f "$ZK_RAW" ]; then
+    mkdir -p "$PROJECT_ROOT/example/zk-verifier/prebuilt"
+    gzip -c "$ZK_RAW" > "$ZK_WASM"
   fi
 fi
 if [ -f "$ZK_WASM" ]; then
