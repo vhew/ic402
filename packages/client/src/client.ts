@@ -19,7 +19,6 @@ import type {
   SessionIntent,
   SessionState,
   SignedAuthorization,
-  SignedTransaction,
   Voucher,
 } from './types.js';
 import { signVoucher, type VoucherSigner } from './voucher.js';

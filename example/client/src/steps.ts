@@ -22,7 +22,6 @@ import {
   section,
 } from './util.js';
 
-const BASE_CHAIN = 'Base Sepolia testnet (chainId 84532)';
 const BASE_EXPLORER = 'https://sepolia.basescan.org';
 const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
 const EVM_CHAINS = [
@@ -108,8 +107,6 @@ async function evmUsdcBalance(rpc: string, usdc: string, addr: string): Promise<
     return -1n;
   }
 }
-const EXTERNAL_CONTENT_URL =
-  'https://images.lumacdn.com/cdn-cgi/image/format=auto,fit=cover,dpr=1,quality=80,width=400,height=400/event-covers/v2/ceaf4fc5-d05b-49f0-8c88-f81bea8d9f46';
 
 /**
  * Normalize the optional Candid `settlementTxHash` field (agent-js renders ?Text as `[]` /

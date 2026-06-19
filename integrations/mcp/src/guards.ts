@@ -129,10 +129,6 @@ export function resolveSecurityConfig(
  */
 const DANGEROUS_TOOLS = new Set(['sign_typed_data', 'delete_content']);
 
-export function dangerousTools(): string[] {
-  return [...DANGEROUS_TOOLS];
-}
-
 export function isToolAllowed(toolName: string, allowDangerousTools: boolean): boolean {
   if (DANGEROUS_TOOLS.has(toolName)) return allowDangerousTools;
   return true;
