@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.2.2 — 2026-06-19
+
+Patch release. Fixes a `@ic402/client` packaging bug and trims dead code/deps
+(supply-chain cleanup). No wire/HTTP or API changes.
+
+### Fixed
+
+- **`@ic402/client` was mis-packaged.** It imported `@icp-sdk/core` without
+  declaring it — so a clean `npm install @ic402/client@2.2.1` is broken
+  (`MODULE_NOT_FOUND`) — and declared three deps it never imports
+  (`@canister-software/x402-icp`, `@x402/core`, `@x402/fetch`), which dragged in
+  the legacy `@dfinity/*` tree (the source of most supply-chain-scan alerts). Now
+  `@icp-sdk/core` is declared and the three dead deps are removed. **Republish from
+  2.2.2 to fix the live package.**
+
+### Removed (dead code)
+
+- `client.ts` unused `SignedTransaction` import; `guards.ts` unused
+  `dangerousTools()` export; demo `versus()` helper and two unused constants.
+  Verified with depcheck / ts-prune / eslint; build + 72 client tests pass.
+
+### Notes
+
+- The transitive advisories a supply-chain scan flags — `ws` (via viem's WebSocket
+  transport) and `hono`/`path-to-regexp`/`fast-uri` (via the MCP SDK's HTTP/SSE
+  transports) — are **not reachable**: ic402 uses viem `http()` and a stdio-only
+  MCP server, so neither transport runs. The fixes are upstream. See
+  `docs/security-model.md` §5.
+
 ## v2.2.1 — 2026-06-19
 
 Security release. A composed-system adversarial security audit (SEC-0) plus two

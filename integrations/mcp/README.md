@@ -10,10 +10,10 @@ The server identifies itself to MCP clients as:
 
 ```
 name:    ic402
-version: 2.2.1
+version: 2.2.2
 ```
 
-(see `src/index.ts`, the `new McpServer({ name: 'ic402', version: '2.2.1' })` registration).
+(see `src/index.ts`, the `new McpServer({ name: 'ic402', version: '2.2.2' })` registration).
 
 > **Security note up front.** This server is driven by an LLM whose inputs may be influenced by
 > untrusted web content (prompt injection) while it holds a controller identity capable of
