@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.2.1 — 2026-06-19
+
+Security release. A composed-system adversarial security audit (SEC-0) plus two
+re-attack rounds found and fixed six issues. No wire/HTTP or `@ic402/client` breaking
+changes; two additive Motoko methods (below).
+
+### Security (SEC-0)
+
+- **[critical] Marketplace double-refund.** The ServiceRegistry ZkGroth16 `#err`
+  branch wrote `#Disputed` unconditionally, clobbering a terminal `#Settled`/`#Refunded`/
+  `#Expired` set during the verifier await → the next `expireJobs` tick re-refunded the
+  job. Now status-guarded (only `#Computing` → `#Disputed`, mirroring the `#ok` branch).
+- **[high] EVM session overpayment strand.** `openEvmSession` accepted `authz.value >
+  deposit`, pulling the full value on-chain but crediting only `deposit`. Now requires
+  `authz.value == deposit` (mirrors the charge path).
+- **[high] Unmetered-ecRecover cycle-DoS.** The expensive EIP-3009 `ecRecover` ran
+  without the global rate gate on the paid `/content`/`/search` settle paths and on
+  `openEvmSession`. A single global token bucket now meters `settle`/`verifyPayment`/
+  `openEvmSession`; the example uses a floor-only check on `/verify`+`/settle` so the
+  bucket isn't double-charged.
+- **[high] EVM pool over-allocation + open-time leak.** `EvmEscrow.totalAllocated` was
+  never consulted (dead code) and the session public key was validated *after*
+  `allocate`. Now a live per-chain+token `poolCap` guard, and the key is validated
+  before the on-chain deposit + allocation.
+- **[high] MCP spend-cap TOCTOU.** Concurrent/pipelined tool calls passed the same
+  stale cumulative cap. The cap is now reserved synchronously at confirm time and
+  refunded on a no-money-moved failure.
+- **[high] MCP DNS-rebinding SSRF.** The `fetch_x402` probe leg and `register_agent`
+  rpcUrl bypassed the redirect-safe fetch. Outbound hosts are now DNS-resolved and
+  rejected if they resolve to a private/metadata IP, at every fetch entry point.
+
+### Added
+
+- `Gateway.setEvmPoolCap(cap)` — bound outstanding EVM session deposits per chain+token
+  (the over-allocation guard). The example wires a ceiling.
+- `Gateway.cyclesBelowFloor()` — the facilitator cycle-floor check, split out so a
+  consumer doesn't double-charge the global rate bucket.
+
+### Documented residuals
+
+Deliberately deferred and disclosed in `docs/security-model.md` /
+`docs/production-readiness.md` (SEC-0): system-wide shared-EVM-pool solvency
+(marketplace/`sweepEvm` vs `totalAllocated`); the SSRF connect-time re-resolve window
+(no undici IP-pinning yet); and the ungated-but-unwired `recoverBuyerActionSigner`.
+
 ## v2.2.0 — 2026-06-18
 
 Minor release. Adds a recovery/observability suite and a facilitator DoS gate,
