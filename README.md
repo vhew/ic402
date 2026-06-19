@@ -143,6 +143,28 @@ An ICP canister replaces the HTTP server, the wallet, the escrow, and the paymen
 - **Persistent state** — escrow, jobs, encrypted content survive upgrades
 - **Coordinator model** — the canister IS the smart contract, no external escrow needed
 
+## Costs
+
+Costs are bimodal — everything is cheap except signing **and** broadcasting an EVM transaction.
+
+| Operation | Net cost |
+|-----------|----------|
+| x402 verify / 402 / content delivery | trivial (query, no outcall) |
+| ICP settle (ICRC‑2) | ~10–500M cycles (≈ <$0.001) |
+| Session voucher | trivial (Ed25519, in‑canister) — the 5,000× lever |
+| EVM settle (sign + broadcast + confirm) | **~17B cycles** local / ~40–80B mainnet est. (≈ $0.02–0.10) + EVM gas |
+
+Per‑call EVM settle is **underwater below ~$0.05–0.10** — use the ICP rail or sessions for micropayments. Measured numbers, the cycle buffer to hold, and rail‑selection guidance: **[docs/costs-and-rails.md](docs/costs-and-rails.md)**.
+
+## Security
+
+The money paths are sound — recipient binding, exact `value == amount`, single‑use nonces, confirm‑before‑deliver. But two things you must know before deploying with real funds:
+
+- **The library is not secure‑by‑default.** Four access‑control checks (policy‑mutation auth, roster redaction, cross‑resource underpayment, content gating) live only in [`example/main.mo`](example/main.mo) — copy them or inherit a price‑bypass / roster‑leak / content‑leak.
+- **One trust root.** Every admin/signer/recovery power is `Principal.isController`, so a single stolen controller key = total EVM drain + arbitrary signing.
+
+Read **[docs/security-model.md](docs/security-model.md)** (integration checklist + key‑custody guidance) before going to mainnet.
+
 ## Demo
 
 ```bash
