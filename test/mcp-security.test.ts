@@ -48,6 +48,10 @@ describe('MCP SSRF: validateFetchUrl', () => {
 });
 
 describe('MCP SSRF: safeFetch redirect re-validation (S2)', () => {
+  // Resolve any test host to a public IP so the SEC-0 DNS-rebinding check passes; the redirect /
+  // re-validation logic under test is independent of resolution. Rebinding itself is tested below.
+  const PUBLIC_LOOKUP = async () => [{ address: '93.184.216.34', family: 4 }];
+
   it('follows a redirect to a safe https host, re-validating each hop', async () => {
     const fetchImpl = async (url: string) => {
       if (url === 'https://a.example/start')
@@ -61,6 +65,7 @@ describe('MCP SSRF: safeFetch redirect re-validation (S2)', () => {
     const resp = await safeFetch('https://a.example/start', undefined, {
       localDev: false,
       fetchImpl,
+      lookupImpl: PUBLIC_LOOKUP,
     });
     expect(resp.status).toBe(200);
     expect(await resp.text()).toBe('ok');
@@ -78,7 +83,11 @@ describe('MCP SSRF: safeFetch redirect re-validation (S2)', () => {
       return new Response('SHOULD NOT BE REACHED', { status: 200 });
     };
     await expect(
-      safeFetch('https://evil.example/start', undefined, { localDev: false, fetchImpl }),
+      safeFetch('https://evil.example/start', undefined, {
+        localDev: false,
+        fetchImpl,
+        lookupImpl: PUBLIC_LOOKUP,
+      }),
     ).rejects.toThrow(/metadata|private|loopback/i);
     // The validated origin was fetched, but the redirect target never was.
     expect(seen).toEqual(['https://evil.example/start']);
@@ -91,7 +100,11 @@ describe('MCP SSRF: safeFetch redirect re-validation (S2)', () => {
       return new Response('NOPE', { status: 200 });
     };
     await expect(
-      safeFetch('https://evil.example/start', undefined, { localDev: false, fetchImpl }),
+      safeFetch('https://evil.example/start', undefined, {
+        localDev: false,
+        fetchImpl,
+        lookupImpl: PUBLIC_LOOKUP,
+      }),
     ).rejects.toThrow(/http:\/\//);
   });
 
@@ -103,13 +116,36 @@ describe('MCP SSRF: safeFetch redirect re-validation (S2)', () => {
         localDev: false,
         fetchImpl,
         maxRedirects: 3,
+        lookupImpl: PUBLIC_LOOKUP,
       }),
     ).rejects.toThrow(/more than 3 redirects/);
   });
 
   it('returns a non-redirect response directly', async () => {
     const fetchImpl = async () => new Response('hello', { status: 200 });
-    const resp = await safeFetch('https://example.com/', undefined, { localDev: false, fetchImpl });
+    const resp = await safeFetch('https://example.com/', undefined, {
+      localDev: false,
+      fetchImpl,
+      lookupImpl: PUBLIC_LOOKUP,
+    });
     expect(await resp.text()).toBe('hello');
+  });
+
+  it('BLOCKS DNS-rebinding: a public host that resolves to a private IP (SEC-0)', async () => {
+    let fetched = false;
+    const fetchImpl = async () => {
+      fetched = true;
+      return new Response('SHOULD NOT BE REACHED', { status: 200 });
+    };
+    // The literal host is public, but it resolves to an internal address (cloud metadata).
+    const rebind = async () => [{ address: '169.254.169.254', family: 4 }];
+    await expect(
+      safeFetch('https://rebind.example/', undefined, {
+        localDev: false,
+        fetchImpl,
+        lookupImpl: rebind,
+      }),
+    ).rejects.toThrow(/rebinding|private|internal/i);
+    expect(fetched).toBe(false);
   });
 });

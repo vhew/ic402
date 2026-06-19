@@ -22,11 +22,34 @@ module {
 
     var allocations = HashMap.HashMap<Text, Allocation>(8, Text.equal, Text.hash);
 
-    /// Reserve a deposit amount for a session.
+    // SEC-0: optional cap on the TOTAL allocation per chain+token — the funded pool size the
+    // consumer commits to backing on-chain. When set (via setPoolCap), allocate() refuses any
+    // reservation that would push totalAllocated past it, so concurrent EVM sessions can never
+    // reserve more than the shared address can actually pay out. null = unbounded (legacy). This
+    // makes totalAllocated a LIVE guard rather than advisory dead code; operators MUST keep the
+    // shared EVM address funded at/above the cap (see docs/security-model.md — shared-pool solvency).
+    var poolCap : ?Nat = null;
+
+    /// Set the maximum total the canister will back on-chain per chain+token (the funded pool
+    /// size). null = unbounded. Call this with the amount of USDC you have actually funded the
+    /// canister's EVM address with.
+    public func setPoolCap(cap : ?Nat) { poolCap := cap };
+
+    /// Reserve a deposit amount for a session. Refuses on a duplicate session, or — when a pool cap
+    /// is set — when the new total would exceed the cap (over-allocation).
     public func allocate(sessionId : Text, chainId : Nat, token : Text, amount : Nat) : { #ok; #err : Text } {
       switch (allocations.get(sessionId)) {
         case (?_) { #err("Session " # sessionId # " already has an EVM allocation") };
         case (null) {
+          switch (poolCap) {
+            case (?c) {
+              let projected = totalAllocated(chainId, token) + amount;
+              if (projected > c) {
+                return #err("EVM pool over-allocation: projected " # debug_show (projected) # " exceeds pool cap " # debug_show (c) # " (chain " # debug_show (chainId) # ")");
+              };
+            };
+            case (null) {};
+          };
           allocations.put(sessionId, { chainId; token; amount });
           #ok;
         };

@@ -70,12 +70,23 @@ security audit and `CHANGELOG.md` for what shipped.
 
 ## Security (fresh composed-system pass before tagging "production-ready")
 
-- [ ] **SEC-0 — Commission ONE fresh adversarial security pass over the entire v2.1.0
-  surface AS A COMPOSED SYSTEM.** The pieces were reviewed per-commit, but the new surface
-  has never been audited end-to-end together: the unauthenticated facilitator endpoints
-  (`/verify`, `/settle`, `/supported`, `/discovery`), the marketplace cross-rail
-  settle/refund, the EVM session close, and the 7 new MCP admin tools. *(Requested
-  explicitly.)* Specifically cover SEC-1..3 below as part of it.
+- [x] **SEC-0 — DONE (composed-system adversarial audit run; findings fixed).** A multi-agent
+  composed-system pass (attack → majority-vote verify → cross-surface critic) plus two re-attack
+  rounds covered the unauthenticated facilitator endpoints, marketplace cross-rail settle/refund,
+  EVM session close, key custody, the MCP tools, and EVM reorg/RPC trust. **Confirmed + fixed:**
+  (1) ServiceRegistry ZK `#err` branch clobbered terminal job state → double-refund (now status-
+  guarded); (2) EVM session accepted EIP-3009 overpayment → stranded excess (now `value == deposit`);
+  (3) unmetered `ecRecover` cycle-DoS on the paid-settle + session-open paths (now one global token
+  bucket inside settle/verifyPayment/openEvmSession); (4) `EvmEscrow.totalAllocated` was dead code +
+  an open-time allocation leak (now a live `poolCap` guard + validate-before-allocate); (5) MCP
+  cumulative spend-cap TOCTOU (now reserve-at-confirm + refund-on-failure); (6) MCP DNS-rebinding
+  SSRF (now DNS-resolved at every fetch entry point). Re-attack #2 verdict: PASS, no non-documented
+  blocker. **Deferred/documented residuals** (see `docs/security-model.md`): (a) system-wide shared-
+  EVM-pool solvency — marketplace/sweep vs `totalAllocated`; (b) SSRF connect-time re-resolve window
+  (no undici IP-pinning yet) + `probeX402` per-redirect-hop literal validation; (c) `recoverBuyer-
+  ActionSigner` ungated but not example-wired; plus a recommended regression-test layer (ServiceRegistry
+  async interleavings; MCP `spendGuard`/`refundSpend`) and the pre-existing transient `submit_request`
+  lost-reply cap under-count (availability, not a cap-bypass).
 - [~] **SEC-1 — PARTIAL (v2.1.1).** Rate-limit/gate the unauthenticated facilitator **update**
   endpoints (`POST /verify`, `/settle`): they run in `http_request_update` (cost the canister
   cycles) and parse attacker JSON before any policy rate-limit → **cycle/DoS** surface.

@@ -78,22 +78,42 @@ module {
     var facilitatorTokens : Nat = 60;
     var facilitatorLastRefill : Int = 0;
 
-    /// SEC-1 gate — call BEFORE parsing the facilitator body or running verifyPayment/settle.
-    /// Returns #throttled when the global rate is exceeded, #lowCycles when the balance is below
-    /// the floor (so an attacker can't drain the canister via the unmetered facilitator path).
-    public func facilitatorAdmit() : { #ok; #throttled; #lowCycles } {
-      if (Cycles.balance() < FACILITATOR_MIN_CYCLES) { return #lowCycles };
+    /// Pure rate-limit admission (token bucket only, NO cycle floor). SEC-0: settle/verifyPayment
+    /// call this to meter the expensive ecRecover without depending on Cycles.balance() (which is
+    /// unavailable in the unit-test interpreter) and without the 500B floor blocking legitimate
+    /// settlement at merely-moderate cycles. The GLOBAL (caller-agnostic) bucket bounds the
+    /// aggregate rate of attacker-triggerable ecRecover; the cycle floor stays in facilitatorAdmit
+    /// (the pure-facilitator /verify+/settle endpoints) and in EvmSender's 120B broadcast floor.
+    func admitRate() : { #ok; #throttled } {
       let step = tokenBucketStep(facilitatorTokens, facilitatorLastRefill, Time.now(), FACILITATOR_BUCKET_CAPACITY, FACILITATOR_REFILL_PER_SEC);
       facilitatorTokens := step.tokens;
       facilitatorLastRefill := step.lastRefill;
       if (step.admit) { #ok } else { #throttled };
     };
 
+    /// SEC-1 gate — call BEFORE parsing the facilitator body or running verifyPayment/settle.
+    /// Returns #throttled when the global rate is exceeded, #lowCycles when the balance is below
+    /// the floor (so an attacker can't drain the canister via the unmetered facilitator path).
+    public func facilitatorAdmit() : { #ok; #throttled; #lowCycles } {
+      if (Cycles.balance() < FACILITATOR_MIN_CYCLES) { return #lowCycles };
+      admitRate();
+    };
+
+    /// SEC-0 (round 2): just the cycle floor (no bucket). A consumer applies this at its HTTP
+    /// facilitator ingress for the low-cycles 503 backstop, while the per-request RATE limit now
+    /// lives INSIDE settle/verifyPayment/openSession (admitRate). Using this instead of
+    /// facilitatorAdmit on those routes avoids charging the global bucket twice per request.
+    public func cyclesBelowFloor() : Bool { Cycles.balance() < FACILITATOR_MIN_CYCLES };
+
     let sessionsMgr = SessionsMod.Sessions(
       selfPrincipal, config, policy, escrowManager,
       evmEscrowMgr, evmSenderInst,
       { get = func() : ?Text { evmRecipient } },
     );
+    // SEC-0 (round 2): share the global facilitator token bucket with the session-open path, so the
+    // expensive ecRecover in openEvmSession is rate-limited by the SAME caller-agnostic gate as
+    // settle/verifyPayment — not just the mintable per-caller policy limit.
+    sessionsMgr.setAdmitRate(admitRate);
 
     // Management canister for tECDSA
     let management_canister : actor {
@@ -365,6 +385,13 @@ module {
       if (not isEvmNetwork(signature.network)) {
         return { isValid = false; invalidReason = ?"unsupported_scheme"; payer = null };
       };
+      // SEC-0: rate-limit the expensive ecRecover below behind the global token bucket —
+      // verifyPayment runs pure-Motoko ecRecover on attacker input, the same cycle-DoS surface as
+      // settle. Self-protecting so a consumer that calls verifyPayment need not gate it externally.
+      switch (admitRate()) {
+        case (#ok) {};
+        case (#throttled) { return { isValid = false; invalidReason = ?"rate_limited"; payer = null } };
+      };
       let authz = switch (signature.authorization) {
         case (?a) { a };
         case (null) { return { isValid = false; invalidReason = ?"invalid_payload"; payer = null } };
@@ -451,6 +478,18 @@ module {
     /// cross-resource guard for server-nonce clients (a nonce whose bound amount doesn't match
     /// the resource's price is rejected). Pass `null` to fall back to the nonce-bound amount.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
+      // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
+      // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
+      // bogus payloads on ANY paid path (/content, /search, /settle) cannot run unmetered ecRecover
+      // toward the freezing threshold. settle is now self-protecting regardless of which resource
+      // path the consumer routes from — the SEC-1 metering no longer depends on the consumer
+      // remembering to call facilitatorAdmit. ICP settles (cheap inter-canister calls) are NOT gated.
+      if (isEvmNetwork(signature.network)) {
+        switch (admitRate()) {
+          case (#ok) {};
+          case (#throttled) { return #policyDenied("Rate limited: facilitator admission") };
+        };
+      };
       // H-2: Resolve token to verify nonce is bound to the correct network+token
       let resolvedToken = resolveTokenForNonce(signature.network);
 
@@ -861,6 +900,12 @@ module {
     };
 
     /// Start recurring timers for session cleanup and policy garbage collection.
+    /// SEC-0: cap the TOTAL EVM session deposit the canister will back per chain+token (the funded
+    /// pool size). When set, openSession refuses to over-allocate the shared EVM address beyond it,
+    /// so concurrent sessions can never reserve more than the canister can actually pay back. Set
+    /// this to the USDC you have funded the canister's EVM address with; null = unbounded (legacy).
+    public func setEvmPoolCap(cap : ?Nat) { evmEscrowMgr.setPoolCap(cap) };
+
     /// Also auto-initializes HMAC seed and derives EVM address if ecdsaKeyName is set.
     /// Must be called from actor context (requires <system> capability).
     public func startTimers<system>() {

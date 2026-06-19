@@ -540,8 +540,18 @@ module {
               };
             };
             case (#err(msg)) {
+              // SEC-0: mirror the #ok guard. Only transition if the job is STILL our reserved
+              // #Computing. A concurrent transition that fired during the verifier await (e.g.
+              // expireJobs → #Expired → #Refunded) must NOT be clobbered back to #Disputed —
+              // otherwise the next expireJobs tick re-refunds an already-terminal job, draining
+              // the shared pool a second time (the "stale write-back double spend" the comment
+              // at the #Computing reservation above warns about).
               switch (jobs.get(jobId)) {
-                case (?j2) { jobs.put(jobId, { j2 with status = #Disputed }) };
+                case (?j2) {
+                  if (j2.status == #Computing) {
+                    jobs.put(jobId, { j2 with status = #Disputed });
+                  };
+                };
                 case (null) {};
               };
               #err("ZK verification failed: " # msg);

@@ -15,7 +15,7 @@ import {
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
-import { validateFetchUrl, safeFetch } from './security.js';
+import { validateFetchUrl, safeFetch, assertResolvedHostIsPublic } from './security.js';
 import {
   parseAtomicAmount,
   checkSpend,
@@ -80,18 +80,22 @@ const securityConfig: SecurityConfig = {
 let sessionSpentAtomic = 0n;
 
 /**
- * Enforce the per-call and cumulative session spend caps. Does NOT mutate the
- * running total — call commitSpend() only after the spend actually succeeds, or
- * pass commit:true to reserve up-front. Throws on violation.
+ * Enforce the per-call and cumulative session spend caps against the running total. With
+ * commit:true it ALSO reserves the amount synchronously. SEC-0: reservations are made at confirm
+ * time (see requireConfirmation) BEFORE any await, so a second pipelined/batched tool call sees the
+ * reservation immediately. Without this, the stdio transport's concurrent dispatch let N calls all
+ * pass the same stale cumulative cap (a check-then-commit TOCTOU). Throws on violation; release a
+ * reservation with refundSpend() if the action ultimately fails.
  */
 function spendGuard(amountAtomic: bigint, opts: { commit?: boolean } = {}): void {
   checkSpend(amountAtomic, securityConfig, sessionSpentAtomic);
   if (opts.commit) sessionSpentAtomic += amountAtomic;
 }
 
-/** Record a successful spend against the cumulative session total. */
-function commitSpend(amountAtomic: bigint): void {
-  sessionSpentAtomic += amountAtomic;
+/** Release a reservation made by spendGuard(commit:true) when the action then failed. */
+function refundSpend(amountAtomic: bigint): void {
+  sessionSpentAtomic -= amountAtomic;
+  if (sessionSpentAtomic < 0n) sessionSpentAtomic = 0n;
 }
 
 /** Standard MCP text result helper. */
@@ -116,9 +120,12 @@ function requireConfirmation(args: {
   chain?: string | number;
   note?: string;
 }): { content: [{ type: 'text'; text: string }] } | null {
-  // Enforce caps first (only meaningful when an amount is known).
+  // Enforce caps first (only meaningful when an amount is known). SEC-0: on the CONFIRMED
+  // invocation, RESERVE the amount synchronously (commit:true) so a concurrent/pipelined tool call
+  // can't pass the same stale cumulative cap. The post-await commitSpend() at the call sites is
+  // removed; failures release the reservation via refundSpend().
   if (args.amountAtomic !== undefined) {
-    spendGuard(args.amountAtomic);
+    spendGuard(args.amountAtomic, { commit: args.confirm });
   }
   if (args.confirm) return null;
   return textResult({
@@ -613,14 +620,14 @@ server.tool(
       },
     };
 
-    const session = await c.openSession(
-      prefs,
-      voucherSigner,
-      cid !== defaultCanisterId ? cid : undefined,
-    );
-
-    // Record the escrowed deposit against the cumulative session cap.
-    commitSpend(session.deposited);
+    // SEC-0: the deposit was reserved against the cumulative cap at confirm time
+    // (requireConfirmation); release the reservation if the on-chain/escrow deposit fails.
+    const session = await c
+      .openSession(prefs, voucherSigner, cid !== defaultCanisterId ? cid : undefined)
+      .catch((e) => {
+        refundSpend(depositAtomic);
+        throw e;
+      });
 
     activeSessions.set(session.id, session);
 
@@ -925,6 +932,10 @@ server.tool(
     let target: URL;
     try {
       target = validateFetchUrl(url, ssrfOpts());
+      // SEC-0 (round 2): the probe leg below (probeX402) does NOT route through safeFetch, so its
+      // only SSRF defence is validateFetchUrl (literal host). Add the DNS-resolution guard here so a
+      // public name that resolves to an internal/metadata IP is rejected before the probe ever fetches.
+      await assertResolvedHostIsPublic(target.hostname, ssrfOpts());
     } catch (e) {
       return errorResult(e);
     }
@@ -994,6 +1005,8 @@ server.tool(
         opt.tokenVersion,
       )) as Record<string, unknown>;
       if (!signResult || 'err' in signResult) {
+        // SEC-0: signing failed after the reservation — release it.
+        refundSpend(opt.amount);
         return errorResult(
           new Ic402Error('sign_failed', String(signResult?.err ?? 'Signing failed')),
         );
@@ -1004,9 +1017,9 @@ server.tool(
       // `accepted` is not EIP-712-signed, so rewriting it is safe.
       const headerToSend = applyVerbatimAccepted(signed.header, opt.rawRequirement);
 
-      // Record the spend against the cumulative session cap now that signing
-      // succeeded.
-      commitSpend(opt.amount);
+      // SEC-0: the spend was reserved against the cumulative cap at confirm time (the reservation
+      // is kept now that signing succeeded — a later retry failure does not un-count the payment,
+      // matching the prior commit-after-sign semantics).
 
       // 3. Retry with payment header (client-side HTTP, 15s timeout)
       const retryController = new AbortController();
@@ -1084,6 +1097,11 @@ server.tool(
     if (rpcUrl !== undefined) {
       try {
         validateFetchUrl(rpcUrl, ssrfOpts());
+        // SEC-0 (round 2): the rpcUrl is handed to viem's http() transport (raw fetch, no safeFetch),
+        // so add the DNS-resolution guard here — otherwise a public name resolving to an internal IP
+        // reaches the internal target via the JSON-RPC POSTs. (Residual: the connect-time re-resolve
+        // window remains until the transport pins the validated IP — tracked in security-model.md.)
+        await assertResolvedHostIsPublic(new URL(rpcUrl).hostname, ssrfOpts());
       } catch (e) {
         return errorResult(e);
       }
@@ -1153,6 +1171,11 @@ server.tool(
     if (!cid) throw new Error('No canister ID.');
     const encoded = new TextEncoder().encode(params);
 
+    // SEC-0 (round 2): tracks the amount reserved at confirm time so a failed submit (where NO
+    // value settled — approve error / error-variant / transient throw) RELEASES the reservation,
+    // instead of permanently burning cap headroom toward a self-inflicted spend-cap DoS. Stays 0
+    // (no refund) for any throw before the gate passed, so a pre-reservation error never over-refunds.
+    let reservedAmount = 0n;
     try {
       // C4: discover the price via a READ-ONLY query (no nonce minted), instead of the prior
       // state-changing submitServiceRequest "dry-run" probe. The client's submitServiceRequest
@@ -1215,16 +1238,22 @@ server.tool(
         note: `Auto-pay ${amountAtomic} (price ${price} + ledger fee ${fee}) for service "${serviceId}" on canister ${cid}`,
       });
       if (gate) return gate;
+      // Gate passed → the amount is now reserved against the cumulative cap; record it so the catch
+      // can release it on a no-money-moved failure (and ONLY then — pre-gate throws leave it 0).
+      reservedAmount = amountAtomic;
 
       // Confirmed and within caps — the client performs the single probe + approve + pay.
       const result = await c.submitServiceRequest(serviceId, encoded);
-      commitSpend(amountAtomic);
       return textResult({
         status: 'ok',
         jobId: result.jobId,
         paidAmount: amountAtomic.toString(),
       });
     } catch (e) {
+      // SEC-0 (round 2): submitServiceRequest threw without settling (approve error, error-variant,
+      // transient) — release the confirm-time reservation so repeated failed submits don't drain the
+      // cumulative cap. reservedAmount is 0 for any throw before the gate passed, so this is safe.
+      if (reservedAmount > 0n) refundSpend(reservedAmount);
       return errorResult(e);
     }
   },

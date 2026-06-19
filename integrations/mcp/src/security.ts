@@ -10,6 +10,8 @@
  * redirect-bypass, audit finding S2 / prior C2-H11).
  */
 
+import { lookup as dnsLookup } from 'node:dns/promises';
+
 export interface SsrfOptions {
   /** Allow http://localhost / 127.0.0.1 targets (local development only). */
   localDev: boolean;
@@ -17,11 +19,16 @@ export interface SsrfOptions {
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+/** Resolve a hostname to its IP addresses. Injectable for tests; defaults to node:dns. */
+export type LookupLike = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+
 export interface SafeFetchOptions extends SsrfOptions {
   /** Max redirect hops to follow, each re-validated. Default 5. */
   maxRedirects?: number;
   /** Injectable fetch (defaults to globalThis.fetch); used for testing. */
   fetchImpl?: FetchLike;
+  /** Injectable DNS lookup (defaults to node:dns); used for testing. SEC-0 rebinding guard. */
+  lookupImpl?: LookupLike;
 }
 
 /** Parse a dotted-quad IPv4 string to a 32-bit unsigned int, or null. */
@@ -97,8 +104,8 @@ export function isPrivateIpv6(host: string): boolean {
  * plus obvious internal TLDs. Returns the parsed URL or throws.
  *
  * NOTE: this validates the LITERAL host only. DNS-rebinding (a public name that
- * resolves to a private IP) is not covered here — close it by resolving the host
- * and re-checking the resolved addresses before connecting (a resolver seam).
+ * resolves to a private IP) is handled by assertResolvedHostIsPublic(), which
+ * safeFetch() calls for every hop before connecting.
  */
 export function validateFetchUrl(raw: string, opts: SsrfOptions): URL {
   let parsed: URL;
@@ -144,10 +151,46 @@ export function validateFetchUrl(raw: string, opts: SsrfOptions): URL {
 }
 
 /**
+ * SEC-0: resolve a hostname and reject if ANY resolved address is private/loopback/link-local/
+ * metadata — closes DNS-rebinding (a public name that resolves to an internal IP), which the
+ * literal-host check in validateFetchUrl cannot catch. Literal IPs are already covered by
+ * validateFetchUrl, so they short-circuit here. A narrow check-vs-connect rebind window remains
+ * (the OS re-resolves at fetch time); fully closing it requires pinning the validated IP at the
+ * connection layer (a custom undici dispatcher).
+ */
+export async function assertResolvedHostIsPublic(
+  hostname: string,
+  opts: SafeFetchOptions,
+): Promise<void> {
+  let h = hostname.toLowerCase();
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+  // Literal IPs were already validated by validateFetchUrl; resolving them adds nothing.
+  if (ipv4ToInt(h) !== null || h.includes(':')) return;
+  if (opts.localDev && (h === 'localhost' || h === '127.0.0.1' || h === '::1')) return;
+  const doLookup: LookupLike =
+    opts.lookupImpl ?? ((host) => dnsLookup(host, { all: true, verbatim: true }));
+  let results: Array<{ address: string; family: number }>;
+  try {
+    results = await doLookup(h);
+  } catch {
+    throw new Error(`Refusing fetch: cannot resolve host "${hostname}".`);
+  }
+  for (const { address } of results) {
+    if ((isPrivateIpv4(address) || isPrivateIpv6(address)) && !opts.localDev) {
+      throw new Error(
+        `Refusing fetch: host "${hostname}" resolves to a private/internal address (${address}) — DNS-rebinding blocked.`,
+      );
+    }
+  }
+}
+
+/**
  * SSRF-safe fetch: validate the initial URL, then follow redirects MANUALLY,
  * re-validating every hop's Location before fetching it. This closes the
  * redirect-bypass where an allowlisted origin 30x's to an internal target.
- * `fetchImpl` is injectable for testing; defaults to globalThis.fetch.
+ * SEC-0: each hop's host is also DNS-resolved and the resolved IPs re-checked
+ * (assertResolvedHostIsPublic) so a public name can't rebind to an internal IP.
+ * `fetchImpl` / `lookupImpl` are injectable for testing.
  */
 export async function safeFetch(
   raw: string,
@@ -157,6 +200,7 @@ export async function safeFetch(
   const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
   const maxRedirects = opts.maxRedirects ?? 5;
   let currentUrl = validateFetchUrl(raw, opts).toString();
+  await assertResolvedHostIsPublic(new URL(currentUrl).hostname, opts);
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const resp = await fetchImpl(currentUrl, { ...init, redirect: 'manual' });
@@ -166,6 +210,7 @@ export async function safeFetch(
       const next = new URL(location, currentUrl).toString();
       // Re-validate the redirect target BEFORE following it (TOCTOU SSRF fix).
       currentUrl = validateFetchUrl(next, opts).toString();
+      await assertResolvedHostIsPublic(new URL(currentUrl).hostname, opts);
       continue;
     }
     return resp;

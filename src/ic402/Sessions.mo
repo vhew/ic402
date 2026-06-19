@@ -109,6 +109,12 @@ module {
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
     let sessionOpenLocks = HashMap.HashMap<Principal, Int>(8, Principal.equal, Principal.hash);
 
+    // SEC-0 (round 2): GLOBAL rate-limit hook for the expensive ecRecover in openEvmSession. The
+    // Gateway injects its own admitRate (the caller-agnostic token bucket shared with settle/
+    // verifyPayment); defaults to a no-op so unit tests constructing Sessions directly are unaffected.
+    var admitRateFn : () -> { #ok; #throttled } = func() : { #ok; #throttled } { #ok };
+    public func setAdmitRate(f : () -> { #ok; #throttled }) { admitRateFn := f };
+
     func findLedger(identifier : Text) : ?Types.TokenConfig {
       Utils.findLedger(config.tokens, identifier);
     };
@@ -406,10 +412,19 @@ module {
         return #err(#invalidSignature("EIP-3009 deposit recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")"));
       };
 
-      // Validate authorization amount
+      // Validate authorization amount. SEC-0: the signed value must EQUAL the credited deposit.
+      // executeTransferWithAuthorization below pulls the FULL authz.value on-chain, but the
+      // session only credits/allocates `deposit` — so accepting authz.value > deposit pulls USDC
+      // that is never credited and can never be refunded (close caps the refund at deposited −
+      // consumed). The excess strands in the shared EVM pool. Mirror the charge path's
+      // value == amount (Gateway.settle).
       if (authz.value < deposit) {
         sessionOpenLocks.delete(caller);
         return #err(#depositBelowMinimum(deposit));
+      };
+      if (authz.value > deposit) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("EIP-3009 deposit value (" # Nat.toText(authz.value) # ") must equal the session deposit (" # Nat.toText(deposit) # "); overpayment is not creditable"));
       };
 
       // Verify EIP-712 signature locally before executing on-chain
@@ -434,6 +449,36 @@ module {
         tokenName := evmChain.tokens[0].name;
         tokenVersion := evmChain.tokens[0].version;
       };
+
+      // SEC-0 (round 2): rate-limit the expensive ecRecover in verifyAuthorization below behind the
+      // GLOBAL token bucket. openEvmSession is a public, unauthenticated entry callable with a forged
+      // EIP-3009; its per-caller policy limit is mintable (fresh principals), so without this the
+      // unmetered-ecRecover cycle-DoS is reachable on the session rail (the settle/verifyPayment gate
+      // alone did not cover it). admitRateFn is injected by the Gateway (no-op default for unit tests).
+      switch (admitRateFn()) {
+        case (#ok) {};
+        case (#throttled) {
+          sessionOpenLocks.delete(caller);
+          return #err(#policyDenied("Rate limited: facilitator admission"));
+        };
+      };
+
+      // SEC-0 (round 2): validate the Ed25519 session public key HERE — before the on-chain deposit
+      // and the escrow allocation below — so an invalid key fails cheaply WITHOUT pulling funds or
+      // leaking an escrow allocation. The old placement validated AFTER allocate(), which (under a
+      // live poolCap) permanently burned pool headroom and stranded an already-pulled deposit.
+      let sessionPublicKey = switch (sig.publicKey) {
+        case (?pk) { pk };
+        case (null) {
+          sessionOpenLocks.delete(caller);
+          return #err(#invalidSignature("Missing publicKey for session voucher signing"));
+        };
+      };
+      if (Blob.toArray(sessionPublicKey).size() != 32) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
+      };
+
       let verified = Eip712.verifyAuthorization(
         chainId, EvmUtils.hexToBytes(tokenAddr),
         EvmUtils.hexToBytes(authz.from), EvmUtils.hexToBytes(authz.to),
@@ -509,19 +554,7 @@ module {
         case (#ok) {};
       };
 
-      // Validate Ed25519 public key
-      let sessionPublicKey = switch (sig.publicKey) {
-        case (?pk) { pk };
-        case (null) {
-          sessionOpenLocks.delete(caller);
-          return #err(#invalidSignature("Missing publicKey for session voucher signing"));
-        };
-      };
-      if (Blob.toArray(sessionPublicKey).size() != 32) {
-        sessionOpenLocks.delete(caller);
-        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
-      };
-
+      // (Ed25519 public key was validated above, before the on-chain deposit + escrow allocation.)
       let now = Time.now();
       let effectivePolicy = policy.getEffectivePolicy(caller);
 

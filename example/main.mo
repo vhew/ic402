@@ -123,6 +123,10 @@ persistent actor KnowledgeBase {
 
   // Start background timers (session expiry, EVM address derivation)
   gate.startTimers<system>();
+  // SEC-0: bound the shared EVM session pool per chain+token — concurrent EVM sessions cannot
+  // reserve more than this. Set it to the USDC you actually fund the canister's EVM address with
+  // (here a generous demo ceiling). Without it, over-allocation is unbounded (see security-model.md).
+  gate.setEvmPoolCap(?1_000_000_000); // 1,000 USDC (6 decimals)
   // H-6: Seed the content store's encryption key from canister randomness on
   // first deploy (idempotent; no-op once seeded / restored from stable state).
   store.startTimers<system>();
@@ -362,13 +366,12 @@ persistent actor KnowledgeBase {
     // x402 v2 facilitator endpoints (POST { paymentPayload, paymentRequirements }).
     // /verify validates the exact/EVM authorization off-chain; /settle broadcasts on-chain.
     if (path == "/verify" or path == "/settle") {
-      // SEC-1: GLOBAL rate + cycle gate BEFORE parsing attacker JSON or running ecrecover/settle.
-      // These unauthenticated endpoints run in the update context (cost cycles); the per-caller
-      // policy limit is bypassable, so gate the TOTAL facilitator rate here, caller-agnostic.
-      switch (gate.facilitatorAdmit()) {
-        case (#ok) {};
-        case (#throttled) { return Http.httpError(429, "Facilitator rate limit exceeded — retry shortly") };
-        case (#lowCycles) { return Http.httpError(503, "Facilitator temporarily unavailable (canister low on cycles)") };
+      // SEC-1/SEC-0: keep the low-cycles floor here (these unauthenticated update endpoints must
+      // refuse work when the canister is low on cycles), but the per-request RATE limit now lives
+      // INSIDE verifyPayment/settle (admitRate), so we do NOT charge the global token bucket twice
+      // (the round-1 double-charge regression). A throttle now surfaces in the verify/settle result.
+      if (gate.cyclesBelowFloor()) {
+        return Http.httpError(503, "Facilitator temporarily unavailable (canister low on cycles)");
       };
       let body = switch (Text.decodeUtf8(request.body)) {
         case (?t) { t };

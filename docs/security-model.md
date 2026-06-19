@@ -57,10 +57,21 @@ The `Gateway`, `Policy`, and `ContentStore` modules intentionally ship **without
 ## 5. Other operator notes
 
 - **Content at rest.** ChaCha20‑Poly1305 (RFC 8439) is real, but the master key sits in **plaintext stable memory** — recoverable by any controller or via a state snapshot. "Only the canister can decrypt" holds against node operators and raw memory dumps, **not** against a controller. Don't store data whose confidentiality must survive controller compromise.
-- **Facilitator endpoints (`/verify`, `/settle`).** Throttled by a single **global** token bucket (~120/min) behind the 500B‑cycle floor. The floor is the real DoS backstop; the bucket is transient (resets on upgrade) and un‑keyed (one client can consume the whole budget). It bounds drain, not fairness.
-- **MCP server.** Well‑designed two‑tier (operator vs LLM) trust with default‑deny on dangerous tools — **but the reference demo invocation turns the safety off** (`IC402_MCP_ALLOW_DANGEROUS_TOOLS=1`, `IC402_MCP_ALLOW_SECURITY_CHANGES=1`, `autoPayment`). Do **not** copy the demo's environment into production; keep the safe defaults.
+- **Facilitator / paid‑settle DoS.** The expensive EIP‑3009 `ecRecover` on every unauthenticated path — `/verify`, `/settle`, paid `/content` & `/search`, and EVM session‑open — is rate‑limited by a single **global** token bucket (~120/min) *inside* `settle`/`verifyPayment`/`openEvmSession` (so it doesn't depend on the consumer remembering to gate); a ~500B‑cycle floor backstops the facilitator HTTP routes. The bucket is transient (resets on upgrade) and un‑keyed (one client can consume the whole budget) — it bounds drain, not fairness.
+- **MCP server.** Well‑designed two‑tier (operator vs LLM) trust with default‑deny on dangerous tools — **but the reference demo invocation turns the safety off** (`IC402_MCP_ALLOW_DANGEROUS_TOOLS=1`, `IC402_MCP_ALLOW_SECURITY_CHANGES=1`, `autoPayment`). Do **not** copy the demo's environment into production; keep the safe defaults. Outbound fetches are SSRF‑guarded — every host is validated *and DNS‑resolved*, rejecting names that resolve to private/metadata IPs (DNS‑rebinding). **Residual:** the OS re‑resolves at connect time, so a host validated‑public can still rebind before the socket opens; full closure needs IP‑pinning at the transport (a custom undici dispatcher) — tracked as a follow‑up.
 - **Upgrades.** The example is a persistent actor with **no migration function**; adding stable fields breaks in‑place upgrade, and the supported remedy is a *state‑dropping fresh deploy* that discards escrow/sessions/grants/nonces **and any funds parked mid‑settlement**. Drain and settle before upgrading. (Tracked as **B1** in [`production-readiness.md`](production-readiness.md).)
+
+## 6. Shared EVM pool solvency (operators)
+
+All three EVM subsystems — x402 charges, streaming sessions, and the service marketplace — settle from **one** tECDSA‑derived address. The library bounds *session* over‑allocation via `gate.setEvmPoolCap(cap)` (a per‑chain+token ceiling on outstanding session deposits; the example sets one), but it does **not** automatically reconcile the marketplace's `settleToOperator`/`refundOnRail` or the controller's `sweepEvm` against that ceiling. So the canister can pay marketplace/sweep funds out of the *same* balance that backs open session refunds.
+
+What you must do as an operator:
+- **Fund the EVM address at or above your `setEvmPoolCap` ceiling**, and treat the cap as a contract you keep solvent.
+- **Don't `sweepEvm` funds that back open sessions** — `sweepEvm` sends an operator‑chosen amount with no record of what's owed; only sweep genuine surplus.
+- **Monitor the on‑chain balance** against `health()` session counts; if you also run the marketplace on EVM, size its throughput so settle/refund outflows stay within the funded surplus.
+
+This shared‑pool solvency is a **load‑bearing operator invariant**, not an automatic guarantee. A system‑wide on‑chain‑balance reservation (marketplace/sweep consulting `totalAllocated`) is a tracked follow‑up.
 
 ## Where this is tracked
 
-[`docs/production-readiness.md`](production-readiness.md) is the maintainer backlog (e.g. **SEC‑0** composed‑system audit, **B3** funded end‑to‑end EVM settle in CI). This document is the consumer‑facing model — what *you* must account for when you integrate or operate.
+[`docs/production-readiness.md`](production-readiness.md) is the maintainer backlog. The **SEC‑0** composed‑system adversarial audit has been run (two attack + re‑attack passes); its findings are fixed, with three deliberately‑deferred residuals documented there and above: shared‑pool solvency (§6), the SSRF connect‑time re‑resolve window (§5), and the ungated‑but‑unwired `recoverBuyerActionSigner` (§2). This document is the consumer‑facing model — what *you* must account for when you integrate or operate.

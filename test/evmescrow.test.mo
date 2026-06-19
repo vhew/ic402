@@ -44,4 +44,22 @@ suite("EvmEscrowManager", func() {
     switch (m.allocate("s1", 8453, "0xusdc", 200)) { case (#ok) {}; case (#err(_)) { assert false } };
     assert (m.totalAllocated(8453, "0xusdc") == 200);
   });
+
+  // SEC-0: the pool cap turns totalAllocated into a LIVE over-allocation guard (per chain+token).
+  test("poolCap refuses allocations past the funded pool size", func() {
+    let m = EvmEscrow.EvmEscrowManager();
+    m.setPoolCap(?1000);
+    switch (m.allocate("s1", 8453, "0xusdc", 600)) { case (#ok) {}; case (#err(_)) { assert false } };
+    // Would exceed the cap (600 + 500 > 1000) → refused; the shared pool can't be over-reserved.
+    switch (m.allocate("s2", 8453, "0xusdc", 500)) { case (#err(_)) {}; case (#ok) { assert false } };
+    // Exactly filling the cap (600 + 400 == 1000) is allowed.
+    switch (m.allocate("s2", 8453, "0xusdc", 400)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert (m.totalAllocated(8453, "0xusdc") == 1000);
+    // The cap applies per chain+token: a different token has its own headroom up to the cap.
+    switch (m.allocate("s3", 8453, "0xother", 800)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (m.allocate("s4", 8453, "0xother", 300)) { case (#err(_)) {}; case (#ok) { assert false } };
+    // Clearing the cap (null) restores unbounded allocation.
+    m.setPoolCap(null);
+    switch (m.allocate("s5", 8453, "0xusdc", 999999)) { case (#ok) {}; case (#err(_)) { assert false } };
+  });
 });
