@@ -3,6 +3,19 @@
   "version": "2.2.0",
   "description": "MCP server for ic402 — exposes x402 charges and streaming sessions as tools",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vhew/ic402.git",
+    "directory": "integrations/mcp"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "dist/index.js",
   "bin": {

@@ -9,6 +9,9 @@
     "url": "https://github.com/vhew/ic402.git",
     "directory": "packages/client"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "ic402",
     "x402",
