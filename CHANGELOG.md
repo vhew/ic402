@@ -1,5 +1,72 @@
 # Changelog
 
+## v2.2.0 — 2026-06-18
+
+Minor release. Adds a recovery/observability suite and a facilitator DoS gate,
+fixes a latent EVM-RPC decode trap that could hit any EVM operation, and bumps
+the Motoko crypto/IC dependencies. No wire/HTTP or `@ic402/client` breaking
+changes; one Motoko-library breaking change for direct `EvmRpc` consumers (below).
+
+### Added
+
+- **Recovery & observability** (controller-only via the consumer). Escape hatches
+  for funds parked mid-settlement: `health()` (cycle balance + job/session counts),
+  `listJobs`, manual `resolveJob` / `reconcileJob` / `reconcileSession` /
+  `forceResolveSession`, and `sweepEvm(chainId, token, to, amount)`. Auto
+  confirm-only reconcile timers for marketplace jobs and streaming EVM sessions
+  re-poll a STORED tx and finalize when confirmed — they never re-broadcast.
+- **SEC-1 — facilitator DoS gate.** The unauthenticated `/verify` + `/settle`
+  update endpoints now run behind a global token-bucket rate limit and a
+  500B-cycle floor, evaluated before any attacker-controlled parsing / `ecRecover`
+  / RPC / signing work.
+- **Pre-broadcast cycle guard.** `EvmSender.sendTransaction` refuses to broadcast
+  below `MIN_BROADCAST_CYCLES` (120B), so it never strands a half-sent EVM tx.
+- **RPC resilience.** Added a verified 3rd RPC provider to the testnet chains that
+  previously had only two, so one flaky endpoint no longer parks settlement.
+
+### Fixed
+
+- **EVM-RPC decode trap (`openSession`, and any EVM op).** `EvmRpc.RpcError`
+  mis-modeled three of its four arms versus `evm_rpc.did` — `ProviderError`,
+  `HttpOutcallError`, and `ValidationError` are variants on the wire, not flat
+  `{ code; message }` records. A multi-provider response is Candid-decoded *whole*
+  before consensus runs, so a single provider returning one of those (a common
+  transient testnet failure) trapped the entire call. Now mirrors the canister
+  candid exactly. Surfaced as a Step-7 session-open failure but could hit
+  settle/verify/identity too.
+- **All compiler warnings cleared.** `M0155` (Nat-subtraction trap risk, 7 sites,
+  all provably guarded → `Utils.satSub`) and `M0194` (unused, 4 sites) removed; the
+  build is warning-free.
+
+### Breaking (Motoko library — direct consumers only)
+
+- **`EvmRpc.RpcError`** arms changed shape to match `evm_rpc.did`: `ProviderError`,
+  `HttpOutcallError`, and `ValidationError` are now variants (with their real
+  sub-types), not `{ code : Int32; message : Text }` records; `JsonRpcError` is
+  unchanged. Code that pattern-matches these arms directly must update — consumers
+  using `EvmRpc.rpcErrorToText` (the normal path) are unaffected.
+
+### Dependencies
+
+- `mo:ic` 4.0.0 → **4.1.0**
+- `mo:sha2` 0.2.1 → **0.2.4** — SHA-256 output unchanged (hash-dependent suites
+  green; the tECDSA EVM address derives identically), and it stays under the
+  IC0505 Wasm-locals limit after `wasm-opt -O` (96/1900).
+
+### Docs
+
+- **`docs/costs-and-rails.md`** — measured per-operation cycle costs (a single EVM
+  settle nets ~17B cycles locally, not the ~100B *reserve* in code comments), the
+  cycle buffer operators must hold, and rail selection by payment size.
+- **`docs/security-model.md`** — what's defended by default, the secure-by-default
+  integration checklist (the four guards that live only in `example/main.mo`), and
+  the key-custody / blast-radius model.
+
+### Tooling
+
+- Replica-backed integration CI job (B4) with a `.did`-sync gate; the ckUSDC ledger
+  is now mintable on a fresh `local-dev` (CI funding fix).
+
 ## v2.1.1 — 2026-06-17
 
 Patch release. Makes the example canister installable on the current IC (the

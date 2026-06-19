@@ -1,6 +1,6 @@
 [package]
 name = "ic402"
-version = "2.1.1"
+version = "2.2.0"
 description = "Drop-in payment library for ICP canisters. x402 charges, MPP-style sessions, ERC-8004 agent identity."
 repository = "https://github.com/vhew/ic402"
 license = "Apache-2.0"
@@ -18,10 +18,10 @@ files = [ "src/ic402/**/*.mo" ]
 
 [dependencies]
 base = "0.16.0"
-ic = "4.0.0"
+ic = "4.1.0"
 cbor = "4.1.0"
 ed25519 = "0.1.0"
-sha2 = "0.2.1"
+sha2 = "0.2.4"
 sha3 = "0.1.1"
 ecdsa = "8.0.0"
 hmac = "1.1.0"
