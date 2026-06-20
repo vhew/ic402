@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.2.3 — 2026-06-19
+
+Patch release. CI/test infrastructure only — no wire/HTTP or `@ic402/client` API
+changes. Closes **B3**, the last production-readiness hermeticity gap: the EVM
+**outbound** rail (sign → broadcast → confirm / park) is now gated in CI without a
+funded testnet or any network egress.
+
+### Added
+
+- **Hermetic EVM-outbound CI gate (B3).** A scriptable Motoko mock of the DFINITY
+  EVM-RPC canister (`example/evm-rpc-mock/`) implements the exact
+  `EvmRpc.EvmRpcCanister` interface and answers every RPC round-trip with canned,
+  controllable data, so the whole outbound state machine runs on a plain local
+  replica. The canister under test still does **real tECDSA signing + RLP encoding** —
+  only the broadcast/confirm leg is mocked, and the mock records each raw tx it was
+  asked to broadcast so a test can assert the bytes went out exactly once.
+  `scripts/setup-evm-outbound.sh` re-points the example at the mock, and
+  `test/evm-outbound.test.ts` drives the controller-only `sweepEvm` through
+  confirmed / reverted / never-mined / pending-then-mined / inconsistent-fee
+  outcomes — including ones a live testnet won't produce on demand. A new
+  `test-evm-outbound` CI job enforces it (`IC402_REQUIRE_EVM_OUTBOUND=1`).
+
+### Notes
+
+- With B3 closed, the remaining production-readiness items are NEW-5 (confirmation
+  depth, deferred — low practical risk on optimistic L2s) and an optional external
+  audit / periodic live-testnet smoke (the funded leg can't be hermetic). B1 waived.
+  `docs/production-readiness.md` is the source of truth.
+
 ## v2.2.2 — 2026-06-19
 
 Patch release. Fixes a `@ic402/client` packaging bug and trims dead code/deps
