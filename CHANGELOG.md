@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.2.4 — 2026-06-19
+
+Docs + tooling patch. No wire/HTTP or `@ic402/client` API changes.
+
+### Docs
+
+- **100% mops documentation coverage** (was 96.94%). Added `///` doc comments to the 25
+  public declarations `mo-doc` flagged — `lib.mo` marketplace-type re-exports, the `EvmRpc`
+  error types, the `ServiceRegistry` class + its EVM transfer/confirm hooks + reconcile
+  helpers, and `Sessions` / `EvmSender` / `Types` members.
+- **`SECURITY.md` brought current.** Every `file:line` reference in the money-theft and
+  threat-model sections had drifted after the SEC-0..4 changes — all corrected against
+  source. The H-4 bullet now cites the live `recordSpend`/`releaseDaily` mechanism (the
+  `reserveCharge`/`reserveSessionOpen` it named are dead code). The status banner,
+  supported-versions table, and open-items list now reflect B0/B2/B3/B4 done, B1 waived,
+  and SEC-0..4 closed; the remediation narrative includes the composed-system pass.
+- **B3 reflected across the docs.** `README`, `CONTRIBUTING`, and `CLAUDE.md` list the
+  EVM-RPC mock (`example/evm-rpc-mock/`) and the hermetic outbound test; a stale README
+  "not enforced in CI" line and a duplicate `CONTRIBUTING` layout entry are fixed; and
+  `docs/costs-and-rails.md` no longer labels the (closed) B3 as open backlog.
+
+### Tooling
+
+- **`scripts/setup.sh` now sanitizes its PATH** (the same guard `build-example.sh` uses),
+  so a sibling repo's `node_modules/.bin` can no longer shadow `mops` and silently break
+  `mops install`. It also reinstalls when `.mops` is empty (not just absent) and fails
+  loudly instead of masking a broken toolchain.
+
 ## v2.2.3 — 2026-06-19
 
 Patch release. CI/test infrastructure only — no wire/HTTP or `@ic402/client` API
