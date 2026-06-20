@@ -60,4 +60,21 @@ suite("EvmSender fee helpers", func() {
     let h : EvmRpc.FeeHistory = { reward = []; gasUsedRatio = []; oldestBlock = 0; baseFeePerGas = [] };
     switch (EvmSender.latestBaseFee(h)) { case (?_) { assert(false) }; case null {} };
   });
+
+  // SEC-2: robustBaseFee = lower median, so one outlier provider can't pick an unpayable gas fee.
+  test("robustBaseFee: null on no data", func() {
+    switch (EvmSender.robustBaseFee([])) { case (?_) { assert(false) }; case null {} };
+  });
+  test("robustBaseFee: single provider returns its value", func() {
+    switch (EvmSender.robustBaseFee([100])) { case (?b) { assert(b == 100) }; case null { assert(false) } };
+  });
+  test("robustBaseFee: 2 providers take the LOWER (neutralises a high outlier)", func() {
+    switch (EvmSender.robustBaseFee([100, 999_999_999])) { case (?b) { assert(b == 100) }; case null { assert(false) } };
+    switch (EvmSender.robustBaseFee([999_999_999, 100])) { case (?b) { assert(b == 100) }; case null { assert(false) } };
+  });
+  test("robustBaseFee: 3 providers take the MIDDLE (ignore one high AND one low outlier)", func() {
+    switch (EvmSender.robustBaseFee([100, 200, 300])) { case (?b) { assert(b == 200) }; case null { assert(false) } };
+    // a hostile huge fee + a near-zero fee are both ignored
+    switch (EvmSender.robustBaseFee([200, 1_000_000_000_000_000, 1])) { case (?b) { assert(b == 200) }; case null { assert(false) } };
+  });
 });

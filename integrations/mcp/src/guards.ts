@@ -129,8 +129,28 @@ export function resolveSecurityConfig(
  */
 const DANGEROUS_TOOLS = new Set(['sign_typed_data', 'delete_content']);
 
-export function isToolAllowed(toolName: string, allowDangerousTools: boolean): boolean {
+/**
+ * SEC-3: state-changing ADMIN tools — registering/enabling services, claiming + submitting job
+ * results, uploading content. They mutate canister state (and drive the value-moving job lifecycle),
+ * so like the dangerous primitives they are now DEFAULT-DENIED and require an explicit operator
+ * opt-in at startup. An in-band `confirm` flag alone is NOT sufficient — a prompt-injected LLM can
+ * set it. (`delete_content` is already covered by DANGEROUS_TOOLS.)
+ */
+const ADMIN_TOOLS = new Set([
+  'register_service',
+  'enable_service',
+  'claim_job',
+  'submit_job_result',
+  'upload_content',
+]);
+
+export function isToolAllowed(
+  toolName: string,
+  allowDangerousTools: boolean,
+  allowAdminTools: boolean,
+): boolean {
   if (DANGEROUS_TOOLS.has(toolName)) return allowDangerousTools;
+  if (ADMIN_TOOLS.has(toolName)) return allowAdminTools;
   return true;
 }
 
@@ -138,6 +158,7 @@ export interface OperatorConfig {
   security: SecurityConfig;
   allowSecurityChanges: boolean;
   allowDangerousTools: boolean;
+  allowAdminTools: boolean;
 }
 
 /**
@@ -187,5 +208,6 @@ export function resolveOperatorConfig(
     },
     allowSecurityChanges: pickBool('allowSecurityChanges', 'IC402_MCP_ALLOW_SECURITY_CHANGES'),
     allowDangerousTools: pickBool('allowDangerousTools', 'IC402_MCP_ALLOW_DANGEROUS_TOOLS'),
+    allowAdminTools: pickBool('allowAdminTools', 'IC402_MCP_ALLOW_ADMIN_TOOLS'),
   };
 }

@@ -125,6 +125,7 @@ in `guards.ts`).
 | `IC402_MCP_AUTO_PAYMENT` | `autoPayment` | Allow paid endpoints to auto-approve/pay. Default `false`. |
 | `IC402_MCP_ALLOW_SECURITY_CHANGES` | `allowSecurityChanges` | If set, the LLM may retune caps / `localDev` / `autoPayment` via the `configure` tool. Default `false`. |
 | `IC402_MCP_ALLOW_DANGEROUS_TOOLS` | `allowDangerousTools` | If set, enables the default-denied dangerous tools `sign_typed_data` and `delete_content`. Default `false`. |
+| `IC402_MCP_ALLOW_ADMIN_TOOLS` | `allowAdminTools` | If set, enables the default-denied state-changing admin tools (`register_service`, `enable_service`, `claim_job`, `submit_job_result`, `upload_content`). Default `false` (SEC-3). |
 
 Booleans are true when the value is exactly `"1"` or `"true"`. Amounts are parsed as
 non-negative integer **strings** (a JS number that has already lost precision is rejected — see
@@ -198,11 +199,17 @@ cannot choose the method) and requires `confirm:true`:
 | `submit_job_result` | `submitJobResult` | Operator submits a job result (+ optional proof) for verification + settlement. |
 | `sign_typed_data` | `signTypedData` | Sign arbitrary EIP-712 typed data with the canister tECDSA key. **DEFAULT-DENIED** — generic signing primitive. |
 
-**Two of these are default-denied:** `sign_typed_data` and `delete_content`. They are dangerous
-primitives — a raw EIP-712 signing oracle that can authorize an arbitrary-value transfer and
-*bypasses the spend caps*, and an irreversible delete — so a prompt-injected LLM must not be able
-to reach them. They throw unless the operator set `IC402_MCP_ALLOW_DANGEROUS_TOOLS=1`
-(`isToolAllowed` / `DANGEROUS_TOOLS` in `guards.ts`).
+**Default-denied tools (operator opt-in required).** Two categories throw unless the operator
+enables them at startup — a prompt-injected LLM must not reach them via an in-band `confirm` alone:
+
+- **Dangerous primitives** — `sign_typed_data` (a raw EIP-712 signing oracle that can authorize an
+  arbitrary-value transfer and *bypasses the spend caps*) and `delete_content` (irreversible delete).
+  Enable with `IC402_MCP_ALLOW_DANGEROUS_TOOLS=1`.
+- **State-changing admin tools (SEC-3)** — `register_service`, `enable_service`, `claim_job`,
+  `submit_job_result`, `upload_content` mutate the canister and drive the value-moving job lifecycle.
+  Enable with `IC402_MCP_ALLOW_ADMIN_TOOLS=1`.
+
+(`isToolAllowed` / `DANGEROUS_TOOLS` / `ADMIN_TOOLS` in `guards.ts`.)
 
 ## Security model
 

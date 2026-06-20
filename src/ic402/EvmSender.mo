@@ -9,6 +9,7 @@ import EvmAddress "EvmAddress";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat "mo:base/Nat";
+import Buffer "mo:base/Buffer";
 import Nat8 "mo:base/Nat8";
 import Error "mo:base/Error";
 import Cycles "mo:base/ExperimentalCycles";
@@ -47,6 +48,20 @@ module {
       minPriority;
     };
     (2 * baseFee + priorityFee, priorityFee);
+  };
+
+  /// SEC-2: a ROBUST central base fee across the providers that returned data — the lower median —
+  /// so a single hostile/buggy provider reporting an EXTREME base fee cannot push the gas reservation
+  /// (gasLimit * maxFeePerGas) to an unpayable value and grief-park every close/settle. The prior fold
+  /// took the MAX, which picked exactly that outlier. With ≥3 providers this is the true middle
+  /// (ignores one high AND one low outlier); with 2 it is the lower of the pair (neutralises a high
+  /// outlier). The 2x multiplier in feeFromBase, the 10k-gwei cap there, and the confirm-only reconcile
+  /// path cover the residual underpay risk if the low value is the wrong one. Returns null only when no
+  /// provider produced a base fee. Pure — unit-tested.
+  public func robustBaseFee(bases : [Nat]) : ?Nat {
+    if (bases.size() == 0) return null;
+    let sorted = Array.sort(bases, Nat.compare);
+    ?sorted[(sorted.size() - 1) / 2];
   };
 
   /// EVM transaction sender with tECDSA signing.
@@ -340,10 +355,10 @@ module {
     // sendRawTransaction paths it does NOT require strict multi-provider agreement.
     // eth_feeHistory(#Latest) returns a per-block base fee, so providers at slightly
     // different chain tips routinely disagree → #Inconsistent. Rather than park the
-    // CLOSE on that (the prior behaviour), take the MAX base fee across providers
-    // that returned data (overpaying gas is safe; underpaying risks a stuck tx).
-    // Still return null only when NO provider produced a base fee — preserving the
-    // genuine-unavailable retry path. This mirrors the lenient receipt-poll idiom.
+    // CLOSE on that (the prior behaviour), take the ROBUST (lower-median) base fee across providers
+    // that returned data (SEC-2: NOT the max — one hostile/outlier provider reporting an extreme fee
+    // would otherwise make the gas reservation unpayable and grief-park every close). Still return
+    // null only when NO provider produced a base fee — preserving the genuine-unavailable retry path.
     func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async ?(Nat, Nat) {
       try {
         let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_feeHistory(
@@ -357,24 +372,19 @@ module {
             ?feeFromBase(baseFee);
           };
           case (#Inconsistent(results)) {
-            var maxBase : ?Nat = null;
+            // SEC-2: collect every provider's base fee, then take the ROBUST (lower-median) one via
+            // robustBaseFee — a single outlier (hostile, or just at a far chain tip) can't drive the
+            // gas reservation to an unpayable value and grief-park the close.
+            let buf = Buffer.Buffer<Nat>(results.size());
             for ((_, r) in results.vals()) {
               switch (r) {
                 case (#Ok(history)) {
-                  switch (latestBaseFee(history)) {
-                    case (?b) {
-                      switch (maxBase) {
-                        case (?cur) { if (b > cur) { maxBase := ?b } };
-                        case null { maxBase := ?b };
-                      };
-                    };
-                    case null {}; // this provider returned an empty array — skip
-                  };
+                  switch (latestBaseFee(history)) { case (?b) { buf.add(b) }; case null {} };
                 };
                 case (#Err(_)) {}; // this provider errored — skip
               };
             };
-            switch (maxBase) {
+            switch (robustBaseFee(Buffer.toArray(buf))) {
               case (?b) { ?feeFromBase(b) };
               case null { null }; // every provider errored / had no data
             };

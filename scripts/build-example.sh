@@ -20,6 +20,20 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Drop FOREIGN project node_modules/.bin from PATH. A sibling repo's node_modules/.bin ahead of
+# the global toolchain can shadow `mops`/`node` with an incompatible copy — e.g. a pnpm-installed
+# ic-mops/@icp-sdk whose transitive @dfinity mismatch crashes on load ("Cannot find package
+# '@dfinity/identity'"). Keep this project's own node_modules/.bin and every non-node_modules dir.
+_sanitized=""
+_OLDIFS="$IFS"; IFS=':'
+for _e in $PATH; do
+  case "$_e" in
+    */node_modules/.bin) case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac ;;
+    *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
+  esac
+done
+IFS="$_OLDIFS"; export PATH="$_sanitized"
+
 OUT="${1:-.icp/example.wasm}"
 RAW="$(dirname "$OUT")/.example-raw.wasm"
 LOCALS_BUDGET="${IC402_LOCALS_BUDGET:-1900}"

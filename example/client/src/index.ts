@@ -128,6 +128,9 @@ async function main(): Promise<void> {
       ),
       IC402_MCP_ALLOW_SECURITY_CHANGES: '1',
       IC402_MCP_ALLOW_DANGEROUS_TOOLS: '1',
+      // SEC-3: the demo drives the state-changing admin tools (upload_content, register_service,
+      // claim_job, …), which are now default-denied — opt in explicitly (trusted demo context).
+      IC402_MCP_ALLOW_ADMIN_TOOLS: '1',
     },
   });
 

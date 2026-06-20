@@ -134,16 +134,31 @@ describe('resolveOperatorConfig (operator config file + env; env wins; LLM canno
   });
 });
 
-describe('isToolAllowed (S1/S9: dangerous tools default-denied)', () => {
-  it('denies sign_typed_data and delete_content unless explicitly enabled', () => {
-    expect(isToolAllowed('sign_typed_data', false)).toBe(false);
-    expect(isToolAllowed('delete_content', false)).toBe(false);
-    expect(isToolAllowed('sign_typed_data', true)).toBe(true);
-    expect(isToolAllowed('delete_content', true)).toBe(true);
+describe('isToolAllowed (S1/S9 + SEC-3: dangerous + admin tools default-denied)', () => {
+  it('denies sign_typed_data and delete_content unless allowDangerousTools', () => {
+    expect(isToolAllowed('sign_typed_data', false, false)).toBe(false);
+    expect(isToolAllowed('delete_content', false, false)).toBe(false);
+    expect(isToolAllowed('sign_typed_data', true, false)).toBe(true);
+    expect(isToolAllowed('delete_content', true, false)).toBe(true);
+    // admin opt-in does NOT enable the dangerous primitives
+    expect(isToolAllowed('sign_typed_data', false, true)).toBe(false);
   });
-  it('always allows ordinary tools', () => {
-    expect(isToolAllowed('search', false)).toBe(true);
-    expect(isToolAllowed('open_session', false)).toBe(true);
-    expect(isToolAllowed('register_service', false)).toBe(true);
+  it('SEC-3: denies state-changing admin tools unless allowAdminTools', () => {
+    for (const t of [
+      'register_service',
+      'enable_service',
+      'claim_job',
+      'submit_job_result',
+      'upload_content',
+    ]) {
+      expect(isToolAllowed(t, false, false)).toBe(false); // default-denied
+      expect(isToolAllowed(t, false, true)).toBe(true); // operator opt-in
+      expect(isToolAllowed(t, true, false)).toBe(false); // dangerous flag does NOT enable admin
+    }
+  });
+  it('always allows ordinary read/payment tools', () => {
+    expect(isToolAllowed('search', false, false)).toBe(true);
+    expect(isToolAllowed('open_session', false, false)).toBe(true);
+    expect(isToolAllowed('fetch_x402', false, false)).toBe(true);
   });
 });

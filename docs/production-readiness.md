@@ -1,10 +1,18 @@
-# Production-readiness TODO (v2.1.0 → prod)
+# Production-readiness TODO (→ prod)
 
-ic402 **v2.1.0** (master @ `388c473`, tagged + released) is a solid unit-tested library
-with correct mainnet config and guarded money-**theft** paths, but is **not yet
-deploy-to-mainnet-with-real-funds ready**. This is the tracked backlog to close the gap,
-from a multi-agent readiness audit (2026-06-16). See `AUDIT.md` for the historical
-security audit and `CHANGELOG.md` for what shipped.
+ic402 is a solid unit-tested library with correct mainnet config and guarded money-**theft**
+paths. This is the tracked backlog to close the gap to **deploy-to-mainnet-with-real-funds**,
+from a multi-agent readiness audit (2026-06-16). See `AUDIT.md` for the historical security
+audit and `CHANGELOG.md` for what shipped.
+
+**Status as of v2.2.2 (2026-06-19):** **SEC-0** (composed-system adversarial audit + 2 re-attack
+rounds) DONE; **SEC-1/SEC-2/SEC-3/SEC-4** all closed; **B0/B2/B4** done, **B1** waived. The EVM
+rail is now empirically proven end-to-end via the live demo (B3 — see below). The genuine
+remaining items for the single-operator, real-funds context: a **CI-gated** funded EVM run (B3),
+the deferred confirmation-depth tradeoff (low L2 risk), and an optional **external** professional
+audit (the SEC-0 pass was internal multi-agent). The SEC-0 documented residuals (shared-pool
+solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`) are in
+`docs/security-model.md`.
 
 ## Blockers (must clear before a production deploy)
 
@@ -50,10 +58,13 @@ security audit and `CHANGELOG.md` for what shipped.
   **Landed (f579545):** `sendErc20TransferConfirmed` tri-state added, `EvmTransferFn`
   hook widened, and settle/refund/close finalize only on `#confirmed` — verified on
   Base Sepolia this release (mined `status==1` settle + session close+refund).
-- [ ] **B3 — EVM rail never verified end-to-end.** No funded on-chain settle/close has
-  ever completed through ic402's tECDSA sender. **Do:** one observed green settle + one
-  green session close+refund on a funded clean-EOA payer (Base Sepolia), capturing mined
-  `status==1` tx hashes; plus a Foundry-fork replay for CI/offline.
+- [~] **B3 — EVM rail PROVEN end-to-end; CI-gating still open.** The funded outbound path has
+  completed live on Base Sepolia repeatedly via the interactive demo — settle + EVM session
+  close+refund + ERC-8004 agent register, all mined `status==1`, 10/10 — so "does it work" is
+  answered (was the original blocker). **What remains:** a REPEATABLE gate — a Foundry/anvil-fork
+  harness that mocks the EVM-RPC canister so the outbound settle/close/reconcile path runs
+  hermetically in CI (the funded leg can't be hermetic), plus a periodic live-testnet smoke. This
+  also closes B4's residual EVM-outbound gap.
 - [~] **B4 — CI green is hollow for the substance — MOSTLY FIXED (v2.1.1).** The only e2e suite
   (`test/integration.test.ts`, now 50 cases) used to **silently pass in CI** (every case is
   `if (skip) return`; with no replica vitest counts them as passed) and failed locally on
@@ -87,7 +98,7 @@ security audit and `CHANGELOG.md` for what shipped.
   ActionSigner` ungated but not example-wired; plus a recommended regression-test layer (ServiceRegistry
   async interleavings; MCP `spendGuard`/`refundSpend`) and the pre-existing transient `submit_request`
   lost-reply cap under-count (availability, not a cap-bypass).
-- [~] **SEC-1 — PARTIAL (v2.1.1).** Rate-limit/gate the unauthenticated facilitator **update**
+- [x] **SEC-1 — DONE (v2.1.1 + SEC-0 #3 in v2.2.1).** Rate-limit/gate the unauthenticated facilitator **update**
   endpoints (`POST /verify`, `/settle`): they run in `http_request_update` (cost the canister
   cycles) and parse attacker JSON before any policy rate-limit → **cycle/DoS** surface.
   (No theft — C-1 binding holds — but spam is unmetered.) **DONE (v2.1.1):** (1) `policy.gcRateLimit()`
@@ -97,16 +108,21 @@ security audit and `CHANGELOG.md` for what shipped.
   before the body parse / ecrecover / settle, returning 429/503. The bucket keys on nothing, so the
   attacker can't mint fresh per-`from` buckets; the floor (above the 120B broadcast floor) self-
   disables the facilitator before a drain reaches freezing. Adversarially reviewed SAFE/EFFECTIVE.
-  **Still open (follow-up, lesser):** the paid `/content`/`/search`/`/service` settle paths run
-  ecrecover on attacker input without the global gate (same drain class, but they require a parseable
-  payment header) — extend the gate to them; and (optional) `canister_inspect_message` to bound ingress.
-- [ ] **SEC-2** — `getFeeData` hostile-RPC grief-park: one persistently bad provider can
-  park every EVM close/settle (max-base-fee picks the outlier; the 10k-gwei ceiling
-  bounds but doesn't eliminate). Ship a recovery path (`recoverEscrow`/confirm-only
-  re-poll) — the example currently exposes none.
-- [ ] **SEC-3** — MCP admin tools (`register_service`, `enable_service`, `claim_job`,
-  `submit_job_result`, `upload_content`) are **default-enabled**, gated only by an in-band
-  `confirm` flag a prompt-injected LLM can set. Re-examine the trust model.
+  **Follow-up CLOSED (v2.2.1, SEC-0 fix #3):** the paid `/content`/`/search`/`/service` settle paths
+  AND the EVM session-open path now run the global token bucket (`admitRate`) before the ecrecover —
+  the gate moved INSIDE `settle`/`verifyPayment`/`openEvmSession`, so it no longer depends on the
+  consumer. (`canister_inspect_message` to bound ingress remains an optional future nicety.)
+- [x] **SEC-2 — DONE (v2.2.2).** `getFeeData`'s `#Inconsistent` fold took the **MAX** base fee, so
+  one hostile/outlier provider could report an extreme fee, make the gas reservation unpayable, and
+  grief-park every EVM close/settle. Now it folds to the ROBUST **lower-median** via the pure,
+  unit-tested `EvmSender.robustBaseFee` (≥3 providers ignore one high AND one low outlier; 2 take the
+  lower). The recovery side (`sweepEvm` / `forceResolveSession` / confirm-only reconcile) landed in
+  v2.1.1, so a parked close is also recoverable.
+- [x] **SEC-3 — DONE (v2.2.2).** The state-changing MCP admin tools (`register_service`,
+  `enable_service`, `claim_job`, `submit_job_result`, `upload_content`) are now **DEFAULT-DENIED**,
+  gated by an operator startup flag `IC402_MCP_ALLOW_ADMIN_TOOLS` — the same pattern as the dangerous
+  `sign_typed_data`/`delete_content` tools. An in-band `confirm` a prompt-injected LLM can set is no
+  longer sufficient. (`guards.isToolAllowed` extended + unit-tested; the demo opts in explicitly.)
 - [x] **SEC-4 — FIXED (v2.1.1).** `getPolicyConfig` now redacts `allowedCallers`/
   `blockedCallers` (returns them null), so the public query no longer exposes the access-control
   roster; the spend limits (non-secret — advertised in the 402 challenge) still read back.

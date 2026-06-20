@@ -68,6 +68,9 @@ const DEFAULT_SESSION_MAX_ATOMIC = 5_000_000n; // 5.00 USDC
 // signing/destructive tools are off unless allowDangerousTools. Defaults are conservative.
 let allowSecurityChanges = false;
 let allowDangerousTools = false;
+// SEC-3: state-changing admin tools (register/enable service, claim/submit job, upload content)
+// are off unless the operator opts in at startup.
+let allowAdminTools = false;
 
 const securityConfig: SecurityConfig = {
   localDev: false,
@@ -1467,15 +1470,18 @@ function adminTool(
       confirm: z.boolean().default(false).describe('Authorize this state-changing/signing action.'),
     },
     async ({ args, canisterId, confirm }) => {
-      // S1/S9: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
-      // delete) unless the operator enabled them at startup — they bypass/ignore the
-      // spend caps, so a prompt-injected LLM must not be able to reach them.
-      if (!isToolAllowed(toolName, allowDangerousTools)) {
+      // S1/S9 + SEC-3: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
+      // delete) AND state-changing admin tools (register/enable service, claim/submit job,
+      // upload content) unless the operator enabled them at startup — they bypass/ignore the
+      // spend caps or mutate the canister, so a prompt-injected LLM must not be able to reach
+      // them via an in-band confirm alone.
+      if (!isToolAllowed(toolName, allowDangerousTools, allowAdminTools)) {
         return errorResult(
           new Error(
-            `Tool "${toolName}" is disabled: it is a dangerous primitive (raw EIP-712 signing / ` +
-              `destructive content deletion) that bypasses or ignores the spend caps. An operator ` +
-              `must enable it explicitly with IC402_MCP_ALLOW_DANGEROUS_TOOLS=1.`,
+            `Tool "${toolName}" is disabled by default: it is a dangerous primitive (raw EIP-712 ` +
+              `signing / destructive deletion) or a state-changing admin tool. An operator must ` +
+              `enable it explicitly at startup — IC402_MCP_ALLOW_DANGEROUS_TOOLS=1 (signing/delete) ` +
+              `or IC402_MCP_ALLOW_ADMIN_TOOLS=1 (service/job/upload admin).`,
           ),
         );
       }
@@ -1567,7 +1573,10 @@ function printSecurityBanner(cfg: OperatorConfig, source: string | null): void {
     `   allowSecurityChanges   : ${cfg.allowSecurityChanges}  (LLM may retune caps via "configure")`,
   );
   L(`   allowDangerousTools    : ${cfg.allowDangerousTools}  (sign_typed_data / delete_content)`);
-  if (cfg.allowSecurityChanges || cfg.allowDangerousTools) {
+  L(
+    `   allowAdminTools        : ${cfg.allowAdminTools}  (register/enable service, claim/submit job, upload_content)`,
+  );
+  if (cfg.allowSecurityChanges || cfg.allowDangerousTools || cfg.allowAdminTools) {
     L(
       '   ⚠  a loosened knob is enabled — only do this in a TRUSTED context (no prompt-injection risk).',
     );
@@ -1601,6 +1610,7 @@ async function main() {
   securityConfig.sessionMaxAtomic = cfg.security.sessionMaxAtomic;
   allowSecurityChanges = cfg.allowSecurityChanges;
   allowDangerousTools = cfg.allowDangerousTools;
+  allowAdminTools = cfg.allowAdminTools;
   printSecurityBanner(cfg, configPath);
 
   const transport = new StdioServerTransport();
