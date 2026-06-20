@@ -402,6 +402,8 @@ module {
     // wall-clock time, so a few polls span ~10-20s — enough for an L2 block.
     // Returns #confirmed on status==1, #reverted on status==0, #pending if not
     // yet mined within the budget, #err on RPC failure.
+    /// Poll the tx receipt up to `maxPolls` times: #confirmed on a mined status==1, #reverted on
+    /// status==0, #pending if not yet mined within the budget, #err on an RPC failure.
     public func confirmTransaction(
       chainId : Nat,
       txHash : Text,

@@ -197,8 +197,9 @@ pnpm demo           # interactive walkthrough (10 steps)
 | `pnpm test:client` | TypeScript client SDK (`@ic402/client`, vitest) |
 | `pnpm exec vitest run` | Root vitest — MCP guards + SSRF/security units (source-imported), plus the integration suite |
 | `pnpm test:integration` | Replica-backed end-to-end (needs `pnpm setup:local`) |
+| `bash scripts/setup-evm-outbound.sh` then `IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts` | Hermetic EVM-outbound rail (sign → broadcast → confirm/park) against a scriptable EVM-RPC mock — no funded testnet |
 
-The integration suite returns early (green) when no local replica is reachable. Set `IC402_REQUIRE_REPLICA=1` to turn that silent skip into a hard failure — CI does not set it today, so the replica-backed assertions are not enforced in CI.
+The replica-backed suites return early (green) when their fixture isn't reachable. CI enforces them in dedicated jobs: `test-integration` runs with `IC402_REQUIRE_REPLICA=1`, and `test-evm-outbound` deploys the EVM-RPC mock and runs with `IC402_REQUIRE_EVM_OUTBOUND=1`, so a missing fixture is a hard failure rather than a silent skip.
 
 ## API Reference
 
@@ -337,6 +338,7 @@ example/                 Example canister + interactive demo
   main.mo                Reference implementation (all features, 10-step demo)
   client/                Interactive demo client
   zk-verifier/           Reference Groth16 verifier (Rust, optional)
+  evm-rpc-mock/          Scriptable EVM-RPC mock (hermetic EVM-outbound tests)
 packages/client/         TypeScript SDK (@ic402/client)
 integrations/mcp/        MCP server (@ic402/mcp)
 ```

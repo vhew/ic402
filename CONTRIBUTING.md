@@ -34,11 +34,11 @@ src/ic402/          Motoko library — the core package published to mops
 example/            Example canister + interactive demo
   main.mo           Reference implementation (all features)
   client/           Interactive demo client
+  evm-rpc-mock/     Scriptable EVM-RPC mock (hermetic EVM-outbound tests)
 packages/client/    TypeScript SDK published to npm as @ic402/client
 integrations/mcp/   MCP server for AI agent access
 contracts/src/      IdentityRegistry.sol (ERC-8004 on Base)
 test/               Motoko unit tests + TypeScript integration tests
-scripts/            Dev tooling (setup, version bump)
 scripts/            Dev tooling (setup, deployment, version bump)
 ```
 
@@ -70,6 +70,7 @@ scripts/            Dev tooling (setup, deployment, version bump)
 |------|----------|----------|
 | Motoko unit tests | `test/*.test.mo` | `mops test` |
 | TypeScript integration | `test/integration.test.ts` | `pnpm test:integration` (needs local replica) |
+| EVM-outbound (hermetic) | `test/evm-outbound.test.ts` | `bash scripts/setup-evm-outbound.sh` then `IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts` |
 | Solidity | `contracts/test/*.t.sol` | `cd contracts && forge test` |
 
 ## Pull Requests

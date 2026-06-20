@@ -5,18 +5,23 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Not yet production-deploy-ready with real funds.** v2.1.x is a unit-tested library
-> with correct mainnet config and guarded money-**theft** paths, but several blockers
-> remain open before a mainnet deploy with real funds — see
-> [`docs/production-readiness.md`](docs/production-readiness.md) and **Known open items**
-> below. Do not read "all audit findings fixed" as "production-ready."
+> **Status (v2.2.3).** The blockers tracked for a real-funds deploy are cleared —
+> B0/B2/B3/B4 done, B1 waived (single-operator state-dropping fresh deploy) — and the
+> composed-system security pass (SEC-0, plus SEC-1..4) is complete; see
+> [`docs/production-readiness.md`](docs/production-readiness.md) (the source of truth) and
+> **Known open items** below. What remains is **not** a blocker: an *optional* external
+> professional audit (the SEC-0 pass was internal multi-agent), a deferred low-risk
+> confirmation-depth/reorg tradeoff (NEW-5), and the SEC-0 documented residuals (operator
+> invariants) in [`docs/security-model.md`](docs/security-model.md). Treat the
+> MCP/facilitator identity as a hot wallet: cap it and review the model for your deployment.
 
 ## Supported versions
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.1.x | ✅ | Current. x402 v2 compliance, EVM/marketplace settlement, self-hosted facilitator. |
-| 2.0.x | ⚠️ | Security release (audit remediation). Superseded by 2.1.x; upgrade when practical. |
+| 2.2.x | ✅ | Current. SEC-0..4 closed, EVM-outbound CI-gated, x402 v2, EVM/marketplace settlement, self-hosted facilitator. |
+| 2.1.x | ⚠️ | Superseded by 2.2.x; upgrade when practical. |
+| 2.0.x | ⚠️ | Security release (audit remediation). Superseded; upgrade. |
 | < 2.0.0 | ❌ | Unmaintained. Pre-remediation; contains the Critical findings in `AUDIT.md`. Do not deploy. |
 
 Security fixes land on the current minor series. There is no long-term-support branch for
@@ -35,7 +40,12 @@ found and fixed 8 follow-on HIGH + 2 medium regressions the fixes themselves int
 treating a missing receipt status as confirmed, a client BigInt crash, and a
 `#Session requireAll(0)` trap). `AUDIT.md` is retained as the historical audit-of-record;
 its per-finding sections are the **original v1.0.0 observations**, mapped to their fixes —
-do not read them as describing current behaviour.
+do not read them as describing current behaviour. Beyond that v1.0.0 audit and its v2.0.0
+re-audit, a separate **composed-system** security pass ran across the v2.1.x→v2.2.3 series:
+**SEC-0** (an internal multi-agent adversarial audit with two re-attack rounds) plus the
+targeted hardening **SEC-1..4**. Its findings are fixed and its deferred residuals
+documented in [`docs/production-readiness.md`](docs/production-readiness.md) (the source of
+truth) and [`docs/security-model.md`](docs/security-model.md).
 
 ### Money-theft paths that are guarded (verified in source)
 
@@ -44,101 +54,116 @@ exercised on the inbound settlement path:
 
 - **C-1 — recipient binding.** EIP-3009 settlement requires `authorization.to` to equal
   the canister's own derived EVM address before any signature verification or broadcast,
-  in **both** the charge path (`src/ic402/Gateway.mo:491-499`) and the session-open path
-  (`src/ic402/Sessions.mo:365-377`). This closes the self-transfer payment-bypass /
+  in **both** the charge path (`src/ic402/Gateway.mo:561-569`) and the session-open path
+  (`src/ic402/Sessions.mo:403-416`). This closes the self-transfer payment-bypass /
   treasury-drain that was the audit's highest-priority finding.
 - **`value == amount` (exact-EVM).** The exact-EVM scheme rejects an authorization whose
   `value` is not exactly the required amount, not merely `>=` it
-  (`src/ic402/Gateway.mo:500-506`) — a v1-style overpayment is rejected.
+  (`src/ic402/Gateway.mo:573-576`) — a v1-style overpayment is rejected.
 - **EIP-712 verify before broadcast.** The EIP-3009 signature is recovered and verified
   locally (`Eip712.verifyAuthorization`) **before** any on-chain outcall
-  (`src/ic402/Gateway.mo:530-548`, then `executeTransferWithAuthorization` at `:564`), so
+  (`src/ic402/Gateway.mo:600-618`, then `executeTransferWithAuthorization` at `:634`), so
   an invalid signature never costs a broadcast.
-- **H-4 — synchronous daily reservation.** The daily spend is reserved synchronously
-  *before* the value-moving `await` (`policy.reserveCharge` / `reserveSessionOpen`,
-  `Policy.mo:195-205`; reservation at `Gateway.mo:556-562`), with `releaseDaily(caller,
-  day, amount)` rollback against the captured day-bucket on failure. Concurrent charges
-  can no longer each pass a stale limit check.
+- **H-4 — synchronous daily spend recording.** The daily spend is recorded synchronously
+  *before* the value-moving `await`: the charge path captures `policy.currentDay()` then
+  calls `policy.recordSpend(...)` (`src/ic402/Gateway.mo:631-632`) before the
+  `executeTransferWithAuthorization` await (`:634`), with `policy.releaseDaily(caller, day,
+  amount)` rollback against the captured day-bucket on failure (`:646`); the session-open
+  path mirrors this (`Sessions.mo:331`/`:597`, rollback at `:791`/`:916`/`:1045`).
+  Concurrent charges can no longer each pass a stale limit check.
 - **S-3 / terminal close.** Session close sets `#closing` *before* any async operation
-  (`src/ic402/Sessions.mo:650-652`) and finalizes `#closed` only on a confirmed transfer;
-  a failed/ambiguous transfer is parked in `#closing` for recovery and never re-broadcast
-  (`Sessions.mo:838-895`). This prevents double-settle / double-refund.
+  (ICP `src/ic402/Sessions.mo:718`, EVM `:952`) and finalizes `#closed` only on a confirmed
+  transfer; a failed/ambiguous transfer is parked in `#closing` for recovery and never
+  re-broadcast (`Sessions.mo:972-1025`, finalize at `:1040`, confirm-only recovery
+  `reconcileSession` at `:900`). This prevents double-settle / double-refund.
 
 Cryptographic primitives reviewed sound: EIP-712 recovery, constant-time byte comparison,
 and AEAD with constant-time tag comparison (`src/ic402/ContentStore.mo`). The residual
 risk lives in the orchestration layer, which is what the open items below address.
 
-## Known open items / not-yet-production-ready
+## Known open items / production-readiness status
 
-Tracked in [`docs/production-readiness.md`](docs/production-readiness.md) (multi-agent
-readiness audit). Current branch state:
+Tracked in [`docs/production-readiness.md`](docs/production-readiness.md) (the source of
+truth). Current state at v2.2.3 — every tracked blocker is cleared or waived, and the
+composed-system security pass is complete:
 
-- **B2 — unconfirmed-broadcast → settled: FIXED** (`f579545`, pending end-to-end
-  verification). The EVM **outbound** paths (marketplace `settleJob`/`refundOnRail`,
-  Sessions EVM `closeEvmSessionInternal`) previously finalized `#Settled`/`#Refunded`/
-  `#closed` on mempool acceptance. They now broadcast then confirm via
-  `EvmSender.sendErc20TransferConfirmed` (`src/ic402/EvmSender.mo:247`), finalize **only**
-  on `#confirmed`, park on `#pending`/`#reverted`, and never re-broadcast an ambiguous
-  send (`sendTransaction` returns a tri-state `{#ok; #err; #maybeSent}`). The
-  recovery/re-poll path for a parked job/session is still manual (tracked as SEC-2).
+- **B0 — un-installable WASM (IC0505): FIXED.** A `wasm-opt -O` build step coalesces the
+  unrolled SHA-256 locals (2081 → 96); a `wasm-locals` CI gate guards against regression.
+- **B2 — unconfirmed-broadcast → settled: FIXED.** The EVM **outbound** paths (marketplace
+  `settleJob`/`refundOnRail`, Sessions EVM `closeEvmSessionInternal`) broadcast then
+  CONFIRM via `EvmSender.sendErc20TransferConfirmed`, finalize **only** on `#confirmed`,
+  park on `#pending`/`#reverted`, and never re-broadcast an ambiguous send (`sendTransaction`
+  returns a tri-state `{#ok; #err; #maybeSent}`).
+- **B3 — EVM rail verified end-to-end AND CI-gated: DONE.** The funded outbound path has
+  completed on Base Sepolia (mined `status==1` settle + session close/refund), and the
+  outbound state machine is now gated **hermetically** in CI: a scriptable mock of the
+  EVM-RPC canister (`example/evm-rpc-mock/`) drives confirm / revert / park / reconcile with
+  no funded testnet (`test-evm-outbound` job). Real tECDSA signing + RLP still run; only the
+  broadcast/confirm leg is mocked.
+- **B4 — replica-backed CI: DONE.** `test-integration` enforces the end-to-end suite
+  (`IC402_REQUIRE_REPLICA=1`); B3 closes its residual EVM-outbound gap.
+- **B1 — upgrade migration from v2.0.0: WAIVED.** `main.mo` is a `persistent actor` (EOP);
+  the operator accepts a state-dropping fresh deploy (single-operator, no external
+  upgrade consumers), so this is not a blocker for that context.
+- **SEC-0 — composed-system adversarial pass: DONE.** A multi-agent pass (attack →
+  majority-vote verify → cross-surface critic) plus two re-attack rounds; 6 findings fixed.
+  The documented residuals (shared-pool solvency operator-invariant; SSRF connect-pin;
+  `recoverBuyerActionSigner`) are in [`docs/security-model.md`](docs/security-model.md).
+- **SEC-1 — unauthenticated-facilitator cycle/DoS: FIXED.** A caller-agnostic token-bucket
+  rate-limit + cycle-floor gate (`Gateway.facilitatorAdmit`) fronts the facilitator paths
+  before the expensive work runs.
+- **SEC-2 — `getFeeData` hostile-RPC grief-park: FIXED.** Fee data now takes the ROBUST
+  (lower-median) base fee across providers, so a single outlier can't make the gas
+  reservation unpayable; a confirm-only `reconcileJob` / `reconcileSession` recovery path
+  exists (and `sweepEvm` / `forceResolveSession` as manual hatches).
+- **SEC-3 — MCP admin-tool trust: FIXED.** The state-changing admin tools (`register_service`,
+  `enable_service`, `claim_job`, `submit_job_result`, `upload_content`) are default-**DENIED**;
+  an operator must opt in (`IC402_MCP_ALLOW_ADMIN_TOOLS`), and the dangerous primitives
+  (`delete_content`, `sign_typed_data`) stay behind a separate flag.
+- **SEC-4 — policy-roster disclosure: FIXED.** `getPolicyConfig` redacts the allow/block roster.
 
-Still open before "production-ready":
+Not blockers, but recommended before treating it as battle-tested:
 
-- **B1 — upgrade incompatibility from v2.0.0.** `main.mo` is a `persistent actor` (EOP);
-  v2.1.0 added stable fields and a required `bindResult` on `#ZkGroth16`, so an in-place
-  upgrade is rejected (M0170) with no migration function — a fresh deploy drops all
-  escrow/session/grant/nonce/registry state. Needs a migration function or a documented
-  state-dropping fresh-deploy.
-- **B3 — EVM rail never verified end-to-end.** No funded on-chain settle/close has ever
-  completed through ic402's tECDSA sender (a green Base Sepolia settle + session
-  close/refund with mined `status==1` hashes is required).
-- **SEC-0 — composed-system security pass (not yet done).** The v2.1.0 surface was
-  reviewed per-commit but never audited end-to-end as a composed system: the
-  unauthenticated facilitator endpoints, the marketplace cross-rail settle/refund, the
-  EVM session close, and the 7 new MCP admin tools. This must be commissioned before
-  tagging "production-ready." It specifically must cover:
-  - **SEC-1 — unauthenticated-facilitator cycle/DoS.** `POST /verify` and `POST /settle`
-    run in `http_request_update` and parse attacker JSON before any policy rate-limit, so
-    spam is unmetered (cycle-DoS surface — no theft, the C-1 binding holds, but the cost
-    is the canister's). Rate-limit/gate these endpoints.
-  - **SEC-2 — `getFeeData` hostile-RPC grief-park.** One persistently bad RPC provider can
-    park every EVM close/settle (max-base-fee picks the outlier; the 10 000-gwei ceiling
-    bounds but does not eliminate). A recovery path (`recoverEscrow` / confirm-only
-    re-poll) is needed; the example currently exposes none.
-  - **SEC-3 — MCP admin-tool trust caveat.** The 7 admin tools (`register_service`,
-    `enable_service`, `claim_job`, `submit_job_result`, `upload_content`,
-    `delete_content`, `sign_typed_data`) are default-enabled, gated only by an in-band
-    `confirm` flag that a prompt-injected LLM can set. The trust model must be re-examined.
+- An **external** professional audit — the SEC-0 pass was internal multi-agent.
+- **NEW-5 — confirmation depth / reorg.** `status==1` is treated as final (DEFERRED; low
+  practical risk on optimistic L2s — a deeper guarantee needs a chain-head read the EVM-RPC
+  interface doesn't expose).
+- An optional periodic **live-testnet smoke** for the funded leg (which can't be hermetic).
 
 ## Threat-model highlights
 
 - **MCP server — untrusted-LLM model.** [`integrations/mcp/`](integrations/mcp/) runs
   against a canister authenticated as a **controller**, driven by an LLM that may be
   steered by prompt-injected content. The audit's C2/C3/H11–H13 all lived here. Mitigations
-  in place: SSRF allowlisting with per-redirect re-validation, restriction of the generic
-  `call` tool to a read-only/query allowlist, and a `confirm` gate on every
-  money-moving/signing tool (`integrations/mcp/src/index.ts`). **Caveat:** the `confirm`
+  in place: SSRF allowlisting with per-redirect re-validation **and a DNS-rebinding guard**
+  that re-resolves each hop and rejects private/internal IPs (`integrations/mcp/src/security.ts`),
+  restriction of the generic `call` tool to a read-only/query allowlist, and a `confirm`
+  gate on every money-moving/signing tool (`integrations/mcp/src/index.ts`; admin-tool
+  gating in `integrations/mcp/src/guards.ts`). **Caveat:** the `confirm`
   flag is in-band — a confirmation an LLM can itself set is not equivalent to
-  human-in-the-loop. Treat the MCP server's identity as a hot wallet, cap it, and do not
-  expose admin tools to an unattended agent (SEC-3).
+  human-in-the-loop. Treat the MCP server's identity as a hot wallet, cap it, and keep the
+  state-changing admin tools at their default-DENIED setting for an unattended agent — opt
+  in (`IC402_MCP_ALLOW_ADMIN_TOOLS`) only for an attended/trusted deployment (SEC-3).
 - **Self-hosted facilitator endpoints.** The canister self-hosts the x402 facilitator role
-  (`GET /supported`, `POST /verify`, `POST /settle`, `GET /discovery/resources` —
-  `example/main.mo:233,290-364`). `/verify` and `/settle` are **unauthenticated update
+  (`GET /supported`, `GET /discovery/resources` — `example/main.mo:305-340`; `POST /verify`,
+  `POST /settle` upgraded to `http_request_update` — `example/main.mo:368-389`). `/verify`
+  and `/settle` are **unauthenticated update
   calls**: no funds can be stolen (C-1 recipient binding still applies), but they cost the
-  canister cycles and are not yet rate-limited (SEC-1). Operators should front them with a
-  rate limiter / cycle budget.
+  canister cycles. They are now fronted by a caller-agnostic token-bucket rate-limit +
+  cycle-floor gate (SEC-1, `Gateway.facilitatorAdmit`); operators should still cap the
+  canister's overall cycle budget.
 - **IC boundary-node CORS caveat.** Every HTTP response sets
-  `Access-Control-Allow-Origin: *` (`src/ic402/HttpHandler.mo:40-46`) so browser agents can
+  `Access-Control-Allow-Origin: *` (`src/ic402/HttpHandler.mo:42`) so browser agents can
   pass the OPTIONS preflight carrying the custom `PAYMENT-SIGNATURE` header. This is
   intentional for an open payment endpoint, but it means **any** web origin can invoke the
-  HTTP/facilitator surface from a browser. Combined with the unauthenticated facilitator
-  update calls (SEC-1), an operator should rate-limit and not assume same-origin
-  protection.
+  HTTP/facilitator surface from a browser. The facilitator rate-limit (SEC-1) bounds the
+  cost; an operator should still not assume same-origin protection.
 - **M-2 — content (key, nonce) reuse (fixed, noted for migration).** Pre-v2, `delete()` +
   re-`put()` of the same content id reused the (key, nonce) pair (keystream reuse → XOR
-  plaintext recovery). v2.0.0 mixes a per-entry random salt into key/nonce derivation
-  (`src/ic402/ContentStore.mo:36,112-119`); the salt boundary was re-hardened in the
-  re-audit (`40e561f`). Note for integrators: pre-v2 deterministic-key content is **not**
+  plaintext recovery). v2.0.0 mixes a per-entry (monotonic-counter) salt into key/nonce
+  derivation (salt field `src/ic402/ContentStore.mo:36-39`, counter at `:119-120`/`:164-165`,
+  mixed into key+nonce at `:45-67`); the salt boundary (fixed 8-byte framing) was re-hardened
+  in the re-audit (`40e561f`, `:47`/`:56`). Note for integrators: pre-v2 deterministic-key content is **not**
   decryptable under the v2 required-seed model and must be re-uploaded; call
   `initExternalSeed(await raw_rand())` (or `startTimers()`) once after deploy.
 

@@ -42,6 +42,8 @@ module {
     ledgerFee : Nat;
   };
 
+  /// Service marketplace: register services, claim/settle/refund jobs, and reconcile parked
+  /// EVM settlements. ICP-only unless the consuming canister wires the EVM transfer/confirm hooks.
   public class ServiceRegistry(
     _canisterPrincipal : Principal,
     config : ServiceConfig,
@@ -61,6 +63,9 @@ module {
     // B2: the hook CONFIRMS the transfer mined before returning, so the registry can
     // finalize a job's terminal state only on a confirmed on-chain transfer (not on a
     // mere mempool ack). #confirmed/#reverted/#pending/#err mirror EvmSender.
+    /// Injected on-chain ERC-20 transfer hook to settle/refund EVM-paid jobs. It CONFIRMS the tx
+    /// mined before returning (#confirmed/#reverted/#pending/#err), so a job finalizes only on
+    /// a confirmed transfer. Args: (chainId, token, toAddress, amount).
     public type EvmTransferFn = (Nat, Text, Text, Nat) -> async {
       #confirmed : Text;
       #reverted : Text;
@@ -76,6 +81,8 @@ module {
 
     // Recovery: a READ-ONLY confirm hook (re-polls a tx receipt; NEVER broadcasts). Distinct from
     // evmTransfer precisely so reconcileJob can never re-broadcast a parked tx (no double-pay).
+    /// Injected READ-ONLY tx-confirmation hook for reconcileJob — re-polls a receipt and NEVER
+    /// broadcasts, so a parked tx can't be double-paid. Args: (chainId, txHash).
     public type EvmConfirmFn = (Nat, Text) -> async { #confirmed; #reverted; #pending; #err : Text };
     var evmConfirm : ?EvmConfirmFn = null;
 
@@ -781,6 +788,9 @@ module {
       #clearParked : { msg : Text }; // clear parkedTx only (Upto remainder confirmed)
       #stay : { err : Text }; // no state change; surface the reason
     };
+    /// Pure decision for reconciling a parked job leg: finalize a #confirmed leg from its parked
+    /// status, clear the parked tx for a confirmed Upto remainder, otherwise stay parked. Never
+    /// re-broadcasts.
     public func reconcileDecision(
       outcome : { #confirmed; #reverted; #pending; #err : Text },
       leg : Types.ParkedLeg,
@@ -953,6 +963,8 @@ module {
       };
     };
 
+    /// Garbage-collect terminal (settled/refunded/expired) jobs older than 24h; returns the count
+    /// removed. Skips any job still carrying a parked tx.
     public func gcTerminalJobs() : Nat {
       let gcCutoff = Time.now() - 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
       let staleJobs = Buffer.Buffer<Text>(8);

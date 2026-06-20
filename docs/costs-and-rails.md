@@ -62,4 +62,4 @@ The figures above are **local**. On mainnet, expect **higher** per‑EVM‑settl
 
 ## Where these figures come from
 
-Empirical: `health().cyclesBalance` deltas captured across the interactive demo (Base Sepolia, this repo), net of refunds. Cross‑checked against in‑source constants (`RPC_CYCLES = 10B`, `MIN_BROADCAST_CYCLES = 120B`) and the IC cost model. The maintainer backlog item to pin mainnet numbers with a funded end‑to‑end run is **B3** in [`production-readiness.md`](production-readiness.md).
+Empirical: `health().cyclesBalance` deltas captured across the interactive demo (Base Sepolia, this repo), net of refunds. Cross‑checked against in‑source constants (`RPC_CYCLES = 10B`, `MIN_BROADCAST_CYCLES = 120B`) and the IC cost model. Pinning *mainnet* numbers against a funded end‑to‑end run remains an optional periodic live‑testnet smoke (B3 itself is **closed** — the outbound rail is now CI‑gated hermetically); see [`production-readiness.md`](production-readiness.md).

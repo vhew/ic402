@@ -66,6 +66,8 @@ module {
     #settleDoneRefundOwed : Text; // settle confirmed but remainder unsent → manual
     #stay : Text; // no change; surface the reason
   };
+  /// Pure decision for reconciling a parked EVM session-close leg: finalize only on a #confirmed
+  /// leg (see the golden rules above), otherwise stay parked.
   public func sessionReconcileDecision(
     outcome : { #confirmed; #reverted; #pending; #err : Text },
     leg : { #Settle; #Refund },
@@ -113,6 +115,7 @@ module {
     // Gateway injects its own admitRate (the caller-agnostic token bucket shared with settle/
     // verifyPayment); defaults to a no-op so unit tests constructing Sessions directly are unaffected.
     var admitRateFn : () -> { #ok; #throttled } = func() : { #ok; #throttled } { #ok };
+    /// Wire the global rate-limit gate for openEvmSession's ecRecover (injected by the Gateway).
     public func setAdmitRate(f : () -> { #ok; #throttled }) { admitRateFn := f };
 
     func findLedger(identifier : Text) : ?Types.TokenConfig {

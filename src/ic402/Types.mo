@@ -621,6 +621,8 @@ module {
     #Refund; // dispute/expire refund-to-buyer → on confirm ⇒ #Refunded
     #UptoRemainder; // Upto buyer remainder; operator already paid+confirmed → confirm clears parkedTx
   };
+  /// A settle/refund transfer that broadcast but isn't yet confirmed — recorded so a recovery
+  /// path can re-poll it confirm-only (and never re-broadcast it).
   public type ParkedTx = {
     txHash : Text;
     leg : ParkedLeg;

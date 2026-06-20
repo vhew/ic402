@@ -148,14 +148,24 @@ module {
 
   // ── Service marketplace types ──
 
+  /// Whether a service is fulfilled synchronously (inline) or asynchronously (job-queued).
   public type ServiceType = Types.ServiceType;
+  /// How a buyer is charged: exact price, up-to authorization, or existing session deposit.
   public type PricingScheme = Types.PricingScheme;
+  /// How a job result is verified (e.g. trust the operator, or a ZK Groth16 proof).
   public type VerificationMethod = Types.VerificationMethod;
+  /// How a job result is delivered to the buyer: poll, callback, or both.
   public type ServiceDeliveryMethod = Types.ServiceDeliveryMethod;
+  /// A registered service: id, name, pricing, verification, and delivery configuration.
   public type ServiceDefinition = Types.ServiceDefinition;
+  /// Lifecycle state of a job (pending → assigned/computing → settled/refunded/expired).
   public type JobStatus = Types.JobStatus;
+  /// A purchased unit of work against a service: buyer, payment rail, status, and result.
   public type Job = Types.Job;
+  /// Construction config for the ServiceRegistry (payment recipient, tokens, ledger fee).
   public type ServiceConfig = ServiceRegistryMod.ServiceConfig;
+  /// Serialized ServiceRegistry state (services + jobs + counters) for stable upgrade persistence.
   public type StableServiceRegistryState = Types.StableServiceRegistryState;
+  /// Interface to an external ZK verifier canister (Groth16 proof verification).
   public type ZkVerifierActor = Types.ZkVerifierActor;
 };

@@ -13,6 +13,9 @@ pnpm build:demo                 # MCP server + demo client
 mops test                       # Motoko unit tests
 pnpm demo                       # interactive demo (needs local replica)
 pnpm setup:local                      # deploy locally (full setup)
+# Hermetic EVM-outbound gate (no funded testnet) — after setup:local:
+bash scripts/setup-evm-outbound.sh    # re-point example at the EVM-RPC mock
+IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts
 ```
 
 ## Key Files
@@ -20,6 +23,7 @@ pnpm setup:local                      # deploy locally (full setup)
 - `src/ic402/` — Motoko library (Gateway, Nonce, EvmVerify, ContentStore, Policy, Identity, HttpHandler, Eip712, EvmUtils, EvmSender, EvmRpc, EvmEscrow, X402Client)
 - `example/main.mo` — Example canister using the library
 - `example/client/` — Interactive demo client
+- `example/evm-rpc-mock/` — Scriptable EVM-RPC mock canister; drives the hermetic EVM-outbound CI gate (`scripts/setup-evm-outbound.sh` + `test/evm-outbound.test.ts`)
 - `packages/client/` — TypeScript client SDK (@ic402/client)
 - `integrations/mcp/` — MCP server for AI agent access
 - `scripts/` — Dev tooling (setup, version bump, deployment)

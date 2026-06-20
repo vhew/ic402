@@ -60,6 +60,7 @@ module {
     #Unknown;
   };
 
+  /// Provider-level error from the EVM-RPC canister (cycles, missing/unknown provider, permission, bad config).
   public type ProviderError = {
     #TooFewCycles : { expected : Nat; received : Nat };
     #MissingRequiredProvider;
@@ -68,18 +69,23 @@ module {
     #InvalidRpcConfig : Text;
   };
 
+  /// Request-validation error from the EVM-RPC canister (bad custom config, malformed hex).
   public type ValidationError = {
     #Custom : Text;
     #InvalidHex : Text;
   };
 
+  /// HTTPS-outcall transport error: an IC reject, or a malformed JSON-RPC HTTP response.
   public type HttpOutcallError = {
     #IcError : { code : RejectionCode; message : Text };
     #InvalidHttpJsonRpcResponse : { status : Nat16; body : Text; parsingError : ?Text };
   };
 
+  /// A JSON-RPC error object returned by an EVM node (code + message).
   public type JsonRpcError = { code : Int64; message : Text };
 
+  /// Union of every EVM-RPC failure mode — a faithful mirror of evm_rpc.did so a
+  /// multi-provider response Candid-decodes without trapping (see the note above).
   public type RpcError = {
     #JsonRpcError : JsonRpcError;
     #ProviderError : ProviderError;
