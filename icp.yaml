@@ -38,6 +38,18 @@ canisters:
         path: example/zk-verifier/prebuilt/zk_verifier.wasm.gz
         candid: example/zk-verifier/zk_verifier.did
 
+  # TEST FIXTURE ONLY (production-readiness item B3): a scriptable mock of the
+  # DFINITY EVM RPC canister so CI can exercise the EVM-outbound state machine
+  # (sign → broadcast → confirm / park / reconcile) on a local replica — no funded
+  # testnet, no HTTPS outcalls. Local-only; deliberately absent from the `ic` env.
+  - name: evm_rpc_mock
+    recipe:
+      type: '@dfinity/motoko@v4.1.0'
+      configuration:
+        main: example/evm-rpc-mock/main.mo
+        candid: example/evm-rpc-mock/evm_rpc_mock.did
+        args: ''
+
 networks:
   - name: local
     mode: managed
@@ -51,7 +63,7 @@ networks:
 environments:
   - name: local
     network: local
-    canisters: [example, ckusdc_ledger, evm_rpc, zk_verifier]
+    canisters: [example, ckusdc_ledger, evm_rpc, zk_verifier, evm_rpc_mock]
 
   - name: ic
     network: mainnet

@@ -1,0 +1,291 @@
+type ValidationError = 
+ variant {
+   Custom: text;
+   InvalidHex: text;
+ };
+type TransactionReceipt = 
+ record {
+   blockHash: text;
+   blockNumber: nat;
+   contractAddress: opt text;
+   cumulativeGasUsed: nat;
+   effectiveGasPrice: nat;
+   from: text;
+   gasUsed: nat;
+   logs: vec LogEntry;
+   logsBloom: text;
+   root: opt text;
+   status: opt nat;
+   to: opt text;
+   transactionHash: text;
+   transactionIndex: nat;
+ };
+type SendRawTransactionStatus = 
+ variant {
+   InsufficientFunds;
+   NonceTooHigh;
+   NonceTooLow;
+   Ok: opt text;
+ };
+type SendRawTransactionResult = 
+ variant {
+   Err: RpcError;
+   Ok: SendRawTransactionStatus;
+ };
+type RpcServices = 
+ variant {
+   ArbitrumOne: opt vec L2MainnetService;
+   BaseMainnet: opt vec L2MainnetService;
+   Custom: record {
+             chainId: nat64;
+             services: vec RpcApi;
+           };
+   EthMainnet: opt vec EthMainnetService;
+   EthSepolia: opt vec EthSepoliaService;
+   OptimismMainnet: opt vec L2MainnetService;
+ };
+type RpcService = 
+ variant {
+   ArbitrumOne: L2MainnetService;
+   BaseMainnet: L2MainnetService;
+   Custom: RpcApi;
+   EthMainnet: EthMainnetService;
+   EthSepolia: EthSepoliaService;
+   OptimismMainnet: L2MainnetService;
+   Provider: nat64;
+ };
+type RpcError = 
+ variant {
+   HttpOutcallError: HttpOutcallError;
+   JsonRpcError: JsonRpcError;
+   ProviderError: ProviderError;
+   ValidationError: ValidationError;
+ };
+type RpcConfig = 
+ record {
+   responseConsensus: opt ConsensusStrategy;
+   responseSizeEstimate: opt nat64;
+ };
+type RpcApi = 
+ record {
+   headers: opt vec record {
+                      name: text;
+                      value: text;
+                    };
+   url: text;
+ };
+type RejectionCode = 
+ variant {
+   CanisterError;
+   CanisterReject;
+   DestinationInvalid;
+   NoError;
+   SysFatal;
+   SysTransient;
+   Unknown;
+ };
+type ReceiptMode = 
+ variant {
+   confirmed;
+   pendingThenConfirmed: nat;
+   reverted;
+ };
+type ProviderError = 
+ variant {
+   InvalidRpcConfig: text;
+   MissingRequiredProvider;
+   NoPermission;
+   ProviderNotFound;
+   TooFewCycles: record {
+                   expected: nat;
+                   received: nat;
+                 };
+ };
+type MultiSendRawTransactionResult = 
+ variant {
+   Consistent: SendRawTransactionResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       SendRawTransactionResult;
+                     };
+ };
+type MultiGetTransactionReceiptResult = 
+ variant {
+   Consistent: GetTransactionReceiptResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       GetTransactionReceiptResult;
+                     };
+ };
+type MultiGetTransactionCountResult = 
+ variant {
+   Consistent: GetTransactionCountResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       GetTransactionCountResult;
+                     };
+ };
+type MultiFeeHistoryResult = 
+ variant {
+   Consistent: FeeHistoryResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       FeeHistoryResult;
+                     };
+ };
+type LogEntry = 
+ record {
+   address: text;
+   blockHash: opt text;
+   blockNumber: opt nat;
+   data: text;
+   logIndex: opt nat;
+   removed: bool;
+   topics: vec text;
+   transactionHash: opt text;
+   transactionIndex: opt nat;
+ };
+type L2MainnetService = 
+ variant {
+   Alchemy;
+   Ankr;
+   BlockPi;
+   Llama;
+   PublicNode;
+ };
+type JsonRpcError = 
+ record {
+   code: int64;
+   message: text;
+ };
+type HttpOutcallError = 
+ variant {
+   IcError: record {
+              code: RejectionCode;
+              message: text;
+            };
+   InvalidHttpJsonRpcResponse:
+    record {
+      body: text;
+      parsingError: opt text;
+      status: nat16;
+    };
+ };
+type GetTransactionReceiptResult = 
+ variant {
+   Err: RpcError;
+   Ok: opt TransactionReceipt;
+ };
+type GetTransactionCountResult = 
+ variant {
+   Err: RpcError;
+   Ok: nat;
+ };
+type GetTransactionCountArgs = 
+ record {
+   address: text;
+   block: BlockTag;
+ };
+type FeeMode = 
+ variant {
+   consistent;
+   inconsistentOutlier;
+ };
+type FeeHistoryResult = 
+ variant {
+   Err: RpcError;
+   Ok: FeeHistory;
+ };
+type FeeHistoryArgs = 
+ record {
+   blockCount: nat;
+   newestBlock: BlockTag;
+   rewardPercentiles: opt vec nat8;
+ };
+type FeeHistory = 
+ record {
+   baseFeePerGas: vec nat;
+   gasUsedRatio: vec float64;
+   oldestBlock: nat;
+   reward: vec vec nat;
+ };
+type EthSepoliaService = 
+ variant {
+   Alchemy;
+   Ankr;
+   BlockPi;
+   PublicNode;
+   Sepolia;
+ };
+type EthMainnetService = 
+ variant {
+   Alchemy;
+   Ankr;
+   BlockPi;
+   Cloudflare;
+   Llama;
+   PublicNode;
+ };
+type ConsensusStrategy = 
+ variant {
+   Equality;
+   Threshold: record {
+                min: nat8;
+                total: opt nat8;
+              };
+ };
+type BlockTag = 
+ variant {
+   Earliest;
+   Finalized;
+   Latest;
+   Number: nat;
+   Pending;
+   Safe;
+ };
+/// ============================================================================
+/// evm-rpc-mock — a hermetic TEST DOUBLE for the DFINITY EVM RPC canister.
+/// 
+/// ⚠️  TEST FIXTURE ONLY. Never deploy this to mainnet. The scriptable hooks are
+///     intentionally unauthenticated so CI can drive them without controller
+///     juggling; on a real network that would let anyone forge receipts.
+/// 
+/// WHY IT EXISTS (production-readiness item B3):
+///   The EVM-outbound path — sign (tECDSA) → RLP → eth_sendRawTransaction →
+///   poll eth_getTransactionReceipt → confirm / park / reconcile — could only be
+///   exercised against a funded public testnet, so CI never gated it. This canister
+///   implements the exact `EvmRpc.EvmRpcCanister` interface the library calls, with
+///   canned, *scriptable* responses, so the whole state machine runs on a local
+///   replica with NO funded account and NO HTTPS outcalls.
+/// 
+///   What stays REAL in the test: the canister-under-test still does genuine tECDSA
+///   signing + RLP encoding; only the broadcast/confirm round-trip hits this mock.
+///   We record every raw tx we were asked to broadcast so a test can assert the
+///   bytes actually went out (and that we did not double-broadcast).
+/// 
+/// SCRIPTING (call before driving the canister-under-test):
+///   setReceiptMode(#confirmed)               receipts report status=1 (mined OK)
+///   setReceiptMode(#reverted)                receipts report status=0 (mined, reverted)
+///   setReceiptMode(#pendingThenConfirmed n)  first n receipt polls => null (not yet
+///                                            mined → caller parks); poll n+1 => status=1
+///   setFeeMode(#consistent)                  one agreed base fee
+///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
+///                                            so the caller's robust-median fee logic runs
+/// ============================================================================
+service : {
+  eth_feeHistory: (_services: RpcServices, _config: opt RpcConfig, _args:
+   FeeHistoryArgs) -> (MultiFeeHistoryResult);
+  eth_getTransactionCount: (_services: RpcServices, _config: opt RpcConfig,
+   _args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
+  eth_getTransactionReceipt: (_services: RpcServices, _config: opt RpcConfig,
+   txHash: text) -> (MultiGetTransactionReceiptResult);
+  eth_sendRawTransaction: (_services: RpcServices, _config: opt RpcConfig,
+   rawTx: text) -> (MultiSendRawTransactionResult);
+  getReceiptPolls: () -> (nat) query;
+  getSentTxs: () -> (vec text) query;
+  /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
+  reset: () -> ();
+  sentTxCount: () -> (nat) query;
+  setFeeMode: (m: FeeMode) -> ();
+  setReceiptMode: (m: ReceiptMode) -> ();
+}

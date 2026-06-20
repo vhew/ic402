@@ -5,11 +5,12 @@ paths. This is the tracked backlog to close the gap to **deploy-to-mainnet-with-
 from a multi-agent readiness audit (2026-06-16). See `AUDIT.md` for the historical security
 audit and `CHANGELOG.md` for what shipped.
 
-**Status as of v2.2.2 (2026-06-19):** **SEC-0** (composed-system adversarial audit + 2 re-attack
-rounds) DONE; **SEC-1/SEC-2/SEC-3/SEC-4** all closed; **B0/B2/B4** done, **B1** waived. The EVM
-rail is now empirically proven end-to-end via the live demo (B3 — see below). The genuine
-remaining items for the single-operator, real-funds context: a **CI-gated** funded EVM run (B3),
-the deferred confirmation-depth tradeoff (low L2 risk), and an optional **external** professional
+**Status as of v2.2.3 (2026-06-19):** **SEC-0** (composed-system adversarial audit + 2 re-attack
+rounds) DONE; **SEC-1/SEC-2/SEC-3/SEC-4** all closed; **B0/B2/B3/B4** done, **B1** waived. The EVM
+rail is proven end-to-end via the live demo AND now CI-gated hermetically via a scriptable mock of
+the EVM-RPC canister (B3 — see below). The genuine remaining items for the single-operator,
+real-funds context: the deferred confirmation-depth tradeoff (low L2 risk), an optional periodic
+live-testnet smoke for the funded leg (can't be hermetic), and an optional **external** professional
 audit (the SEC-0 pass was internal multi-agent). The SEC-0 documented residuals (shared-pool
 solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`) are in
 `docs/security-model.md`.
@@ -58,13 +59,26 @@ solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`) are i
   **Landed (f579545):** `sendErc20TransferConfirmed` tri-state added, `EvmTransferFn`
   hook widened, and settle/refund/close finalize only on `#confirmed` — verified on
   Base Sepolia this release (mined `status==1` settle + session close+refund).
-- [~] **B3 — EVM rail PROVEN end-to-end; CI-gating still open.** The funded outbound path has
-  completed live on Base Sepolia repeatedly via the interactive demo — settle + EVM session
-  close+refund + ERC-8004 agent register, all mined `status==1`, 10/10 — so "does it work" is
-  answered (was the original blocker). **What remains:** a REPEATABLE gate — a Foundry/anvil-fork
-  harness that mocks the EVM-RPC canister so the outbound settle/close/reconcile path runs
-  hermetically in CI (the funded leg can't be hermetic), plus a periodic live-testnet smoke. This
-  also closes B4's residual EVM-outbound gap.
+- [x] **B3 — EVM rail PROVEN end-to-end AND now CI-gated hermetically — DONE (v2.2.3).** The funded
+  outbound path has completed live on Base Sepolia repeatedly via the interactive demo — settle + EVM
+  session close+refund + ERC-8004 agent register, all mined `status==1`, 10/10 — so "does it work" was
+  already answered (the original blocker). **What remained was a REPEATABLE gate**, now landed. Rather
+  than a Foundry/anvil fork (which still needs an external node and can't mock the *canister* boundary),
+  the gate is a **scriptable Motoko mock of the EVM-RPC canister** (`example/evm-rpc-mock/`) that
+  implements the exact `EvmRpc.EvmRpcCanister` interface and answers every RPC round-trip with canned,
+  controllable data — so the whole outbound state machine runs on a plain local replica with **no funded
+  testnet and no HTTPS outcall**. What stays REAL in the test: the canister-under-test still does genuine
+  tECDSA signing + RLP encoding; only the broadcast/confirm leg is mocked. **Landed:** (1) the mock canister
+  with test hooks (`setReceiptMode` confirmed/reverted/pendingThenConfirmed(n), `setFeeMode`
+  consistent/inconsistentOutlier, a sent-tx recorder, a monotonic nonce); (2) `scripts/setup-evm-outbound.sh`
+  re-points the example at the mock (build via `moc` directly — the icp motoko recipe's node moc wrapper
+  breaks under a polluted PATH); (3) `test/evm-outbound.test.ts` drives `sweepEvm` and asserts
+  confirmed→`#confirmed` (broadcast exactly once), reverted(status=0)→`#reverted`, never-mined→`#pending`
+  (poll budget exhausted), pending-then-mined→`#confirmed` (multi-poll), and inconsistent-fee-with-outlier
+  →`#confirmed` (SEC-2 robust-median base fee, not the outlier); (4) a `test-evm-outbound` CI job enforced
+  by `IC402_REQUIRE_EVM_OUTBOUND=1`. This forces revert / pending / fee-outlier outcomes a live testnet
+  won't produce on demand, and closes B4's residual EVM-outbound gap. **Still recommended (not blocking):**
+  a periodic live-testnet smoke for the funded leg, which by definition can't be hermetic.
 - [~] **B4 — CI green is hollow for the substance — MOSTLY FIXED (v2.1.1).** The only e2e suite
   (`test/integration.test.ts`, now 50 cases) used to **silently pass in CI** (every case is
   `if (skip) return`; with no replica vitest counts them as passed) and failed locally on
@@ -73,11 +87,12 @@ solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`) are i
   are sign-only, no broadcast); (2) a **`test-integration` CI job** deploys a real local replica
   (`pnpm setup:local`) and runs it with `IC402_REQUIRE_REPLICA=1`, turning a missing replica into a
   HARD failure (verified 50/50 enforced locally); (3) a `did-sync` gate fails on a drifted
-  `example.did`. **Still open:** the suite covers the LOCAL money/protocol paths but NOT the EVM
-  OUTBOUND broadcast money paths (settle/refund/session-close to Base) — those need a funded
-  testnet or a Foundry-fork mock (can't be hermetic) and the full async `reconcileJob`/
-  `reconcileSession` loop (only their pure decision matrices are unit-tested). First CI run also
-  validates the ubuntu `icp` network-launcher path.
+  `example.did`. **EVM-outbound gap now CLOSED by B3:** the `test-evm-outbound` job hermetically gates
+  the outbound broadcast/confirm/park state machine via the scriptable EVM-RPC mock (real tECDSA + RLP,
+  mocked broadcast). **Still open (minor):** the full async `reconcileJob`/`reconcileSession` recovery
+  loop is exercised end-to-end only through `sweepEvm`'s send→confirm primitive (which they share); their
+  park-then-reconcile *session/job state* transitions remain unit-tested via their pure decision matrices.
+  First CI run also validates the ubuntu `icp` network-launcher path.
 
 ## Security (fresh composed-system pass before tagging "production-ready")
 
@@ -213,4 +228,4 @@ Mainnet constants correct (chain IDs, 5 USDC addresses, ckUSDC ledger, `key_1`, 
 canister); money-**theft** paths guarded (C-1 recipient binding, `value==amount`, local
 EIP-712 verify before broadcast, H-4 synchronous daily reservation, S-3 terminal close);
 unit-level math/guards well-pinned (16 mops + 72 client + MCP guard/security tests);
-cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.1.1.
+cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.2.3.

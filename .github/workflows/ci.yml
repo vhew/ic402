@@ -142,6 +142,37 @@ jobs:
       - name: Integration suite (replica-enforced)
         run: IC402_REQUIRE_REPLICA=1 pnpm test:integration
 
+  # B3: gate the EVM-OUTBOUND rail (sign → broadcast → confirm / park / reconcile) HERMETICALLY —
+  # no funded testnet, no HTTPS outcall. setup:local deploys the replica + example; predemo exports
+  # the (controller) test-payer PEM; setup-evm-outbound.sh deploys a SCRIPTABLE mock of the EVM-RPC
+  # canister and re-points the example at it. The suite then forces confirmed / reverted / never-mined
+  # / pending-then-mined / inconsistent-fee outcomes — including ones a real testnet won't produce on
+  # demand — while the canister still does REAL tECDSA signing + RLP (only the broadcast/confirm is
+  # mocked). IC402_REQUIRE_EVM_OUTBOUND=1 turns a missing fixture into a HARD failure (it is its own
+  # flag, not IC402_REQUIRE_REPLICA, because the example must be re-pointed at the mock first).
+  test-evm-outbound:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: ZenVoich/setup-mops@v1
+      - name: Install icp CLI
+        run: npm install -g @icp-sdk/icp-cli
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy local replica + canisters
+        run: pnpm setup:local
+      - name: Prepare test identity (export test-payer PEM + funding)
+        run: bash scripts/predemo.sh
+      - name: Overlay the EVM-RPC mock fixture (re-point example → mock)
+        run: bash scripts/setup-evm-outbound.sh
+      - name: EVM-outbound suite (fixture-enforced)
+        run: IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts
+
   # Keep example/example.did in sync with example/main.mo — a drifted .did ships a stale Candid
   # interface (and the @ic402/client + MCP IDL are mirrored from it). Regenerate and fail on a diff.
   did-sync:
