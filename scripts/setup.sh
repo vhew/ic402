@@ -15,6 +15,22 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Drop FOREIGN project node_modules/.bin from PATH so a sibling repo's toolchain can't shadow
+# THIS project's mops/node/pnpm. A pnpm-installed ic-mops/@icp-sdk in a sibling repo (ahead on
+# PATH) crashes on load ("Cannot find package '@dfinity/identity'") and silently breaks
+# `mops install`. Same guard as scripts/build-example.sh; keep this project's own
+# node_modules/.bin and every non-node_modules dir. Children (build-example.sh, patch-local.sh's
+# `pnpm exec`, etc.) inherit this exported PATH.
+_sanitized=""
+_OLDIFS="$IFS"; IFS=':'
+for _e in $PATH; do
+  case "$_e" in
+    */node_modules/.bin) case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac ;;
+    *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
+  esac
+done
+IFS="$_OLDIFS"; export PATH="$_sanitized"
+
 echo ""
 echo "==========================================="
 echo "  ic402 Setup"
@@ -43,7 +59,18 @@ echo ""
 
 echo "--- Installing dependencies ---"
 echo ""
-[ -d .mops ] || (mops install || echo "  mops: integrity warning (cosmetic — transitive github deps)")
+# Install when .mops is absent OR empty — a prior failed install can leave an empty dir, which the
+# old `-d` check skipped (then every downstream `mops sources` / build silently used no packages).
+if [ ! -d .mops ] || [ -z "$(ls -A .mops 2>/dev/null)" ]; then
+  mops install || echo "  mops: integrity warning (cosmetic — transitive github deps)"
+fi
+# Fail loudly rather than limp on: an empty .mops here means the toolchain is genuinely broken
+# (commonly a sibling repo's `mops` still shadowing PATH), not a cosmetic warning.
+if [ -z "$(ls -A .mops 2>/dev/null)" ]; then
+  echo "  ERROR: mops install did not populate .mops — the Motoko toolchain is unavailable." >&2
+  echo "         Check that no sibling repo's node_modules/.bin shadows 'mops' on PATH." >&2
+  exit 1
+fi
 echo "  mops: OK"
 pnpm install --silent 2>/dev/null
 echo "  pnpm: OK"
