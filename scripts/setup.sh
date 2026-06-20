@@ -18,14 +18,21 @@ cd "$PROJECT_ROOT"
 # Drop FOREIGN project node_modules/.bin from PATH so a sibling repo's toolchain can't shadow
 # THIS project's mops/node/pnpm. A pnpm-installed ic-mops/@icp-sdk in a sibling repo (ahead on
 # PATH) crashes on load ("Cannot find package '@dfinity/identity'") and silently breaks
-# `mops install`. Same guard as scripts/build-example.sh; keep this project's own
-# node_modules/.bin and every non-node_modules dir. Children (build-example.sh, patch-local.sh's
-# `pnpm exec`, etc.) inherit this exported PATH.
+# `mops install`. KEEP: this project's own node_modules/.bin; the pnpm toolchain dir the CI pnpm
+# action provides ($PNPM_HOME — dropping it leaves setup.sh's own `pnpm install`/`build:demo`
+# with no pnpm on the runner); and every non-node_modules dir. Children (build-example.sh,
+# patch-local.sh's `pnpm exec`, etc.) inherit this exported PATH.
 _sanitized=""
 _OLDIFS="$IFS"; IFS=':'
 for _e in $PATH; do
   case "$_e" in
-    */node_modules/.bin) case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac ;;
+    */node_modules/.bin)
+      if [ -n "${PNPM_HOME:-}" ] && [ "$_e" = "$PNPM_HOME" ]; then
+        _sanitized="${_sanitized:+$_sanitized:}$_e"
+      else
+        case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac
+      fi
+      ;;
     *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
   esac
 done
