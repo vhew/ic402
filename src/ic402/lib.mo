@@ -26,6 +26,13 @@ import ServiceRegistryMod "ServiceRegistry";
 
 module {
 
+  /// Stable-state schema version. BUMP on any BREAKING change to the Stable*State types (a removed
+  /// or retyped field — additive `?optional` fields do NOT need a bump). Consumers should persist
+  /// this next to ic402's stable snapshots and compare it BEFORE calling `loadStable`, so a mismatch
+  /// fails with a clear error instead of a cryptic Candid decode trap. The stable-compat CI gate
+  /// (scripts/check-stable-compat.sh) enforces that a stable-type change is accompanied by a bump here.
+  public let STABLE_SCHEMA_VERSION : Nat = 1;
+
   // ── Core types ──
 
   /// Top-level gateway configuration.

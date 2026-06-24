@@ -40,6 +40,16 @@ jobs:
       - run: mops install
       - run: mops test
 
+  # Guard the library's stable types: a breaking change to any Stable*State (which would brick a
+  # consumer's upgrade) fails here unless STABLE_SCHEMA_VERSION is bumped + the baseline advanced.
+  stable-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ZenVoich/setup-mops@v1
+      - run: mops install
+      - run: ./scripts/check-stable-compat.sh
+
   test-client:
     runs-on: ubuntu-latest
     steps:

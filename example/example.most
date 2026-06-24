@@ -1,0 +1,183 @@
+// Version: 1.0.0
+type EvmRail__34810663 = {network : Text; token : Text};
+type EvmSessionDeposit__25628158 =
+  {chainId : Nat; payerEvmAddress : Text; tokenAddress : Text; txHash : Text};
+type JobStatus__420389215 =
+  {
+    #Assigned;
+    #Computing;
+    #Disputed;
+    #Expired;
+    #Pending;
+    #Refunded;
+    #Settled;
+    #Settling;
+    #Submitted;
+    #Verified
+  };
+type Job__620325697 =
+  {
+    actualCost : ?Nat;
+    amount : Nat;
+    buyer : Text;
+    completedAt : ?Int;
+    createdAt : Int;
+    deliveryCallback : ?Text;
+    expiresAt : Int;
+    id : Text;
+    operator : ?Principal;
+    params : Blob;
+    parkedTx : ?ParkedTx__1046621889;
+    paymentReceiptId : Text;
+    proof : ?Blob;
+    result : ?Blob;
+    serviceId : Text;
+    status : JobStatus__420389215
+  };
+type ParkedLeg__942096948 = {#Refund; #Settle; #UptoRemainder};
+type ParkedTx__1046621889 =
+  {
+    chainId : Nat;
+    leg : ParkedLeg__942096948;
+    parkedAt : Int;
+    token : Text;
+    txHash : Text
+  };
+type PricingScheme__508895677 = {#Exact : Nat; #Session; #Upto : Nat};
+type ServiceDefinition__110976641 =
+  {
+    createdAt : Int;
+    delivery : ServiceDeliveryMethod__938794199;
+    description : Text;
+    enabled : Bool;
+    id : Text;
+    name : Text;
+    operatorId : Principal;
+    pricing : PricingScheme__508895677;
+    serviceType : ServiceType__372239530;
+    timeout : Nat;
+    verification : VerificationMethod__894683427
+  };
+type ServiceDeliveryMethod__938794199 = {#Both; #Callback; #Poll};
+type ServiceType__372239530 = {#Async; #Sync};
+type SessionStatus__330040393 = {#closed; #closing; #expired; #open};
+type SpendingPolicy__561749670 =
+  {
+    allowedCallers : ?[Principal];
+    blockedCallers : ?[Principal];
+    maxConcurrentSessions : ?Nat;
+    maxPerDay : ?Nat;
+    maxPerTransaction : ?Nat;
+    maxSessionDeposit : ?Nat;
+    maxSessionDuration : ?Int;
+    rateLimitPerMinute : ?Nat;
+    sessionIdleTimeout : ?Int
+  };
+type StableAccessGrantState__557910208 =
+  {
+    grantCounter : Nat;
+    hmacSeed : Nat;
+    revokedGrantIds : [Text];
+    revokedGrantTimestamps : ?[(Text, Int)]
+  };
+type StableContentEntry__440671949 =
+  {
+    chunks : [Blob];
+    createdAt : Int;
+    id : Text;
+    mimeType : Text;
+    salt : ?Nat;
+    totalSize : Nat
+  };
+type StableContentStoreState__131454730 = StableContentStoreState__264189794;
+type StableContentStoreState__264189794 =
+  {
+    entries : [StableContentEntry__440671949];
+    masterKey : ?Blob;
+    saltCounter : ?Nat;
+    seedInitialized : ?Bool
+  };
+type StableEvmAllocation__768563522 =
+  {amount : Nat; chainId : Nat; sessionId : Text; token : Text};
+type StableGatewayState__431118882 =
+  {
+    accessGrants : ?StableAccessGrantState__557910208;
+    consumedTxHashes : ?[Text];
+    evmAllocations : ?[StableEvmAllocation__768563522];
+    evmRecipient : ?Text;
+    nonces : StableNonceState__309400779;
+    policy : StablePolicyState__824611050;
+    receiptCounter : Nat;
+    sessionCounter : ?Nat;
+    sessions : [StableSession__29912641]
+  };
+type StableGatewayState__785519254 = StableGatewayState__431118882;
+type StableIdentityState__287114497 = {agentId : ?Nat; evmAddress : ?Text};
+type StableIdentityState__346602069 = StableIdentityState__287114497;
+type StableNonceState__309400779 =
+  {
+    counter : Nat;
+    lockedNonces : ?[Blob];
+    nonces : [(Blob, (Int, Nat, Text, Text))]
+  };
+type StablePolicyState__824611050 =
+  {
+    callerPolicies : [(Principal, SpendingPolicy__561749670)];
+    dailySpendEntries : [(Text, Nat)];
+    globalPolicy : SpendingPolicy__561749670;
+    rateLimitEntries : [(Text, [Int])]
+  };
+type StableServiceRegistryState__134286952 =
+  StableServiceRegistryState__667369321;
+type StableServiceRegistryState__667369321 =
+  {
+    evmRails : ?[(Text, EvmRail__34810663)];
+    jobCounter : Nat;
+    jobs : [(Text, Job__620325697)];
+    operatorPayouts : ?[(Principal, Text)];
+    serviceCounter : Nat;
+    services : [(Text, ServiceDefinition__110976641)]
+  };
+type StableSession__29912641 =
+  {
+    autoClose : Bool;
+    consumed : Nat;
+    deposited : Nat;
+    evmDeposit : ?EvmSessionDeposit__25628158;
+    id : Text;
+    idleTimeout : ?Int;
+    lastActivityAt : Int;
+    lastCumulativeAmount : Nat;
+    lastSequence : Nat;
+    maxDuration : ?Int;
+    network : Text;
+    openedAt : Int;
+    payer : Principal;
+    payerPublicKey : Blob;
+    recipient : Text;
+    remaining : Nat;
+    status : SessionStatus__330040393;
+    subaccount : Blob;
+    token : Text;
+    voucherCount : Nat
+  };
+type VerificationMethod__894683427 =
+  {
+    #AutoSettle;
+    #BuyerConfirm : {disputeWindowSeconds : Nat};
+    #HashMatch;
+    #ZkGroth16 :
+      {
+        bindResult : Bool;
+        verificationKey : Blob;
+        verifierCanister : Principal
+      }
+  };
+actor {
+  stable CKUSDC : Text;
+  stable CKUSDC_FEE : Nat;
+  stable var stableContent : ?StableContentStoreState__131454730;
+  stable var stableGateway : ?StableGatewayState__785519254;
+  stable var stableIdentity : ?StableIdentityState__346602069;
+  stable var stableServices : ?StableServiceRegistryState__134286952
+};
