@@ -80,6 +80,13 @@ scripts/            Dev tooling (setup, deployment, version bump)
 - If you change the Motoko library API, update `packages/client/src/types.ts` to match
 - If you change the example canister's Candid interface, run `bash scripts/gen-did.sh`
 
+## Releasing
+
+ic402 has two version numbers — the package version and the library's `STABLE_SCHEMA_VERSION`. The
+full runbook (bump, the stable-schema gate, tag, publish to mops + npm) is in
+[`RELEASING.md`](RELEASING.md); how consumers handle an ic402 bump is in
+[`docs/upgrade-safety.md`](docs/upgrade-safety.md).
+
 ## ICP Concepts for Non-ICP Developers
 
 | Term | What it means |

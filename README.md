@@ -370,6 +370,11 @@ For services requiring trustless verification, deploy a Groth16 verifier caniste
 - The ic402 library defines the `ZkVerifierActor` interface; you provide the verifier canister
 - Test fixtures included: proof + verification key for circuit "x² = 25, x = 5"
 
+## Contributing
+
+Dev setup, project layout, and conventions: **[CONTRIBUTING.md](CONTRIBUTING.md)**. Cutting a
+release — version bump, the stable-schema gate, publishing to mops + npm: **[RELEASING.md](RELEASING.md)**.
+
 ## License
 
 [Apache 2.0](LICENSE)
