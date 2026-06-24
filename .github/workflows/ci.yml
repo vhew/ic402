@@ -42,6 +42,8 @@ jobs:
 
   # Guard the library's stable types: a breaking change to any Stable*State (which would brick a
   # consumer's upgrade) fails here unless STABLE_SCHEMA_VERSION is bumped + the baseline advanced.
+  # The self-test proves the gate still discriminates (a future moc/flag change can't silently
+  # neuter it into a green no-op).
   stable-compat:
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +51,7 @@ jobs:
       - uses: ZenVoich/setup-mops@v1
       - run: mops install
       - run: ./scripts/check-stable-compat.sh
+      - run: ./scripts/check-stable-compat.sh --self-test
 
   test-client:
     runs-on: ubuntu-latest

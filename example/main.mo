@@ -17,6 +17,7 @@ import Int "mo:base/Int";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
 import Cycles "mo:base/ExperimentalCycles";
+import Debug "mo:base/Debug";
 
 persistent actor KnowledgeBase {
 
@@ -32,6 +33,10 @@ persistent actor KnowledgeBase {
   var stableContent : ?Ic402.StableContentStoreState = null;  // OPTIONAL
   var stableIdentity : ?Ic402.StableIdentityState = null;     // OPTIONAL
   var stableServices : ?Ic402.StableServiceRegistryState = null; // OPTIONAL
+  // Persisted ic402 stable-schema version — checked before loadStable (see the `do` block below)
+  // so an upgrade across a breaking ic402 stable-layout change fails with a clear, actionable error
+  // (or a migration branch) instead of a cryptic Candid decode trap. See docs/upgrade-safety.md.
+  var stableSchemaVersion : Nat = Ic402.STABLE_SCHEMA_VERSION;
 
   // The ckUSDC ledger principal (mainnet). Deploy scripts patch for testnet.
   let CKUSDC = "xevnm-gaaaa-aaaar-qafnq-cai";
@@ -168,10 +173,34 @@ persistent actor KnowledgeBase {
   );
 
   do {
+    // Upgrade-safety guard: detect an ic402 stable-layout change BEFORE loadStable, so a mismatch
+    // is a clear, actionable error (or a migration branch) — not a cryptic Candid decode trap deep
+    // inside loadStable on a live, fund-holding canister. (No-op on a first install / matching
+    // version.) See Ic402.STABLE_SCHEMA_VERSION + docs/upgrade-safety.md.
+    switch (Ic402.checkSchemaVersion(stableSchemaVersion)) {
+      case (#ok) {};
+      case (#migrate({ from; to })) {
+        // A real deployment MIGRATES here: read the old snapshots, transform to the new layout,
+        // then loadStable. Add a `case (N) { ... }` per source version as you bump across breaking
+        // ic402 releases (docs/upgrade-safety.md). Until a migration is written, fail closed:
+        Debug.trap(
+          "ic402 stable schema mismatch: persisted v" # Nat.toText(from) # ", this build expects v"
+          # Nat.toText(to) # ". A breaking ic402 stable-layout change shipped between these versions"
+          # " — supply a migration before loadStable. Refusing to decode stale state."
+        );
+      };
+      case (#ahead({ persisted; current })) {
+        Debug.trap(
+          "ic402 stable schema v" # Nat.toText(persisted) # " is NEWER than this build (v"
+          # Nat.toText(current) # ") — downgrade is not supported."
+        );
+      };
+    };
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
     switch (stableContent) { case (?d) { store.loadStable(d) }; case (null) {} };
     switch (stableIdentity) { case (?d) { identity.loadStable(d) }; case (null) {} };
     switch (stableServices) { case (?d) { registry.loadStable(d) }; case (null) {} };
+    stableSchemaVersion := Ic402.STABLE_SCHEMA_VERSION; // re-stamp (first install + post-migration)
   };
 
   system func preupgrade() {

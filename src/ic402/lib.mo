@@ -26,12 +26,34 @@ import ServiceRegistryMod "ServiceRegistry";
 
 module {
 
-  /// Stable-state schema version. BUMP on any BREAKING change to the Stable*State types (a removed
-  /// or retyped field — additive `?optional` fields do NOT need a bump). Consumers should persist
-  /// this next to ic402's stable snapshots and compare it BEFORE calling `loadStable`, so a mismatch
-  /// fails with a clear error instead of a cryptic Candid decode trap. The stable-compat CI gate
-  /// (scripts/check-stable-compat.sh) enforces that a stable-type change is accompanied by a bump here.
+  /// Stable-state schema version for ic402's library `Stable*State` types. BUMP on any UPGRADE-
+  /// BREAKING change to them: a removed or retyped field, OR a new field on an existing stable
+  /// record — the last is breaking because consumers hold these snapshots in mutable `stable var`s,
+  /// whose type is invariant across upgrade. Changes that stay upgrade-compatible do NOT need a bump:
+  /// adding a new variant case, or a brand-new `?optional` stable variable. The CI gate
+  /// (`scripts/check-stable-compat.sh`) is the authority — it decides with moc's own
+  /// `--stable-compatible` oracle and FAILS the build on a breaking change that does not bump this.
+  ///
+  /// This is one coarse "any library stable type changed" signal (not per-component) — a consumer
+  /// that persists only some components treats any bump as "consult the CHANGELOG for which
+  /// components changed." Consumers persist this next to ic402's snapshots and check it BEFORE
+  /// `loadStable` (see `checkSchemaVersion` + example/main.mo + docs/upgrade-safety.md), so a
+  /// mismatch is a clear error or a migration branch — not a cryptic Candid trap on a live canister.
   public let STABLE_SCHEMA_VERSION : Nat = 1;
+
+  /// Compare a consumer's PERSISTED schema version against this build's `STABLE_SCHEMA_VERSION`,
+  /// to be called BEFORE `loadStable`. `#ok` → same version, decode directly. `#migrate` → persisted
+  /// state is OLDER; run your migration for `from → to` before loading. `#ahead` → persisted state is
+  /// from a NEWER ic402 than this build (a downgrade) — refuse. See example/main.mo for the wiring.
+  public func checkSchemaVersion(persisted : Nat) : {
+    #ok;
+    #migrate : { from : Nat; to : Nat };
+    #ahead : { persisted : Nat; current : Nat };
+  } {
+    if (persisted == STABLE_SCHEMA_VERSION) { #ok } else if (persisted < STABLE_SCHEMA_VERSION) {
+      #migrate({ from = persisted; to = STABLE_SCHEMA_VERSION });
+    } else { #ahead({ persisted; current = STABLE_SCHEMA_VERSION }) };
+  };
 
   // ── Core types ──
 
