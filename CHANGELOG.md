@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.3.1 — 2026-06-24
+
+Patch release. Dependency bump only — no API or behavior change.
+
+### Dependencies
+
+- `mo:sha2` 0.2.4 → 0.2.5. SHA-256 output is unchanged (hash-dependent suites pass), and the
+  example wasm stays well under the per-function locals budget (96 / 1900), so the install-limit
+  (B0) concern is unaffected.
+
 ## v2.3.0 — 2026-06-24
 
 Minor release. Adds **consumer upgrade-safety** for ic402's library stable types. No wire/HTTP
