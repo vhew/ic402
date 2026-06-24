@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.3.0 — 2026-06-24
+
+Minor release. Adds **consumer upgrade-safety** for ic402's library stable types. No wire/HTTP
+or `@ic402/client` API changes; `STABLE_SCHEMA_VERSION` starts at `1` (this release does not change
+any stable type, so an in-place upgrade from v2.2.x is stable-compatible).
+
+### Added
+
+- **Stable-schema versioning + a CI gate that can't silently brick a consumer's upgrade.** ic402's
+  four `Stable*State` snapshots are embedded in every consumer canister's persisted state; a future
+  incompatible change to one of them would trap in `loadStable` on a live, fund-holding canister.
+  - New public mops API: `Ic402.STABLE_SCHEMA_VERSION : Nat` and
+    `Ic402.checkSchemaVersion(persisted)` (returns `#ok` / `#migrate` / `#ahead`), for consumers to
+    persist + check **before** `loadStable` — turning a cryptic Candid trap into a clear error or a
+    migration branch. `example/main.mo` demonstrates the guard.
+  - A `stable-compat` CI job (`scripts/check-stable-compat.sh`) compiles a dedicated anchor
+    (`test/stable-anchor.mo`, persisting exactly the four library types) to a `.most` signature and
+    checks it against a committed baseline with moc's own `--stable-compatible` oracle. A breaking
+    change **fails the build unless `STABLE_SCHEMA_VERSION` is bumped**; `--update` (the release-time
+    baseline advance) refuses a breaking advance without a bump; a `--self-test` proves the gate
+    still discriminates, and a coverage guard stops the anchor from silently dropping a type.
+  - `docs/upgrade-safety.md` documents the mechanism + the consumer pattern; `RELEASING.md`
+    documents the two-version release process.
+
+### Fixed
+
+- **`scripts/setup.sh` now sanitizes its PATH** so a sibling repo's `node_modules/.bin` can't shadow
+  `mops`/`pnpm` (which silently broke `mops install`, leaving an empty `.mops`). Keeps `$PNPM_HOME`
+  so the GitHub pnpm action still resolves; reinstalls when `.mops` is empty and fails loudly.
+
 ## v2.2.4 — 2026-06-19
 
 Docs + tooling patch. No wire/HTTP or `@ic402/client` API changes.
