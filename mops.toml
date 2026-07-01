@@ -18,12 +18,12 @@ files = [ "src/ic402/**/*.mo" ]
 
 [dependencies]
 base = "0.16.0"
-ic = "4.1.0"
+ic = "4.2.0"
 cbor = "4.1.0"
 ed25519 = "0.1.0"
 sha2 = "0.2.5"
 sha3 = "0.1.1"
-ecdsa = "8.0.0"
+ecdsa = "8.0.1"
 hmac = "1.1.0"
 chacha = "1.0.1"
 

@@ -504,6 +504,24 @@ module {
         };
       };
 
+      // Generate the session ID once — used for both the escrow reservation and the session record.
+      let sessionId = nextSessionId();
+
+      // H3/SEC-0: RESERVE the pool allocation BEFORE pulling the deposit on-chain. Running the
+      // poolCap check AFTER the transfer (the old placement) meant an honest open that exceeded
+      // remaining headroom pulled the payer's USDC into the shared pool and THEN failed with no
+      // session and no refund — funds stranded pending a manual sweepEvm. allocate() is
+      // synchronous (no await), so concurrent opens serialize on the cap here and the check can
+      // never be raced across the multi-await deposit confirm. EVERY failure after this point
+      // must deallocate() so the reservation does not leak pool headroom.
+      switch (evmEscrowManager.allocate(sessionId, chainId, intent.token, deposit)) {
+        case (#err(e)) {
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementFailed(e));
+        };
+        case (#ok) {};
+      };
+
       let execResult = try {
         await sender.executeTransferWithAuthorization(
           chainId, intent.token,
@@ -514,6 +532,7 @@ module {
           authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
         );
       } catch (e) {
+        ignore evmEscrowManager.deallocate(sessionId); // H3: release the reservation — no funds moved.
         sessionOpenLocks.delete(caller);
         return #err(#settlementFailed("EIP-3009 execution failed: " # Error.message(e)));
       };
@@ -521,6 +540,7 @@ module {
       let depositTxHash = switch (execResult) {
         case (#ok(hash)) { hash };
         case (#err(msg)) {
+          ignore evmEscrowManager.deallocate(sessionId); // H3: pre-broadcast failure — release reservation.
           sessionOpenLocks.delete(caller);
           return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
         };
@@ -532,32 +552,26 @@ module {
       switch (await sender.confirmTransaction(chainId, depositTxHash, 4)) {
         case (#confirmed) {};
         case (#reverted) {
+          ignore evmEscrowManager.deallocate(sessionId); // H3: reverted → no funds moved, release reservation.
           sessionOpenLocks.delete(caller);
           return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")"));
         };
         case (#pending) {
+          // H3: deposit unconfirmed — release the reservation so it does not leak pool headroom.
+          // (If the tx later mines, the deposit strands unattributed pending a manual sweep — the
+          // pre-existing inbound-strand behavior; not made worse by freeing the reservation.)
+          ignore evmEscrowManager.deallocate(sessionId);
           sessionOpenLocks.delete(caller);
           return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ")"));
         };
         case (#err(e)) {
+          ignore evmEscrowManager.deallocate(sessionId); // H3: confirmation unavailable — release reservation.
           sessionOpenLocks.delete(caller);
           return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ")"));
         };
       };
 
-      // Generate session ID once — used for both escrow allocation and session record
-      let sessionId = nextSessionId();
-
-      // Allocate in EVM escrow
-      switch (evmEscrowManager.allocate(sessionId, chainId, intent.token, deposit)) {
-        case (#err(e)) {
-          sessionOpenLocks.delete(caller);
-          return #err(#settlementFailed(e));
-        };
-        case (#ok) {};
-      };
-
-      // (Ed25519 public key was validated above, before the on-chain deposit + escrow allocation.)
+      // (Session ID + escrow reservation were established above, BEFORE the on-chain deposit.)
       let now = Time.now();
       let effectivePolicy = policy.getEffectivePolicy(caller);
 
@@ -845,10 +859,29 @@ module {
 
       let resultBuf = Array.init<Types.PaymentResult>(buf.size(), #expired("Session expired"));
       var i = 0;
-      for ((sessionId, session) in buf.vals()) {
-        session.status := #expired;
-        let result = await closeSessionInternal(sessionId);
-        resultBuf[i] := result;
+      for ((sessionId, _) in buf.vals()) {
+        // H1/S-3: `buf` is a pre-await snapshot. During an earlier iteration's multi-await
+        // EVM settle, a session later in `buf` may have been concurrently finalized to
+        // #closed (by the payer's own closeSession, or an overlapping expiry-timer run).
+        // Re-fetch the CURRENT state and only expire sessions still #open — blindly
+        // re-stamping #expired would flip a terminal #closed back into a status the re-close
+        // guard (closeSessionInternal rejects only #closed/#closing) does NOT reject, letting
+        // closeEvmSessionInternal broadcast a SECOND settle+refund from the shared EVM pool
+        // and drain other payers' deposits (the exact double-settle S-3 ends closes in
+        // #closed to prevent).
+        switch (sessions.get(sessionId)) {
+          case (?session) {
+            if (session.status == #open) {
+              session.status := #expired;
+              resultBuf[i] := await closeSessionInternal(sessionId);
+            } else {
+              resultBuf[i] := #settlementFailed("Session no longer open — skipped by expiry sweep (concurrently closed)");
+            };
+          };
+          case (null) {
+            resultBuf[i] := #settlementFailed("Session vanished before expiry sweep");
+          };
+        };
         i += 1;
       };
       Array.freeze(resultBuf);

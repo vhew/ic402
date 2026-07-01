@@ -843,12 +843,22 @@ server.tool(
           `Disallowed canisterQuery method "${method}". Allowed: ${[...CONTENT_QUERY_METHODS].join(', ')}.`,
         );
       }
-      const chunks: string[] = [];
+      const chunks: Buffer[] = [];
       for (let i = 0; i < Number(chunkCount); i++) {
-        const chunk = await actor[method as string](grant, i);
-        chunks.push(Buffer.from(chunk as ArrayBuffer).toString('utf-8'));
+        const raw = await actor[method as string](grant, i);
+        // H6: getChunk/getContent are declared `opt blob`, so agent-js decodes them as
+        // [] (None) | [Uint8Array] (Some). Buffer.from([Uint8Array]) treats the opt array as
+        // array-like-of-numbers → the element coerces to NaN → a 1-byte [0] per chunk, silently
+        // returning garbage for paid content. Unwrap the opt, then normalize the blob to bytes.
+        const some = Array.isArray(raw) ? raw[0] : raw;
+        if (some === undefined || some === null) {
+          throw new Error(`Content chunk ${i} unavailable (grant expired or index out of range)`);
+        }
+        chunks.push(Buffer.from(some instanceof Uint8Array ? some : (some as ArrayLike<number>)));
       }
-      resultText = chunks.join('');
+      // Decode the concatenated bytes once so a multi-byte char split across a chunk boundary
+      // is not corrupted by per-chunk utf-8 decoding.
+      resultText = Buffer.concat(chunks).toString('utf-8');
     } else {
       throw new Error('Unknown delivery method in ContentDelivery');
     }

@@ -876,7 +876,7 @@ module {
           switch (await sender.sendErc20Transfer(chainId, token, to, amount)) {
             case (#ok(h)) { #ok(h) };
             case (#err(e)) { #err(e) };
-            case (#maybeSent(e)) { #err(e) };
+            case (#maybeSent(m)) { #err(m.reason) };
           };
         };
         case (null) { #err("EVM not configured (no ecdsaKeyName)") };

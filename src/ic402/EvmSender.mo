@@ -130,7 +130,7 @@ module {
       toAddress : Text,
       calldata : [Nat8],
       gasLimit : Nat,
-    ) : async { #ok : Text; #err : Text; #maybeSent : Text } {
+    ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
       // Cycle floor (see MIN_BROADCAST_CYCLES): never broadcast a tx we can't afford to confirm.
       // Pre-broadcast #err => no funds move and callers roll back safely.
       if (Cycles.balance() < MIN_BROADCAST_CYCLES) {
@@ -144,7 +144,7 @@ module {
       // B2: #err means the tx was definitely NOT broadcast (safe to roll back + retry);
       // #maybeSent means it may have reached a provider's mempool (caller must NOT
       // re-broadcast — the outbound rail has no on-chain replay protection).
-      let result : { #ok : Text; #err : Text; #maybeSent : Text } = try {
+      let result : { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } = try {
         let pubKey = await getPublicKey();
         let senderAddr = await getEvmAddress();
 
@@ -215,6 +215,13 @@ module {
         // Submit
         let rawTxBytes = EvmUtils.signedRawTx(txParams, r, s, yParity);
         let rawTxHex = EvmUtils.bytesToHex(rawTxBytes);
+        // H2/M11: the canonical tx hash is keccak256 of the signed raw tx — derive it
+        // LOCALLY so every ambiguous/hashless outcome still yields a POLLABLE hash. A
+        // provider that accepts the tx without echoing a hash (#Ok(null)), or a network
+        // error / #Inconsistent / #NonceTooHigh after dispatch, must NOT surface an error
+        // string in the hash position: callers park the returned value and poll
+        // eth_getTransactionReceipt with it, and a message string can never resolve.
+        let broadcastTxHash = EvmAddress.toHex(EvmAddress.keccak256(rawTxBytes));
 
         // B2: isolate the broadcast so a network error AFTER dispatch (which may have
         // reached a provider's mempool) is reported as #maybeSent, not #err.
@@ -222,18 +229,19 @@ module {
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
         } catch (e) {
           txInProgress := false;
-          return #maybeSent("EVM send failed after dispatch (may have broadcast): " # Error.message(e));
+          return #maybeSent({ txHash = broadcastTxHash; reason = "EVM send failed after dispatch (may have broadcast): " # Error.message(e) });
         };
         switch (sendResult) {
           case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
-          case (#Consistent(#Ok(#Ok(null)))) { #ok(rawTxHex) };
+          // Accepted with no hash echoed — use the locally derived canonical hash, NOT the raw tx.
+          case (#Consistent(#Ok(#Ok(null)))) { #ok(broadcastTxHash) };
           case (#Consistent(#Ok(#NonceTooLow))) { #err("Nonce too low — retry") };
           // Queued in the mempool (nonce ahead) — it can still mine, so treat as maybe-sent.
-          case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent("Nonce too high (tx may be queued in mempool)") };
+          case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
           case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas") };
           case (#Consistent(#Err(e))) { #err("RPC error: " # EvmRpc.rpcErrorToText(e)) };
           // Providers disagree — exactly one may have accepted the tx into its mempool.
-          case (#Inconsistent(_)) { #maybeSent("Inconsistent RPC responses (a provider may have accepted the tx)") };
+          case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
         };
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
@@ -249,7 +257,7 @@ module {
       tokenAddress : Text,
       recipientAddress : Text,
       amount : Nat,
-    ) : async { #ok : Text; #err : Text; #maybeSent : Text } {
+    ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
       let selector = EvmUtils.functionSelector("transfer(address,uint256)");
       let recipientBytes = EvmUtils.hexToBytes(recipientAddress);
       let calldata = EvmUtils.abiEncodeFunctionCall(
@@ -282,7 +290,8 @@ module {
     ) : async { #confirmed : Text; #reverted : Text; #pending : Text; #err : Text } {
       switch (await sendErc20Transfer(chainId, tokenAddress, recipientAddress, amount)) {
         case (#err(msg)) { #err(msg) }; // definitely not broadcast — safe to roll back
-        case (#maybeSent(msg)) { #pending(msg) }; // may have broadcast — park, do NOT re-send
+        // H2: may have broadcast — park the POLLABLE canonical hash (not a message), do NOT re-send.
+        case (#maybeSent(m)) { #pending(m.txHash) };
         case (#ok(txHash)) {
           switch (await confirmTransaction(chainId, txHash, maxPolls)) {
             case (#confirmed) { #confirmed(txHash) };
@@ -337,7 +346,7 @@ module {
       switch (await sendTransaction(chainId, tokenAddress, calldata, 120_000)) {
         case (#ok(h)) { #ok(h) };
         case (#err(e)) { #err(e) };
-        case (#maybeSent(e)) { #err(e) };
+        case (#maybeSent(m)) { #err(m.reason) };
       };
     };
 

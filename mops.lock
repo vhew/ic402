@@ -1,9 +1,9 @@
 {
   "version": 3,
-  "mopsTomlDepsHash": "800fbee995066268cbc535295ad278f3d2f35f6b30ddb7069f80c6267cd3d565",
+  "mopsTomlDepsHash": "e45b0d5979de9dd4557f60ea310dba2bb375513286d48747a6bacb9a56ca37d5",
   "deps": {
     "base": "0.16.0",
-    "ic": "4.1.0",
+    "ic": "4.2.0",
     "core": "2.5.0",
     "cbor": "4.1.0",
     "core@1": "1.0.0",
@@ -14,7 +14,7 @@
     "sha2": "0.2.5",
     "sha3": "0.1.1",
     "iterext": "https://github.com/timohanke/motoko-iterext#v2.0.0",
-    "ecdsa": "8.0.0",
+    "ecdsa": "8.0.1",
     "sha2@0": "0.1.14",
     "asn1@3": "3.1.0",
     "xtended-iter@1": "1.1.0",
@@ -81,13 +81,13 @@
       "base@0.16.0/src/Trie.mo": "3ca67f2527afaf5e663bd7b227384d0b20d0ea0cfc7c532e5d95a625c0d0d6bb",
       "base@0.16.0/src/TrieSet.mo": "9c8c1821582b344de6f3910f417527ec0b565876eb2d9da09455af05117ed45a"
     },
-    "ic@4.1.0": {
-      "ic@4.1.0/src/lib.mo": "9d9ec84a85eb25d191c1cae99cb841d9b6e0cf0f9bc27c3f3805ac9673d7bef1",
-      "ic@4.1.0/README.md": "4aacc06321244e54f741e9d826f3d374144a4b32372cb58dddaedcaad2e12bc3",
-      "ic@4.1.0/mops.toml": "6625a51f095a9a2a7d664043ba41ff689bef7b745df7c1c467123a7c46f38613",
-      "ic@4.1.0/LICENSE": "ec415b57f8143746b567c94bfad243f5342f3edf110c94641a1a60e02722db55",
-      "ic@4.1.0/src/Call.mo": "b4a3572e5617d0b1eb696450344b65e99504f844794e7ddf1cff664fcfeb2994",
-      "ic@4.1.0/src/Types.mo": "3d84a78df0014676caf7b6afa149c8615c2349f248f668fb7b8c7468f02f080a"
+    "ic@4.2.0": {
+      "ic@4.2.0/src/Call.mo": "b4a3572e5617d0b1eb696450344b65e99504f844794e7ddf1cff664fcfeb2994",
+      "ic@4.2.0/src/lib.mo": "9d9ec84a85eb25d191c1cae99cb841d9b6e0cf0f9bc27c3f3805ac9673d7bef1",
+      "ic@4.2.0/README.md": "4aacc06321244e54f741e9d826f3d374144a4b32372cb58dddaedcaad2e12bc3",
+      "ic@4.2.0/LICENSE": "ec415b57f8143746b567c94bfad243f5342f3edf110c94641a1a60e02722db55",
+      "ic@4.2.0/mops.toml": "90a4087e4c1fb5ca9b976d824370bca632d860191eedd0461ac85bdbc4169f55",
+      "ic@4.2.0/src/Types.mo": "3d145437f9b8c6a661266ec659c9522c4b9001b50954945816e746f48028c9fc"
     },
     "core@2.5.0": {
       "core@2.5.0/src/Blob.mo": "25d7c07e9786f11ceb8611a32a83b8491769580024054086e4548607a67afbe4",
@@ -293,22 +293,22 @@
       "sha3@0.1.1/mops.toml": "4428621816bdfc3439fba82a9fac23fd306ec13b0473b050d8db46b1fefe9595",
       "sha3@0.1.1/README.md": "80674416dba195c8838a08dc92c0d6f5d03f650fb8be946341acc2b78a5ff058"
     },
-    "ecdsa@8.0.0": {
-      "ecdsa@8.0.0/mops.toml": "75bc0514543d539d8a9feaefafc7b764f094f2dc95364613def317801c664615",
-      "ecdsa@8.0.0/src/Binary.mo": "68dd7c2ed71a82a2af754c1d93031d08b62e9f7ff6e50bea9900b2d139cec67f",
-      "ecdsa@8.0.0/README.md": "6bb0d4e8e8627d5ab1fb701db991f8044b0d935c88510fe4395377bc8a6d7144",
-      "ecdsa@8.0.0/src/Field.mo": "055ad45131c5df8ec8cd807e5a61c0a8c41c26e298f1eaea6424d60037bc34a4",
-      "ecdsa@8.0.0/src/Curve.mo": "f1ba22a40292d9c60be749fa9460eeb02e9d230d8c2754d4531d7f4709bd7c3e",
-      "ecdsa@8.0.0/NOTICE": "ede5d37dbee00172c1a52e9f77625868c1d197196254bc3fd20eb7e45264c93d",
-      "ecdsa@8.0.0/LICENSE": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
-      "ecdsa@8.0.0/src/IntExt.mo": "53aa9c487ac139f12496c08d0efa8d910f7bb0247ab08cadec372389dabcd20d",
-      "ecdsa@8.0.0/src/Hex.mo": "aeebac8b2c192a69c6b4a29403139cca83e9d35995f7550b979b56dd8c3004cb",
-      "ecdsa@8.0.0/src/Signature.mo": "1989063b717faac95643557a35c8a8e59c2ab447884187eeeb41e39eabbb9f28",
-      "ecdsa@8.0.0/src/KeyCommon.mo": "27a53135a251907f7fc9d6d529099a5d107bdd05e5488f26504bd86dbf9e1f4b",
-      "ecdsa@8.0.0/src/Util.mo": "f80dd1208394ebd6061a79f5db4b160194eb4c764ae6d8965ebfe6d6c890771e",
-      "ecdsa@8.0.0/src/lib.mo": "abfbe3c07ef078fbc7e79bdbc70ade7463cf8afe7b8c9cac6f61909271430311",
-      "ecdsa@8.0.0/src/PublicKey.mo": "f774569757953a2d2e8db4cb62dda3d891ca38987e7cc1e1da4ea220a8e425a1",
-      "ecdsa@8.0.0/src/PrivateKey.mo": "0b82ff7d19e7ff463717fa4e40989e23a594d8badfad3b3d4b58d480f951c0a9"
+    "ecdsa@8.0.1": {
+      "ecdsa@8.0.1/src/Curve.mo": "cb1a93885d18e7654dcc95570d29c4dbd206677bc0ec6fb0a8ff0fbea1f97062",
+      "ecdsa@8.0.1/LICENSE": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+      "ecdsa@8.0.1/mops.toml": "55abc54c885e1e4a09a238b324270982e904c073f35570ebebf75929bafc3a58",
+      "ecdsa@8.0.1/src/Binary.mo": "68dd7c2ed71a82a2af754c1d93031d08b62e9f7ff6e50bea9900b2d139cec67f",
+      "ecdsa@8.0.1/src/Field.mo": "055ad45131c5df8ec8cd807e5a61c0a8c41c26e298f1eaea6424d60037bc34a4",
+      "ecdsa@8.0.1/README.md": "01eec3ddc3164b596f31a9f98df705b25af149a05a505c9b8a723f82466d4d75",
+      "ecdsa@8.0.1/NOTICE": "ede5d37dbee00172c1a52e9f77625868c1d197196254bc3fd20eb7e45264c93d",
+      "ecdsa@8.0.1/src/Hex.mo": "aeebac8b2c192a69c6b4a29403139cca83e9d35995f7550b979b56dd8c3004cb",
+      "ecdsa@8.0.1/src/KeyCommon.mo": "27a53135a251907f7fc9d6d529099a5d107bdd05e5488f26504bd86dbf9e1f4b",
+      "ecdsa@8.0.1/src/IntExt.mo": "53aa9c487ac139f12496c08d0efa8d910f7bb0247ab08cadec372389dabcd20d",
+      "ecdsa@8.0.1/src/PrivateKey.mo": "0b82ff7d19e7ff463717fa4e40989e23a594d8badfad3b3d4b58d480f951c0a9",
+      "ecdsa@8.0.1/src/Signature.mo": "1989063b717faac95643557a35c8a8e59c2ab447884187eeeb41e39eabbb9f28",
+      "ecdsa@8.0.1/src/Util.mo": "f80dd1208394ebd6061a79f5db4b160194eb4c764ae6d8965ebfe6d6c890771e",
+      "ecdsa@8.0.1/src/lib.mo": "abfbe3c07ef078fbc7e79bdbc70ade7463cf8afe7b8c9cac6f61909271430311",
+      "ecdsa@8.0.1/src/PublicKey.mo": "ec84f40ce020088ebc4c65f86bc5328fc3e6bc07859431db24df9932bd73df81"
     },
     "sha2@0.1.14": {
       "sha2@0.1.14/mops.toml": "ba73b13715683357925fb004b66e43a0f3fabb5fdce3028f13d12d4a297b3170",

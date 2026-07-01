@@ -471,6 +471,18 @@ module {
         case (?s) { s };
       };
 
+      // H4: verifyAndSettle runs as a fresh message AFTER submitResult's `await` commit
+      // point, so a concurrent expireJobs/disputeJob/confirmJob may have already moved this
+      // job out of #Submitted (e.g. #Submitted → #Expired → refunded) before we got here.
+      // The #AutoSettle and #HashMatch branches below write #Verified + settleJob from the
+      // stale `job` snapshot with NO re-check; without this guard that clobbers a terminal
+      // status and pays the operator ON TOP OF the buyer's refund — a refund-and-settle
+      // double spend. Only proceed if the job is still awaiting verification. (The #ZkGroth16
+      // branch has its own equivalent #Computing reservation + post-await re-check.)
+      if (job.status != #Submitted) {
+        return #err("Job no longer awaiting verification (status: " # debug_show (job.status) # ")");
+      };
+
       switch (svc.verification) {
         case (#AutoSettle) {
           jobs.put(jobId, { job with status = #Verified });

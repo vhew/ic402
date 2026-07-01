@@ -71,6 +71,43 @@ describe('Ic402Client', () => {
       await expect(client.call('paidMethod', [null])).rejects.toThrow('autoPayment is disabled');
     });
 
+    it('H5: auto-pays against the real `vec PaymentRequirement` wire shape', async () => {
+      const nonce = new Uint8Array(32).fill(7);
+      let approvedAmount: bigint | undefined;
+      let retried = false;
+      const mockActor = {
+        // opt PaymentSignature arg: [] (none) on the first call, [sig] on the retry.
+        paidMethod: async (optSig: unknown[]) => {
+          if (Array.isArray(optSig) && optSig.length > 0) {
+            retried = true;
+            return { ok: { value: 'delivered' } };
+          }
+          // Candid `vec PaymentRequirement` decodes to a JS array, NOT a bare record.
+          return { paymentRequired: [{ amount: 5_000n, nonce }] };
+        },
+      };
+      const mockLedger = {
+        icrc2_approve: async (arg: { amount: bigint }) => {
+          approvedAmount = arg.amount;
+          return { Ok: 1n };
+        },
+      };
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: 'ryjl3-tyaaa-aaaaa-aaaba-cai', // valid principal — call() does Principal.fromText(cid)
+          autoPayment: true,
+          ledger: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
+          actorFactory: mockActorFactory(mockActor),
+          ledgerActorFactory: mockActorFactory(mockLedger),
+        }),
+      );
+
+      const result = await client.call('paidMethod', [[]]);
+      expect(approvedAmount).toBe(5_000n + 100_000n); // amount + default fee buffer, no crash
+      expect(retried).toBe(true);
+      expect(result).toEqual({ value: 'delivered' });
+    });
+
     it('returns raw result when not { ok } or { paymentRequired }', async () => {
       const mockActor = {
         rawMethod: async () => 'raw-result',
@@ -80,6 +117,49 @@ describe('Ic402Client', () => {
 
       const result = await client.call('rawMethod', []);
       expect(result).toBe('raw-result');
+    });
+  });
+
+  describe('fetchContent() canisterQuery (H6)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const grant = { grantId: 'g1' } as any;
+
+    it('unwraps the `opt blob` chunk and returns the real bytes, not zero bytes', async () => {
+      const chunkA = new Uint8Array([1, 2, 3]);
+      const chunkB = new Uint8Array([4, 5]);
+      const mockActor = {
+        // getChunk : (AccessGrant, nat) -> (opt blob) — agent-js yields [] | [Uint8Array].
+        getChunk: async (_g: unknown, i: number) => (i === 0 ? [chunkA] : [chunkB]),
+      };
+      const client = new Ic402Client(makeConfig());
+      const delivery = {
+        grant,
+        delivery: { canisterQuery: { method: 'getChunk', chunkCount: 2n } },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      const bytes = await client.fetchContent(delivery, {
+        canisterId: 'content-canister',
+        actorFactory: mockActorFactory(mockActor),
+      });
+      expect(Array.from(bytes)).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('throws when a chunk opt is empty (expired grant / index out of range)', async () => {
+      const mockActor = { getChunk: async () => [] as unknown[] };
+      const client = new Ic402Client(makeConfig());
+      const delivery = {
+        grant,
+        delivery: { canisterQuery: { method: 'getChunk', chunkCount: 1n } },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      await expect(
+        client.fetchContent(delivery, {
+          canisterId: 'content-canister',
+          actorFactory: mockActorFactory(mockActor),
+        }),
+      ).rejects.toThrow('unavailable');
     });
   });
 

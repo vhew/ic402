@@ -127,7 +127,16 @@ export class Ic402Client {
         throw new Error('Payment required but autoPayment is disabled');
       }
 
-      const requirement = result.paymentRequired;
+      // H5: every ic402 402 endpoint returns `vec PaymentRequirement` (Candid → a JS array),
+      // NOT a bare record. Reading `.amount` off the array yields `undefined`, and
+      // `undefined + 100_000n` throws "Cannot mix BigInt and other types" — crashing the
+      // documented auto-pay flow before any approve. Normalize to a single requirement,
+      // tolerating a bare record for older/mocked callers (matches submitServiceRequest).
+      const requirementRaw = result.paymentRequired;
+      const requirement = Array.isArray(requirementRaw) ? requirementRaw[0] : requirementRaw;
+      if (!requirement || typeof requirement.amount !== 'bigint') {
+        throw new Error(`Malformed paymentRequired response: ${safeStringify(requirementRaw)}`);
+      }
 
       if (!this.config.ledger || !this.config.ledgerActorFactory) {
         throw new Error('Auto-approval requires ledger and ledgerActorFactory in config');
@@ -150,15 +159,23 @@ export class Ic402Client {
         throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
       }
 
-      // Construct PaymentSignature from the requirement's nonce and retry
+      // Construct PaymentSignature from the requirement's nonce and retry. Candid may decode
+      // `vec nat8` as a Uint8Array, a number[], or an indexed object — normalize to number[].
+      const rawNonce = requirement.nonce ?? new Uint8Array(32);
+      const nonce =
+        rawNonce instanceof Uint8Array
+          ? Array.from(rawNonce)
+          : Array.isArray(rawNonce)
+            ? rawNonce
+            : Object.values(rawNonce as Record<string, number>);
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
       const sig = {
         scheme: 'exact',
         network: this.config.network,
-        signature: requirement.nonce,
+        signature: nonce,
         publicKey: [],
         sender,
-        nonce: requirement.nonce,
+        nonce,
         authorization: [],
       };
 
@@ -460,8 +477,16 @@ export class Ic402Client {
       const actor = options.actorFactory(cid);
       const chunks: Uint8Array[] = [];
       for (let i = 0n; i < chunkCount; i++) {
-        const chunk = await actor[queryMethod](delivery.grant, Number(i));
-        chunks.push(new Uint8Array(chunk as ArrayBuffer));
+        const raw = await actor[queryMethod](delivery.grant, Number(i));
+        // H6: getChunk is declared `opt blob`, so agent-js decodes it as [] (None) |
+        // [Uint8Array] (Some). Wrapping the opt array directly — new Uint8Array([bytes]) —
+        // coerces the single element to NaN → a 1-byte [0] per chunk, silently returning
+        // garbage for paid content. Unwrap the opt, then normalize the blob to bytes.
+        const some = Array.isArray(raw) ? raw[0] : raw;
+        if (some === undefined || some === null) {
+          throw new Error(`Content chunk ${i} unavailable (grant expired or index out of range)`);
+        }
+        chunks.push(some instanceof Uint8Array ? some : new Uint8Array(some as ArrayLike<number>));
       }
       const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
       const result = new Uint8Array(totalLength);
