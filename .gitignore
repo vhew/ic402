@@ -46,3 +46,6 @@ example/zk-verifier/target/
 
 # Claude Code
 .claude/
+
+# npm auth (env-var indirection; never commit a literal token)
+.npmrc
