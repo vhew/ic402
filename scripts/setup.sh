@@ -214,11 +214,25 @@ echo ""
 # breaking every settle test. Repoint the minter/controller at the LIVE deployer. This is a no-op
 # when they already match (the common local case), so it never dirties the working tree there.
 INIT_CANDID="$PROJECT_ROOT/.icp/ckusdc-ledger-init.candid"
+# Suffix matches the *.local-bak gitignore rule, so an interrupted run's backup is never committed.
+INIT_CANDID_BAK="$INIT_CANDID.local-bak"
 PLACEHOLDER_MINTER="j4utn-gav76-3hfsp-uzvyt-zeriq-65gn5-dlt3z-r6fmo-wu4oz-jmkbs-wae"
+# M18: idempotently restore the pristine committed candid.
+restore_ckusdc_candid() {
+  if [ -f "$INIT_CANDID_BAK" ]; then mv -f "$INIT_CANDID_BAK" "$INIT_CANDID"; fi
+}
 if [ -f "$INIT_CANDID" ] && [ -n "$MY_PRINCIPAL" ] && [ "$MY_PRINCIPAL" != "$PLACEHOLDER_MINTER" ]; then
+  # M18: the sed below rewrites a git-TRACKED file IN PLACE. Left patched, a routine `git commit
+  # -am` permanently poisons the placeholder — after which the sed silently no-ops on every other
+  # machine + in CI, deploying the ledger with a foreign minter and breaking every settle test.
+  # Back up the pristine file and restore it (below, after the ledger deploys). The EXIT trap here
+  # covers an interrupt/failure before that explicit restore; it is later replaced by
+  # register_patch_trap (main.mo), by which point this candid is already restored.
+  cp "$INIT_CANDID" "$INIT_CANDID_BAK"
+  trap 'restore_ckusdc_candid' EXIT INT TERM
   tmp=$(mktemp)
   sed "s/$PLACEHOLDER_MINTER/$MY_PRINCIPAL/g" "$INIT_CANDID" >"$tmp" && mv "$tmp" "$INIT_CANDID"
-  echo "  ckUSDC minter: repointed to live deployer"
+  echo "  ckUSDC minter: repointed to live deployer (restored after deploy)"
 fi
 
 # Deploy ckUSDC ledger
@@ -228,6 +242,9 @@ else
   icp deploy ckusdc_ledger -e local >/dev/null 2>&1
   CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --id-only)
 fi
+# M18: the ledger has deployed from the patched init args — restore the pristine candid now so the
+# working tree stays clean (no tracked-file modification for a contributor to accidentally commit).
+restore_ckusdc_candid
 echo "  ckUSDC ledger: $CKUSDC_ID"
 
 # Deploy EVM RPC canister (needed for cross-chain EVM payments)

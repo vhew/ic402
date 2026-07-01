@@ -248,6 +248,10 @@ persistent actor KnowledgeBase {
             #ok(doSearch(searchQuery));
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
+          // M13: an EVM transfer was BROADCAST but not yet confirmed. Do NOT re-challenge with a
+          // fresh #paymentRequired — that discards the pending tx and invites a double-payment for
+          // a transfer that may still mine. Surface the pending state (with the tx hash) instead.
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
       };
@@ -431,7 +435,16 @@ persistent actor KnowledgeBase {
         switch (Http.getHeader(request.headers, "x-payment")) {
           case (?p) { p };
           case (null) {
-            if (Text.startsWith(path, #text "/content/")) { return Http.http402(gate.requireAll(5_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/content/")) {
+              // M14: don't advertise a 402 for content that doesn't exist — the client would pay
+              // for an undeliverable resource. Check existence before minting the challenge.
+              let cid = switch (Text.stripStart(path, #text "/content/")) { case (?id) { id }; case (null) { "" } };
+              switch (store.getMetadata(cid)) {
+                case (null) { return Http.httpError(404, "Content not found") };
+                case (?_) {};
+              };
+              return Http.http402(gate.requireAll(5_000), resourceUrl);
+            };
             if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000), resourceUrl) };
             if (Text.startsWith(path, #text "/service/")) {
               let serviceId = switch (Text.stripStart(path, #text "/service/")) {
@@ -473,6 +486,13 @@ persistent actor KnowledgeBase {
       let contentId = switch (Text.stripStart(path, #text "/content/")) {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
+      };
+      // M14: verify the content exists BEFORE settling — don't take payment for an undeliverable
+      // resource (typo'd/nonexistent id, or content deleted since the 402) then return 404 while
+      // keeping the funds.
+      switch (store.getMetadata(contentId)) {
+        case (null) { return Http.httpError(404, "Content not found") };
+        case (?_) {};
       };
       let contentResult = await gate.settle(sig, ?5_000);
       switch (contentResult) {
@@ -527,6 +547,13 @@ persistent actor KnowledgeBase {
       let serviceId = switch (Text.stripStart(path, #text "/service/")) {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing service ID") };
+      };
+      // M14: re-check the service exists and is enabled BEFORE settling — the 402 was minted
+      // earlier and the service may have been disabled since, in which case submitRequest would
+      // reject after the funds have already moved, with no refund.
+      switch (registry.getService(serviceId)) {
+        case (null) { return Http.httpError(404, "Service not found") };
+        case (?svc) { if (not svc.enabled) return Http.httpError(404, "Service not available") };
       };
       let serviceResult = await gate.settle(sig, null);
       switch (serviceResult) {
@@ -680,6 +707,13 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
+        // M14: verify the content exists BEFORE settling. Otherwise a payment for a nonexistent
+        // /typo'd id settles funds on-chain and then returns "Not found", keeping the buyer's
+        // money with nothing delivered and no refund path.
+        switch (store.getMetadata(contentId)) {
+          case (null) { return #error("Not found") };
+          case (?_) {};
+        };
         switch (await gate.settle(sig, ?amount)) {
           case (#ok(receipt)) {
             // Cross-resource underpayment: the nonce binds amount/token/network but not the
@@ -711,6 +745,8 @@ persistent actor KnowledgeBase {
           case (#settlementFailed(r)) { #error("Settlement: " # r) };
           case (#expired(r)) { #error("Expired: " # r) };
           case (#insufficientFunds(r)) { #error("Funds: " # r) };
+          // M13: broadcast-but-unconfirmed — surface the pending tx, don't re-challenge (see search).
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
       };
@@ -848,6 +884,9 @@ persistent actor KnowledgeBase {
       case (null) { return #error("Service not found") };
       case (?s) { s };
     };
+    // M14: reject a disabled service BEFORE settling (and before quoting) — otherwise
+    // submitRequest rejects after the funds have moved, keeping the buyer's payment with no job.
+    if (not svc.enabled) { return #error("Service not available") };
     let amount = switch (svc.pricing) {
       case (#Exact(p)) { p };
       case (#Upto(p)) { p };

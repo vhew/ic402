@@ -558,14 +558,18 @@ export class Ic402Client {
     }
 
     // 3. Retry with payment header.
-    // H-10: echo the ic402 server nonce from the 402 challenge into the payment
-    // payload so the canister can lock the bound amount (otherwise the
-    // EVM-over-HTTP settlement returns #expired). Mirrors evm.ts fetchX402.
+    // H-10: echo the ic402 server nonce so the canister can lock the bound amount (else the
+    // EVM-over-HTTP settlement returns #expired). M15: ALSO echo the advertised requirement
+    // VERBATIM as `accepted` (so a strict facilitator's accepted-vs-advertised check passes —
+    // the canister reconstructs `accepted` from only six params, so maxTimeoutSeconds/extra
+    // differ from the advertised entry). Neither is part of the EIP-712-signed authorization,
+    // so rewriting post-signing is safe. Mirrors evm.ts fetchX402.
     let headerToSend = signed.header;
-    if (paymentOption.ic402Nonce) {
+    if (paymentOption.rawRequirement || paymentOption.ic402Nonce) {
       try {
         const obj = JSON.parse(atob(signed.header));
-        obj.ic402Nonce = paymentOption.ic402Nonce;
+        if (paymentOption.rawRequirement) obj.accepted = JSON.parse(paymentOption.rawRequirement);
+        if (paymentOption.ic402Nonce) obj.ic402Nonce = paymentOption.ic402Nonce;
         headerToSend = btoa(JSON.stringify(obj));
       } catch {
         headerToSend = signed.header;

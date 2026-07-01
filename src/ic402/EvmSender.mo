@@ -136,6 +136,14 @@ module {
       if (Cycles.balance() < MIN_BROADCAST_CYCLES) {
         return #err("Insufficient cycles to safely broadcast and confirm; top up the canister");
       };
+      // M9: validate the destination address BEFORE taking the single-flight lock. addressToBytes
+      // (used below to build the tx) asserts a 20-byte decode and TRAPS on a malformed address;
+      // a trap after `txInProgress := true` (committed at the first await) would leave the lock
+      // stuck true and wedge the ENTIRE outbound rail — every close/settle/refund/sweep — until
+      // canister upgrade. Fail cleanly here (no lock taken, no funds moved) instead.
+      if (EvmUtils.hexToBytes(toAddress).size() != 20) {
+        return #err("Invalid destination address (expected a 20-byte / 40-hex-char address): " # toAddress);
+      };
       // H-1: Reject concurrent transactions to prevent nonce desync.
       if (txInProgress) {
         return #err("Transaction in progress, retry later");
@@ -246,8 +254,12 @@ module {
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
         #err("EVM tx failed before broadcast: " # Error.message(e));
+      } finally {
+        // M9: guarantee the single-flight lock is released on EVERY exit — including a local trap
+        // (e.g. an assert), which `catch` does NOT intercept. Without this, one trap after the
+        // lock is taken would strand txInProgress = true and wedge the whole outbound rail.
+        txInProgress := false;
       };
-      txInProgress := false;
       result;
     };
 

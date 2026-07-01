@@ -532,11 +532,15 @@ module {
           // for garbage. This requires a circuit whose public input 0 commits to the result, so it
           // is opt-in; the default (false) passes the buyer's params only, matching circuits that
           // prove the computation but not the result string (e.g. the √25 demo).
-          // The hash is reduced to a valid BN254 scalar (clear the top byte so it is < the field
-          // modulus); the circuit must commit to the same reduced value.
+          // The hash is reduced to a valid BN254 scalar. M12: arkworks Fr::deserialize_compressed
+          // (in the verifier canister) reads the 32 bytes LITTLE-endian, so byte 31 is the MOST-
+          // significant — zero byte 31 to force the value below the field modulus (top byte 0x30).
+          // Zeroing byte 0 (the LE LEAST-significant byte) leaves a random MSB that exceeds the
+          // modulus ~81% of the time and fails deserialization, marking honest jobs #Disputed.
+          // The circuit must commit to this same little-endian reduced value.
           let publicInputs : [Blob] = if (bindResult) {
             let h = Blob.toArray(SHA256.fromBlob(#sha256, result));
-            let reduced = Blob.fromArray(Array.tabulate<Nat8>(32, func(i) { if (i == 0) { 0 } else { h[i] } }));
+            let reduced = Blob.fromArray(Array.tabulate<Nat8>(32, func(i) { if (i == 31) { 0 } else { h[i] } }));
             if (Blob.toArray(job.params).size() > 0) { [reduced, job.params] } else { [reduced] };
           } else if (Blob.toArray(job.params).size() > 0) {
             [job.params];

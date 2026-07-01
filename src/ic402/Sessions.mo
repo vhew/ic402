@@ -250,6 +250,24 @@ module {
 
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
+      // M7/SEC-0: validate the Ed25519 session public key BEFORE pulling the deposit on-chain,
+      // so a missing/malformed key fails cheaply without moving funds. The old placement
+      // validated AFTER the deposit and then refunded the FULL `deposit` — which ALWAYS failed:
+      // the escrow subaccount holds exactly `deposit`, and icrc1_transfer deducts the fee ON TOP,
+      // so it needs deposit+fee. Worse, those paths return before `sessions.put`, so no session
+      // record exists and recoverEscrow can't find it — the deposit was unrecoverable in-band.
+      let sessionPublicKey = switch (sig.publicKey) {
+        case (?pk) { pk };
+        case (null) {
+          sessionOpenLocks.delete(caller);
+          return #err(#invalidSignature("Missing publicKey in PaymentSignature (required for sessions)"));
+        };
+      };
+      if (Blob.toArray(sessionPublicKey).size() != 32) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
+      };
+
       // Execute deposit via escrow
       let depositResult = await escrowManager.deposit(
         ledger,
@@ -269,13 +287,16 @@ module {
       switch (effectivePolicy.maxConcurrentSessions) {
         case (?max) {
           if (activeCountAfter >= max) {
-            // Refund the deposit
-            // Best-effort refund — if this fails, deposit is locked in escrow.
-            // Use recoverEscrow() to manually retrieve locked funds.
+            // Refund the deposit. M7: the escrow subaccount holds exactly `deposit`, and
+            // icrc1_transfer deducts the ledger fee ON TOP of the amount — so refund deposit−fee,
+            // not the full `deposit` (which fails InsufficientFunds and strands the funds).
+            // Best-effort: if this transfer itself fails (transient ledger error) the funds need
+            // manual controller recovery, since no session record exists yet.
+            let fee : Nat = try { await ledger.icrc1_fee() } catch (_) { 10_000 };
             let _refundResult = await escrowManager.refund(
               ledger, subaccount,
               { owner = caller; subaccount = null },
-              deposit,
+              Utils.satSub(deposit, fee),
             );
             sessionOpenLocks.delete(caller);
             return #err(#policyDenied("Concurrent session limit reached (TOCTOU)"));
@@ -284,21 +305,7 @@ module {
         case (null) {};
       };
 
-      // Validate payer's Ed25519 public key
-      let sessionPublicKey = switch (sig.publicKey) {
-        case (?pk) { pk };
-        case (null) {
-          let _refundResult = await escrowManager.refund(ledger, subaccount, { owner = caller; subaccount = null }, deposit);
-          sessionOpenLocks.delete(caller);
-          return #err(#invalidSignature("Missing publicKey in PaymentSignature (required for sessions)"));
-        };
-      };
-      if (Blob.toArray(sessionPublicKey).size() != 32) {
-        let _refundResult = await escrowManager.refund(ledger, subaccount, { owner = caller; subaccount = null }, deposit);
-        sessionOpenLocks.delete(caller);
-        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
-      };
-
+      // (Ed25519 public key was validated above, before the on-chain deposit.)
       let now = Time.now();
       let session : Types.InternalSessionState = {
         id = sessionId;
@@ -1024,7 +1031,17 @@ module {
             return #settlementPending("EVM settle broadcast but not confirmed (session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
-            // Failed before broadcast (e.g. fee data unavailable) — park in #closing.
+            // M10: pre-broadcast #err means NOTHING was broadcast for this session (safe to roll
+            // back — no funds moved, consumed unsettled). For a CLIENT-initiated close, restore
+            // #open so the session stays usable and the client can retry; otherwise a transient
+            // reject (e.g. a concurrent tx holding the EvmSender single-flight lock — the M10
+            // race) would strand it permanently in #closing with no retry path. For a
+            // timer-initiated (expired) close, keep #closing to avoid the 60s expiry timer
+            // re-driving a persistent failure every tick (S16/C1).
+            if (not wasExpired) {
+              session.status := #open;
+              return #settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry): " # msg);
+            };
             return #settlementFailed("EVM settle failed (session parked for recovery): " # msg);
           };
         };
@@ -1055,6 +1072,14 @@ module {
             return #settlementPending("EVM refund broadcast but not confirmed (settle succeeded, session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
+            // M10: refund failed pre-broadcast (nothing broadcast). If settle ran and confirmed
+            // (settleTxHash set), we must NOT reopen — a retry would re-settle consumed; park in
+            // #closing. If settle was SKIPPED (consumed == 0, nothing moved at all), a
+            // client-initiated close can safely reopen to #open and retry.
+            if (settleTxHash == null and not wasExpired) {
+              session.status := #open;
+              return #settlementFailed("EVM refund failed — nothing broadcast, session reopened (safe to retry): " # msg);
+            };
             return #settlementFailed("EVM refund failed (settle succeeded, session left in #closing): " # msg);
           };
         };

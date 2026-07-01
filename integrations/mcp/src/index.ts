@@ -843,8 +843,20 @@ server.tool(
           `Disallowed canisterQuery method "${method}". Allowed: ${[...CONTENT_QUERY_METHODS].join(', ')}.`,
         );
       }
+      // M17: `chunkCount` comes from the caller-supplied (attacker-influenceable) delivery JSON.
+      // Cap it before looping — an unbounded value would spin ~N sequential canister queries and
+      // grow an unbounded buffer, hanging/OOM-ing the MCP process. 10_000 chunks is far above any
+      // real content (a chunk is ~1-2 MB) yet bounds the work.
+      const MAX_FETCH_CHUNKS = 10_000;
+      const count = Number(chunkCount);
+      if (!Number.isFinite(count) || count < 0) {
+        throw new Error(`Invalid chunkCount in delivery: ${String(chunkCount)}`);
+      }
+      if (count > MAX_FETCH_CHUNKS) {
+        throw new Error(`chunkCount ${count} exceeds the ${MAX_FETCH_CHUNKS}-chunk fetch limit.`);
+      }
       const chunks: Buffer[] = [];
-      for (let i = 0; i < Number(chunkCount); i++) {
+      for (let i = 0; i < count; i++) {
         const raw = await actor[method as string](grant, i);
         // H6: getChunk/getContent are declared `opt blob`, so agent-js decodes them as
         // [] (None) | [Uint8Array] (Some). Buffer.from([Uint8Array]) treats the opt array as
@@ -1365,8 +1377,22 @@ const CALL_BLOCK_SUBSTRINGS = [
   'end',
 ];
 
+// M16: methods whose NAME looks read-only (get*/fetch*/…) but which are actually
+// state-changing UPDATES that can settle a payment. getContent takes a PaymentSignature and
+// calls gate.settle, moving value — it would otherwise pass the get-prefix heuristic below and
+// bypass the confirmation + spend-cap gate. Deny wins over the allowlist and every heuristic.
+const CALL_DENY_METHODS = new Set<string>(['getContent']);
+
 function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
   const lower = method.toLowerCase();
+  // M16: hard-deny known state-changing/settling methods with read-only-looking names FIRST,
+  // so they can never reach the canister through the generic (uncapped, unconfirmed) call path.
+  if (CALL_DENY_METHODS.has(method)) {
+    return {
+      ok: false,
+      reason: `Method "${method}" is a state-changing/settling update despite its read-only name — use the dedicated content tool (which gates payment), not the generic call path.`,
+    };
+  }
   // The explicit, curated read-only allowlist is authoritative: it wins over the
   // substring heuristic below. This is required for genuine read-only getters
   // whose name happens to contain a blocked substring (e.g. getPolicyConfig
