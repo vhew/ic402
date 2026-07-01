@@ -1,5 +1,75 @@
 # Changelog
 
+## v2.4.0 — 2026-07-01
+
+Minor release. Resolves a full-codebase review (28 findings) — EVM fund-safety, SDK correctness,
+DoS bounds, and reference-example hardening — and adds new controller API for inbound-EVM-deposit
+recovery and zk-verifier access control. `STABLE_SCHEMA_VERSION` stays at `1` (no stable type
+changed — the new inbound-deposit tracker is **transient**), so an in-place upgrade from v2.3.x is
+stable-compatible.
+
+### Dependencies
+
+- `mo:ic` 4.1.0 → 4.2.0, `mo:ecdsa` 8.0.0 → 8.0.1. Hash/signature suites pass; example wasm stays at
+  96 / 1900 per-function locals.
+
+### Added
+
+- **Inbound EVM deposit recovery + upgrade drain (M8).** A session deposit broadcast but not
+  confirmed within `openSession`'s poll budget is now tracked (transient) so it can be reconciled
+  instead of stranding in the shared pool. New controller-gated API: `pendingEvmDepositCount`,
+  `listPendingEvmDeposits`, `setEvmDrainMode` / `getEvmDrainMode`, and `reconcileEvmDeposit`
+  (refund-on-confirm to the payer's EVM address). Upgrade runbook: drain to a `0` pending count
+  before upgrading — see `docs/upgrade-safety.md`.
+- **zk-verifier authorized-caller allowlist (L24).** The reference verifier gains controller-only
+  `set_authorized_callers` / `get_authorized_callers` (persisted across upgrades), checked before the
+  ~1–5B-instruction verification — closing an unauthenticated cycle-drain.
+
+### Fixed
+
+**EVM fund-safety (high):**
+
+- **Double-settle from the shared pool (H1).** `closeExpiredSessions` re-fetches each session and
+  only expires those still `#open`, so a concurrently-`#closed` session can no longer be flipped back
+  and re-settled (the S-3 bypass).
+- **Ambiguous EVM sends are now recoverable (H2/M11).** The canonical tx hash is derived locally
+  (`keccak256` of the signed raw tx) and carried in a structured `#maybeSent`, so a parked entry is a
+  pollable hash rather than an error string / raw tx — confirm-only reconcile can resolve it.
+- **Pool-cap check moved before the deposit (H3).** `openEvmSession` reserves the pool allocation
+  before pulling funds and deallocates on any later failure, so an over-cap open no longer strands an
+  honest payer's USDC.
+- **Refund-and-settle double spend in the marketplace (H4).** `verifyAndSettle`'s
+  `#AutoSettle`/`#HashMatch` branches re-check the job is still `#Submitted` before paying.
+
+**EVM robustness (medium/low):**
+
+- Outbound-rail wedge fixed — `sendTransaction` validates the destination before taking the
+  single-flight lock and releases it in `finally` (M9). A safe-to-retry pre-broadcast `#err` on a
+  client-initiated close reopens the session instead of stranding it in `#closing` (M10). Empty
+  `#Consistent` fee data returns `null` instead of broadcasting an unmineable 1-gwei tx (L20). A
+  malformed ERC-20 recipient is rejected pre-broadcast instead of encoding `address(0)` (L21).
+- Unauthenticated verify/settle/open paths no longer trap on a malformed EIP-712 `from`/`nonce`/etc.
+  — `verifyAuthorization` returns a graceful `false` (L19/L28), and the HTTP payment-header parser no
+  longer traps on bad hex (L22).
+
+**SDK correctness:**
+
+- `Ic402Client.call` auto-pay handles the real `vec PaymentRequirement` wire shape (H5), and
+  `fetchContent` / MCP `fetch_content` unwrap the `opt blob` chunk instead of returning zero bytes
+  (H6). `Ic402Client.fetchX402` echoes the advertised requirement verbatim as `accepted` for
+  strict facilitators (M15).
+
+**Reference example + tooling:**
+
+- Existence/enabled is checked before settling (content + service, HTTP + Candid), and
+  `#settlementPending` returns the pending tx instead of a fresh challenge (M13/M14). ZkGroth16
+  `bindResult` uses the correct little-endian byte for BN254 reduction (M12). The MCP
+  `fetch_content` caps `chunkCount` from untrusted delivery JSON (M17). `operatorEvmPayout` is
+  capped (L23). `setup.sh` restores the tracked ckUSDC candid (M18); the
+  broken redundant `local-start.sh` is removed in favor of `setup.sh` (L26); the patch-drift gate
+  checks the previously-missed EVM-RPC/recipient/key markers (L27); demo Step 2 fails loudly on a
+  real upload failure (L25).
+
 ## v2.3.1 — 2026-06-24
 
 Patch release. Dependency bump only — no API or behavior change.

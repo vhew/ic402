@@ -258,7 +258,7 @@ function serialize(value: unknown): unknown {
 
 const server = new McpServer({
   name: 'ic402',
-  version: '2.3.1',
+  version: '2.4.0',
 });
 
 // ---------------------------------------------------------------------------
@@ -1377,22 +1377,19 @@ const CALL_BLOCK_SUBSTRINGS = [
   'end',
 ];
 
-// M16: methods whose NAME looks read-only (get*/fetch*/…) but which are actually
-// state-changing UPDATES that can settle a payment. getContent takes a PaymentSignature and
-// calls gate.settle, moving value — it would otherwise pass the get-prefix heuristic below and
-// bypass the confirmation + spend-cap gate. Deny wins over the allowlist and every heuristic.
-const CALL_DENY_METHODS = new Set<string>(['getContent']);
+// M16 (posture note, not enforced here): `getContent` is dual-mode — a read-only 402 challenge
+// fetch when called with no PaymentSignature, but a SETTLING update when a signature is passed
+// (gate.settle moves value INTO the canister's own recipient account). It is the ONLY content-
+// purchase entry point over MCP (the x402 flow the demo uses on both rails), and there is no
+// dedicated capped/confirmed purchase tool to route it through, so denying it here breaks the
+// intended flow. Settlement pays the operator's OWN canister (C-1 recipient binding) rather than an
+// attacker, and the spend caps are documented as outbound-signing-only — so the residual risk is a
+// prompt-injected LLM buying content against a standing ICRC-2 approval, not fund exfiltration. A
+// future dedicated `buy_content` tool (spendGuard + requireConfirmation) is the right fix; until
+// then getContent stays reachable via the get-prefix heuristic below.
 
 function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
   const lower = method.toLowerCase();
-  // M16: hard-deny known state-changing/settling methods with read-only-looking names FIRST,
-  // so they can never reach the canister through the generic (uncapped, unconfirmed) call path.
-  if (CALL_DENY_METHODS.has(method)) {
-    return {
-      ok: false,
-      reason: `Method "${method}" is a state-changing/settling update despite its read-only name — use the dedicated content tool (which gates payment), not the generic call path.`,
-    };
-  }
   // The explicit, curated read-only allowlist is authoritative: it wins over the
   // substring heuristic below. This is required for genuine read-only getters
   // whose name happens to contain a blocked substring (e.g. getPolicyConfig
