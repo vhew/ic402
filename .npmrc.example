@@ -1,0 +1,16 @@
+# npm auth for publishing @ic402/client + @ic402/mcp to the public registry.
+#
+# PER-REPO token in a gitignored `.npmrc`, so ic402 and sibling repos (e.g. engramx) each publish
+# with their OWN token — no shared global ~/.npmrc token needed.
+#
+# pnpm does NOT expand ${ENV_VARS} in a project .npmrc auth line (a deliberate security measure:
+# it assumes a project .npmrc could be committed and leak the token). So the token must be a
+# LITERAL value here — which is safe because `.npmrc` is gitignored and never leaves your machine.
+#
+# Create your local .npmrc the pnpm-native way (writes the file for you):
+#
+#   pnpm config set "//registry.npmjs.org/:_authToken" npm_xxxxxxxxxxxx --location project
+#
+# ...or `cp .npmrc.example .npmrc` and paste your token below. Use an npm *automation* token
+# (revocable). `mops publish` uses separate mops auth, not this token.
+//registry.npmjs.org/:_authToken=npm_REPLACE_WITH_YOUR_AUTOMATION_TOKEN

@@ -46,7 +46,16 @@ extra to do for the stable contract.
    ```bash
    git push origin master && git push origin v2.2.5
    ```
-6. **Publish** (after CI on the pushed tag is green):
+6. **npm auth (one-time).** The two npm packages publish with a **per-repo** token in a gitignored
+   `.npmrc`, so ic402 and sibling repos (e.g. engramx) each publish with their own token — no shared
+   global `~/.npmrc` token. pnpm won't expand env vars in a project `.npmrc`, so the token is a
+   **literal** value (safe: `.npmrc` is gitignored, never committed). Create it once:
+   ```bash
+   pnpm config set "//registry.npmjs.org/:_authToken" npm_xxxxxxxx --location project
+   ```
+   (or `cp .npmrc.example .npmrc` and paste your automation token). `mops publish` uses separate
+   mops auth, not this token.
+7. **Publish** (after CI on the pushed tag is green):
    ```bash
    pnpm build:client && pnpm build:demo     # ensure dist/ is fresh
    mops publish                              # publishes the `ic402` mops package
@@ -61,6 +70,12 @@ extra to do for the stable contract.
 > shadow `mops` with a broken copy (`Cannot find package '@dfinity/identity'`). If you hit that,
 > run the project's toolchain explicitly (e.g. `/opt/homebrew/bin/mops publish`) or drop the
 > offending entry from `PATH`.
+
+> **`Failed to replace env in config: ${NPM_TOKEN}` warning:** this comes from the **global**
+> `~/.npmrc` (`_authToken=${NPM_TOKEN}`) when `NPM_TOKEN` is unset. It's harmless (install/build
+> from the public registry needs no auth). Now that each repo carries its own gitignored `.npmrc`,
+> the global token line is redundant — remove it from `~/.npmrc` (or `export NPM_TOKEN=…`) to
+> silence the warning. A project `.npmrc` with a **literal** token does not warn.
 
 ---
 
