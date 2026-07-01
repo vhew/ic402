@@ -15,6 +15,13 @@ service : {
   /// verification_key: arkworks-serialized compressed VerifyingKey
   verify_groth16 : (proof : blob, public_inputs : vec blob, verification_key : blob) -> (VerifyResult);
 
+  /// Controller-only: set the principals allowed to call verify_groth16 (the ic402 canister(s)).
+  /// Closes the unauthenticated cycle-drain (L24). Empty vec = allow-all (default).
+  set_authorized_callers : (vec principal) -> (VerifyResult);
+
+  /// The principals currently allowed to call verify_groth16 (empty = allow-all).
+  get_authorized_callers : () -> (vec principal) query;
+
   /// Health check.
   get_info : () -> (text) query;
 }

@@ -172,6 +172,18 @@ module {
     tokenName : ?Text,
     tokenVersion : ?Text,
   ) : Bool {
+    // L19/L28: reject malformed field lengths HERE (return false) rather than letting the ABI
+    // encoders below assert-trap. tokenAddress/from/to must be 20-byte addresses; nonce/r/s must be
+    // 32-byte words. These arrive as caller-controlled hex on the UNAUTHENTICATED verify / settle /
+    // openEvmSession paths, so a bad length must be a graceful verification failure, not a canister
+    // trap (a trap also rolls back the SEC-1 admission-token decrement in the same message, leaving
+    // the malformed flood unmetered).
+    if (
+      tokenAddress.size() != 20 or from.size() != 20 or to.size() != 20
+      or nonce.size() != 32 or r.size() != 32 or s.size() != 32
+    ) {
+      return false;
+    };
     switch (recoverAuthorizationSigner(chainId, tokenAddress, from, to, value, validAfter, validBefore, nonce, v, r, s, tokenName, tokenVersion)) {
       case (?recovered) { equalBytes(recovered, from) };
       case (null) { false };

@@ -24,7 +24,7 @@
     "format": "prettier --write \"**/*.{ts,js,mjs,json,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,js,mjs,json,yaml}\"",
     "clean": "rm -rf node_modules packages/client/node_modules packages/client/dist integrations/mcp/node_modules integrations/mcp/dist example/client/node_modules example/client/dist .pnpm-store .mops .icp/cache *.wasm",
-    "local:start": "./scripts/local-start.sh",
+    "local:start": "./scripts/setup.sh",
     "setup:local": "./scripts/setup.sh",
     "local:stop": "icp network stop",
     "version:bump": "./scripts/version.sh",

@@ -315,11 +315,20 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           success('Uploaded and encrypted — plaintext never persists');
         } else if (up && typeof up === 'object' && 'contentAlreadyExists' in up) {
           success('Content "ic402-logo" already exists (uploaded in a previous run)');
-        } else if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
-          warn('Upload rejected — MCP identity is not a canister controller.');
-          info('Run deploy.sh to add the MCP identity as a controller.');
         } else {
-          warn(`Upload rejected: ${JSON.stringify(upload)}`);
+          // L25: any other result is a genuine upload failure and must FAIL the step. runSteps only
+          // marks a step failed when run() throws, so warning-and-returning reported this step green
+          // even when nothing was uploaded (e.g. a non-controller MCP identity) — masking breakage
+          // in the smoke test. Throw so the failure surfaces (a re-run's {contentAlreadyExists} and
+          // a real {ok} are the only passes).
+          if (typeof upload === 'string' && upload.toLowerCase().includes('assert')) {
+            info(
+              'Hint: the MCP identity may not be a canister controller — run deploy.sh to add it.',
+            );
+          }
+          throw new Error(
+            `upload_content failed (expected {ok} or {contentAlreadyExists}): ${JSON.stringify(upload)}`,
+          );
         }
 
         info('Content catalog (IDs are public, content requires payment):');

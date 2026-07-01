@@ -95,12 +95,26 @@ module {
     // settled on-chain to its operator's registered payout address (no ServiceDefinition /
     // Candid change). Without one, EVM settlement can't pay the operator and rolls back.
     var operatorEvmPayout = HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash);
+    // L23: bound the payout map — it is stable-persisted, keyed by an attacker-mintable principal,
+    // and never GC'd, so without a cap an attacker could grow the canister heap + stable snapshot
+    // without bound. 10_000 operators (~150 bytes each) is far above any real operator set.
+    let MAX_OPERATOR_PAYOUTS : Nat = 10_000;
 
     /// Register the calling operator's EVM payout address (0x, 20 bytes). The consuming
     /// canister passes msg.caller and should require the caller be a registered operator.
     public func setOperatorEvmPayout(caller : Principal, address : Text) : { #ok; #err : Text } {
       if (not Text.startsWith(address, #text "0x") or address.size() != 42) {
         return #err("Invalid EVM payout address: must be a 0x-prefixed 20-byte address");
+      };
+      // L23: reject a NEW principal's entry once the cap is reached (existing operators can still
+      // update their address). Bounds unbounded growth from mintable principals.
+      switch (operatorEvmPayout.get(caller)) {
+        case (null) {
+          if (operatorEvmPayout.size() >= MAX_OPERATOR_PAYOUTS) {
+            return #err("Operator payout registry is full");
+          };
+        };
+        case (?_) {};
       };
       operatorEvmPayout.put(caller, address);
       #ok;

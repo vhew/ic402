@@ -35,6 +35,15 @@ require "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E" "Avalanche USDC"
 require "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85" "Optimism USDC"
 require "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" "Arbitrum USDC"
 
+# L27: markers patch-local.sh rewrites that were previously UNchecked here (assert_patched only
+# proves ABSENCE after sed — vacuously true if the marker drifted, so it can't catch this class).
+# EVM-RPC canister placeholder — patch_evm_rpc rewrites `null` → the local evm_rpc canister id.
+require "evmRpcCanister = null" "EVM-RPC canister placeholder"
+# EVM settle recipient placeholder — patch_evm_recipient rewrites the zero address → canister EVM addr.
+require "0x0000000000000000000000000000000000000000" "EVM recipient placeholder"
+# Mainnet tECDSA key name — patch_ecdsa_key rewrites `key_1` → `dfx_test_key`.
+require '"key_1"' "mainnet tECDSA key"
+
 if [ "$fail" -ne 0 ]; then
   echo "patch-pattern drift detected — update scripts/patch-local.sh to match example/main.mo (or vice-versa)." >&2
   exit 1

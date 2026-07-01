@@ -272,6 +272,14 @@ module {
     ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
       let selector = EvmUtils.functionSelector("transfer(address,uint256)");
       let recipientBytes = EvmUtils.hexToBytes(recipientAddress);
+      // L21: a malformed recipient (odd/invalid hex → [], or truncated even-length hex) would be
+      // silently zero-extended to address(0) or a different valid address and then signed +
+      // broadcast — burning gas (USDC reverts on to==0) or, for a token without a zero-address
+      // guard, permanently losing the funds. Reject pre-broadcast. (sendTransaction validates the
+      // TOKEN address; the recipient is encoded into calldata HERE, so it needs its own check.)
+      if (recipientBytes.size() != 20) {
+        return #err("Invalid recipient address (expected a 20-byte / 40-hex-char address): " # recipientAddress);
+      };
       let calldata = EvmUtils.abiEncodeFunctionCall(
         selector,
         [
@@ -388,9 +396,14 @@ module {
         );
         switch (result) {
           case (#Consistent(#Ok(history))) {
-            // Empty array → fall back to a sane 1 gwei base, as the original did.
-            let baseFee = switch (latestBaseFee(history)) { case (?b) b; case null 1_000_000_000 };
-            ?feeFromBase(baseFee);
+            // L20/H-3: return null (do NOT broadcast) when NO base fee is available, matching the
+            // #Inconsistent arm below. The old fabricated 1-gwei fallback broadcast an underpriced,
+            // unmineable tx that jams the #Pending-nonce pipeline (no fee-bump mechanism exists) —
+            // the exact H-3 failure this function's null-on-unavailable contract is meant to avoid.
+            switch (latestBaseFee(history)) {
+              case (?b) { ?feeFromBase(b) };
+              case (null) { null };
+            };
           };
           case (#Inconsistent(results)) {
             // SEC-2: collect every provider's base fee, then take the ROBUST (lower-median) one via

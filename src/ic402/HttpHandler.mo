@@ -466,7 +466,11 @@ module {
   };
 
   func hexToBlob(hex : Text) : Blob {
-    Blob.fromArray(Ed25519.Utils.hexToBytes(hex));
+    // L22: use the LOCAL non-trapping hexToBytes ([] on odd-length / non-hex input). The
+    // Ed25519.Utils version traps (Option.unwrap on a bad nibble, and a Nat underflow on a 1-char
+    // value), and parsePaymentHeader reaches this on a fully attacker-controlled PAYMENT-SIGNATURE
+    // header — a malformed value must degrade to a failed verification, not trap http_request_update.
+    Blob.fromArray(hexToBytes(hex));
   };
 
 };
