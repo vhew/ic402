@@ -1169,6 +1169,47 @@ persistent actor KnowledgeBase {
     await gate.sendErc20TransferConfirmed(chainId, token, to, amount);
   };
 
+  // ── M8: inbound EVM deposit drain + reconcile (controller-only) ──
+  //
+  // An inbound EVM session deposit that was broadcast but not confirmed within openSession's poll
+  // budget is tracked so it can be refunded if it later mines, rather than stranding in the shared
+  // pool. UPGRADE RUNBOOK (the transient tracker does NOT survive an upgrade):
+  //   1. setEvmDrainMode(true)          — reject new EVM session opens
+  //   2. poll pendingEvmDepositCount()  — reconcileEvmDeposit(txHash) each straggler until it is 0
+  //   3. upgrade the canister
+  //   4. setEvmDrainMode(false)         — resume (drain mode auto-resets on upgrade too)
+
+  public shared query (msg) func pendingEvmDepositCount() : async Nat {
+    assert(Principal.isController(msg.caller));
+    gate.pendingEvmDepositCount();
+  };
+
+  public shared query (msg) func listPendingEvmDeposits() : async [{
+    txHash : Text; payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int;
+  }] {
+    assert(Principal.isController(msg.caller));
+    gate.listPendingEvmDeposits();
+  };
+
+  public shared (msg) func setEvmDrainMode(on : Bool) : async () {
+    assert(Principal.isController(msg.caller));
+    gate.setEvmDrainMode(on);
+  };
+
+  public shared query (msg) func getEvmDrainMode() : async Bool {
+    assert(Principal.isController(msg.caller));
+    gate.getEvmDrainMode();
+  };
+
+  // Reconcile a pending inbound deposit: on a mined deposit, REFUND it to the payer's EVM address;
+  // drop it if the deposit reverted; otherwise leave it for a later retry.
+  public shared (msg) func reconcileEvmDeposit(txHash : Text) : async {
+    #refunded : Text; #reverted; #stillPending; #notFound; #err : Text;
+  } {
+    assert(Principal.isController(msg.caller));
+    await gate.reconcileEvmDeposit(txHash);
+  };
+
   public shared query (msg) func verifyGrant(grant : Ic402.AccessGrant) : async Ic402.AccessGrantResult {
     gate.verifyGrant(msg.caller, grant);
   };

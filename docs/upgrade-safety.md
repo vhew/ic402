@@ -91,3 +91,31 @@ be finer but change the public contract; the single `Nat` keeps the consumer che
    in-place upgrade is stable-compatible — deploy normally.
 2. If it **did** change, write a migration from your persisted version to the new layout (or accept a
    documented state-dropping fresh deploy), wire it into the `#migrate` branch, and upgrade.
+
+## Transient in-flight state — drain before upgrading
+
+Not all ic402 state is in the four stable snapshots. Some short-lived, in-flight recovery state is
+deliberately **transient** (in-heap, not serialized in `toStable`), so it does **not** survive an
+upgrade — the same way a `transient` field would be wiped. This keeps it out of the stable contract
+(no `STABLE_SCHEMA_VERSION` bump), at the cost of being lost if you upgrade while it is non-empty.
+
+The one that holds **funds** is the **inbound EVM deposit tracker** (`pendingEvmDeposits`): a session
+deposit that was broadcast but not confirmed within `openSession`'s poll budget is tracked so it can
+be reconciled (refunded) if it later mines. Upgrading while an entry is pending drops it from the
+tracker — the payer's deposit would then need manual recovery via the tx hash in the
+`#settlementPending` error.
+
+To avoid that, the library exposes a **drain protocol** (controller-gated at the consumer). Before an
+upgrade:
+
+1. `setEvmDrainMode(true)` — new inbound EVM session opens are rejected (before any funds move).
+2. Poll `pendingEvmDepositCount()`; `reconcileEvmDeposit(txHash)` each straggler (refund-on-confirm)
+   until the count reaches **0**. `listPendingEvmDeposits()` enumerates them.
+3. Upgrade the canister.
+4. `setEvmDrainMode(false)` — resume (drain mode is itself transient, so it also auto-resets to
+   `false` on upgrade).
+
+The canister cannot detect an imminent upgrade on its own (the IC does not signal it), so this is a
+controller-run procedure, not automatic. The parked EVM **close** txs (`closeParkedTxs`) are transient
+for the same reason; a session parked mid-close across an upgrade falls under the B1 fresh-deploy
+waiver and is recovered with `forceResolveSession` + `sweepEvm`.

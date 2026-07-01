@@ -111,6 +111,20 @@ module {
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
     let sessionOpenLocks = HashMap.HashMap<Principal, Int>(8, Principal.equal, Principal.hash);
 
+    // M8: transient tracker of INBOUND EVM deposits that were BROADCAST but not confirmed within
+    // openEvmSession's poll budget — they MAY still mine into the shared pool. Keyed by tx hash.
+    // Transient like closeParkedTxs (NOT in StableSession): pending deposits are short-lived, so an
+    // operator DRAINS before upgrading — setDrainMode(true) rejects new opens, wait for
+    // pendingEvmDepositCount() == 0, then upgrade — rather than persisting them across upgrades.
+    // Recovered via reconcileEvmDeposit (refund-on-confirm). A deposit still pending across an
+    // upgrade is dropped from the tracker, but its tx hash is in the #settlementPending error for a
+    // manual sweepEvm.
+    type PendingEvmDeposit = { payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int };
+    let pendingEvmDeposits = HashMap.HashMap<Text, PendingEvmDeposit>(8, Text.equal, Text.hash);
+    // M8: when true, openEvmSession rejects new inbound deposits so the tracker can drain to 0
+    // before an upgrade. Transient — resets to false after upgrade (nothing is pending post-upgrade).
+    var drainMode : Bool = false;
+
     // SEC-0 (round 2): GLOBAL rate-limit hook for the expensive ecRecover in openEvmSession. The
     // Gateway injects its own admitRate (the caller-agnostic token bucket shared with settle/
     // verifyPayment); defaults to a no-op so unit tests constructing Sessions directly are unaffected.
@@ -360,6 +374,13 @@ module {
         case (#ok) {};
       };
 
+      // M8: reject new inbound EVM deposits while draining for an upgrade — BEFORE any funds move
+      // or the lock is taken. The operator sets drain mode, waits for pendingEvmDepositCount() to
+      // reach 0, then upgrades, so no in-flight deposit is lost across the (transient) tracker.
+      if (drainMode) {
+        return #err(#settlementFailed("Canister is draining for a pending upgrade — new EVM sessions are temporarily unavailable, retry shortly"));
+      };
+
       let deposit = Nat.min(intent.suggestedDeposit, clientConfig.maxDeposit);
 
       // Check minimum deposit
@@ -564,17 +585,20 @@ module {
           return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")"));
         };
         case (#pending) {
-          // H3: deposit unconfirmed — release the reservation so it does not leak pool headroom.
-          // (If the tx later mines, the deposit strands unattributed pending a manual sweep — the
-          // pre-existing inbound-strand behavior; not made worse by freeing the reservation.)
+          // H3: release the pool reservation so it does not leak headroom. M8: track the
+          // broadcast-but-unconfirmed deposit so it can be reconciled (refunded) if it later mines,
+          // instead of stranding unattributed in the shared pool.
           ignore evmEscrowManager.deallocate(sessionId);
+          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
           sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ")"));
+          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed — tracked for reconcile (tx " # depositTxHash # ")"));
         };
         case (#err(e)) {
-          ignore evmEscrowManager.deallocate(sessionId); // H3: confirmation unavailable — release reservation.
+          // H3: release reservation. M8: track for reconcile (see #pending).
+          ignore evmEscrowManager.deallocate(sessionId);
+          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
           sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ")"));
+          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable — tracked for reconcile: " # e # " (tx " # depositTxHash # ")"));
         };
       };
 
@@ -963,6 +987,57 @@ module {
           #err(msg # " (tx " # parked.txHash # ")");
         };
         case (#stay(err)) { #err(err # " (tx " # parked.txHash # ")") };
+      };
+    };
+
+    // ── M8: inbound EVM deposit drain + reconcile ──
+
+    /// M8: number of inbound EVM deposits that were broadcast but not yet confirmed/reconciled.
+    /// Operators poll this after setDrainMode(true) and upgrade only once it reaches 0, so no
+    /// pending deposit is lost across the transient tracker.
+    public func pendingEvmDepositCount() : Nat { pendingEvmDeposits.size() };
+
+    /// M8: list the tracked pending inbound EVM deposits (observability / manual recovery).
+    public func listPendingEvmDeposits() : [{ txHash : Text; payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int }] {
+      Iter.toArray(
+        Iter.map<(Text, PendingEvmDeposit), { txHash : Text; payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int }>(
+          pendingEvmDeposits.entries(),
+          func((h, d)) { { txHash = h; payer = d.payer; payerEvmAddress = d.payerEvmAddress; chainId = d.chainId; token = d.token; amount = d.amount; createdAt = d.createdAt } },
+        )
+      );
+    };
+
+    /// M8: get/set drain mode. When true, openEvmSession rejects new inbound deposits so the
+    /// tracker can drain to 0 before an upgrade. Controller-gated by the consumer canister.
+    public func setDrainMode(on : Bool) { drainMode := on };
+    public func getDrainMode() : Bool { drainMode };
+
+    /// M8: reconcile a tracked pending inbound deposit. Polls the deposit tx receipt; on a mined
+    /// status==1 (the deposit landed in the shared pool) it REFUNDS the amount to the payer's EVM
+    /// address; on a mined revert it drops the entry (nothing landed); otherwise leaves it for a
+    /// later retry. The entry is claimed synchronously before the first await so two concurrent
+    /// reconciles of the same tx can't double-refund. Controller-gated by the consumer.
+    public func reconcileEvmDeposit(txHash : Text) : async { #refunded : Text; #reverted; #stillPending; #notFound; #err : Text } {
+      let dep = switch (pendingEvmDeposits.get(txHash)) { case (?d) { d }; case (null) { return #notFound } };
+      let sender = switch (evmSender) { case (?s) { s }; case (null) { return #err("EVM sender not configured") } };
+      // Claim synchronously (no await between get and delete) so a concurrent reconcile of the same
+      // tx sees #notFound and cannot double-refund. Restore on any non-terminal outcome.
+      pendingEvmDeposits.delete(txHash);
+      switch (await sender.confirmTransaction(dep.chainId, txHash, 4)) {
+        case (#confirmed) {
+          // Deposit mined into the shared pool — refund it to the payer's EVM address.
+          switch (await sender.sendErc20TransferConfirmed(dep.chainId, dep.token, dep.payerEvmAddress, dep.amount, 4)) {
+            case (#confirmed(h)) { #refunded(h) }; // stays deleted — done
+            case (#reverted(h)) { pendingEvmDeposits.put(txHash, dep); #err("refund reverted on-chain (tx " # h # ") — retry reconcile") };
+            // Refund broadcast but unconfirmed — do NOT restore (it may land; restoring risks a
+            // double refund on retry). Operator verifies the tx before any manual re-refund.
+            case (#pending(h)) { #err("refund broadcast but not confirmed (tx " # h # ") — verify on-chain before retrying to avoid double refund") };
+            case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("refund failed (nothing broadcast): " # e) };
+          };
+        };
+        case (#reverted) { #reverted }; // deposit never landed — nothing to refund; stays dropped
+        case (#pending) { pendingEvmDeposits.put(txHash, dep); #stillPending };
+        case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("receipt poll failed: " # e) };
       };
     };
 

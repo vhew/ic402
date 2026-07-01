@@ -378,6 +378,7 @@ service : {
       paymentRequired: vec PaymentRequirement;
     });
   getEvmAddress: () -> (text);
+  getEvmDrainMode: () -> (bool) query;
   getEvmPublicKey: () -> (blob);
   getJob: (jobId: text) -> (opt Job) query;
   getJobResult: (jobId: text) -> (opt blob) query;
@@ -411,12 +412,24 @@ service : {
   keccak256: (data: vec nat8) -> (vec nat8) query;
   listContent: () -> (vec ContentEntry) query;
   listJobs: (serviceId: text, statusFilter: opt JobStatus) -> (vec Job) query;
+  listPendingEvmDeposits: () ->
+   (vec
+     record {
+       amount: nat;
+       chainId: nat;
+       createdAt: int;
+       payer: principal;
+       payerEvmAddress: text;
+       token: text;
+       txHash: text;
+     }) query;
   listServices: () -> (vec ServiceDefinition) query;
   openSession: (config: SessionConfig, sig: PaymentSignature) ->
    (variant {
       err: text;
       ok: SessionState;
     });
+  pendingEvmDepositCount: () -> (nat) query;
   quoteServiceRequest: (serviceId: text) ->
    (variant {
       err: text;
@@ -429,6 +442,14 @@ service : {
          total: nat;
        };
     }) query;
+  reconcileEvmDeposit: (txHash: text) ->
+   (variant {
+      err: text;
+      notFound;
+      refunded: text;
+      reverted;
+      stillPending;
+    });
   reconcileJob: (jobId: text) -> (variant {
                                     err: text;
                                     ok: text;
@@ -460,6 +481,7 @@ service : {
       error: text;
       ok: text;
     });
+  setEvmDrainMode: (on: bool) -> ();
   setEvmPayout: (address: text) -> (variant {
                                       err: text;
                                       ok;

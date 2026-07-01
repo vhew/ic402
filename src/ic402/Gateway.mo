@@ -997,6 +997,28 @@ module {
       await sessionsMgr.reconcileSession(sessionId);
     };
 
+    // ── M8: inbound EVM deposit drain + reconcile (delegates to Sessions; controller-gate at the consumer) ──
+
+    /// Count of inbound EVM deposits broadcast but not yet confirmed/reconciled. Poll this after
+    /// setEvmDrainMode(true) and upgrade only once it reaches 0 so no pending deposit is lost.
+    public func pendingEvmDepositCount() : Nat { sessionsMgr.pendingEvmDepositCount() };
+
+    /// List the tracked pending inbound EVM deposits (observability / manual recovery).
+    public func listPendingEvmDeposits() : [{ txHash : Text; payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int }] {
+      sessionsMgr.listPendingEvmDeposits();
+    };
+
+    /// Set drain mode — when true, openSession rejects new inbound EVM deposits so the pending
+    /// tracker can drain to 0 before an upgrade.
+    public func setEvmDrainMode(on : Bool) { sessionsMgr.setDrainMode(on) };
+    public func getEvmDrainMode() : Bool { sessionsMgr.getDrainMode() };
+
+    /// Reconcile a tracked pending inbound deposit: poll the receipt, refund-on-confirm to the
+    /// payer's EVM address (drop on revert, leave otherwise).
+    public func reconcileEvmDeposit(txHash : Text) : async { #refunded : Text; #reverted; #stillPending; #notFound; #err : Text } {
+      await sessionsMgr.reconcileEvmDeposit(txHash);
+    };
+
     // ── Content Delivery (delegates to Grants module) ──
 
     /// Initialize HMAC seed from randomness. Call once on first deployment.
