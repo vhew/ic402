@@ -20,7 +20,6 @@ import Array "mo:base/Array";
 import HashMap "mo:base/HashMap";
 import SHA256 "mo:sha2/Sha256";
 import Utils "Utils";
-import EvmVerify "EvmVerify";
 import EvmAddress "EvmAddress";
 import EvmEscrow "EvmEscrow";
 import EvmSender "EvmSender";
@@ -161,11 +160,11 @@ module {
       "rcpt-" # Nat.toText(receiptCounter);
     };
 
+    // Owner principal as text for stamping receipts. A configured subaccount is intentionally NOT
+    // rendered here (both arms were identical); the actual transfer target — recipientAccount() —
+    // does carry the subaccount.
     func recipientText() : Text {
-      switch (config.recipient.subaccount) {
-        case (null) { Principal.toText(config.recipient.owner) };
-        case (?_) { Principal.toText(config.recipient.owner) };
-      };
+      Principal.toText(config.recipient.owner);
     };
 
     func recipientAccount() : Types.Account {

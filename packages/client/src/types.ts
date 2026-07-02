@@ -8,6 +8,10 @@ export interface PaymentRequirement {
   recipient: string;
   nonce: Uint8Array;
   expiry: bigint;
+  // EIP-712 domain name/version for the token (EVM rails). Candid `opt text` → [] | [string];
+  // typed loosely here to match the file's existing optional convention.
+  tokenName?: string;
+  tokenVersion?: string;
 }
 
 export interface PaymentReceipt {
@@ -36,6 +40,7 @@ export interface SessionIntent {
 
 export interface SessionState {
   id: string;
+  payer: string; // caller principal (Candid `principal`; read via .toText() when it's a Principal object)
   deposited: bigint;
   consumed: bigint;
   remaining: bigint;

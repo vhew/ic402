@@ -90,10 +90,10 @@ module {
     /// Deserialize after upgrade.
     public func loadStable(data : Types.StableIdentityState) {
       agentId := data.agentId;
-      switch (data.evmAddress) {
-        case (?addr) { evmAddress := ?addr };
-        case (null) {};
-      };
+      // evmAddress starts null on a fresh instance, so this is a plain restore (the old
+      // no-op-on-null switch was equivalent). NB: ContentStore.loadStable's null branch is
+      // deliberately different — there it preserves the in-memory value.
+      evmAddress := data.evmAddress;
     };
   };
 };

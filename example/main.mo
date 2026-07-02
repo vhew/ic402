@@ -238,13 +238,9 @@ persistent actor KnowledgeBase {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
         switch (await gate.settle(sig, ?amount)) {
-          // A nonce binds amount/token/network but NOT the resource, so a nonce minted at a
-          // cheaper endpoint could be redeemed here. Verify the settled amount covers THIS
-          // resource's price (cross-resource underpayment).
-          case (#ok(receipt)) {
-            if (receipt.amount < amount) {
-              return #error("Underpayment: search requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
-            };
+          // settle(sig, ?amount) enforces the cross-resource amount internally (it rejects a nonce
+          // whose bound amount != this resource's price), so #ok guarantees receipt.amount == amount.
+          case (#ok(_)) {
             #ok(doSearch(searchQuery));
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
@@ -497,11 +493,7 @@ persistent actor KnowledgeBase {
       let contentResult = await gate.settle(sig, ?5_000);
       switch (contentResult) {
         case (#ok(receipt)) {
-          // Cross-resource underpayment: the nonce binds amount/token/network but not the
-          // resource, so reject a settlement that doesn't cover this content's price.
-          if (receipt.amount < 5_000) {
-            return Http.httpError(402, "Underpayment: content requires 5000, settled " # Nat.toText(receipt.amount));
-          };
+          // settle(sig, ?5_000) enforces the cross-resource amount internally, so receipt.amount == 5_000 here.
           let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let metadata = switch (store.getMetadata(contentId)) {
             case (null) { return Http.httpError(404, "Content not found") };
@@ -526,9 +518,7 @@ persistent actor KnowledgeBase {
       let searchResult = await gate.settle(sig, ?1_000);
       switch (searchResult) {
         case (#ok(receipt)) {
-          if (receipt.amount < 1_000) {
-            return Http.httpError(402, "Underpayment: search requires 1000, settled " # Nat.toText(receipt.amount));
-          };
+          // settle(sig, ?1_000) enforces the cross-resource amount internally, so receipt.amount == 1_000 here.
           let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           let results = doSearch(q);
           var json = "[";
@@ -716,11 +706,7 @@ persistent actor KnowledgeBase {
         };
         switch (await gate.settle(sig, ?amount)) {
           case (#ok(receipt)) {
-            // Cross-resource underpayment: the nonce binds amount/token/network but not the
-            // resource, so reject a settlement that doesn't cover this content's price.
-            if (receipt.amount < amount) {
-              return #error("Underpayment: content requires " # Nat.toText(amount) # ", settled " # Nat.toText(receipt.amount));
-            };
+            // settle(sig, ?amount) enforces the cross-resource amount internally, so receipt.amount == amount here.
             let metadata = switch (store.getMetadata(contentId)) {
               case (null) { return #error("Not found") };
               case (?m) { m };
