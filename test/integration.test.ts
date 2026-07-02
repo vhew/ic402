@@ -119,6 +119,7 @@ describe('ic402 integration', () => {
         network: icpReq.network,
         signature: new Uint8Array(0),
         publicKey: [],
+        asset: [],
         sender: callerPrincipal.toText(),
         nonce: icpReq.nonce,
         authorization: [],
@@ -231,6 +232,7 @@ describe('ic402 integration', () => {
         network: icpReq.network,
         signature: new Uint8Array(0),
         publicKey: [],
+        asset: [],
         sender: callerPrincipal.toText(),
         nonce: icpReq.nonce,
         authorization: [],
@@ -276,6 +278,7 @@ describe('ic402 integration', () => {
         network: icpReq.network,
         signature: new Uint8Array(0),
         publicKey: [],
+        asset: [],
         sender: caller.toText(),
         nonce: icpReq.nonce,
         authorization: [],
@@ -427,6 +430,7 @@ describe('ic402 integration', () => {
         network: icpReq.network,
         signature: new Uint8Array(0),
         publicKey: [],
+        asset: [],
         sender: caller.toText(),
         nonce: icpReq.nonce,
         authorization: [],
@@ -928,6 +932,9 @@ describe('ic402 integration', () => {
 
     it('an HTTP settlement failure returns a v2 SettlementResponse, not a plain error', async () => {
       if (skip) return;
+      // 'probe' must exist first: M14 returns 404 for a nonexistent content id BEFORE settling,
+      // so without this the handler never reaches the value check this test exercises.
+      await actor.uploadContent('probe', 'text/plain', new TextEncoder().encode('probe'));
       // Sign an authorization to the canister for 1000, then present it at /content (needs 5000):
       // settle fails on the value check BEFORE any broadcast, exercising the failure response.
       const canisterAddr = await actor.getEvmAddress();
