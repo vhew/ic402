@@ -1243,13 +1243,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         );
 
         section('Live x402 payment');
-        const queryAddr = evmAddress || '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
-        const x402Url = `https://x402.goldrush.dev/v1/base-mainnet/address/${queryAddr}/balances_native/`;
+        const x402Url = 'https://sandbox.node4all.com/v1/x402-test';
         info(`URL: ${x402Url}`);
         info('');
         info('This is a live third-party x402 API — a real 402 challenge, not a mock.');
         info(
-          'GoldRush serves mainnet data but accepts Base Sepolia USDC (advertised ~$0.0001/request; the actual amount comes from its 402 challenge).',
+          'The Node4All x402 sandbox accepts Base Sepolia USDC (~$0.002/request; the exact amount comes from its 402 challenge).',
         );
         info('');
 
@@ -1279,8 +1278,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             const low = emsg.toLowerCase();
             if (low.includes('abort') || low.includes('timeout') || low.includes('timed out')) {
               throw new KnownIssueError(
-                'GoldRush x402 API timed out / was unreachable',
-                'External third-party API availability — not an ic402 bug. The flow (probe → canister signs → retry with the payment header) is intact; retry when x402.goldrush.dev responds.',
+                'Node4All x402 sandbox timed out / was unreachable',
+                'External third-party API availability — not an ic402 bug. The flow (probe → canister signs → retry with the payment header) is intact; retry when sandbox.node4all.com responds.',
               );
             }
             if (
