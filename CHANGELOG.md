@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.5.4 — 2026-07-02
+
+Patch release — **money-path fix**. Every inbound EVM x402 settlement via EIP-3009
+`transferWithAuthorization` reverted on-chain; **upgrade is strongly recommended for any
+canister accepting EVM payments.** `example.did` is byte-identical to v2.5.3 and
+`STABLE_SCHEMA_VERSION` stays at `1` (no interface or stable change).
+
+### Fixed
+
+- **EIP-3009 `transferWithAuthorization` broadcast the payer signature `v` as `0/1` instead
+  of `27/28`.** The parser normalizes `v` (27/28 → 0/1) for ic402's internal ecRecover, but
+  `EvmSender` then wrote that raw `0/1` into the on-chain calldata — where USDC's `ecrecover`
+  requires `27/28` — so the contract recovered the wrong signer and reverted. No funds moved;
+  `settle` returned `#settlementFailed(...reverted on-chain...)`. The fix denormalizes `v` at
+  the on-chain-encoding layer only (`EvmUtils.chainVFromRecoveryId`); the verify path is
+  unchanged. ICP and single-token rails were unaffected. Found via a live Base-Sepolia
+  end-to-end run; invisible to unit tests because it only manifested on a real broadcast.
+
+### Internal / tests
+
+- Named, idempotent `v` conversions (`recoveryIdFromV` / `chainVFromRecoveryId`) replace the
+  scattered inline normalization so the representation seam is explicit, and
+  `buildTransferWithAuthorizationCalldata` is now a pure, unit-testable function. A new
+  replica-free guard (`test/eip3009calldata.test.mo`) recovers the signer from the **encoded**
+  calldata `(v, r, s)` exactly as the chain does, so any future on-chain-encoding regression
+  (v form, r/s order, digest) fails in the fast suite.
+
 ## v2.5.3 — 2026-07-02
 
 Patch release. Adds public wire-form TS types for typing hand-built canister payloads, plus
