@@ -61,6 +61,12 @@ module {
     sender : Text;
     nonce : Blob;
     authorization : ?Eip3009Authorization; // EIP-3009 for standard x402 EVM payments. Null for ICP.
+    // EVM token contract (EIP-712 verifyingContract) the payer signed for. `null` for ICP / legacy
+    // clients → the chain's FIRST configured token is used. Enables multi-token-per-chain settlement:
+    // the verifyingContract, EIP-712 domain, and on-chain execution token all key off THIS asset, so
+    // a valid signature for a non-first token is no longer verified against the wrong token's domain.
+    // (Candid `opt` → backward-compatible: an old client that omits it decodes to null.)
+    asset : ?Text;
   };
 
   /// Receipt issued after successful payment settlement.

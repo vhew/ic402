@@ -456,6 +456,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       network,
                       signature: Array.from(new Uint8Array(64)),
                       publicKey: [],
+                      asset: [], // single-token chain: empty => canister uses the chain's first token
                       sender: callerPrincipal,
                       nonce: Array.isArray(nonce)
                         ? nonce
@@ -714,6 +715,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                   network: selectedNetwork,
                   signature: Array.from(new Uint8Array(0)),
                   publicKey: [],
+                  asset: [], // single-token chain: empty => canister uses the chain's first token
                   sender: testAddr,
                   nonce: freshNonce,
                   authorization: [
@@ -970,6 +972,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       network: 'icp:1',
                       signature: Array.from(new Uint8Array(64)),
                       publicKey: [],
+                      asset: [],
                       sender: '',
                       // The MCP `call` tool serializes a vec nat8 nonce to a HEX STRING.
                       // Array.from(hexString) would split it into hex CHARACTERS (["4","8",…])

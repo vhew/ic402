@@ -171,6 +171,7 @@ export class Ic402Client {
         sender,
         nonce,
         authorization: [],
+        asset: [], // ICP rail — no EVM token; empty => canister uses the chain's first token
       };
 
       // Retry: replace the last arg (optional PaymentSignature) with our sig
@@ -266,6 +267,7 @@ export class Ic402Client {
         ? Array.from(new TextEncoder().encode(config!.evmTxHash!))
         : new Uint8Array(0),
       publicKey: [pubKey],
+      asset: [], // sessions key the token off the session intent, not this field
       sender: config?.evmSender ?? '',
       nonce: new Uint8Array(32),
       authorization: evmAuth
@@ -760,6 +762,7 @@ export class Ic402Client {
         sender,
         nonce,
         authorization: [],
+        asset: [], // ICP rail — no EVM token; empty => canister uses the chain's first token
       };
       const retryResult = await actor.submitServiceRequest(serviceId, Array.from(params), [sig]);
 

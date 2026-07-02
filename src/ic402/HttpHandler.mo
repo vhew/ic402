@@ -213,6 +213,7 @@ module {
         network;
         signature = Blob.fromArray([]);
         publicKey = null;
+        asset = if (asset != "") { ?asset } else { null };
         sender = from;
         nonce = Blob.fromArray([]); // facilitator: no server nonce
         authorization = ?{
@@ -357,6 +358,7 @@ module {
       network;
       signature = hexToBlob(signature);
       publicKey = null;
+      asset = null; // legacy ICP header carries no EVM asset
       sender;
       nonce = hexToBlob(nonce);
       authorization = null;
@@ -392,6 +394,10 @@ module {
     let sig = Utils.extractJsonField(json, "signature");
     // H-10 (v2): the echoed ic402 server nonce (hex), if the client included it.
     let ic402Nonce = Utils.extractJsonField(json, "ic402Nonce");
+    // The token contract the payer signed for (EIP-712 verifyingContract), from the echoed
+    // `accepted` PaymentRequirements. Lets settle key the domain + execution token off THIS asset
+    // on a multi-token chain instead of the first configured token. Empty (legacy) → null.
+    let assetAddr = Utils.extractJsonField(json, "asset");
 
     if (from == "" or to == "" or sig == "" or nonce == "") return null;
 
@@ -408,6 +414,7 @@ module {
       network;
       signature = Blob.fromArray([]);
       publicKey = null;
+      asset = if (assetAddr != "") { ?assetAddr } else { null };
       sender = from;
       // H-10: carry the echoed server nonce so Gateway.settle can lock the bound
       // amount. Empty when the client did not echo it (then settle returns

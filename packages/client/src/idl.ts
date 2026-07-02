@@ -34,6 +34,8 @@ const PaymentSignature = IDL.Record({
   sender: IDL.Text,
   nonce: IDL.Vec(IDL.Nat8),
   authorization: IDL.Opt(Eip3009Authorization),
+  // EVM token contract the payer signed for (multi-token chains); [] on ICP / single-token.
+  asset: IDL.Opt(IDL.Text),
 });
 
 const PaymentReceipt = IDL.Record({

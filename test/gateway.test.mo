@@ -45,6 +45,7 @@ suite("Gateway.verifyPayment", func() {
     network = "eip155:84532";
     signature = Blob.fromArray([]);
     publicKey = null;
+    asset = null;
     sender = "0x2222222222222222222222222222222222222222";
     nonce = Blob.fromArray([]);
     authorization = ?{
@@ -129,5 +130,51 @@ suite("Gateway.tokenBucketStep", func() {
     let c2 = Gateway.tokenBucketStep(c1.tokens, c1.lastRefill, 0, 2, 1);
     let c3 = Gateway.tokenBucketStep(c2.tokens, c2.lastRefill, 0, 2, 1);
     assert(c1.admit and c2.admit and not c3.admit);
+  });
+});
+
+// ── Multi-token EIP-712 domain resolution (the pure core of the tokens[0] fix) ──
+suite("Gateway.resolveEvmAsset / resolveEvmDomain", func() {
+  let t1 : Types.EvmTokenConfig = {
+    address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    symbol = "AAA"; decimals = 6; name = ?"Token A"; version = ?"1";
+  };
+  let t2 : Types.EvmTokenConfig = {
+    address = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    symbol = "BBB"; decimals = 6; name = ?"Token B"; version = ?"2";
+  };
+  let chain : Types.EvmChainConfig = {
+    chainId = 84532; recipient = "0x1111111111111111111111111111111111111111"; tokens = [t1, t2];
+  };
+
+  test("resolveEvmAsset: the payer-signed asset wins", func() {
+    assert (Gateway.resolveEvmAsset(chain, ?t2.address) == t2.address);
+  });
+  test("resolveEvmAsset: null (legacy) falls back to the first configured token", func() {
+    assert (Gateway.resolveEvmAsset(chain, null) == t1.address);
+  });
+  test("resolveEvmDomain: a NON-FIRST token uses its OWN domain, not tokens[0]", func() {
+    switch (Gateway.resolveEvmDomain(chain, t2.address)) {
+      case (?d) { assert (d.name == ?"Token B" and d.version == ?"2") };
+      case (null) { assert false };
+    };
+  });
+  test("resolveEvmDomain: the first token", func() {
+    switch (Gateway.resolveEvmDomain(chain, t1.address)) {
+      case (?d) { assert (d.name == ?"Token A" and d.version == ?"1") };
+      case (null) { assert false };
+    };
+  });
+  test("resolveEvmDomain: an unconfigured asset -> null", func() {
+    switch (Gateway.resolveEvmDomain(chain, "0xcccccccccccccccccccccccccccccccccccccccc")) {
+      case (null) {};
+      case (?_) { assert false };
+    };
+  });
+  test("resolveEvmDomain: address match is case-insensitive", func() {
+    switch (Gateway.resolveEvmDomain(chain, "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")) {
+      case (?d) { assert (d.name == ?"Token B") };
+      case (null) { assert false };
+    };
   });
 });

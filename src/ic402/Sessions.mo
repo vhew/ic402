@@ -476,9 +476,13 @@ module {
           };
         };
       };
-      if (evmChain.tokens.size() > 0) {
-        tokenName := evmChain.tokens[0].name;
-        tokenVersion := evmChain.tokens[0].version;
+      // Multi-token: key the EIP-712 domain off the SESSION's token (tokenAddr = intent.token), not
+      // tokens[0], so a deposit in a non-first configured token verifies against its OWN domain.
+      for (tok in evmChain.tokens.vals()) {
+        if (EvmUtils.addressesEqual(tok.address, tokenAddr)) {
+          tokenName := tok.name;
+          tokenVersion := tok.version;
+        };
       };
 
       // SEC-0 (round 2): rate-limit the expensive ecRecover in verifyAuthorization below behind the

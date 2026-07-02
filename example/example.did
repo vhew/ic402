@@ -135,6 +135,7 @@ type PricingScheme =
  };
 type PaymentSignature = 
  record {
+   asset: opt text;
    authorization: opt Eip3009Authorization;
    network: text;
    nonce: blob;

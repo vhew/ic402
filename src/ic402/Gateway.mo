@@ -48,6 +48,27 @@ module {
     };
   };
 
+  /// Pick the token being paid on `chain`: the payer-signed `asset` when present (multi-token), else
+  /// the chain's FIRST configured token (legacy / single-token). Returns "" for an empty chain.
+  /// Module-level + pure so the multi-token asset selection is directly unit-testable.
+  public func resolveEvmAsset(chain : Types.EvmChainConfig, asset : ?Text) : Text {
+    switch (asset) {
+      case (?a) { a };
+      case (null) { if (chain.tokens.size() > 0) { chain.tokens[0].address } else { "" } };
+    };
+  };
+
+  /// Resolve the EIP-712 domain (name/version) for the PAID token on a chain — keyed on the actual
+  /// verifyingContract (`tokenAddr`), NOT tokens[0], so on a multi-token chain each token verifies
+  /// against its OWN domain. Returns null when `tokenAddr` is not a configured token on the chain.
+  /// Shared by verifyPayment / settle / (mirrored in) Sessions.openEvmSession.
+  public func resolveEvmDomain(chain : Types.EvmChainConfig, tokenAddr : Text) : ?{ name : ?Text; version : ?Text } {
+    for (tok in chain.tokens.vals()) {
+      if (EvmUtils.addressesEqual(tok.address, tokenAddr)) return ?{ name = tok.name; version = tok.version };
+    };
+    null;
+  };
+
   /// Main payment gateway. Orchestrates charges, sessions, grants, escrow, and policy.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
 
@@ -246,16 +267,6 @@ module {
       null;
     };
 
-    /// Find the configured EVM token on `chain` whose address matches `address`
-    /// (case-insensitive). Used to select the EIP-712 domain (name/version) of the
-    /// token actually being paid, rather than assuming tokens[0] — they differ on a
-    /// multi-token chain, and a mismatched domain makes a valid signature fail.
-    func findEvmToken(chain : Types.EvmChainConfig, address : Text) : ?Types.EvmTokenConfig {
-      for (tok in chain.tokens.vals()) {
-        if (EvmUtils.addressesEqual(tok.address, address)) return ?tok;
-      };
-      null;
-    };
 
     /// Resolve the EVM recipient: prefer self-derived address, fall back to config.
     func evmRecipientFor(chain : Types.EvmChainConfig) : Text {
@@ -416,16 +427,14 @@ module {
       // (`asset` is the verifyingContract passed to verifyAuthorization below), NOT
       // tokens[0]: on a multi-token chain they differ and a wrong domain makes a
       // valid signature fail to verify. Reject an asset this canister doesn't accept.
-      var tokenName : ?Text = null;
-      var tokenVersion : ?Text = null;
-      switch (findEvmChain(chainId)) {
+      let (tokenName, tokenVersion) = switch (findEvmChain(chainId)) {
+        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
         case (?chain) {
-          switch (findEvmToken(chain, asset)) {
-            case (?tok) { tokenName := tok.name; tokenVersion := tok.version };
+          switch (resolveEvmDomain(chain, asset)) {
+            case (?d) { (d.name, d.version) };
             case (null) { return { isValid = false; invalidReason = ?"unsupported_asset"; payer = ?authz.from } };
           };
         };
-        case (null) { return { isValid = false; invalidReason = ?"invalid_network"; payer = ?authz.from } };
       };
       let verified = Eip712.verifyAuthorization(
         chainId, EvmUtils.hexToBytes(asset),
@@ -579,21 +588,25 @@ module {
           case (?id) { id };
           case (null) { nonceManager.unlock(signature.nonce); return #networkNotSupported("Invalid network: " # signature.network) };
         };
-        let tokenAddr = resolveTokenForNonce(signature.network);
-        // M-5: Look up per-chain token name/version for the EIP-712 domain separator.
-        // Return error if chain not configured (wrong defaults cause silent sig failure).
-        var tokenName : ?Text = null;
-        var tokenVersion : ?Text = null;
-        switch (findEvmChain(chainId)) {
-          case (?chain) {
-            if (chain.tokens.size() > 0) {
-              tokenName := chain.tokens[0].name;
-              tokenVersion := chain.tokens[0].version;
-            };
-          };
+        // Multi-token: verify + settle against the token the payer actually signed for
+        // (signature.asset), resolved via resolveEvmDomain so the verifyingContract, EIP-712 domain,
+        // AND the on-chain execution token below all key off the SAME asset — not tokens[0]. A
+        // legacy client that sends no asset falls back to the chain's first configured token. The
+        // asset is cryptographically bound to the signature (it IS the verifyingContract), so a
+        // spoofed asset simply fails verification.
+        let chain = switch (findEvmChain(chainId)) {
+          case (?c) { c };
           case (null) {
             nonceManager.unlock(signature.nonce);
             return #networkNotSupported("No EVM chain config for chainId " # Nat.toText(chainId));
+          };
+        };
+        let tokenAddr = resolveEvmAsset(chain, signature.asset);
+        let (tokenName, tokenVersion) = switch (resolveEvmDomain(chain, tokenAddr)) {
+          case (?d) { (d.name, d.version) };
+          case (null) {
+            nonceManager.unlock(signature.nonce);
+            return #invalidSignature("Unsupported asset " # tokenAddr # " on chain " # Nat.toText(chainId));
           };
         };
         let verified = Eip712.verifyAuthorization(
