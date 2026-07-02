@@ -1,6 +1,6 @@
 # ic402
 
-Motoko payment and service marketplace library for ICP canisters. [x402](https://www.x402.org/) charges, streaming sessions, encrypted content, paid services with coordinator pattern, cross-chain EVM settlement, agent discovery.
+Motoko payment and service marketplace library for ICP canisters. [x402](https://www.x402.org/) charges, streaming sessions, encrypted content, paid services with a coordinator pattern, multi-token EVM settlement across 5 chains, and ERC-8004 agent identity on Base.
 
 ## Three modes
 
@@ -126,7 +126,7 @@ Client provides nonce+gas → canister signs tx → client broadcasts
 | **Paid services** | Coordinator pattern: escrow, assign, verify (ZK/hash/buyer), settle |
 | **Cross-rail settlement** | Marketplace jobs and streaming sessions settle/refund on their native rail — ICP from the pool, or on-chain to the EVM payout address (confirmed broadcast) |
 | **EIP-712 signing** | Generic typed data signing — DEX agent wallets, permits, any EIP-712 protocol |
-| **5 EVM chains** | Base, Ethereum, Avalanche, Optimism, Arbitrum |
+| **5 EVM chains** | Base, Ethereum, Avalanche, Optimism, Arbitrum — multiple tokens per chain, settlement keyed to the paid asset |
 | **Remote signing** | Canister signs, client broadcasts — no EVM RPC dependency for outbound |
 | **Encrypted content** | ChaCha20-Poly1305 at rest, 3 delivery patterns |
 | **ZK verification** | Groth16/BN254 via reference Rust canister (~$0.005, 100-1000x cheaper than Ethereum) |
