@@ -1,5 +1,49 @@
 # Changelog
 
+## v2.5.0 — 2026-07-02
+
+Minor release. Fixes a latent multi-token EIP-712 settlement bug by threading the paid EVM asset
+through the payment path via an additive `PaymentSignature.asset` field; the remainder is an internal
+robustness pass (shared-helper extractions, dead-code removal, new tests). **No wire/HTTP or
+`@ic402/client` breaking changes** — `asset` is an optional Candid field, so an old client that omits
+it decodes to `null` and the chain's first configured token is used (the prior behavior).
+`STABLE_SCHEMA_VERSION` stays at `1` (`PaymentSignature` is a message payload, not stable state), so
+an in-place upgrade from v2.4.x is stable-compatible.
+
+### Fixed
+
+- **Multi-token EIP-712 settlement (correctness).** `Gateway.verifyPayment` resolved the EIP-712
+  domain from the paid asset, but `settle` and `Sessions.openEvmSession` took the verifyingContract,
+  domain, and on-chain execution token from `chain.tokens[0]`. On a chain configured with **more than
+  one token**, a valid EIP-3009 signature for a non-first token verified but was then rejected /
+  mis-executed at settle. `PaymentSignature` now carries the signed `asset`, and settle /
+  openEvmSession key their domain + execution off it. Single-token-per-chain deployments (the shipped
+  config) were unaffected, and no path moved funds on a failed verify.
+
+### Added
+
+- **`PaymentSignature.asset : ?Text`** (mops `ic402` + `@ic402/client` idl/types) — the EVM token
+  contract (EIP-712 verifyingContract) the payer signed for. Optional/additive → backward-compatible.
+  New pure, tested Gateway helpers `resolveEvmAsset` (asset ?? first token) and `resolveEvmDomain`
+  (name/version keyed on the actual token) are the shared seam for verify / settle / openEvmSession.
+
+### Changed (internal, no behavior change)
+
+- **Robustness / de-duplication pass.** Extracted shared seams and removed copy-paste across the
+  library, SDK, MCP server, scripts, and the reference demo: Gateway/EvmSender RPC-preamble +
+  candid-decode helpers, MCP response-envelope routing through `textResult`/`serialize`, a shared
+  script PATH-sanitize helper, the SDK's `candid.ts` opt/byte decoders, and the demo client's new
+  `codec.ts` (opt / nonce / inline-blob / USDC formatting) + `evm.ts` (`demoPayer` +
+  `signTransferWithAuthorization`, collapsing two ~120-line pasted EIP-712 blocks). Dead code swept
+  (unused imports, redundant post-settle guards).
+
+### Tests
+
+- New Motoko + TypeScript coverage for the touched seams: `resolveEvmAsset` / `resolveEvmDomain` (6),
+  the `consumeVoucher` streaming-charge fund gate, the MCP call-guard case matrix, and the demo codec
+  helpers + a **pinned EIP-712 signing vector** with an ecrecover round-trip (19) that proves the
+  extracted signer is byte-identical to the old inline blocks.
+
 ## v2.4.0 — 2026-07-01
 
 Minor release. Resolves a full-codebase review (28 findings) — EVM fund-safety, SDK correctness,
