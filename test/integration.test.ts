@@ -7,6 +7,10 @@ import {
 } from './helpers.js';
 import type { HttpAgent } from '@icp-sdk/core/agent';
 import { Principal } from '@icp-sdk/core/principal';
+// Wire-form type: annotating the hand-built payloads makes `tsc` flag a missing field (e.g. a
+// future opt like v2.5.0's `asset`) at compile time, instead of only at agent-js encode against
+// a live replica. The idl-encode-contract test keeps this type honest against the IDL.
+import type { PaymentSignatureArg } from '../packages/client/src/idl.js';
 
 /**
  * Integration tests for ic402 example canister.
@@ -114,7 +118,7 @@ describe('ic402 integration', () => {
       const callerPrincipal = await agent.getPrincipal();
 
       // 4. Call search with payment signature
-      const paymentSig = {
+      const paymentSig: PaymentSignatureArg = {
         scheme: icpReq.scheme,
         network: icpReq.network,
         signature: new Uint8Array(0),
@@ -227,7 +231,7 @@ describe('ic402 integration', () => {
 
       // 3. Settle via getContent
       const callerPrincipal = await agent.getPrincipal();
-      const paymentSig = {
+      const paymentSig: PaymentSignatureArg = {
         scheme: icpReq.scheme,
         network: icpReq.network,
         signature: new Uint8Array(0),
@@ -273,7 +277,7 @@ describe('ic402 integration', () => {
         expires_at: [],
       });
       const caller = await agent.getPrincipal();
-      const cheapSig = {
+      const cheapSig: PaymentSignatureArg = {
         scheme: icpReq.scheme,
         network: icpReq.network,
         signature: new Uint8Array(0),
@@ -425,7 +429,7 @@ describe('ic402 integration', () => {
 
       // 3. Pay → a job is created.
       const caller = await agent.getPrincipal();
-      const paymentSig = {
+      const paymentSig: PaymentSignatureArg = {
         scheme: icpReq.scheme,
         network: icpReq.network,
         signature: new Uint8Array(0),

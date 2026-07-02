@@ -14,6 +14,10 @@ const PaymentRequirement = IDL.Record({
   tokenVersion: IDL.Opt(IDL.Text),
 });
 
+// Eip3009Authorization/PaymentSignature/Voucher are exported (see the block at the bottom) so the
+// encode-contract test can round-trip client-built wire payloads through the real record IDLs —
+// catching a payload that drifts from the schema (e.g. a missing opt field) at fast-test time,
+// not only against a live replica.
 const Eip3009Authorization = IDL.Record({
   from: IDL.Text,
   to: IDL.Text,
@@ -37,6 +41,36 @@ const PaymentSignature = IDL.Record({
   // EVM token contract the payer signed for (multi-token chains); [] on ICP / single-token.
   asset: IDL.Opt(IDL.Text),
 });
+
+/**
+ * Wire-form (agent-js Candid encoding) TypeScript types for the client-built message records —
+ * the exact shapes passed as canister method arguments. Distinct from the ergonomic interfaces in
+ * types.ts: Candid `opt T` is `[] | [T]`, `vec nat8` is `Uint8Array | number[]`, `nat` is bigint.
+ * Annotate hand-built payloads with these so `tsc` flags a missing field (e.g. the v2.5.0 `asset`)
+ * at compile time; idl-encode-contract.test.ts then verifies these shapes encode via the IDLs.
+ */
+export interface Eip3009AuthorizationArg {
+  from: string;
+  to: string;
+  value: bigint | number;
+  validAfter: bigint | number;
+  validBefore: bigint | number;
+  nonce: Uint8Array | number[];
+  v: number;
+  r: Uint8Array | number[];
+  s: Uint8Array | number[];
+}
+
+export interface PaymentSignatureArg {
+  scheme: string;
+  network: string;
+  signature: Uint8Array | number[];
+  publicKey: [] | [Uint8Array | number[]];
+  sender: string;
+  nonce: Uint8Array | number[];
+  authorization: [] | [Eip3009AuthorizationArg];
+  asset: [] | [string];
+}
 
 const PaymentReceipt = IDL.Record({
   id: IDL.Text,
@@ -423,6 +457,7 @@ export const exampleIdlFactory = () =>
 
 export {
   PaymentRequirement,
+  Eip3009Authorization,
   PaymentSignature,
   PaymentReceipt,
   PaymentResult,
