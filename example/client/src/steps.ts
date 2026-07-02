@@ -205,11 +205,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Configure',
-      description: 'Connect to the canister, derive its EVM address',
+      description: 'Connect to the canister and derive its native EVM address',
       run: async (_rl: ReadlineInterface) => {
         header('Step 1: Configure');
         info('The canister IS the server, the wallet, AND the payment processor.');
-        info('One Motoko import. One deploy. No external infrastructure.');
+        info('One Motoko import, one deploy — no external infrastructure to run.');
 
         const configArgs: Record<string, unknown> = {
           canisterId,
@@ -252,7 +252,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         if (evmAddress) {
           success(`Canister EVM address: ${evmAddress}`);
-          highlight('No external wallet — derived natively via tECDSA.');
+          highlight('No wallet software, no stored key — the address is derived via tECDSA.');
         }
 
         section('Infrastructure');
@@ -274,8 +274,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: 'Upload content via MCP — encrypted at rest, gated by payment',
       run: async (_rl: ReadlineInterface) => {
         header('Step 2: ADD Encrypted Content');
-        info('Built-in encrypted content store. Upload, encrypt, deliver —');
-        info('all inside the canister. Three delivery backends supported.');
+        info('The library ships an encrypted content store. Upload, encrypt, deliver —');
+        info('all without leaving the canister. Three delivery backends supported.');
 
         const __dirname = dirname(fileURLToPath(import.meta.url));
         const logoPath = resolve(__dirname, '../logo.png');
@@ -355,8 +355,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: "Hit the canister's HTTP endpoint — get a 402, pay on ICP or any EVM chain",
       run: async (rl: ReadlineInterface) => {
         header('Step 3: SELL Content over x402');
-        info('Multi-chain in ONE response. Client chooses ICP or any of 5 EVM chains.');
-        info('Canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.');
+        info('One 402 response, six ways to pay: ICP ckUSDC or USDC on any of 5 EVM chains.');
+        info('The canister verifies EVM payments via HTTPS outcall. No facilitator, no bridge.');
 
         section('Live HTTP endpoints');
         state('Content (paid)', `${rawHttpUrl}/content/ic402-logo`);
@@ -414,7 +414,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           // Tracks whether a payment path actually DELIVERED content, so the closing highlight
           // (and the step's ✓) only appear on a real success — not after a revert/failure.
           let delivered = false;
-          info('Pay for the ic402 logo we uploaded in step 2.');
+          info('Now pay for the logo we uploaded in step 2 — for real, end to end.');
           info('Choose ICP ckUSDC (works on local replica) or EVM USDC (testnet/mainnet).');
           info('');
           state('  1', `ICP ckUSDC — ICRC-2 (${CKUSDC_LEDGER})`);
@@ -807,7 +807,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
           // Only claim the multi-rail win if a payment actually delivered content.
           if (delivered) {
-            highlight('Multi-chain ICP and EVM x402 — no other implementation does this.');
+            highlight('ICP and EVM rails on one 402 — no other x402 implementation does this.');
           }
         }
       },
@@ -818,7 +818,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'DELETE Content',
-      description: 'Remove content and verify the catalog updates',
+      description: 'Delete content and prove it is gone — catalog and endpoint verified',
       run: async (_rl: ReadlineInterface) => {
         header('Step 4: DELETE Content');
 
@@ -883,7 +883,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           if (contentRes.status === 402) {
             // 402 means the endpoint still exists but requires payment
             // Pay to test if content is actually gone
-            info('Endpoint returns 402 (payment required). Attempting payment...');
+            info('Endpoint still answers 402 — paying to confirm the content itself is gone...');
             const payRes = await mcpCall(client, 'call', {
               method: 'getContent',
               args: '["ic402-logo", []]',
@@ -990,8 +990,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: 'Register a service, accept payment, compute off-chain, verify, settle',
       run: async (_rl: ReadlineInterface) => {
         header('Step 5: SELL Services over x402');
-        info('You register services on your canister. Buyers pay via x402.');
-        info('Your client does the computation off-chain. Your canister verifies and settles.');
+        info('Sell compute, not just content. Register services; buyers pay via x402.');
+        info('Your client computes off-chain. Your canister verifies the result and settles.');
 
         section('How it works');
         state(
@@ -1225,7 +1225,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           state('Reference', 'example/zk-verifier/ — arkworks Groth16/BN254 verifier');
         }
 
-        highlight('x402 services: register, pay, compute, verify, settle.');
+        highlight('One canister, the whole lifecycle: register, pay, compute, verify, settle.');
       },
     },
 
@@ -1237,9 +1237,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: 'Canister signs EVM transactions via tECDSA — client broadcasts',
       run: async (_rl: ReadlineInterface) => {
         header('Step 6: BUY over x402');
-        info('The canister signs EVM payments via tECDSA. The client library handles');
+        info('Now flip the flow: the canister is the BUYER. It signs EVM payments via tECDSA;');
         info(
-          'everything else: probing the URL, parsing the 402, and retrying with the signed header.',
+          'the client library does the rest — probe the URL, parse the 402, retry with the signed header.',
         );
 
         section('Live x402 payment');
@@ -1247,7 +1247,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         const x402Url = `https://x402.goldrush.dev/v1/base-mainnet/address/${queryAddr}/balances_native/`;
         info(`URL: ${x402Url}`);
         info('');
-        info('Flow: client probes URL → parses 402 → canister signs → client retries with header.');
+        info('This is a live third-party x402 API — a real 402 challenge, not a mock.');
         info(
           'GoldRush serves mainnet data but accepts Base Sepolia USDC (advertised ~$0.0001/request; the actual amount comes from its 402 challenge).',
         );
@@ -1314,8 +1314,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('', 'Requires ic402 client SDK (Ed25519 voucher signing, Candid RPC)');
         state('', 'NOT accessible via HTTP or x402 browsers — designed for agents/backends');
 
-        info('Deposit once. Stream signed vouchers (free). Settle on close.');
-        info('10,000 calls = 2 on-chain transactions.');
+        info('Charges pay per request; sessions amortize. Deposit, stream, settle.');
+        info('10,000 calls = 2 on-chain transactions. Here is the math:');
 
         section('Economics');
         state('Per-call model', '10K calls/day × $0.001/tx = $10/day settlement overhead');
@@ -1719,8 +1719,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
       description: 'Cross-chain identity — canister signs registration tx, client broadcasts',
       run: async (_rl: ReadlineInterface) => {
         header('Step 8: Agent Identity');
-        info('Agent card registered as ERC-721 on Base via IdentityRegistry.');
-        info('Other agents query by skill, domain, or x402Support to discover this canister.');
+        info('The agent card is minted as an ERC-721 on Base via the IdentityRegistry.');
+        info('Other agents discover this canister by querying skill, domain, or x402Support.');
 
         section('How it works');
         state('Key derivation', 'ICP tECDSA → secp256k1 → native EVM address');
@@ -1953,12 +1953,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Policy Engine + Summary',
-      description: 'Canister spending policy + UVP recap',
+      description: 'Live policy limits read from the canister, then the full recap',
       run: async (_rl: ReadlineInterface) => {
         header('Step 10: Policy + Summary');
-        info('Canister-side policy engine enforces all spending limits.');
-        info('Rate limits, session caps, idle timeouts.');
-        info('Evaluated in-canister, zero ledger calls, constant time.');
+        info('Every limit in this demo is enforced by one canister-side policy engine:');
+        info('spending caps, rate limits, session caps, idle timeouts —');
+        info('all evaluated in-canister, in constant time, with zero ledger calls.');
 
         section(
           'Configured policy (read LIVE from the canister via getPolicyConfig — enforced in-canister)',
@@ -2020,7 +2020,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             'Supported via setPolicy(?caller, …); none configured here',
           );
         }
-        highlight('Your service can never be abused. Idle sessions auto-refund.');
+        highlight('Abuse is capped by policy, not by trust — and idle sessions auto-refund.');
 
         section('What ic402 provides');
         state('SELL content', 'Upload encrypted content, gate with x402, deliver on payment');
