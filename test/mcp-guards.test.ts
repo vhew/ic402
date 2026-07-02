@@ -4,6 +4,7 @@ import {
   checkSpend,
   resolveSecurityConfig,
   isToolAllowed,
+  isCallMethodAllowed,
   resolveOperatorConfig,
   type SecurityConfig,
 } from '../integrations/mcp/src/guards';
@@ -160,5 +161,50 @@ describe('isToolAllowed (S1/S9 + SEC-3: dangerous + admin tools default-denied)'
     expect(isToolAllowed('search', false, false)).toBe(true);
     expect(isToolAllowed('open_session', false, false)).toBe(true);
     expect(isToolAllowed('fetch_x402', false, false)).toBe(true);
+  });
+});
+
+describe('isCallMethodAllowed (C3: generic call is read-only)', () => {
+  const ok = (m: string) => expect(isCallMethodAllowed(m).ok).toBe(true);
+  const blocked = (m: string) => expect(isCallMethodAllowed(m).ok).toBe(false);
+
+  it('admits curated read-only allowlist entries', () => {
+    ok('getChunk');
+    ok('listServices');
+    ok('getJob');
+    ok('verifyGrant');
+  });
+
+  it('allowlist beats the substring blocklist (getPolicyConfig contains "policy")', () => {
+    ok('getPolicyConfig');
+  });
+
+  it('blocks signing/admin/value-moving names via substring', () => {
+    blocked('signX402Payment'); // sign
+    blocked('setPolicy'); // set
+    blocked('submitServiceRequest'); // submit
+    blocked('openSession'); // open
+    blocked('closeSession'); // close
+    blocked('registerService'); // register
+    blocked('uploadContent'); // upload
+    blocked('deleteContent'); // delete
+    blocked('confirmJob'); // confirm
+    blocked('sweepEvm'); // no block-substring? -> falls to prefix (not get/list/fetch/is) -> blocked
+  });
+
+  it('admits new read-only getters via the name-prefix fallback', () => {
+    ok('getSomethingNew');
+    ok('listWidgets');
+    ok('fetchData');
+    ok('isReady');
+  });
+
+  it('getContent stays reachable (dual-mode content-purchase entry — M16)', () => {
+    ok('getContent');
+  });
+
+  it('rejects an unknown non-getter name', () => {
+    blocked('doThing');
+    blocked('frobnicate');
   });
 });

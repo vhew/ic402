@@ -211,3 +211,82 @@ export function resolveOperatorConfig(
     allowAdminTools: pickBool('allowAdminTools', 'IC402_MCP_ALLOW_ADMIN_TOOLS'),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Generic `call` tool method gating (C3)
+//
+// The generic MCP `call` tool must only reach read-only/query methods; state-changing, signing,
+// payment, and admin methods have dedicated, capped, confirmation-gated tools. This logic lives
+// here (not in index.ts, which boots the server on import and can't be unit-tested) so the decision
+// tree can be exercised directly — see test/mcp-guards.test.ts.
+// ---------------------------------------------------------------------------
+
+/** Curated read-only allowlist — every entry is a `query` (or otherwise non-state-changing read)
+ *  in the IDL. Authoritative: wins over the substring blocklist, so a genuine read-only getter
+ *  whose name contains a blocked substring (e.g. getPolicyConfig contains 'policy') is still
+ *  admitted. ONLY add verified non-state-changing query methods. */
+export const READONLY_CALL_ALLOWLIST = new Set<string>([
+  'listContent',
+  'getChunk',
+  'getAgentCard',
+  'getAgentId',
+  'verifyGrant',
+  'listServices',
+  'getJobStatus',
+  'getJob',
+  'getJobResult',
+  'keccak256',
+  'getPolicyConfig',
+]);
+
+/** Substrings that must NEVER be reachable through the generic `call` path — signing/admin/
+ *  value-moving method names that have dedicated tools. */
+export const CALL_BLOCK_SUBSTRINGS = [
+  'sign',
+  'set',
+  'submit',
+  'open',
+  'close',
+  'transfer',
+  'register',
+  'pay',
+  'approve',
+  'policy',
+  'upload',
+  'delete',
+  'claim',
+  'confirm',
+  'dispute',
+  'enable',
+  'disable',
+  'end',
+];
+
+// M16 (posture note): `getContent` is dual-mode — a read-only 402 challenge fetch with no
+// PaymentSignature, but a SETTLING update when a signature is passed. It is the only content-
+// purchase entry point over MCP, and there is no dedicated capped/confirmed purchase tool, so it
+// stays reachable via the get-prefix fallback below. Settlement pays the operator's own canister
+// (C-1), and spend caps are outbound-signing-only; a future `buy_content` tool is the right fix.
+
+/** Decide whether a method name may be called through the generic (uncapped, unconfirmed) `call`
+ *  tool. Order: allowlist (authoritative) → substring blocklist → read-only name-prefix fallback. */
+export function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
+  const lower = method.toLowerCase();
+  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
+  for (const bad of CALL_BLOCK_SUBSTRINGS) {
+    if (lower.includes(bad)) {
+      return {
+        ok: false,
+        reason: `Method "${method}" looks state-changing/signing (contains "${bad}"). Use the dedicated tool for this action.`,
+      };
+    }
+  }
+  // Forward-compat: admit new read-only getters by name prefix, only after the blocklist cleared it.
+  if (/^(get|list|fetch|is)[A-Z]/.test(method) || /^(get|list|fetch|is)$/.test(method)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `Method "${method}" is not on the read-only allowlist. The generic "call" tool only permits query/read methods; use a dedicated tool for state-changing or signing operations.`,
+  };
+}

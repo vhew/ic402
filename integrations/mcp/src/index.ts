@@ -21,6 +21,7 @@ import {
   checkSpend,
   resolveSecurityConfig,
   isToolAllowed,
+  isCallMethodAllowed,
   resolveOperatorConfig,
   type OperatorConfig,
 } from './guards.js';
@@ -1328,82 +1329,8 @@ server.tool(
 // `call` tool. Every entry here is a `query` (or otherwise non-state-changing
 // read) in the IDL. Anything not listed is rejected; the LLM must use the
 // dedicated, capped, confirmation-gated tool for state-changing/signing calls.
-const READONLY_CALL_ALLOWLIST = new Set<string>([
-  'listContent',
-  'getChunk',
-  'getAgentCard',
-  'getAgentId',
-  'verifyGrant',
-  'listServices',
-  'getJobStatus',
-  'getJob',
-  'getJobResult',
-  'keccak256',
-  'getPolicyConfig', // pure read-only query; contains the blocked 'policy' substring, so it must be allowlisted
-]);
 
-// Substrings that must NEVER be reachable through the generic `call` path —
-// these denote signing/admin/value-moving methods with dedicated tools.
-const CALL_BLOCK_SUBSTRINGS = [
-  'sign',
-  'set',
-  'submit',
-  'open',
-  'close',
-  'transfer',
-  'register',
-  'pay',
-  'approve',
-  'policy',
-  'upload',
-  'delete',
-  'claim',
-  'confirm',
-  'dispute',
-  'enable',
-  'disable',
-  'end',
-];
-
-// M16 (posture note, not enforced here): `getContent` is dual-mode — a read-only 402 challenge
-// fetch when called with no PaymentSignature, but a SETTLING update when a signature is passed
-// (gate.settle moves value INTO the canister's own recipient account). It is the ONLY content-
-// purchase entry point over MCP (the x402 flow the demo uses on both rails), and there is no
-// dedicated capped/confirmed purchase tool to route it through, so denying it here breaks the
-// intended flow. Settlement pays the operator's OWN canister (C-1 recipient binding) rather than an
-// attacker, and the spend caps are documented as outbound-signing-only — so the residual risk is a
-// prompt-injected LLM buying content against a standing ICRC-2 approval, not fund exfiltration. A
-// future dedicated `buy_content` tool (spendGuard + requireConfirmation) is the right fix; until
-// then getContent stays reachable via the get-prefix heuristic below.
-
-function isCallMethodAllowed(method: string): { ok: boolean; reason?: string } {
-  const lower = method.toLowerCase();
-  // The explicit, curated read-only allowlist is authoritative: it wins over the
-  // substring heuristic below. This is required for genuine read-only getters
-  // whose name happens to contain a blocked substring (e.g. getPolicyConfig
-  // contains 'policy', a future getSettings would contain 'set'). ONLY add
-  // verified non-state-changing query methods to READONLY_CALL_ALLOWLIST.
-  if (READONLY_CALL_ALLOWLIST.has(method)) return { ok: true };
-  // Hard block on any signing/admin/value-moving name, even if it would
-  // otherwise match a read-only prefix.
-  for (const bad of CALL_BLOCK_SUBSTRINGS) {
-    if (lower.includes(bad)) {
-      return {
-        ok: false,
-        reason: `Method "${method}" looks state-changing/signing (contains "${bad}"). Use the dedicated tool for this action.`,
-      };
-    }
-  }
-  // Fall back to read-only name prefixes for forward-compat with new query
-  // getters, but only after the blocklist above has cleared the name.
-  if (/^(get|list|fetch|is)[A-Z]/.test(method) || /^(get|list|fetch|is)$/.test(method)) {
-    return { ok: true };
-  }
-  return {
-    ok: false,
-    reason: `Method "${method}" is not on the read-only allowlist. The generic "call" tool only permits query/read methods; use a dedicated tool for state-changing or signing operations.`,
-  };
-}
+// isCallMethodAllowed + the READONLY_CALL_ALLOWLIST / CALL_BLOCK_SUBSTRINGS tables live in guards.ts (testable).
 
 server.tool(
   'call',
