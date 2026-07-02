@@ -21,6 +21,8 @@ import {
   divider,
   section,
 } from './util.js';
+import { unwrapOpt, optText, decodeNonce, decodeInlineBlob, formatUsdc } from './codec.js';
+import { demoPayer, signTransferWithAuthorization } from './evm.js';
 
 const BASE_EXPLORER = 'https://sepolia.basescan.org';
 const BASE_REGISTRY = process.env.BASE_REGISTRY_CONTRACT || '(not deployed on Base yet)';
@@ -113,8 +115,7 @@ async function evmUsdcBalance(rpc: string, usdc: string, addr: string): Promise<
  * `[hash]`; a bare string is also tolerated) into a printable hash, or '' if absent.
  */
 function settlementTxHashOf(raw: unknown): string {
-  const v = Array.isArray(raw) ? raw[0] : raw;
-  return typeof v === 'string' && v ? v : '';
+  return optText(raw);
 }
 
 function pubkeyToEvmAddress(compressedHex: string): string | null {
@@ -153,10 +154,7 @@ async function mcpCallAndRender(
     success(`${tool} succeeded`);
     // Render known fields
     if (res.paidAmount != null)
-      state(
-        'Paid',
-        `${res.paidAmount} USDC units ($${(Number(res.paidAmount) / 1_000_000).toFixed(6)})`,
-      );
+      state('Paid', `${res.paidAmount} USDC units ($${formatUsdc(Number(res.paidAmount))})`);
     if (res.body != null)
       state(
         'Response',
@@ -398,7 +396,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               )
             : 0;
           success(
-            `HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${(searchPrice / 1_000_000).toFixed(6)} USDC)`,
+            `HTTP ${searchRes.status} — ${searchCount} payment options, ${searchPrice} ($${formatUsdc(searchPrice)} USDC)`,
           );
         } catch {
           warn('Could not reach search endpoint');
@@ -458,9 +456,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       publicKey: [],
                       asset: [], // single-token chain: empty => canister uses the chain's first token
                       sender: callerPrincipal,
-                      nonce: Array.isArray(nonce)
-                        ? nonce
-                        : Array.from(Buffer.from(String(nonce), 'hex')),
+                      nonce: decodeNonce(nonce),
                       authorization: [],
                     };
 
@@ -486,12 +482,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       }
                       const del = delivery?.delivery as Record<string, unknown>;
                       if (del && 'inline' in del) {
-                        const inlineData = del.inline;
-                        let buf: Buffer | null = null;
-                        if (typeof inlineData === 'string') buf = Buffer.from(inlineData, 'hex');
-                        else if (Array.isArray(inlineData))
-                          buf = Buffer.from(inlineData as number[]);
-                        if (buf && buf.length > 0) {
+                        const buf = decodeInlineBlob(del.inline);
+                        if (buf.length > 0) {
                           success(`Content received: ${buf.length} bytes`);
                           showImage(buf, 'ic402-logo-paid.png');
                         } else {
@@ -553,16 +545,12 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                   payTo = String(evmReq.recipient ?? '');
                   amount = Number(evmReq.amount ?? 0);
                   const nonceVal = evmReq.nonce;
-                  freshNonce = Array.isArray(nonceVal)
-                    ? nonceVal
-                    : Array.from(Buffer.from(String(nonceVal), 'hex'));
+                  freshNonce = decodeNonce(nonceVal);
                   // Extract token name/version — Candid opt fields come as [value] or []
-                  const tnRaw = evmReq.tokenName;
-                  const tn = Array.isArray(tnRaw) ? tnRaw[0] : tnRaw;
-                  if (typeof tn === 'string' && tn) tName = tn;
-                  const tvRaw = evmReq.tokenVersion;
-                  const tv = Array.isArray(tvRaw) ? tvRaw[0] : tvRaw;
-                  if (typeof tv === 'string' && tv) tVersion = tv;
+                  const tn = optText(evmReq.tokenName);
+                  if (tn) tName = tn;
+                  const tv = optText(evmReq.tokenVersion);
+                  if (tv) tVersion = tv;
                 }
               }
 
@@ -586,7 +574,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 );
                 state('  ', 'Canister pays gas (~30B cycles). Client pays nothing.');
                 info('');
-                state('  Amount', `${(amount / 1_000_000).toFixed(6)} USDC → ${payTo}`);
+                state('  Amount', `${formatUsdc(amount)} USDC → ${payTo}`);
 
                 info('');
                 // The payer key. MUST be a CLEAN EOA (no code): Circle's USDC rejects EIP-3009
@@ -594,18 +582,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 // evmCodeLen). Default to a deterministic demo EOA; override with a funded key via
                 // IC402_DEMO_EVM_KEY. (Hardhat #0 is deliberately NOT used — it is 7702-delegated
                 // on most testnets, which is exactly what blocked EVM settlement before.)
-                const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
-                const TEST_KEY = envKey
-                  ? Buffer.from(envKey, 'hex')
-                  : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
-                const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
-                const testAddr =
-                  '0x' +
-                  Buffer.from(keccak_256(testPubUncompressed.slice(1)))
-                    .slice(-20)
-                    .toString('hex');
+                const payer = demoPayer();
+                const testAddr = payer.address;
                 info(
-                  `Signing as ${testAddr} (${envKey ? 'IC402_DEMO_EVM_KEY' : 'deterministic demo EOA'})...`,
+                  `Signing as ${testAddr} (${payer.fromEnv ? 'IC402_DEMO_EVM_KEY' : 'deterministic demo EOA'})...`,
                 );
 
                 // EIP-7702 / contract-account preflight: if the payer has code, Circle's
@@ -635,76 +615,28 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 crypto.getRandomValues(authNonce);
 
                 // EIP-712 signing (same logic as MetaMask/ethers/viem)
-                const pad32 = (hex: string) => {
-                  const b = Buffer.from(hex.replace(/^0x/, ''), 'hex');
-                  const p = new Uint8Array(32);
-                  p.set(b, 32 - b.length);
-                  return p;
-                };
-                const u256 = (n: number) => {
-                  const b = new Uint8Array(32);
-                  let v = BigInt(n);
-                  for (let i = 31; i >= 0; i--) {
-                    b[i] = Number(v & 0xffn);
-                    v >>= 8n;
-                  }
-                  return b;
-                };
-                const cat = (...a: Uint8Array[]) => {
-                  const o = new Uint8Array(a.reduce((s, x) => s + x.length, 0));
-                  let off = 0;
-                  for (const x of a) {
-                    o.set(x, off);
-                    off += x.length;
-                  }
-                  return o;
-                };
-                const enc = (s: string) => new TextEncoder().encode(s);
-                const typeHash = keccak_256(
-                  enc(
-                    'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)',
-                  ),
+                const sig = signTransferWithAuthorization(
+                  payer.key,
+                  {
+                    name: tName,
+                    version: tVersion,
+                    chainId: selectedChain.chainId,
+                    verifyingContract: selectedChain.usdc,
+                  },
+                  {
+                    from: testAddr,
+                    to: payTo,
+                    value: amount,
+                    validAfter,
+                    validBefore,
+                    nonce: authNonce,
+                  },
                 );
-                const authTypeHash = keccak_256(
-                  enc(
-                    'TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)',
-                  ),
-                );
-                const domSep = keccak_256(
-                  cat(
-                    typeHash,
-                    keccak_256(enc(tName)),
-                    keccak_256(enc(tVersion)),
-                    u256(selectedChain.chainId),
-                    pad32(selectedChain.usdc),
-                  ),
-                );
-                const structHash = keccak_256(
-                  cat(
-                    authTypeHash,
-                    pad32(testAddr),
-                    pad32(payTo),
-                    u256(amount),
-                    u256(validAfter),
-                    u256(validBefore),
-                    authNonce,
-                  ),
-                );
-                const digest = keccak_256(cat(new Uint8Array([0x19, 0x01]), domSep, structHash));
-
-                // @noble/curves v2: prehash defaults to TRUE — force false to sign the
-                // EIP-712 digest directly. 'recovered' format = [recovery(1), r(32), s(32)].
-                const sig = secp256k1.sign(digest, TEST_KEY, {
-                  lowS: true,
-                  prehash: false,
-                  format: 'recovered',
-                });
-                const v = sig[0] + 27;
 
                 section('EIP-712 Typed Data (what the wallet signs)');
                 state('  from', testAddr);
                 state('  to', payTo);
-                state('  value', `${amount} (${(amount / 1_000_000).toFixed(6)} USDC)`);
+                state('  value', `${amount} (${formatUsdc(amount)} USDC)`);
                 state('  domain', `${tName} v${tVersion} on chainId ${selectedChain.chainId}`);
 
                 info('');
@@ -726,9 +658,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       validAfter,
                       validBefore,
                       nonce: Array.from(authNonce),
-                      v,
-                      r: Array.from(sig.slice(1, 33)),
-                      s: Array.from(sig.slice(33, 65)),
+                      v: sig.v,
+                      r: sig.r,
+                      s: sig.s,
                     },
                   ],
                 };
@@ -755,11 +687,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                     }
                     const del = delivery?.delivery as Record<string, unknown>;
                     if (del && 'inline' in del) {
-                      const inlineData = del.inline;
-                      let buf: Buffer | null = null;
-                      if (typeof inlineData === 'string') buf = Buffer.from(inlineData, 'hex');
-                      else if (Array.isArray(inlineData)) buf = Buffer.from(inlineData as number[]);
-                      if (buf && buf.length > 0) {
+                      const buf = decodeInlineBlob(del.inline);
+                      if (buf.length > 0) {
                         success(`Content received: ${buf.length} bytes`);
                         showImage(buf, 'ic402-logo-paid.png');
                       } else {
@@ -802,7 +731,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       const isBalance = bal >= 0n && bal < BigInt(amount);
                       if (isBalance) {
                         info(
-                          `On-chain: payer holds ${(Number(bal) / 1e6).toFixed(6)} USDC, needs ${(amount / 1e6).toFixed(6)}.`,
+                          `On-chain: payer holds ${formatUsdc(Number(bal))} USDC, needs ${formatUsdc(amount)}.`,
                         );
                         info(`The signature was ACCEPTED — the payer ${testAddr} just has no USDC`);
                         info(
@@ -980,17 +909,14 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                       // the same robust way Step 3's working ICP/EVM rails do. (sender stays ''
                       // so the canister cleanly rejects this probe — settle runs before the
                       // deleted-content check, so a valid sender would actually charge for it.)
-                      nonce: (() => {
-                        const raw = (
+                      nonce: decodeNonce(
+                        (
                           (payObj.paymentRequired as Record<string, unknown>[])?.[0] as Record<
                             string,
                             unknown
                           >
-                        )?.nonce;
-                        return Array.isArray(raw)
-                          ? (raw as number[])
-                          : Array.from(Buffer.from(String(raw ?? ''), 'hex'));
-                      })(),
+                        )?.nonce,
+                      ),
                       authorization: [],
                     },
                   ],
@@ -1419,15 +1345,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const approxQueries = cpc > 0 ? Math.floor(sugg / cpc) : 0;
           state(
             'Suggested deposit',
-            `${intentObj.suggestedDeposit} units ($${(sugg / 1_000_000).toFixed(6)}${approxQueries ? ` — ~${approxQueries} queries` : ''})`,
+            `${intentObj.suggestedDeposit} units ($${formatUsdc(sugg)}${approxQueries ? ` — ~${approxQueries} queries` : ''})`,
           );
           state(
             'Cost per call',
-            `${(intentObj.costPerCall as unknown[])?.[0] ?? '?'} units ($${(cpc / 1_000_000).toFixed(6)})`,
+            `${(intentObj.costPerCall as unknown[])?.[0] ?? '?'} units ($${formatUsdc(cpc)})`,
           );
           state(
             'Min deposit',
-            `${(intentObj.minDeposit as unknown[])?.[0] ?? '?'} units ($${(minDep / 1_000_000).toFixed(6)})`,
+            `${(intentObj.minDeposit as unknown[])?.[0] ?? '?'} units ($${formatUsdc(minDep)})`,
           );
         }
 
@@ -1484,8 +1410,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           info('');
           state('Queries accepted', `${succeeded}/${questions.length}`);
           state('On-chain txns', '0 (vouchers verified in-canister)');
-          state('Total consumed', `${lastConsumed} ($${(lastConsumed / 1_000_000).toFixed(6)})`);
-          state('Remaining', `${lastRemaining} ($${(lastRemaining / 1_000_000).toFixed(6)})`);
+          state('Total consumed', `${lastConsumed} ($${formatUsdc(lastConsumed)})`);
+          state('Remaining', `${lastRemaining} ($${formatUsdc(lastRemaining)})`);
           return succeeded;
         }
 
@@ -1518,16 +1444,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           // Sign the EIP-3009 deposit with a CLEAN EOA (no code) — same as Step 3. Circle's USDC
           // rejects EIP-3009 from a contract / EIP-7702-delegated address (Hardhat #0), so never
           // use that key here either. Override with IC402_DEMO_EVM_KEY (a funded clean key).
-          const envKey = process.env.IC402_DEMO_EVM_KEY?.replace(/^0x/, '');
-          const TEST_KEY = envKey
-            ? Buffer.from(envKey, 'hex')
-            : Buffer.from(keccak_256(new TextEncoder().encode('ic402-demo-evm-payer-v1')));
-          const testPubUncompressed = secp256k1.getPublicKey(TEST_KEY, false);
-          const testAddr =
-            '0x' +
-            Buffer.from(keccak_256(testPubUncompressed.slice(1)))
-              .slice(-20)
-              .toString('hex');
+          const payer = demoPayer();
+          const testAddr = payer.address;
 
           // EIP-7702 / contract-account preflight: a code-bearing payer is rejected by Circle's USDC.
           const sessionPayerCode = await evmCodeLen(chain.rpc, testAddr);
@@ -1551,78 +1469,27 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           const authNonce = new Uint8Array(32);
           crypto.getRandomValues(authNonce);
 
-          const pad32 = (hex: string) => {
-            const b = Buffer.from(hex.replace(/^0x/, ''), 'hex');
-            const p = new Uint8Array(32);
-            p.set(b, 32 - b.length);
-            return p;
-          };
-          const u256 = (n: number) => {
-            const b = new Uint8Array(32);
-            let v = BigInt(n);
-            for (let i = 31; i >= 0; i--) {
-              b[i] = Number(v & 0xffn);
-              v >>= 8n;
-            }
-            return b;
-          };
-          const cat = (...a: Uint8Array[]) => {
-            const o = new Uint8Array(a.reduce((s, x) => s + x.length, 0));
-            let off = 0;
-            for (const x of a) {
-              o.set(x, off);
-              off += x.length;
-            }
-            return o;
-          };
-          const enc = (s: string) => new TextEncoder().encode(s);
-          const typeHash = keccak_256(
-            enc(
-              'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)',
-            ),
+          const sig = signTransferWithAuthorization(
+            payer.key,
+            {
+              name: tName,
+              version: tVersion,
+              chainId: chain.chainId,
+              verifyingContract: chain.usdc,
+            },
+            {
+              from: testAddr,
+              to: evmAddr,
+              value: depositAmount,
+              validAfter,
+              validBefore,
+              nonce: authNonce,
+            },
           );
-          const authTypeHash = keccak_256(
-            enc(
-              'TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)',
-            ),
-          );
-          const domSep = keccak_256(
-            cat(
-              typeHash,
-              keccak_256(enc(tName)),
-              keccak_256(enc(tVersion)),
-              u256(chain.chainId),
-              pad32(chain.usdc),
-            ),
-          );
-          const structHash = keccak_256(
-            cat(
-              authTypeHash,
-              pad32(testAddr),
-              pad32(evmAddr),
-              u256(depositAmount),
-              u256(validAfter),
-              u256(validBefore),
-              authNonce,
-            ),
-          );
-          const digest = keccak_256(cat(new Uint8Array([0x19, 0x01]), domSep, structHash));
-
-          // @noble/curves v2: prehash defaults to TRUE — force false to sign the
-          // EIP-712 digest directly. 'recovered' format = [recovery(1), r(32), s(32)].
-          const sig = secp256k1.sign(digest, TEST_KEY, {
-            lowS: true,
-            prehash: false,
-            format: 'recovered',
-          });
-          const v = sig[0] + 27;
 
           divider();
           state('  Chain', `${chain.name} (${evmNetwork})`);
-          state(
-            '  Deposit',
-            `${(depositAmount / 1_000_000).toFixed(6)} USDC (${depositAmount} units)`,
-          );
+          state('  Deposit', `${formatUsdc(depositAmount)} USDC (${depositAmount} units)`);
           state('  From', testAddr);
           state('  To', evmAddr);
           state('  Method', 'EIP-3009 TransferWithAuthorization');
@@ -1646,9 +1513,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 validAfter,
                 validBefore,
                 nonce: Array.from(authNonce),
-                v,
-                r: Array.from(sig.slice(1, 33)),
-                s: Array.from(sig.slice(33, 65)),
+                v: sig.v,
+                r: sig.r,
+                s: sig.s,
               },
             })) as Record<string, unknown>;
 
@@ -1748,7 +1615,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             ) {
               info(`The clean-EOA signature is accepted; the deposit just needs funding.`);
               info(
-                `Fund ${testAddr} with ${chain.name} USDC (faucet.circle.com) ≥ ${(depositAmount / 1e6).toFixed(6)}, then re-run.`,
+                `Fund ${testAddr} with ${chain.name} USDC (faucet.circle.com) ≥ ${formatUsdc(depositAmount)}, then re-run.`,
               );
               throw new KnownIssueError(
                 `${chain.name}: EVM session deposit needs a funded payer`,
@@ -1804,14 +1671,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           state('Session ID', sessionId);
           const dep = Number(session.deposited ?? 0);
           const rem = Number(session.remaining ?? session.deposited ?? 0);
-          state(
-            'Deposited',
-            `${session.deposited ?? '?'} units ($${(dep / 1_000_000).toFixed(6)})`,
-          );
-          state(
-            'Remaining',
-            `${session.remaining ?? '?'} units ($${(rem / 1_000_000).toFixed(6)})`,
-          );
+          state('Deposited', `${session.deposited ?? '?'} units ($${formatUsdc(dep)})`);
+          state('Remaining', `${session.remaining ?? '?'} units ($${formatUsdc(rem)})`);
           state('Cost per call', '500 units ($0.0005, per the example policy)');
           state('Status', 'OPEN');
 
@@ -1889,8 +1750,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info('');
         info('Checking Base registration...');
         const agentIdResult = await mcpCall(client, 'call', { method: 'getAgentId', args: '[]' });
-        const agentIdArr = agentIdResult as unknown[];
-        const agentId = Array.isArray(agentIdArr) && agentIdArr.length > 0 ? agentIdArr[0] : null;
+        const agentId = unwrapOpt(agentIdResult);
 
         if (agentId != null) {
           success(`Already registered — ERC-721 #${agentId} on Base Sepolia`);
@@ -2106,11 +1966,11 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         // opt Nat/Int decode to [] | [value]; unwrap, then format atomic USDC (6dp) to dollars
         // or nanosecond durations to hours. Values are small — well within Number's safe range.
         const optNum = (v: unknown): number | undefined => {
-          const a = v as unknown[] | undefined;
-          return a && a.length > 0 ? Number(a[0]) : undefined;
+          const x = unwrapOpt(v);
+          return x === undefined ? undefined : Number(x);
         };
         const usd = (v: number | undefined): string =>
-          v === undefined ? 'unset (no limit)' : `$${(v / 1_000_000).toFixed(6)}`;
+          v === undefined ? 'unset (no limit)' : `$${formatUsdc(v)}`;
         const hrs = (ns: number | undefined): string =>
           ns === undefined ? 'unset' : `${ns / 3_600_000_000_000}h`;
         try {
