@@ -16,6 +16,7 @@
 ///   5. Canister settles payment and returns content
 
 import Types "Types";
+import EvmUtils "EvmUtils";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Nat "mo:base/Nat";
@@ -223,7 +224,7 @@ module {
           validAfter;
           validBefore;
           nonce = Blob.fromArray(hexToBytes(authzNonce));
-          v = if (v >= 27) { v - 27 : Nat8 } else { v };
+          v = EvmUtils.recoveryIdFromV(v); // 27/28 → 0/1 for ic402's internal ecRecover
           r;
           s;
         };
@@ -435,7 +436,7 @@ module {
         validAfter;
         validBefore;
         nonce = Blob.fromArray(hexToBytes(nonce));
-        v = if (v >= 27) { v - 27 : Nat8 } else { v }; // Normalize v (27/28 → 0/1)
+        v = EvmUtils.recoveryIdFromV(v); // 27/28 → 0/1 for ic402's internal ecRecover
         r;
         s;
       };

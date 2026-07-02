@@ -64,6 +64,42 @@ module {
     ?sorted[(sorted.size() - 1) / 2];
   };
 
+  /// Build the EIP-3009 `transferWithAuthorization` calldata (selector 0xe3ee160e).
+  /// Pure + module-scoped so the on-chain encoding is unit-testable WITHOUT a broadcast
+  /// (that opacity is exactly what let the v-form bug reach mainnet).
+  ///
+  /// MONEY-PATH INVARIANT: the payer's signature `v` arrives here in ic402's internal 0/1
+  /// recovery-id form (HttpHandler normalized it for ecRecover). USDC's on-chain `ecrecover`
+  /// requires 27/28, so the v word is denormalized via `chainVFromRecoveryId`. Encoding the
+  /// raw 0/1 makes the contract recover the wrong signer and REVERT — no funds move.
+  public func buildTransferWithAuthorizationCalldata(
+    from : [Nat8],       // 20 bytes
+    to : [Nat8],         // 20 bytes
+    value : Nat,
+    validAfter : Nat,
+    validBefore : Nat,
+    authNonce : [Nat8],  // 32 bytes
+    v : Nat8,            // 0/1 recovery id (as normalized on ingress)
+    r : [Nat8],          // 32 bytes
+    s : [Nat8],          // 32 bytes
+  ) : [Nat8] {
+    let selector : [Nat8] = [0xe3, 0xee, 0x16, 0x0e];
+    EvmUtils.abiEncodeFunctionCall(
+      selector,
+      [
+        #static_(EvmUtils.natToBytes(EvmUtils.bytesToNat(from), 32)),                        // from (address)
+        #static_(EvmUtils.natToBytes(EvmUtils.bytesToNat(to), 32)),                          // to (address)
+        #static_(EvmUtils.abiEncodeUint256(value)),                                          // value
+        #static_(EvmUtils.abiEncodeUint256(validAfter)),                                     // validAfter
+        #static_(EvmUtils.abiEncodeUint256(validBefore)),                                    // validBefore
+        #static_(authNonce),                                                                  // nonce (bytes32)
+        #static_(EvmUtils.abiEncodeUint256(Nat8.toNat(EvmUtils.chainVFromRecoveryId(v)))),  // v (27/28 on-chain form)
+        #static_(r),                                                                          // r (bytes32)
+        #static_(s),                                                                          // s (bytes32)
+      ],
+    );
+  };
+
   /// EVM transaction sender with tECDSA signing.
   public class EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) {
 
@@ -336,22 +372,18 @@ module {
       r : [Nat8],          // 32 bytes
       s : [Nat8],          // 32 bytes
     ) : async { #ok : Text; #err : Text } {
-      // Build transferWithAuthorization calldata
-      // selector: 0xe3ee160e
-      let selector : [Nat8] = [0xe3, 0xee, 0x16, 0x0e];
-      let calldata = EvmUtils.abiEncodeFunctionCall(
-        selector,
-        [
-          #static_(EvmUtils.natToBytes(EvmUtils.bytesToNat(from), 32)),     // from (address)
-          #static_(EvmUtils.natToBytes(EvmUtils.bytesToNat(to), 32)),       // to (address)
-          #static_(EvmUtils.abiEncodeUint256(value)),                       // value
-          #static_(EvmUtils.abiEncodeUint256(validAfter)),                  // validAfter
-          #static_(EvmUtils.abiEncodeUint256(validBefore)),                 // validBefore
-          #static_(authNonce),                                               // nonce (bytes32)
-          #static_(EvmUtils.abiEncodeUint256(Nat8.toNat(v))),              // v (uint8 as uint256)
-          #static_(r),                                                       // r (bytes32)
-          #static_(s),                                                       // s (bytes32)
-        ],
+      // Build calldata via the pure module-level encoder, which denormalizes v (0/1 → 27/28)
+      // for the on-chain ecrecover. Kept out of this async fn so it is unit-testable.
+      let calldata = buildTransferWithAuthorizationCalldata(
+        from,
+        to,
+        value,
+        validAfter,
+        validBefore,
+        authNonce,
+        v,
+        r,
+        s,
       );
       // transferWithAuthorization uses more gas than a simple transfer (~80k)
       // B2: collapse #maybeSent → #err. Unlike the outbound rail, the INBOUND EIP-3009

@@ -179,6 +179,19 @@ module {
     natToBytes(n, 32);
   };
 
+  // ── ECDSA signature `v` representation ─────────────────────────────────────
+  // Wallets sign EIP-3009 authorizations with v ∈ {27, 28} — the form Ethereum's on-chain
+  // `ecrecover` (and USDC's `transferWithAuthorization`) require. ic402's internal `ecRecover`
+  // uses the 0/1 recovery id instead. These two idempotent conversions NAME that seam so every
+  // site declares which form it means, instead of a scattered `if v >= 27`: mixing them up
+  // recovers the wrong signer (0/1 in on-chain calldata reverts every EIP-3009 transfer).
+
+  /// As-signed v (27/28) → recovery id (0/1) for ic402's internal ecRecover. Idempotent.
+  public func recoveryIdFromV(v : Nat8) : Nat8 { if (v >= 27) { v - 27 : Nat8 } else { v } };
+
+  /// Recovery id (0/1) → on-chain signature v (27/28) that ecrecover requires. Idempotent.
+  public func chainVFromRecoveryId(v : Nat8) : Nat8 { if (v < 27) { v + 27 : Nat8 } else { v } };
+
   /// Encode a Bool as uint256 (0 or 1).
   public func abiEncodeBool(b : Bool) : [Nat8] {
     abiEncodeUint256(if (b) 1 else 0);
