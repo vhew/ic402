@@ -1,0 +1,68 @@
+name: EngramX canary
+
+# Protects the flagship consumer: builds + Motoko-tests EngramX (which pins `ic402`) against THIS
+# repo's HEAD, so an ic402 change that breaks EngramX fails HERE — before it's released.
+#
+# Mechanism (verified against the real repos): EngramX imports `mo:ic402/ic402/*`; mops resolves a
+# sibling local-path dep; `mops test` compiles EngramX's canister against the overridden ic402 and
+# runs its Motoko suites (~2s, no replica). This is the fast build-only tier — not EngramX's
+# replica-backed integration/EVM tests.
+#
+# EngramX is currently PRIVATE, so the checkout uses ENGRAMX_READ_TOKEN (a read-only token/deploy
+# key, scoped to the `canary` environment — which must have NO branch restriction, or PR runs are
+# blocked). When EngramX goes public: drop the token, the `environment:` line, and the fork guard.
+# Fork PRs are skipped (GitHub withholds secrets from them) rather than failing.
+#
+# TODO before first run: confirm the EngramX repo path below (owner/name).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '0 7 * * *' # nightly drift check
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engramx-canary:
+    # Same-repo events only: a fork PR can't (and shouldn't) reach ENGRAMX_READ_TOKEN.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: canary # scopes ENGRAMX_READ_TOKEN to this job
+    steps:
+      - name: Checkout ic402 (HEAD under test)
+        uses: actions/checkout@v4
+        with:
+          path: ic402
+
+      - name: Checkout EngramX (private, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: vhew/engramx # <-- confirm the real owner/name
+          token: ${{ secrets.ENGRAMX_READ_TOKEN }}
+          path: engramx
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+      - uses: ZenVoich/setup-mops@v1
+
+      # Repoint EngramX's ic402 dep from the pinned registry version to this checkout (siblings:
+      # ./ic402 and ./engramx). Matches the verified local rehearsal.
+      - name: Point EngramX at ic402 HEAD
+        run: |
+          sed -i 's#^ic402 = .*#ic402 = "../ic402"#' engramx/mops.toml
+          echo "override: $(grep '^ic402' engramx/mops.toml)"
+
+      - name: Build + Motoko-test EngramX against ic402 HEAD
+        working-directory: engramx
+        run: |
+          mops install
+          mops test
