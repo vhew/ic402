@@ -671,16 +671,16 @@ persistent actor KnowledgeBase {
 
   // Admin: upload/delete (controller-only)
   public shared(msg) func uploadContent(id : Text, mimeType : Text, data : Blob) : async Ic402.ContentStoreResult {
-    assert(Principal.isController(msg.caller)); store.put(id, mimeType, data);
+    requireController(msg.caller); store.put(id, mimeType, data);
   };
   public shared(msg) func uploadContentInit(id : Text, mimeType : Text, totalSize : Nat, chunkCount : Nat) : async Ic402.ContentStoreResult {
-    assert(Principal.isController(msg.caller)); store.putChunkedInit(id, mimeType, totalSize, chunkCount);
+    requireController(msg.caller); store.putChunkedInit(id, mimeType, totalSize, chunkCount);
   };
   public shared(msg) func uploadContentChunk(id : Text, index : Nat, data : Blob) : async Ic402.ContentStoreResult {
-    assert(Principal.isController(msg.caller)); store.putChunk(id, index, data);
+    requireController(msg.caller); store.putChunk(id, index, data);
   };
   public shared(msg) func deleteContent(id : Text) : async Ic402.ContentStoreResult {
-    assert(Principal.isController(msg.caller)); store.delete(id);
+    requireController(msg.caller); store.delete(id);
   };
   public query func listContent() : async [Ic402.ContentEntry] { store.list() };
 
@@ -773,7 +773,7 @@ persistent actor KnowledgeBase {
     delivery : Ic402.ServiceDeliveryMethod,
     timeout : Nat,
   ) : async { #ok : Text; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     let verification : Ic402.VerificationMethod = switch (verificationMethod) {
       case ("AutoSettle") { #AutoSettle };
       case ("HashMatch") { #HashMatch };
@@ -819,12 +819,12 @@ persistent actor KnowledgeBase {
   };
 
   public shared(msg) func enableService(id : Text) : async { #ok; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     registry.enableService(msg.caller, id);
   };
 
   public shared(msg) func disableService(id : Text) : async { #ok; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     registry.disableService(msg.caller, id);
   };
 
@@ -944,7 +944,7 @@ persistent actor KnowledgeBase {
   // Observability (controller-only): list a service's jobs, optionally filtered by status —
   // e.g. statusFilter = ?#Settling to enumerate jobs parked mid-settlement.
   public shared query (msg) func listJobs(serviceId : Text, statusFilter : ?Ic402.JobStatus) : async [Ic402.Job] {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     registry.listJobs(serviceId, statusFilter);
   };
 
@@ -976,7 +976,7 @@ persistent actor KnowledgeBase {
     tokenName : Text,
     tokenVersion : Text,
   ) : async { #ok : Ic402.SignedAuthorization; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await signer.signEip3009Authorization(chainId, tokenAddress, recipient, amount, tokenName, tokenVersion);
   };
 
@@ -990,7 +990,7 @@ persistent actor KnowledgeBase {
     maxFeePerGas : Nat,
     maxPriorityFeePerGas : Nat,
   ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await signer.signErc20Transfer(chainId, tokenAddress, recipientAddress, amount, nonce, maxFeePerGas, maxPriorityFeePerGas);
   };
 
@@ -1004,7 +1004,7 @@ persistent actor KnowledgeBase {
     maxFeePerGas : Nat,
     maxPriorityFeePerGas : Nat,
   ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await signer.signEthTransfer(chainId, recipientAddress, amountWei, gasLimit, nonce, maxFeePerGas, maxPriorityFeePerGas);
   };
 
@@ -1015,7 +1015,7 @@ persistent actor KnowledgeBase {
     maxFeePerGas : Nat,
     maxPriorityFeePerGas : Nat,
   ) : async { #ok : Ic402.SignedTransaction; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await signer.signRegistration(
       "0x140D228d099367c273fDCD3C4Bfd87342ad7a8D2",
       84532,
@@ -1038,7 +1038,7 @@ persistent actor KnowledgeBase {
     domainSeparator : [Nat8],
     structHash : [Nat8],
   ) : async { #ok : Ic402.SignedTypedData; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await signer.signTypedData(domainSeparator, structHash);
   };
 
@@ -1067,7 +1067,7 @@ persistent actor KnowledgeBase {
   // ═══════════════════════════════════════════════════════════════════════
 
   public shared(msg) func setPolicy(p : Ic402.SpendingPolicy) : async () {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.setPolicy(null, p);
   };
 
@@ -1094,7 +1094,7 @@ persistent actor KnowledgeBase {
     jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat };
     sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat };
   } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     {
       cyclesBalance = Cycles.balance();
       jobs = registry.jobCounts();
@@ -1103,7 +1103,7 @@ persistent actor KnowledgeBase {
   };
 
   public shared(msg) func forceCloseSession(sessionId : Text) : async Ic402.PaymentResult {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await gate.forceCloseSession(sessionId);
   };
 
@@ -1111,7 +1111,7 @@ persistent actor KnowledgeBase {
   // the stored parked tx, re-polls it on-chain, and finalizes #Settled/#Refunded ONLY on a mined
   // status==1 — never re-broadcasts. Use `health`/`listJobs` to find parked jobs (#Settling).
   public shared(msg) func reconcileJob(jobId : Text) : async { #ok : Text; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await registry.reconcileJob(jobId);
   };
 
@@ -1120,12 +1120,12 @@ persistent actor KnowledgeBase {
   // yourself, then force the record to a terminal state so it stops pinning memory. STATE
   // assertion only — these move NO funds; reconcile any real fund movement out-of-band.
   public shared(msg) func resolveJob(jobId : Text, terminal : Ic402.JobStatus) : async { #ok; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     registry.resolveJob(jobId, terminal);
   };
 
   public shared(msg) func forceResolveSession(sessionId : Text) : async { #ok; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.forceResolveSession(sessionId);
   };
 
@@ -1135,7 +1135,7 @@ persistent actor KnowledgeBase {
   // refund is unsent) — use forceResolveSession + sweepEvm there. Find parked sessions via
   // `health` (sessions.closing).
   public shared(msg) func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await gate.reconcileSession(sessionId);
   };
 
@@ -1151,7 +1151,7 @@ persistent actor KnowledgeBase {
     #pending : Text;
     #err : Text;
   } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await gate.sendErc20TransferConfirmed(chainId, token, to, amount);
   };
 
@@ -1166,24 +1166,24 @@ persistent actor KnowledgeBase {
   //   4. setEvmDrainMode(false)         — resume (drain mode auto-resets on upgrade too)
 
   public shared query (msg) func pendingEvmDepositCount() : async Nat {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.pendingEvmDepositCount();
   };
 
   public shared query (msg) func listPendingEvmDeposits() : async [{
     txHash : Text; payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int;
   }] {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.listPendingEvmDeposits();
   };
 
   public shared (msg) func setEvmDrainMode(on : Bool) : async () {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.setEvmDrainMode(on);
   };
 
   public shared query (msg) func getEvmDrainMode() : async Bool {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     gate.getEvmDrainMode();
   };
 
@@ -1192,7 +1192,7 @@ persistent actor KnowledgeBase {
   public shared (msg) func reconcileEvmDeposit(txHash : Text) : async {
     #refunded : Text; #reverted; #stillPending; #notFound; #err : Text;
   } {
-    assert(Principal.isController(msg.caller));
+    requireController(msg.caller);
     await gate.reconcileEvmDeposit(txHash);
   };
 
@@ -1201,6 +1201,13 @@ persistent actor KnowledgeBase {
   };
 
   // ── Internal stubs ──
+
+  // Controller-only guard for admin/observability endpoints. Named (vs a bare `assert`) so the
+  // auth policy lives in one place, an omission on a new endpoint is visible in review, and the
+  // trap carries a clear reason instead of "assertion failed".
+  func requireController(caller : Principal) {
+    if (not Principal.isController(caller)) { Debug.trap("Unauthorized: controller-only endpoint") };
+  };
 
   func doSearch(q : Text) : [Text] {
     ["ic402: payment library for ICP canisters", "Query: " # q]

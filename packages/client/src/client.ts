@@ -1,4 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
+import { unwrapOpt, unwrapOptNat, toByteArray, toBytes } from './candid.js';
 
 /** Minimal identity interface — any ICP identity that can provide a principal. */
 export interface Ic402Identity {
@@ -133,7 +134,7 @@ export class Ic402Client {
       // documented auto-pay flow before any approve. Normalize to a single requirement,
       // tolerating a bare record for older/mocked callers (matches submitServiceRequest).
       const requirementRaw = result.paymentRequired;
-      const requirement = Array.isArray(requirementRaw) ? requirementRaw[0] : requirementRaw;
+      const requirement = unwrapOpt<{ amount: bigint; nonce: unknown }>(requirementRaw);
       if (!requirement || typeof requirement.amount !== 'bigint') {
         throw new Error(`Malformed paymentRequired response: ${safeStringify(requirementRaw)}`);
       }
@@ -159,15 +160,8 @@ export class Ic402Client {
         throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
       }
 
-      // Construct PaymentSignature from the requirement's nonce and retry. Candid may decode
-      // `vec nat8` as a Uint8Array, a number[], or an indexed object — normalize to number[].
-      const rawNonce = requirement.nonce ?? new Uint8Array(32);
-      const nonce =
-        rawNonce instanceof Uint8Array
-          ? Array.from(rawNonce)
-          : Array.isArray(rawNonce)
-            ? rawNonce
-            : Object.values(rawNonce as Record<string, number>);
+      // Construct PaymentSignature from the requirement's nonce and retry.
+      const nonce = toByteArray(requirement.nonce ?? new Uint8Array(32));
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
       const sig = {
         scheme: 'exact',
@@ -325,13 +319,7 @@ export class Ic402Client {
       async call(method: string, callArgs: unknown[]): Promise<unknown> {
         // Calculate new cumulative amount (costPerCall from intent, or 1 unit)
         // costPerCall is opt nat — Candid decodes as [bigint] or []
-        const rawCost = intent.costPerCall;
-        const cost =
-          Array.isArray(rawCost) && rawCost.length > 0
-            ? BigInt(rawCost[0])
-            : typeof rawCost === 'bigint'
-              ? rawCost
-              : 1n;
+        const cost = unwrapOptNat(intent.costPerCall, 1n);
         // C8: compute the next cumulative/sequence locally and COMMIT them only after the
         // canister accepts the voucher. Previously these were incremented before the await,
         // so a transient failure (throw) or an error variant left consumed/sequence advanced,
@@ -372,13 +360,7 @@ export class Ic402Client {
         // costPerCall is a Candid `opt nat` → decodes to [bigint] (Some) or [] (None),
         // ALWAYS an array, so `?? 1n` never fires and `consumed += array` would throw
         // "Cannot mix BigInt and other types". Mirror the guard in call().
-        const rawCost = intent.costPerCall;
-        const cost =
-          Array.isArray(rawCost) && rawCost.length > 0
-            ? BigInt(rawCost[0])
-            : typeof rawCost === 'bigint'
-              ? rawCost
-              : 1n;
+        const cost = unwrapOptNat(intent.costPerCall, 1n);
         // C8: commit cumulative/sequence only after the canister accepts the voucher
         // (see call() above) so a failed content fetch does not brick the session.
         const nextConsumed = consumed + cost;
@@ -482,11 +464,11 @@ export class Ic402Client {
         // [Uint8Array] (Some). Wrapping the opt array directly — new Uint8Array([bytes]) —
         // coerces the single element to NaN → a 1-byte [0] per chunk, silently returning
         // garbage for paid content. Unwrap the opt, then normalize the blob to bytes.
-        const some = Array.isArray(raw) ? raw[0] : raw;
+        const some = unwrapOpt(raw);
         if (some === undefined || some === null) {
           throw new Error(`Content chunk ${i} unavailable (grant expired or index out of range)`);
         }
-        chunks.push(some instanceof Uint8Array ? some : new Uint8Array(some as ArrayLike<number>));
+        chunks.push(toBytes(some));
       }
       const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
       const result = new Uint8Array(totalLength);
@@ -744,9 +726,8 @@ export class Ic402Client {
         );
       }
 
-      const requirement = result.paymentRequired;
-      const amount =
-        Array.isArray(requirement) && requirement.length > 0 ? requirement[0].amount : 0n;
+      const req0 = unwrapOpt<{ amount: bigint; nonce: unknown }>(result.paymentRequired);
+      const amount = req0?.amount ?? 0n;
 
       // Approve amount + fee buffer (ICRC-2 transfer_from deducts fee from allowance)
       const approveAmount = amount + (this.config.approvalFeeBuffer ?? 100_000n);
@@ -768,14 +749,7 @@ export class Ic402Client {
         );
       }
 
-      // Convert nonce to proper array — Candid may decode vec nat8 as Uint8Array or indexed object
-      const rawNonce = requirement[0]?.nonce ?? new Uint8Array(32);
-      const nonce =
-        rawNonce instanceof Uint8Array
-          ? Array.from(rawNonce)
-          : Array.isArray(rawNonce)
-            ? rawNonce
-            : Object.values(rawNonce as Record<string, number>);
+      const nonce = toByteArray(req0?.nonce ?? new Uint8Array(32));
       // Sender must be the caller's principal — derive from identity if available
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
       const sig = {
@@ -817,7 +791,9 @@ export class Ic402Client {
     for (let i = 0; i < maxAttempts; i++) {
       const job = await actor.getJob(jobId);
       // Candid opt returns [job] or []
-      const j: Job | null = Array.isArray(job) && job.length > 0 ? job[0] : job;
+      // unwrapOpt returns null for an empty opt (job not found) — the old inline form returned the
+      // empty array `[]` (truthy), so the `if (!j)` not-found guard below never fired.
+      const j: Job | null = unwrapOpt<Job>(job) ?? null;
       if (!j) throw new Ic402Error('unknown', `Job not found: ${jobId}`);
 
       const status = j.status;

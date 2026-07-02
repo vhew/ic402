@@ -156,13 +156,8 @@ module {
         let pubKey = await getPublicKey();
         let senderAddr = await getEvmAddress();
 
-        let rpcPrincipal = switch (evmRpcCanister) {
-          case (?p) { p };
-          case (null) { EvmRpc.DEFAULT_CANISTER };
-        };
-        let evmRpc : EvmRpc.EvmRpcCanister = actor (rpcPrincipal);
-        let services = switch (EvmRpc.rpcServices(chainId)) {
-          case (?s) { s };
+        let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+          case (?r) { r };
           case (null) {
             txInProgress := false;
             return #err("Unsupported chain ID: " # Nat.toText(chainId));
@@ -443,13 +438,8 @@ module {
       txHash : Text,
       maxPolls : Nat,
     ) : async { #confirmed; #reverted; #pending; #err : Text } {
-      let rpcPrincipal = switch (evmRpcCanister) {
-        case (?p) { p };
-        case (null) { EvmRpc.DEFAULT_CANISTER };
-      };
-      let evmRpc : EvmRpc.EvmRpcCanister = actor (rpcPrincipal);
-      let services = switch (EvmRpc.rpcServices(chainId)) {
-        case (?s) { s };
+      let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+        case (?r) { r };
         case (null) { return #err("Unsupported chain ID: " # Nat.toText(chainId)) };
       };
       var attempts = 0;

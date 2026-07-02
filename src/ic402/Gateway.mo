@@ -803,18 +803,8 @@ module {
       // Assign a proper receipt ID from the Gateway's counter
       switch (result) {
         case (#ok(receipt)) {
-          #ok({
-            id = nextReceiptId();
-            amount = receipt.amount;
-            token = receipt.token;
-            sender = receipt.sender;
-            recipient = receipt.recipient;
-            network = receipt.network;
-            timestamp = receipt.timestamp;
-            txHash = receipt.txHash;
-            sessionId = receipt.sessionId;
-            refunded = receipt.refunded;
-          });
+          // Re-stamp the id from the Gateway's counter; all other fund fields flow through.
+          #ok({ receipt with id = nextReceiptId() });
         };
         case (other) { other };
       };
@@ -829,18 +819,8 @@ module {
       let result = await sessionsMgr.closeSessionInternal(sessionId);
       switch (result) {
         case (#ok(receipt)) {
-          #ok({
-            id = nextReceiptId();
-            amount = receipt.amount;
-            token = receipt.token;
-            sender = receipt.sender;
-            recipient = receipt.recipient;
-            network = receipt.network;
-            timestamp = receipt.timestamp;
-            txHash = receipt.txHash;
-            sessionId = receipt.sessionId;
-            refunded = receipt.refunded;
-          });
+          // Re-stamp the id from the Gateway's counter; all other fund fields flow through.
+          #ok({ receipt with id = nextReceiptId() });
         };
         case (other) { other };
       };

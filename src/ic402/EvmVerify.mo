@@ -92,16 +92,10 @@ module {
     expectedAmount : Nat,
     evmRpcCanister : ?Text,
   ) : async VerifyResult {
-    let services = switch (rpcServices(chainId)) {
-      case (?s) { s };
+    let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+      case (?r) { r };
       case (null) { return #failed("Unsupported chain ID: " # Nat.toText(chainId)) };
     };
-
-    let rpcPrincipal = switch (evmRpcCanister) {
-      case (?p) { p };
-      case (null) { DEFAULT_EVM_RPC_CANISTER };
-    };
-    let evmRpc : EvmRpcService = actor (rpcPrincipal);
 
     // Call the EVM RPC canister with consensus verification.
     // Attaching cycles to cover the multi-provider outcall cost.

@@ -363,6 +363,20 @@ module {
     null;
   };
 
+  /// Resolve the EVM-RPC canister actor + the provider set for a chain in one step. Returns null on
+  /// an unsupported chain so each caller can surface its own error idiom. `evmRpcCanister` overrides
+  /// the default (local-dev / the scriptable mock); null → DEFAULT_CANISTER.
+  public func resolveRpc(evmRpcCanister : ?Text, chainId : Nat) : ?(EvmRpcCanister, RpcServices) {
+    switch (rpcServices(chainId)) {
+      case (null) { null };
+      case (?services) {
+        let principal = switch (evmRpcCanister) { case (?p) { p }; case (null) { DEFAULT_CANISTER } };
+        let rpc : EvmRpcCanister = actor (principal);
+        ?(rpc, services);
+      };
+    };
+  };
+
   /// Format an RpcError as human-readable text.
   public func rpcErrorToText(err : RpcError) : Text {
     switch (err) {
