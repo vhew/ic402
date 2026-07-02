@@ -21,15 +21,24 @@ module {
 
   /// EIP-3009 TransferWithAuthorization parameters for EVM USDC payments.
   public type Eip3009Authorization = {
-    from : Text;       // payer EVM address (0x-prefixed)
-    to : Text;         // recipient EVM address (0x-prefixed)
-    value : Nat;       // USDC amount
-    validAfter : Nat;  // unix timestamp (seconds)
-    validBefore : Nat; // unix timestamp (seconds)
-    nonce : Blob;      // random bytes32
-    v : Nat8;          // ECDSA recovery id
-    r : Blob;          // 32 bytes
-    s : Blob;          // 32 bytes
+    /// payer EVM address (0x-prefixed)
+    from : Text;
+    /// recipient EVM address (0x-prefixed)
+    to : Text;
+    /// USDC amount
+    value : Nat;
+    /// unix timestamp (seconds)
+    validAfter : Nat;
+    /// unix timestamp (seconds)
+    validBefore : Nat;
+    /// random bytes32
+    nonce : Blob;
+    /// ECDSA recovery id
+    v : Nat8;
+    /// 32 bytes
+    r : Blob;
+    /// 32 bytes
+    s : Blob;
   };
 
   // ── Charge (x402 "exact") ──
@@ -42,9 +51,12 @@ module {
     amount : Nat;
     recipient : Text;
     nonce : Blob;
+    /// Absolute deadline in NANOSECONDS since epoch (Time.now() scale).
     expiry : Int;
-    tokenName : ?Text;    // EIP-712 domain name for 402 extra field. Null = "USD Coin".
-    tokenVersion : ?Text; // EIP-712 domain version for 402 extra field. Null = "2".
+    /// EIP-712 domain name for 402 extra field. Null = "USD Coin".
+    tokenName : ?Text;
+    /// EIP-712 domain version for 402 extra field. Null = "2".
+    tokenVersion : ?Text;
   };
 
   /// Payment signature for x402 settlement.
@@ -61,11 +73,11 @@ module {
     sender : Text;
     nonce : Blob;
     authorization : ?Eip3009Authorization; // EIP-3009 for standard x402 EVM payments. Null for ICP.
-    // EVM token contract (EIP-712 verifyingContract) the payer signed for. `null` for ICP / legacy
-    // clients → the chain's FIRST configured token is used. Enables multi-token-per-chain settlement:
-    // the verifyingContract, EIP-712 domain, and on-chain execution token all key off THIS asset, so
-    // a valid signature for a non-first token is no longer verified against the wrong token's domain.
-    // (Candid `opt` → backward-compatible: an old client that omits it decodes to null.)
+    /// EVM token contract (EIP-712 verifyingContract) the payer signed for. `null` for ICP / legacy
+    /// clients → the chain's FIRST configured token is used. Enables multi-token-per-chain settlement:
+    /// the verifyingContract, EIP-712 domain, and on-chain execution token all key off THIS asset, so
+    /// a valid signature for a non-first token is no longer verified against the wrong token's domain.
+    /// (Candid `opt` → backward-compatible: an old client that omits it decodes to null.)
     asset : ?Text;
   };
 
@@ -106,12 +118,17 @@ module {
   // ── Session (escrow + cumulative vouchers) ──
 
   /// Session offer describing deposit, cost, and expiry for the client.
+  /// The credited deposit at open is min(suggestedDeposit, the client's SessionConfig.maxDeposit),
+  /// and must be ≥ minDeposit (else #depositBelowMinimum). Setting minDeposit > suggestedDeposit
+  /// makes the intent unsatisfiable. `costPerCall` is advisory pricing information for the
+  /// client; the library does not enforce it per voucher. `expiry` is NANOSECONDS since epoch.
   public type SessionIntent = {
     network : Text;
     token : Text;
     recipient : Text;
     suggestedDeposit : Nat;
     minDeposit : ?Nat;
+    /// Absolute deadline in NANOSECONDS since epoch (Time.now() scale).
     expiry : Int;
     costPerCall : ?Nat;
     description : ?Text;
@@ -121,6 +138,7 @@ module {
   public type SessionConfig = {
     maxDeposit : Nat;
     autoClose : Bool;
+    /// NANOSECONDS; null = inherit the effective policy's sessionIdleTimeout.
     idleTimeout : ?Int;
   };
 
@@ -146,6 +164,12 @@ module {
   };
 
   /// Cumulative payment voucher signed by the session payer.
+  /// `signature` is a 64-byte Ed25519 signature (by the publicKey registered at openSession)
+  /// over the CBOR array [text(verifyingCanisterId), text(sessionId), uint(cumulativeAmount),
+  /// uint(sequence)] — see Sessions.encodeVoucherPayload; the canister principal is bound in,
+  /// so a voucher cannot be replayed against another canister. `cumulativeAmount` is the
+  /// running TOTAL (not a delta), strictly increasing and ≤ the session deposit; values above
+  /// Nat64 max are rejected (#payloadOverflow).
   public type Voucher = {
     sessionId : Text;
     cumulativeAmount : Nat;
@@ -177,7 +201,9 @@ module {
     rateLimitPerMinute : ?Nat;
     maxSessionDeposit : ?Nat;
     maxConcurrentSessions : ?Nat;
+    /// Max session lifetime in NANOSECONDS (compared to Time.now() − openedAt).
     maxSessionDuration : ?Int;
+    /// Idle cutoff in NANOSECONDS since last voucher/activity.
     sessionIdleTimeout : ?Int;
     allowedCallers : ?[Principal];
     blockedCallers : ?[Principal];

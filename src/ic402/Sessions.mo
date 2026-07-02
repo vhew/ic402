@@ -182,15 +182,29 @@ module {
       sessionCounter;
     };
 
-    /// Generate a session offer for 402 response.
-    /// Validates the intent (deposit > 0, expiry in the future) and returns it.
+    /// Generate a session offer for a 402 response.
+    /// TRAPS if intent.suggestedDeposit == 0 or intent.expiry <= Time.now() (expiry is in
+    /// NANOSECONDS since epoch, like Time.now()) — validate client-influenced input first.
     public func offerSession(intent : Types.SessionIntent) : Types.SessionIntent {
       if (intent.suggestedDeposit == 0) { Debug.trap("ic402: offerSession() called with suggestedDeposit = 0") };
       if (intent.expiry <= Time.now()) { Debug.trap("ic402: offerSession() called with expired intent") };
       intent;
     };
 
-    /// Open a session. Dispatches to ICRC-2 (ICP) or EVM deposit verification.
+    /// Open a streaming session. Dispatches on `intent.network`: ICP (`icp:1`) pulls an ICRC-2
+    /// deposit into a per-session escrow subaccount; EVM (`eip155:*`) executes an EIP-3009
+    /// deposit to the canister's derived EVM address (authorization.value must EQUAL the
+    /// deposit; overpayment is rejected as non-creditable).
+    ///
+    /// The credited deposit is min(intent.suggestedDeposit, clientConfig.maxDeposit), and must
+    /// meet intent.minDeposit. `sig.publicKey` MUST be the payer's 32-byte Ed25519 key (used to
+    /// verify vouchers); `sig.signature` is unused for sessions. `caller` MUST be the
+    /// authenticated msg.caller — it becomes the session payer with close/refund rights.
+    ///
+    /// EVM: may return #err(#settlementPending(...)): the deposit tx was broadcast but not
+    /// confirmed — NO session exists; the deposit is tracked for reconcileEvmDeposit(txHash).
+    /// A per-caller open lock (auto-expiring after 5 min) rejects concurrent opens with
+    /// #policyDenied.
     public func openSession(
       caller : Principal,
       intent : Types.SessionIntent,
@@ -649,7 +663,15 @@ module {
       #ok(toPublic(session));
     };
 
-    /// Verify a cumulative voucher and return the delta.
+    /// Verify a cumulative voucher and return the incremental delta (#ok(cumulative − last)).
+    /// Synchronous — no awaits. Acceptance requires: session #open and within
+    /// maxDuration/idleTimeout (otherwise #sessionNotOpen, even before the expiry timer runs);
+    /// sequence STRICTLY increasing; cumulativeAmount STRICTLY increasing (zero-delta →
+    /// #invalidSequence) and ≤ deposited; both values ≤ Nat64 max (#payloadOverflow);
+    /// a 64-byte Ed25519 signature by the session's payerPublicKey over the CBOR payload
+    /// [canisterId, sessionId, cumulativeAmount, sequence] (see encodeVoucherPayload — the
+    /// canister principal is bound in, so vouchers are not replayable across canisters).
+    /// Deltas are NOT counted against the daily limit (the full deposit was counted at open).
     public func consumeVoucher(voucher : Types.Voucher) : Types.VoucherResult {
       let session = switch (sessions.get(voucher.sessionId)) {
         case (null) { return #sessionNotOpen };
@@ -744,8 +766,21 @@ module {
       await closeSessionInternal(sessionId);
     };
 
-    /// Close a session without auth (for timer/admin use).
-    /// Dispatches to ICP or EVM close based on the session's network.
+    /// Close a session (no auth — timer/admin use; payer-authenticated callers use closeSession).
+    /// Two-leg fund movement: settle `consumed` → recipient, then refund the remainder → payer.
+    /// Rejects sessions already #closed or #closing (recovery goes through reconcileSession /
+    /// forceResolveSession, never a re-close).
+    ///
+    /// ICP: ledger fees come out of the refund (refunded = deposited − consumed − fees). If the
+    /// settle leg succeeds but the refund leg fails, the session is still marked #closed and
+    /// #settlementFailed("Refund: …") is returned — the remainder stays in the escrow
+    /// subaccount and is recoverable via recoverEscrow.
+    ///
+    /// EVM: finalizes ONLY on confirmed transfers. #settlementPending → the session is PARKED
+    /// in #closing with the tx hash recorded; recover with reconcileSession (confirm-only —
+    /// re-broadcasting risks double-pay). A pre-broadcast #err on a client-initiated close may
+    /// REOPEN the session to #open (safe to retry); after a confirmed settle, failures leave
+    /// #closing for manual recovery. On full success the receipt's txHash is "settle|refund".
     public func closeSessionInternal(sessionId : Text) : async Types.PaymentResult {
       let session = switch (sessions.get(sessionId)) {
         case (null) { return #settlementFailed("Session not found") };

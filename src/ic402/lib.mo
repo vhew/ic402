@@ -65,7 +65,8 @@ module {
   public type Price = Types.Price;
   /// 402 payment requirement returned to clients.
   public type PaymentRequirement = Types.PaymentRequirement;
-  /// Client-supplied payment proof.
+  /// Client-supplied payment proof. Field conventions differ for charges vs sessions, and
+  /// `asset = null` falls back to the chain's first configured token — see Types.PaymentSignature.
   public type PaymentSignature = Types.PaymentSignature;
   /// On-chain settlement receipt.
   public type PaymentReceipt = Types.PaymentReceipt;

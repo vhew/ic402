@@ -70,6 +70,16 @@ module {
   };
 
   /// Main payment gateway. Orchestrates charges, sessions, grants, escrow, and policy.
+  ///
+  /// Consumer obligations:
+  /// - `selfPrincipal` MUST be the consuming canister's own principal (bound into voucher
+  ///   payloads and escrow subaccount derivation).
+  /// - Call `startTimers<system>()` once from actor context, or schedule session expiry/GC
+  ///   yourself.
+  /// - Persist `toStable()` in preupgrade and restore with `loadStable()` in postupgrade;
+  ///   check `Ic402.checkSchemaVersion` against your persisted version BEFORE loadStable.
+  /// - EVM rails are unavailable until the async tECDSA address derivation completes —
+  ///   poll `isEvmReady()`.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
 
     let policy = Policy.Engine();
@@ -278,6 +288,10 @@ module {
 
     /// Generate 402 payment requirements for all configured EVM chains.
     /// M-7: Traps if amount is 0 to prevent free-payment attacks.
+    /// One requirement per chain, using the chain's FIRST configured token only. Additional
+    /// configured tokens on a chain are still settleable when the client echoes them via
+    /// PaymentSignature.asset, but are not advertised by this helper — build custom
+    /// PaymentRequirements for them if you want them offered.
     public func requireEvm(amount : Nat) : [Types.PaymentRequirement] {
       if (amount == 0) { Debug.trap("ic402: requireEvm() called with amount = 0; payment amount must be positive") };
       let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size());
@@ -314,6 +328,10 @@ module {
     /// require*, this does NOT generate or persist a server nonce — it describes the price/asset
     /// for each rail so a client can discover the endpoint. The client must still hit the
     /// resource to receive a live 402 challenge with a real nonce. nonce = empty, expiry = 0.
+    /// One requirement per chain, using the chain's FIRST configured token only. Additional
+    /// configured tokens on a chain are still settleable when the client echoes them via
+    /// PaymentSignature.asset, but are not advertised by this helper — build custom
+    /// PaymentRequirements for them if you want them offered.
     public func describeAll(amount : Nat) : [Types.PaymentRequirement] {
       let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size() + 1);
       switch (price(amount)) {
@@ -383,10 +401,14 @@ module {
     };
 
     /// x402 v2 facilitator `POST /verify`: validate an exact/EVM PaymentPayload against the chosen
-    /// PaymentRequirements OFF-CHAIN (no nonce, no broadcast, no state change). Returns the v2
-    /// verify verdict {isValid, invalidReason?, payer?}. EVM-only — the ICP rail is non-standard
-    /// and not exposed as a facilitator scheme. `asset` is the requirement's token (EIP-712
-    /// verifyingContract); name/version come from the per-chain config.
+    /// PaymentRequirements OFF-CHAIN: no nonce is minted or consumed, nothing is broadcast, and no
+    /// payment state changes. It DOES consume one token from the GLOBAL facilitator rate
+    /// bucket shared with settle/openSession (the ecRecover here is the same cycle-DoS
+    /// surface) — heavy verify traffic can throttle settlement, and a
+    /// `invalidReason = "rate_limited"` result is transient, not a signature failure. Returns
+    /// the v2 verify verdict {isValid, invalidReason?, payer?}. EVM-only — the ICP rail is
+    /// non-standard and not exposed as a facilitator scheme. `asset` is the requirement's
+    /// token (EIP-712 verifyingContract); name/version come from the per-chain config.
     public func verifyPayment(signature : Types.PaymentSignature, expectedAmount : Nat, payTo : Text, asset : Text) : {
       isValid : Bool;
       invalidReason : ?Text;
@@ -453,10 +475,6 @@ module {
       Utils.extractChainId(network);
     };
 
-    /// Verify and settle a charge payment.
-    /// Uses lock/consume/unlock pattern: nonce is locked during settlement,
-    /// consumed on success, unlocked on failure (allowing client retry).
-    /// Dispatches to ICRC-2 (ICP) or HTTPS outcall verification (EVM).
     /// Resolve the token for nonce binding from the signature's network.
     func resolveTokenForNonce(network : Text) : Text {
       if (isEvmNetwork(network)) {
@@ -479,12 +497,27 @@ module {
       };
     };
 
-    /// Verify and settle a charge payment (ICP via ICRC-2 or EVM via EIP-3009).
+    /// Verify and settle a charge payment (ICP via ICRC-2, or EVM via EIP-3009 broadcast + confirm).
     ///
     /// `expectedAmount` is the price the calling resource advertised. It is REQUIRED for a
     /// conformant x402 client that sends no ic402 server nonce (the EVM rail), and serves as a
-    /// cross-resource guard for server-nonce clients (a nonce whose bound amount doesn't match
-    /// the resource's price is rejected). Pass `null` to fall back to the nonce-bound amount.
+    /// cross-resource guard for server-nonce clients. Pass `null` to fall back to the nonce-bound
+    /// amount. ICP settlement ALWAYS requires the server nonce (empty nonce → #expired).
+    ///
+    /// Nonce lifecycle: lock → (awaits) → consume on #ok / unlock on failure, EXCEPT
+    /// #settlementPending, where the nonce stays LOCKED (GC'd at expiry) so the same challenge
+    /// cannot be re-broadcast. #settlementPending is NOT final: no receipt is issued and the
+    /// caller MUST NOT deliver value — the broadcast tx may still mine later (handle out-of-band).
+    ///
+    /// Multi-token (v2.5.0): the EVM verify + on-chain execution key off `signature.asset`
+    /// (the EIP-712 verifyingContract the payer signed for); `asset = null` falls back to the
+    /// chain's FIRST configured token. EVM additionally requires authorization.to == the
+    /// canister's derived EVM address and authorization.value == the settled amount (exact).
+    ///
+    /// Interleaving: this method awaits (EVM broadcast + confirmation poll / ICP ledger call).
+    /// The nonce lock and the daily-spend reservation commit synchronously BEFORE the first
+    /// await and are rolled back on failure. EVM settles are metered by the GLOBAL facilitator
+    /// token bucket and can return #policyDenied("Rate limited…") under load; ICP settles are not.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
       // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
@@ -785,12 +818,27 @@ module {
 
     // ── Session (delegates to Sessions module) ──
 
-    /// Generate a session offer for 402 response.
+    /// Generate a session offer for a 402 response.
+    /// TRAPS if intent.suggestedDeposit == 0 or intent.expiry <= Time.now() (expiry is in
+    /// NANOSECONDS since epoch, like Time.now()) — validate client-influenced input first.
     public func offerSession(intent : Types.SessionIntent) : Types.SessionIntent {
       sessionsMgr.offerSession(intent);
     };
 
-    /// Open a session with ICRC-2 escrow deposit.
+    /// Open a streaming session. Dispatches on `intent.network`: ICP (`icp:1`) pulls an ICRC-2
+    /// deposit into a per-session escrow subaccount; EVM (`eip155:*`) executes an EIP-3009
+    /// deposit to the canister's derived EVM address (authorization.value must EQUAL the
+    /// deposit; overpayment is rejected as non-creditable).
+    ///
+    /// The credited deposit is min(intent.suggestedDeposit, clientConfig.maxDeposit), and must
+    /// meet intent.minDeposit. `sig.publicKey` MUST be the payer's 32-byte Ed25519 key (used to
+    /// verify vouchers); `sig.signature` is unused for sessions. `caller` MUST be the
+    /// authenticated msg.caller — it becomes the session payer with close/refund rights.
+    ///
+    /// EVM: may return #err(#settlementPending(...)): the deposit tx was broadcast but not
+    /// confirmed — NO session exists; the deposit is tracked for reconcileEvmDeposit(txHash).
+    /// A per-caller open lock (auto-expiring after 5 min) rejects concurrent opens with
+    /// #policyDenied.
     public func openSession(
       caller : Principal,
       intent : Types.SessionIntent,
@@ -846,6 +894,9 @@ module {
 
     /// M-8: Recover funds from an escrow subaccount.
     /// H-5: Always refunds to payer, caps at unconsumed amount, rejects open sessions.
+    /// ICP-ESCROW ONLY: refunds from the session's ICRC-1 escrow subaccount. EVM session
+    /// deposits live in the canister's shared EVM pool and are NOT recoverable here — use
+    /// reconcileSession / reconcileEvmDeposit (or an operator sweep) for EVM.
     public func recoverEscrow(
       caller : Principal,
       ledger : Types.LedgerActor,
@@ -891,15 +942,19 @@ module {
       };
     };
 
-    /// Start recurring timers for session cleanup and policy garbage collection.
     /// SEC-0: cap the TOTAL EVM session deposit the canister will back per chain+token (the funded
     /// pool size). When set, openSession refuses to over-allocate the shared EVM address beyond it,
     /// so concurrent sessions can never reserve more than the canister can actually pay back. Set
     /// this to the USDC you have funded the canister's EVM address with; null = unbounded (legacy).
     public func setEvmPoolCap(cap : ?Nat) { evmEscrowMgr.setPoolCap(cap) };
 
-    /// Also auto-initializes HMAC seed and derives EVM address if ecdsaKeyName is set.
-    /// Must be called from actor context (requires <system> capability).
+    /// Start recurring timers: close expired/idle sessions every 60s (then GC closed sessions
+    /// older than 24h), and hourly GC of daily-spend, rate-limit, and revoked-grant state.
+    /// Also one-shot: auto-initializes the HMAC seed from raw_rand, and derives the canister's
+    /// EVM address via tECDSA when config.ecdsaKeyName is set.
+    /// Must be called from actor context (requires <system> capability). A consumer that does
+    /// not call this must schedule closeExpiredSessions()/GC itself, or sessions never expire
+    /// and rate-limit logs grow unbounded.
     public func startTimers<system>() {
       // Close expired sessions every 60 seconds, then GC stale entries
       ignore Timer.recurringTimer<system>(#seconds 60, func() : async () {
@@ -1003,6 +1058,7 @@ module {
     /// Set drain mode — when true, openSession rejects new inbound EVM deposits so the pending
     /// tracker can drain to 0 before an upgrade.
     public func setEvmDrainMode(on : Bool) { sessionsMgr.setDrainMode(on) };
+    /// Read the current drain-mode flag (see setEvmDrainMode). Transient — false after upgrade.
     public func getEvmDrainMode() : Bool { sessionsMgr.getDrainMode() };
 
     /// Reconcile a tracked pending inbound deposit: poll the receipt, refund-on-confirm to the
@@ -1042,7 +1098,12 @@ module {
 
     // ── Stable state (composes sub-module states) ──
 
-    /// Serialize all gateway state for stable storage.
+    /// Serialize all gateway state for stable storage (sessions, nonces, policy, grants,
+    /// counters, EVM allocations). TRANSIENT recovery state is NOT serialized: parked
+    /// close-tx hashes, the pending inbound EVM deposit tracker, drain mode, and the
+    /// facilitator rate bucket. Before upgrading, drain in-flight EVM deposits:
+    /// setEvmDrainMode(true), poll pendingEvmDepositCount() == 0, then upgrade — otherwise a
+    /// pending deposit's only trace after upgrade is the tx hash in its #settlementPending error.
     public func toStable() : Types.StableGatewayState {
       {
         sessions = sessionsMgr.toStable();
@@ -1060,7 +1121,10 @@ module {
       };
     };
 
-    /// Restore all gateway state from stable storage.
+    /// Restore all gateway state from stable storage. Call from postupgrade, AFTER checking
+    /// Ic402.checkSchemaVersion(persisted) — a schema mismatch should branch to a migration,
+    /// not decode blindly. Sessions restored while in #closing have no parked tx hash
+    /// (transient); resolve them via forceResolveSession + out-of-band reconciliation.
     public func loadStable(data : Types.StableGatewayState) {
       nonceManager.loadStable(data.nonces);
       policy.loadStable(data.policy);

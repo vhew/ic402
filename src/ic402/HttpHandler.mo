@@ -316,7 +316,10 @@ module {
     };
   };
 
-  /// Extract a query parameter value from a URL.
+  /// Extract a raw query parameter value from a URL. The value is returned WITHOUT
+  /// percent-decoding, and a value containing '=' is truncated at the second '=' (only the
+  /// segment between the first two '=' delimiters is returned) — do not route base64 or
+  /// percent-encoded payloads through this helper without decoding/handling on your side.
   public func getQueryParam(url : Text, param : Text) : ?Text {
     let parts = Iter.toArray(Text.split(url, #char '?'));
     if (parts.size() < 2) return null;
@@ -342,6 +345,11 @@ module {
 
   /// Parse X-PAYMENT header JSON into a PaymentSignature.
   /// Expects: {"scheme":"exact","network":"...","signature":"...","sender":"...","nonce":"..."}
+  /// Legacy ICP-rail parser: the result always has `asset = null` and `authorization = null`.
+  /// Do NOT use it for EVM payments — settle would fall back to the chain's first configured
+  /// token (Types.PaymentSignature.asset); use parseX402PaymentHeader for the standard x402
+  /// EVM header. Returns null on any missing field; malformed hex degrades to an empty blob
+  /// (failed verification) rather than trapping.
   public func parsePaymentHeader(json : Text) : ?Types.PaymentSignature {
     let scheme = Utils.extractJsonField(json, "scheme");
     let network = Utils.extractJsonField(json, "network");
