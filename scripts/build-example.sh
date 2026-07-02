@@ -20,19 +20,11 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Drop FOREIGN project node_modules/.bin from PATH. A sibling repo's node_modules/.bin ahead of
-# the global toolchain can shadow `mops`/`node` with an incompatible copy — e.g. a pnpm-installed
-# ic-mops/@icp-sdk whose transitive @dfinity mismatch crashes on load ("Cannot find package
-# '@dfinity/identity'"). Keep this project's own node_modules/.bin and every non-node_modules dir.
-_sanitized=""
-_OLDIFS="$IFS"; IFS=':'
-for _e in $PATH; do
-  case "$_e" in
-    */node_modules/.bin) case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac ;;
-    *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
-  esac
-done
-IFS="$_OLDIFS"; export PATH="$_sanitized"
+# Drop FOREIGN node_modules/.bin from PATH (keep ours + $PNPM_HOME) so a sibling repo's toolchain
+# can't shadow this project's mops/node. See scripts/lib/toolchain-path.sh.
+# shellcheck source=scripts/lib/toolchain-path.sh
+. "$PROJECT_ROOT/scripts/lib/toolchain-path.sh"
+sanitize_project_path "$PROJECT_ROOT"
 
 OUT="${1:-.icp/example.wasm}"
 RAW="$(dirname "$OUT")/.example-raw.wasm"

@@ -35,18 +35,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Drop FOREIGN node_modules/.bin from PATH so a sibling repo can't shadow moc/mops; keep this
-# project's own .bin and $PNPM_HOME. Same guard as scripts/setup.sh (see there for the rationale).
-_sanitized=""; _OLDIFS="$IFS"; IFS=':'
-for _e in $PATH; do
-  case "$_e" in
-    */node_modules/.bin)
-      if [ -n "${PNPM_HOME:-}" ] && [ "$_e" = "$PNPM_HOME" ]; then _sanitized="${_sanitized:+$_sanitized:}$_e";
-      else case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac; fi ;;
-    *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
-  esac
-done
-IFS="$_OLDIFS"; export PATH="$_sanitized"
+# Drop FOREIGN node_modules/.bin from PATH (keep ours + $PNPM_HOME). See scripts/lib/toolchain-path.sh.
+# shellcheck source=scripts/lib/toolchain-path.sh
+. "$PROJECT_ROOT/scripts/lib/toolchain-path.sh"
+sanitize_project_path "$PROJECT_ROOT"
 
 MOC="$(mops toolchain bin moc)"
 SOURCES="$(mops sources)"

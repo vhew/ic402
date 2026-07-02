@@ -490,9 +490,7 @@ server.tool(
     const actor = actorFactory(cid);
     const intent = await actor.requestSession();
 
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(serialize(intent), null, 2) }],
-    };
+    return textResult(serialize(intent));
   },
 );
 
@@ -755,9 +753,7 @@ server.tool(
     const receipt: PaymentReceipt = await session.close();
     activeSessions.delete(sessionId);
 
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(serialize(receipt), null, 2) }],
-    };
+    return textResult(serialize(receipt));
   },
 );
 
@@ -777,9 +773,7 @@ server.tool(
       remaining: s.remaining.toString(),
     }));
 
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(sessions, null, 2) }],
-    };
+    return textResult(sessions);
   },
 );
 
@@ -1170,9 +1164,7 @@ server.tool(
 server.tool('list_services', 'List available paid services from the canister.', {}, async () => {
   const c = requireClient();
   const services = await c.listServices();
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(serialize(services), null, 2) }],
-  };
+  return textResult(serialize(services));
 });
 
 // ---------------------------------------------------------------------------
@@ -1299,9 +1291,7 @@ server.tool(
     const c = requireClient();
     try {
       const job = await c.pollJobResult(jobId, maxAttempts);
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(serialize(job), null, 2) }],
-      };
+      return textResult(serialize(job));
     } catch (e) {
       return errorResult(e);
     }
@@ -1323,9 +1313,7 @@ server.tool(
     const c = requireClient();
     try {
       await c.disputeJob(jobId, reason);
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok' }, null, 2) }],
-      };
+      return textResult({ status: 'ok' });
     } catch (e) {
       return errorResult(e);
     }
@@ -1452,9 +1440,7 @@ server.tool(
     }
     const result = await actor[method](...(Array.isArray(parsedArgs) ? parsedArgs : [parsedArgs]));
 
-    return {
-      content: [{ type: 'text' as const, text: JSON.stringify(serialize(result), null, 2) }],
-    };
+    return textResult(serialize(result));
   },
 );
 

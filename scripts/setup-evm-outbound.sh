@@ -33,17 +33,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Drop FOREIGN node_modules/.bin from PATH (a sibling repo can shadow moc/mops with
-# an incompatible copy). Identical guard to scripts/build-example.sh.
-_sanitized=""
-_OLDIFS="$IFS"; IFS=':'
-for _e in $PATH; do
-  case "$_e" in
-    */node_modules/.bin) case "$_e" in "$PROJECT_ROOT"/*) _sanitized="${_sanitized:+$_sanitized:}$_e" ;; esac ;;
-    *) _sanitized="${_sanitized:+$_sanitized:}$_e" ;;
-  esac
-done
-IFS="$_OLDIFS"; export PATH="$_sanitized"
+# Drop FOREIGN node_modules/.bin from PATH (keep ours + $PNPM_HOME). See scripts/lib/toolchain-path.sh.
+# shellcheck source=scripts/lib/toolchain-path.sh
+. "$PROJECT_ROOT/scripts/lib/toolchain-path.sh"
+sanitize_project_path "$PROJECT_ROOT"
 
 echo "--- EVM-outbound test fixture ---"
 
