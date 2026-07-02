@@ -134,7 +134,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const client = new Client({ name: 'ic402-demo', version: '2.5.2' });
+  const client = new Client({ name: 'ic402-demo', version: '2.5.3' });
   await client.connect(transport);
 
   try {

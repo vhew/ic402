@@ -36,6 +36,9 @@ export type {
 export { signVoucher, encodeVoucherPayload } from './voucher.js';
 export type { VoucherSigner } from './voucher.js';
 export { exampleIdlFactory } from './idl.js';
+// Wire-form (agent-js Candid encoding) types for hand-built canister-argument payloads —
+// annotate a raw PaymentSignature/authorization so `tsc` flags a missing field (e.g. `asset`).
+export type { PaymentSignatureArg, Eip3009AuthorizationArg } from './idl.js';
 export {
   usdcDomain,
   TRANSFER_WITH_AUTHORIZATION_TYPES,

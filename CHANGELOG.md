@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.5.3 — 2026-07-02
+
+Patch release. Adds public wire-form TS types for typing hand-built canister payloads, plus
+dev-facing test/demo fixes. **No canister behavior or interface change**: `example.did` is
+byte-identical to v2.5.2 and `STABLE_SCHEMA_VERSION` stays at `1`. The mops `ic402` library and
+`@ic402/mcp` are unchanged since v2.5.2 — only `@ic402/client` gains additive exports.
+
+### Added
+
+- **`@ic402/client`: `PaymentSignatureArg` / `Eip3009AuthorizationArg`** — wire-form (agent-js
+  Candid encoding) types for hand-built canister-argument payloads. Annotate a raw
+  `PaymentSignature` so `tsc` flags a missing field (e.g. a future opt like v2.5.0's `asset`) at
+  compile time, instead of only at agent-js encode against a live replica.
+
+### Tests / tooling
+
+- **Schema-drift guard.** A new `idl-encode-contract` test round-trips representative
+  `PaymentSignature` / `Eip3009Authorization` / `Voucher` payloads through the actual record IDLs,
+  so a payload missing a required field fails in the fast (replica-free) suite — the exact class
+  that slipped through after v2.5.0 added `asset`. Also fixed two pre-existing integration failures
+  (4 payloads missing `asset`; an HTTP test hitting a never-uploaded content id).
+
+### Demo
+
+- **Step 6 x402 endpoint swapped** from the dead `x402.goldrush.dev` (its API route hangs
+  indefinitely) to the live `sandbox.node4all.com/v1/x402-test` from Coinbase's x402 Bazaar
+  (Base Sepolia USDC; a drop-in for the SDK's `payment-required`-header probe). Step 6 now
+  completes a real paid round-trip on a local replica.
+
 ## v2.5.2 — 2026-07-02
 
 Patch release — **diagnostics only, no behavior or interface change**. `example.did`
