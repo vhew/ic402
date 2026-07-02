@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.5.1 — 2026-07-02
+
+Patch release — **documentation only, no code or interface change**. `example.did` is
+byte-identical to v2.5.0 and `STABLE_SCHEMA_VERSION` stays at `1`. This ships the
+library doc-comment audit that landed after the v2.5.0 mops publish (which mops
+cannot retroactively include), plus the rewritten `@ic402/client` README and a new
+getting-started guide.
+
+### Documentation
+
+- **Library doc-comments (`src/ic402`).** Comment-only audit of the public fund-path
+  surface (Gateway, Sessions, Types, HttpHandler, lib): fixed two misattributed doc
+  blocks (`settle`'s doc was stranded on a private helper; "start recurring timers"
+  sat on `setEvmPoolCap`), documented the NANOSECOND units on the expiry/duration
+  fields (the nearby EIP-3009 fields say "seconds" — a real misconfiguration
+  footgun), promoted the v2.5.0 `PaymentSignature.asset` docs from `//` to `///` so
+  they appear in generated docs, and added `#settlementPending` / close-parking /
+  `consumeVoucher` / `recoverEscrow`-is-ICP-only / drain-before-upgrade invariants.
+- **`@ic402/client` README** rewritten: corrected the stale `call()` / `openSession()`
+  signatures, documented every public method with real signatures, the `VoucherSigner`
+  contract, the EIP-712 helpers, the error kinds, and a Multi-token (v2.5.0) note on
+  `PaymentSignature.asset`.
+- **`docs/getting-started.md`** (new): a zero-to-first-payment tutorial (x402 charge,
+  streaming session, EIP-3009 EVM), plus a root-README prose polish and a v2.5.0
+  release announcement.
+
 ## v2.5.0 — 2026-07-02
 
 Minor release. Fixes a latent multi-token EIP-712 settlement bug by threading the paid EVM asset
