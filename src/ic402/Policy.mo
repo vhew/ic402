@@ -135,7 +135,7 @@ module {
           // gcRateLimit(), which the maintenance timer must call alongside gcDailySpend().
 
           if (existing.size() >= limit) {
-            return #denied("Rate limit exceeded: " # Nat.toText(limit) # "/min");
+            return #denied("Rate limit exceeded: " # Nat.toText(limit) # "/min for this caller — transient; retry after the 60s window, or raise rateLimitPerMinute via setPolicy for this principal.");
           };
 
           // Record this request
@@ -217,7 +217,7 @@ module {
         case (?max) {
           let current = getDailySpend(caller);
           if (current + amount > max) {
-            #denied("Daily limit exceeded: " # Nat.toText(current + amount) # " > " # Nat.toText(max));
+            #denied("Daily limit exceeded: " # Nat.toText(current + amount) # " > " # Nat.toText(max) # " — the per-caller daily bucket resets at UTC midnight; wait for the reset or raise maxPerDay via setPolicy.");
           } else {
             #ok;
           };

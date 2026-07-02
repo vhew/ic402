@@ -367,7 +367,10 @@ export async function probeX402(
   if (!option) {
     return {
       status: 'error',
-      error: new Ic402Error('no_match', `No payment option for eip155:${chainId} in 402 response`),
+      error: new Ic402Error(
+        'no_match',
+        `No payment option for eip155:${chainId} in the 402 response — the server does not advertise that chain. Inspect the accepts[] networks in the 402 body and set config.network (or the chainId arg) to one of them.`,
+      ),
     };
   }
 
@@ -614,7 +617,7 @@ export async function registerAgent(
   if (!receipt) {
     throw new Ic402Error(
       'not_confirmed',
-      `Tx ${txHash} submitted but not confirmed within poll window`,
+      `Tx ${txHash} submitted but not confirmed within the poll window — it may still mine. Check the hash on a block explorer or re-poll pollReceipt before retrying; re-broadcasting signs a new tx and can double-register.`,
     );
   }
 

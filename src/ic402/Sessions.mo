@@ -219,7 +219,7 @@ module {
 
       // M-2: Check intent expiry before processing
       if (Time.now() > intent.expiry) {
-        return #err(#expired("Session intent expired"));
+        return #err(#expired("Session intent expired — intents carry a nanosecond expiry set by the server. Request a fresh intent (requestSession/offerSession) and open the session before it lapses."));
       };
 
       // Dispatch: EVM or ICP?
@@ -246,7 +246,7 @@ module {
       switch (sessionOpenLocks.get(caller)) {
         case (?lockTime) {
           if (Time.now() - lockTime < lockTimeout) {
-            return #err(#policyDenied("Session open already in progress"));
+            return #err(#policyDenied("Session open already in progress for this caller — concurrent opens are serialized. Wait for the in-flight open to finish and retry; a lock stranded by a failed call auto-expires after 5 minutes."));
           };
           // Stale lock — expired, allow override
         };
@@ -327,7 +327,7 @@ module {
               Utils.satSub(deposit, fee),
             );
             sessionOpenLocks.delete(caller);
-            return #err(#policyDenied("Concurrent session limit reached (TOCTOU)"));
+            return #err(#policyDenied("Concurrent session limit reached while the deposit was in flight — no session was opened; the deposit was refunded minus the ledger fee. Close an existing session (or raise maxConcurrentSessions) and retry."));
           };
         };
         case (null) {};
@@ -410,7 +410,7 @@ module {
       switch (sessionOpenLocks.get(caller)) {
         case (?lockTime) {
           if (Time.now() - lockTime < lockTimeout) {
-            return #err(#policyDenied("Session open already in progress"));
+            return #err(#policyDenied("Session open already in progress for this caller — concurrent opens are serialized. Wait for the in-flight open to finish and retry; a lock stranded by a failed call auto-expires after 5 minutes."));
           };
         };
         case (null) {};
@@ -450,7 +450,7 @@ module {
       // passed evmRecipientAddress precisely for this check.
       let canisterEvmAddr = switch (evmRecipientAddress.get()) {
         case (?addr) { addr };
-        case (null) { sessionOpenLocks.delete(caller); return #err(#settlementFailed("Canister EVM address not derived")) };
+        case (null) { sessionOpenLocks.delete(caller); return #err(#settlementFailed("Canister EVM address not derived yet — tECDSA derivation is async. Ensure startTimers() was called (or call deriveEvmRecipient), poll isEvmReady() until true, and check logs for 'EVM address derivation failed'. Transient at startup; retry after derivation.")) };
       };
       if (not EvmUtils.addressesEqual(authz.to, canisterEvmAddr)) {
         sessionOpenLocks.delete(caller);
@@ -508,7 +508,7 @@ module {
         case (#ok) {};
         case (#throttled) {
           sessionOpenLocks.delete(caller);
-          return #err(#policyDenied("Rate limited: facilitator admission"));
+          return #err(#policyDenied("Rate limited: global facilitator admission bucket exhausted (shared across settle/verify/session-open). Transient — retry with backoff; heavy /verify traffic can starve settlement."));
         };
       };
 
@@ -538,7 +538,7 @@ module {
       );
       if (not verified) {
         sessionOpenLocks.delete(caller);
-        return #err(#invalidSignature("EIP-3009 authorization signature verification failed"));
+        return #err(#invalidSignature("EIP-3009 authorization signature verification failed — the recovered signer does not match authorization.from. Check the EIP-712 domain matches this canister's config (token name/version, chainId, verifyingContract = the paid asset) and that the signer key controls the from address. Not retryable without re-signing."));
       };
 
       // Execute transferWithAuthorization via tECDSA (canister acts as facilitator)
@@ -609,14 +609,14 @@ module {
           ignore evmEscrowManager.deallocate(sessionId);
           pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
           sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed — tracked for reconcile (tx " # depositTxHash # ")"));
+          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ") — no session was created. If the tx mines, the deposit lands in the shared pool: call reconcileEvmDeposit with this tx hash to refund it, then open a new session. Do not re-sign the same authorization."));
         };
         case (#err(e)) {
           // H3: release reservation. M8: track for reconcile (see #pending).
           ignore evmEscrowManager.deallocate(sessionId);
           pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
           sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable — tracked for reconcile: " # e # " (tx " # depositTxHash # ")"));
+          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ") — no session was created; the deposit is tracked. Retry reconcileEvmDeposit with this tx hash once the RPC recovers (refund-on-confirm)."));
         };
       };
 
@@ -788,7 +788,7 @@ module {
       };
 
       if (session.status == #closed or session.status == #closing) {
-        return #settlementFailed("Session already closed");
+        return #settlementFailed("Session already closed or a close is in progress (#closing) — do not re-close. If it is stuck in #closing (parked EVM close), recover with reconcileSession (confirm-only) or forceResolveSession + manual sweep.");
       };
 
       // Dispatch: EVM sessions use tECDSA-signed ERC-20 transfers
@@ -861,7 +861,7 @@ module {
           case (#err(msg)) {
             // Settlement succeeded but refund failed — mark closed anyway
             session.status := #closed;
-            return #settlementFailed("Refund: " # msg);
+            return #settlementFailed("Refund leg failed (settle succeeded; session marked #closed): " # msg # " — the remainder stays in the session's escrow subaccount and is recoverable by the payer via recoverEscrow(sessionId).");
           };
           case (#ok(blockIdx)) { refundBlockIndex := ?blockIdx };
         };

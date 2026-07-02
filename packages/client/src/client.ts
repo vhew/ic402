@@ -125,7 +125,9 @@ export class Ic402Client {
     // Check for payment required response
     if (result && typeof result === 'object' && 'paymentRequired' in result) {
       if (!this.config.autoPayment) {
-        throw new Error('Payment required but autoPayment is disabled');
+        throw new Error(
+          'Payment required but autoPayment is disabled — set autoPayment: true (plus ledger + ledgerActorFactory for ICP), or handle the paymentRequired response and retry the call with a PaymentSignature yourself.',
+        );
       }
 
       // H5: every ic402 402 endpoint returns `vec PaymentRequirement` (Candid → a JS array),
@@ -296,7 +298,7 @@ export class Ic402Client {
     const result = await actor.openSession(openConfig, sig);
 
     if ('err' in result) {
-      throw new Error(`Failed to open session: ${result.err}`);
+      throw new Error(`Failed to open session: ${safeStringify(result.err)}`);
     }
 
     const state: SessionState = result.ok;
@@ -719,7 +721,10 @@ export class Ic402Client {
 
     if (result && typeof result === 'object' && 'paymentRequired' in result) {
       if (!this.config.autoPayment) {
-        throw new Ic402Error('config_error', 'Payment required but autoPayment is disabled');
+        throw new Ic402Error(
+          'config_error',
+          'Payment required but autoPayment is disabled — set autoPayment: true (plus ledger + ledgerActorFactory for ICP), or handle the paymentRequired response and retry the call with a PaymentSignature yourself.',
+        );
       }
       if (!this.config.ledger || !this.config.ledgerActorFactory) {
         throw new Ic402Error(

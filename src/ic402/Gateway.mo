@@ -528,7 +528,7 @@ module {
       if (isEvmNetwork(signature.network)) {
         switch (admitRate()) {
           case (#ok) {};
-          case (#throttled) { return #policyDenied("Rate limited: facilitator admission") };
+          case (#throttled) { return #policyDenied("Rate limited: global facilitator admission bucket exhausted (shared across settle/verify/session-open). Transient — retry with backoff; heavy /verify traffic can starve settlement.") };
         };
       };
       // H-2: Resolve token to verify nonce is bound to the correct network+token
@@ -544,7 +544,7 @@ module {
       let usesServerNonce = signature.nonce.size() > 0;
       let amount = if (usesServerNonce) {
         switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
-          case (null) { return #expired("Nonce expired or already consumed") };
+          case (null) { return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.") };
           case (?a) {
             switch (expectedAmount) {
               case (?e) {
@@ -561,8 +561,8 @@ module {
       } else {
         switch (expectedAmount, isEvmNetwork(signature.network)) {
           case (?e, true) { e }; // stock EVM client: amount comes from the resource, value==amount below
-          case (_, false) { return #expired("ICP settlement requires the ic402 server nonce") };
-          case (null, _) { return #expired("No server nonce and no resource amount; cannot settle") };
+          case (_, false) { return #expired("ICP settlement requires the ic402 server nonce — echo the ic402Nonce from the 402 challenge's extra field in your payment; ICP has no on-chain replay protection without it.") };
+          case (null, _) { return #expired("Cannot settle: no server nonce and no expected amount. Consumer canisters must pass expectedAmount (the advertised price) to settle(); clients may alternatively echo the challenge's ic402Nonce.") };
         };
       };
 
@@ -597,7 +597,7 @@ module {
         // Validate authorization parameters
         let canisterEvmAddr = switch (evmRecipient) {
           case (?addr) { addr };
-          case (null) { nonceManager.unlock(signature.nonce); return #settlementFailed("Canister EVM address not derived") };
+          case (null) { nonceManager.unlock(signature.nonce); return #settlementFailed("Canister EVM address not derived yet — tECDSA derivation is async. Ensure startTimers() was called (or call deriveEvmRecipient), poll isEvmReady() until true, and check logs for 'EVM address derivation failed'. Transient at startup; retry after derivation.") };
         };
         // C-1 (v2): The EIP-3009 recipient MUST be the canister's own EVM address.
         // Without this check a payer can sign a self-transfer (to = an address they
@@ -659,7 +659,7 @@ module {
         );
         if (not verified) {
           nonceManager.unlock(signature.nonce);
-          return #invalidSignature("EIP-3009 authorization signature verification failed");
+          return #invalidSignature("EIP-3009 authorization signature verification failed — the recovered signer does not match authorization.from. Check the EIP-712 domain matches this canister's config (token name/version, chainId, verifyingContract = the paid asset) and that the signer key controls the from address. Not retryable without re-signing.");
         };
 
         // Execute transferWithAuthorization on-chain (canister acts as facilitator)
@@ -716,18 +716,18 @@ module {
               case (#reverted) {
                 nonceManager.unlock(signature.nonce);
                 policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ")");
+                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, authorization nonce already used, or token paused. Fix the cause and re-sign a fresh authorization.");
               };
               case (#pending) {
                 // Keep the nonce locked (GC'd at expiry) so the same challenge is
                 // not re-broadcast; release the daily reservation since no receipt
                 // is issued. Caller MUST NOT deliver value on #settlementPending.
                 policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ")");
+                return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain).");
               };
               case (#err(e)) {
                 policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ")");
+                return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending.");
               };
             };
           };
@@ -803,8 +803,8 @@ module {
             nonceManager.unlock(signature.nonce);
             policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
             switch (err) {
-              case (#InsufficientFunds({ balance })) { #insufficientFunds("Insufficient funds: balance " # Nat.toText(balance)) };
-              case (#InsufficientAllowance({ allowance })) { #insufficientFunds("Insufficient allowance: " # Nat.toText(allowance)) };
+              case (#InsufficientFunds({ balance })) { #insufficientFunds("Insufficient funds: payer balance " # Nat.toText(balance) # " — the payer needs amount + the ledger transfer fee. Top up the payer account and retry.") };
+              case (#InsufficientAllowance({ allowance })) { #insufficientFunds("Insufficient allowance: " # Nat.toText(allowance) # " — the payer must icrc2_approve this canister for at least amount + ledger fee before settle (the SDK's autoPayment does this; add a fee buffer). Re-approve and retry.") };
               case (_) { #settlementFailed("ICRC-2 error: " # debug_show(err)) };
             };
           };

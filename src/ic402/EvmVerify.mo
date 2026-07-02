@@ -109,7 +109,7 @@ module {
     let receipt : TransactionReceipt = switch (rpcResult) {
       case (#Consistent(#Ok(?r))) { r };
       case (#Consistent(#Ok(null))) {
-        return #failed("Transaction not found or not yet confirmed");
+        return #failed("Transaction not found or not yet confirmed — verify the tx hash and chainId match where it was sent, wait a block or two, and retry verification. Retryable.");
       };
       case (#Consistent(#Err(err))) {
         return #failed("RPC error: " # rpcErrorToText(err));

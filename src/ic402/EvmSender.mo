@@ -146,7 +146,7 @@ module {
       };
       // H-1: Reject concurrent transactions to prevent nonce desync.
       if (txInProgress) {
-        return #err("Transaction in progress, retry later");
+        return #err("Another outbound EVM transaction is in progress — sends are serialized to keep the nonce consistent. Nothing was broadcast; retry in a few seconds.");
       };
       txInProgress := true;
       // B2: #err means the tx was definitely NOT broadcast (safe to roll back + retry);
@@ -177,7 +177,7 @@ module {
           case (#Consistent(#Ok(n))) { n };
           case (_) {
             txInProgress := false;
-            return #err("Failed to get EVM nonce");
+            return #err("Failed to get EVM nonce: eth_getTransactionCount did not reach multi-provider consensus. Nothing was broadcast — safe to retry. If it persists, check the EVM-RPC canister's providers/cycles for this chain.");
           };
         };
 
@@ -241,7 +241,7 @@ module {
           case (#Consistent(#Ok(#NonceTooLow))) { #err("Nonce too low — retry") };
           // Queued in the mempool (nonce ahead) — it can still mine, so treat as maybe-sent.
           case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
-          case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas") };
+          case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast.") };
           case (#Consistent(#Err(e))) { #err("RPC error: " # EvmRpc.rpcErrorToText(e)) };
           // Providers disagree — exactly one may have accepted the tx into its mempool.
           case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
@@ -447,7 +447,7 @@ module {
         attempts += 1;
         let result = try {
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
-        } catch (_) { return #err("Receipt query failed") };
+        } catch (_) { return #err("Receipt query failed — transaction status unknown (it may still mine). Transient RPC failure: re-poll confirmTransaction with the same tx hash; never re-broadcast on this outcome.") };
         switch (result) {
           case (#Consistent(#Ok(?receipt))) {
             switch (receipt.status) {
