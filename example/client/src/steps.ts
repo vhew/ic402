@@ -1270,20 +1270,43 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           } else if (res?.status === 'free') {
             info('Resource returned content with no 402 challenge — nothing to pay.');
           } else {
-            info(
-              'No paid round-trip completed — see the error above (fund the canister EVM wallet with Base Sepolia USDC to settle).',
+            // No paid round-trip settled. Classify the real cause (mcpCallAndRender returns the
+            // error envelope rather than throwing) so the remedy is accurate, and surface it as a
+            // KnownIssue — an external x402/EVM dependency, not a silent ✓ pass (matches Steps 3/8).
+            const err = (res?.error ?? {}) as Record<string, unknown>;
+            const kind = String(err.kind ?? 'unknown');
+            const emsg = String(err.message ?? 'no result returned');
+            const low = emsg.toLowerCase();
+            if (low.includes('abort') || low.includes('timeout') || low.includes('timed out')) {
+              throw new KnownIssueError(
+                'GoldRush x402 API timed out / was unreachable',
+                'External third-party API availability — not an ic402 bug. The flow (probe → canister signs → retry with the payment header) is intact; retry when x402.goldrush.dev responds.',
+              );
+            }
+            if (
+              low.includes('insufficient') ||
+              low.includes('have 0') ||
+              kind === 'insufficient_funds'
+            ) {
+              throw new KnownIssueError(
+                'Canister EVM wallet unfunded for Base Sepolia USDC',
+                "Fund the canister's derived EVM address with Base Sepolia USDC (plus a little ETH for gas) — external setup, not an ic402 bug.",
+              );
+            }
+            throw new KnownIssueError(
+              `x402 buy did not settle (${kind})`,
+              `${emsg} — external x402/EVM dependency; the canister signing path itself did not fail.`,
             );
           }
         } catch (e) {
+          if (e instanceof KnownIssueError) throw e;
+          // mcpCallAndRender doesn't throw for fetch_x402 errors, so reaching here is an unexpected
+          // failure in the surrounding flow — still an external dependency, so flag, never green-pass.
           const msg = e instanceof Error ? e.message : String(e);
-          if (msg.includes('aborted') || msg.includes('timeout')) {
-            warn('Request timed out — GoldRush API may be slow or unreachable.');
-            info('The flow works: probe → canister signs → client retries with payment header.');
-          } else if (msg.includes('insufficient funds') || msg.includes('have 0')) {
-            warn('Canister EVM wallet has no USDC — fund it to complete x402 payments.');
-          } else {
-            warn(`fetch_x402 failed: ${msg}`);
-          }
+          throw new KnownIssueError(
+            'x402 buy step failed unexpectedly',
+            `${msg} — external x402/EVM dependency (GoldRush API, RPC, or unfunded wallet); not a core ic402 failure.`,
+          );
         }
       },
     },
