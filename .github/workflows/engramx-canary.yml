@@ -29,10 +29,12 @@ permissions:
 
 jobs:
   engramx-canary:
-    # Same-repo events only: a fork PR can't (and shouldn't) reach ENGRAMX_READ_TOKEN.
+    # Skip Dependabot (its PRs bump npm/actions, never ic402's Motoko surface, and can't read the
+    # token anyway) and fork PRs (GitHub withholds secrets from them).
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: canary # scopes ENGRAMX_READ_TOKEN to this job
@@ -59,6 +61,9 @@ jobs:
       - name: Point EngramX at ic402 HEAD
         run: |
           sed -i 's#^ic402 = .*#ic402 = "../ic402"#' engramx/mops.toml
+          # The override changes the deps hash, so EngramX's committed mops.lock no longer matches
+          # (mops fails the integrity check in CI). Drop it — `mops install` regenerates a fresh lock.
+          rm -f engramx/mops.lock
           echo "override: $(grep '^ic402' engramx/mops.toml)"
 
       - name: Build + Motoko-test EngramX against ic402 HEAD
