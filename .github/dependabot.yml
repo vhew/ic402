@@ -1,0 +1,29 @@
+# Automated dependency updates. Every PR runs through the full CI (12 jobs incl. mops test,
+# replica-backed integration, stable-compat, wasm-locals), so a regressing bump fails the gate
+# rather than shipping. NOTE: Dependabot does not support the mops (Motoko) ecosystem — mo:*
+# deps (mo:sha2, mo:ic, mo:ecdsa, ...) still bump by hand.
+version: 2
+updates:
+  # npm / pnpm workspace — the root pnpm-lock.yaml covers packages/*, integrations/*, example/client.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      # Batch minor+patch into one PR to cut noise; majors get their own PR to review deliberately.
+      npm-minor-patch:
+        update-types: ['minor', 'patch']
+
+  # GitHub Actions pinned in the CI + release workflows (actions/checkout, setup-node, setup-mops, ...).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: 'chore(ci)'
+    groups:
+      github-actions:
+        update-types: ['minor', 'patch']

@@ -1,0 +1,99 @@
+name: Release
+
+# Publishes ic402 to mops + @ic402/client and @ic402/mcp to npm when a vX.Y.Z tag is pushed.
+#
+# Flow (see RELEASING.md): bump with scripts/version.sh, commit, `git tag -a vX.Y.Z -m ...`,
+# push master, then push the tag — this workflow does the rest. Publishes are IDEMPOTENT: a
+# version already on a registry is skipped, so re-running, or a no-change release (e.g. mops/mcp
+# unchanged, as in 2.5.3), is safe and won't fail.
+#
+# Required secrets — add these as ENVIRONMENT secrets on a `release` environment (Settings →
+# Environments → release), NOT repository secrets, so only this job can read them. Recommended
+# environment protections: required reviewers (a manual approval gate before an irreversible
+# publish) and a deployment-tag restriction to `v*`.
+#   NPM_TOKEN          - npm automation token with publish rights to the @ic402 scope
+#   MOPS_IDENTITY_PEM  - the mops publishing identity PEM (contents of deploy/ic402-mops.pem)
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Scopes NPM_TOKEN / MOPS_IDENTITY_PEM to this job only; add protections (required reviewers,
+    # tag restriction to v*) on the `release` environment in repo settings.
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+      - uses: ZenVoich/setup-mops@v1
+      - run: pnpm install --frozen-lockfile
+      - run: mops install
+
+      # mops.toml is the single source of truth for the version; a tag must match it exactly.
+      - name: Guard - tag matches source version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER="$(grep '^version' mops.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')"
+          echo "tag=v$TAG  mops.toml=$VER"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::tag v$TAG does not match mops.toml version $VER"; exit 1
+          fi
+
+      # Lean pre-publish re-verify. The tagged commit already passed the full CI on master, but
+      # publish is irreversible, so re-confirm the artifacts that actually ship.
+      - run: pnpm build:client
+      - run: pnpm build:demo
+      - run: mops test
+
+      - name: Publish @ic402/client to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          V="$(node -p "require('./packages/client/package.json').version")"
+          if npm view "@ic402/client@$V" version >/dev/null 2>&1; then
+            echo "@ic402/client@$V already on npm - skipping"
+          else
+            npm publish ./packages/client --access public
+          fi
+
+      - name: Publish @ic402/mcp to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          V="$(node -p "require('./integrations/mcp/package.json').version")"
+          if npm view "@ic402/mcp@$V" version >/dev/null 2>&1; then
+            echo "@ic402/mcp@$V already on npm - skipping"
+          else
+            npm publish ./integrations/mcp --access public
+          fi
+
+      - name: Publish ic402 to mops
+        env:
+          MOPS_IDENTITY_PEM: ${{ secrets.MOPS_IDENTITY_PEM }}
+        run: |
+          if [ -z "$MOPS_IDENTITY_PEM" ]; then
+            echo "::error::MOPS_IDENTITY_PEM secret is not set"; exit 1
+          fi
+          printf '%s\n' "$MOPS_IDENTITY_PEM" > "$RUNNER_TEMP/mops.pem"
+          mops user import --no-encrypt -- "$(cat "$RUNNER_TEMP/mops.pem")"
+          rm -f "$RUNNER_TEMP/mops.pem"
+          set +e
+          OUT="$(mops publish --no-bench 2>&1)"; RC=$?
+          set -e
+          echo "$OUT"
+          if [ "$RC" -ne 0 ] && ! echo "$OUT" | grep -q "already published"; then
+            echo "::error::mops publish failed"; exit 1
+          fi
