@@ -49,7 +49,7 @@ jobs:
           token: ${{ secrets.ENGRAMX_READ_TOKEN }}
           path: engramx
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22.12.0
       - uses: ZenVoich/setup-mops@v1
