@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.5.2 — 2026-07-02
+
+Patch release — **diagnostics only, no behavior or interface change**. `example.did`
+is byte-identical to v2.5.1 and `STABLE_SCHEMA_VERSION` stays at `1`. Ships the
+error-message actionability pass and the SDK `[object Object]` fix.
+
+### Changed
+
+- **Actionable error messages (library + SDK).** 34 human-readable diagnostic
+  messages across the fund path (Gateway, Sessions, EvmSender, EvmVerify, Policy, and
+  `@ic402/client`) now state what happened AND the next step — e.g. Sessions'
+  `"Session already closed"` names the `#closing` / `reconcileSession` recovery path;
+  Gateway's `"ICP settlement requires the ic402 server nonce"` tells you to echo the
+  challenge's `ic402Nonce`; `#insufficientFunds` / `#insufficientAllowance` say "needs
+  amount + ledger fee, re-approve"; EvmSender's nonce/gas/receipt errors state "nothing
+  was broadcast — safe to retry" and where to fund / what to re-poll. **No error
+  variant, `Ic402Error` kind, x402 `invalidReason` token, or interpolation changed** —
+  the protocol surface and every test-asserted string are byte-identical.
+
+### Fixed
+
+- **SDK: `openSession` error rendered `[object Object]`.** `client.ts` interpolated the
+  Candid error variant object directly; it now uses `safeStringify(result.err)` so the
+  real reason (`policyDenied` / `settlementPending` / `depositBelowMinimum` …) surfaces.
+
+### Tests
+
+- Fixed two pre-existing integration failures that only surface against a live replica
+  (the suite skips in CI): PaymentSignature payloads were missing the v2.5.0 `asset`
+  field (agent-js `Invalid opt record`), and the HTTP settlement-failure test's
+  `GET /content/probe` 404'd because that id was never uploaded. Integration is now 50/50.
+
 ## v2.5.1 — 2026-07-02
 
 Patch release — **documentation only, no code or interface change**. `example.did` is
