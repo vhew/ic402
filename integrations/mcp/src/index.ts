@@ -257,10 +257,41 @@ function serialize(value: unknown): unknown {
 // Server
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({
-  name: 'ic402',
-  version: '2.5.4',
-});
+const server = new McpServer(
+  {
+    name: 'ic402',
+    version: '2.5.4',
+  },
+  {
+    instructions:
+      'ic402 MCP server: connects an agent to an ic402-enabled ICP canister for x402 paid HTTP ' +
+      'endpoints, streaming micropayment sessions, encrypted content delivery, marketplace jobs, ' +
+      'and ERC-8004 agent registration on EVM chains.\n' +
+      '\n' +
+      'Rules:\n' +
+      '1. Call "configure" first — every other tool fails until it succeeds.\n' +
+      '2. Read-only tools (never move funds): search, request_session, get_session, ' +
+      'list_sessions, list_services, get_job_result, fetch_content, call.\n' +
+      '3. Value-moving tools (escrow, sign, pay, settle, or spend gas): open_session, ' +
+      'close_session, fetch_x402, submit_request, register_agent. session_query spends from a ' +
+      'deposit already escrowed and confirmed at open_session. dispute_job mutates job state on ' +
+      'the canister but signs no transfer.\n' +
+      '4. Two-phase confirmation: value-moving tools default to confirm:false and return ' +
+      '{status:"confirmation_required", proposal:{amount, recipient, asset, chain}} WITHOUT ' +
+      'acting. Present the proposal to the human; re-invoke with confirm:true only after the ' +
+      'human approves those exact values. Never set confirm:true on the first call, and never ' +
+      'confirm on your own initiative.\n' +
+      '5. Token amounts are ATOMIC units passed as decimal integer strings ("1000000" = 1.00 ' +
+      'USDC at 6 decimals). Never floats; JS numbers that lose precision are rejected.\n' +
+      '6. Spend caps: every capped spend must pass perCallMaxAtomic and the cumulative ' +
+      'sessionMaxAtomic. Caps, autoPayment, and localDev are operator-set at startup; ' +
+      '"configure" cannot loosen them unless the operator enabled security changes out-of-band.\n' +
+      '7. Admin tools (upload_content, register_service, enable_service, claim_job, ' +
+      'submit_job_result) and dangerous primitives (sign_typed_data, delete_content) are ' +
+      'DISABLED by default and fail unless the operator enabled them at startup. If one reports ' +
+      'disabled, tell the human — do not retry.',
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Tool: configure
@@ -268,42 +299,62 @@ const server = new McpServer({
 
 server.tool(
   'configure',
-  'Connect to an ic402-enabled ICP canister. Must be called before any other tool.',
+  'Connect to an ic402-enabled ICP canister and optionally load a signing identity. MUST be ' +
+    'called before any other tool (they all fail until configured). Does not move funds. The ' +
+    'security params (autoPayment, localDev, perCallMaxAtomic, sessionMaxAtomic) are requests ' +
+    'only: they are IGNORED unless the operator started the server with ' +
+    'IC402_MCP_ALLOW_SECURITY_CHANGES=1, and the result reports any ignored fields.',
   {
-    canisterId: z.string().describe('Principal of the canister to interact with'),
-    host: z.string().default('http://localhost:4944').describe('ICP replica URL'),
-    network: z.string().default('icp:1').describe('CAIP-2 network identifier'),
+    canisterId: z
+      .string()
+      .describe(
+        'Principal of the ic402 canister to connect to (e.g. "rrkah-fqaaa-aaaaa-aaaaq-cai"). Becomes the default target for all other tools.',
+      ),
+    host: z
+      .string()
+      .default('http://localhost:4944')
+      .describe(
+        'ICP replica/gateway URL. Default targets a local replica; the root key is auto-fetched when the host contains "localhost".',
+      ),
+    network: z
+      .string()
+      .default('icp:1')
+      .describe('CAIP-2 network identifier for ICP-side payments (default "icp:1" = ICP mainnet).'),
     identityPem: z
       .string()
       .optional()
-      .describe('Path to a secp256k1 PEM file for signing (e.g. identity.pem)'),
+      .describe(
+        'Filesystem path to a secp256k1 private-key PEM (SEC1 "EC PRIVATE KEY" or PKCS#8 "PRIVATE KEY") used to sign canister calls. Falls back to the ICP_IDENTITY_PEM env var; anonymous if neither is set. An unparseable PEM is a hard error, not a silent fallback.',
+      ),
     ledger: z
       .string()
       .optional()
-      .describe('ICRC-2 ledger canister ID for auto-payment (e.g. ckUSDC)'),
+      .describe(
+        'ICRC-2 ledger canister ID (e.g. the ckUSDC ledger) used for ICP-side payments: session escrow deposits and submit_request auto-payment. Required for ICP paid flows.',
+      ),
     autoPayment: z
       .boolean()
       .default(false)
       .describe(
-        'Allow paid endpoints to auto-approve/pay (opt-in). Even when true, spends are capped and confirmation-gated. Default false.',
+        'Request that paid endpoints may auto-approve/pay. IGNORED unless the operator enabled security changes at startup; even when honored, every spend stays capped and confirm-gated. Default false.',
       ),
     localDev: z
       .boolean()
       .default(false)
       .describe(
-        'Allow http://localhost and private/loopback fetch targets (local development only). Default false.',
+        'Request permission to fetch http://localhost and private/loopback URLs (local development only). IGNORED unless the operator enabled security changes at startup. Default false.',
       ),
     perCallMaxAtomic: z
       .string()
       .optional()
       .describe(
-        'Per-call max spend in atomic token units (caps a single signed transfer). Defaults to a small value.',
+        'Requested per-call spend cap in atomic token units, as a decimal integer string (caps a single signed transfer). IGNORED unless the operator enabled security changes. Default 1000000 (= 1.00 USDC at 6 decimals).',
       ),
     sessionMaxAtomic: z
       .string()
       .optional()
       .describe(
-        'Cumulative session max spend in atomic token units across all signed transfers. Defaults to a small value.',
+        'Requested cumulative spend cap for this whole server session in atomic token units, as a decimal integer string. IGNORED unless the operator enabled security changes. Default 5000000 (= 5.00 USDC).',
       ),
   },
   async ({
@@ -419,13 +470,16 @@ server.tool(
 
 server.tool(
   'search',
-  'Call the search endpoint on an ic402 canister (x402 charge flow). Returns results or a payment requirement.',
+  'Probe the canister\'s paid "search" endpoint with NO payment attached (x402 charge flow). ' +
+    'Never signs or pays. Returns {status:"ok", results} when access is free/covered, or ' +
+    '{status:"payment_required", requirements} describing what payment the canister demands — ' +
+    'it does not pay automatically.',
   {
-    query: z.string().describe('Search query text'),
+    query: z.string().describe('Search query text passed to the canister search method.'),
     canisterId: z
       .string()
       .optional()
-      .describe('Canister to call (defaults to configured canister)'),
+      .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ query, canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
@@ -476,12 +530,14 @@ server.tool(
 
 server.tool(
   'request_session',
-  'Request a session intent from a canister — returns pricing (suggestedDeposit, costPerCall) without opening a session.',
+  'Fetch the session intent from the canister — pricing such as suggestedDeposit and ' +
+    'costPerCall — WITHOUT opening a session or moving funds. Read-only. Call this before ' +
+    'open_session to learn the deposit the canister expects.',
   {
     canisterId: z
       .string()
       .optional()
-      .describe('Canister to query (defaults to configured canister)'),
+      .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
@@ -501,38 +557,60 @@ server.tool(
 
 server.tool(
   'open_session',
-  'Open a streaming micropayment session. For ICP: uses ICRC-2 escrow. For EVM: pass evmTxHash proving the USDC deposit.',
+  'Open a streaming micropayment session by escrowing a deposit — this MOVES FUNDS. Two-phase: ' +
+    'with confirm:false (default) it returns a confirmation_required proposal ' +
+    '(amount/recipient/asset/chain) and does nothing; re-invoke with confirm:true only after ' +
+    'the human approves. ICP path: ICRC-2 escrow via the ledger set in configure. EVM path: ' +
+    'pass evmTxHash proving an on-chain USDC deposit, or an EIP-3009 authorization for the ' +
+    'canister to pull the deposit, plus evmNetwork/evmSender/evmToken/evmRecipient. The deposit ' +
+    'is checked against and counted toward the spend caps. Returns {sessionId, deposited, ' +
+    'remaining}; use sessionId with session_query, get_session, and close_session.',
   {
-    canisterId: z.string().optional().describe('Canister to open session on'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister to open the session on (defaults to the canister set by configure).'),
     maxDeposit: z
       .string()
       .optional()
-      .describe('Max deposit in token units (defaults to canister suggestion)'),
+      .describe(
+        'Escrow deposit in ATOMIC token units as a decimal integer string (e.g. "1000000" = 1.00 USDC at 6 decimals). Omit to use the canister\'s suggestedDeposit from request_session.',
+      ),
     evmTxHash: z
       .string()
       .regex(/^0x[0-9a-fA-F]{64}$/, 'Must be a 0x-prefixed 32-byte hex hash')
       .optional()
-      .describe('EVM tx hash proving USDC deposit (for EVM sessions)'),
+      .describe(
+        "EVM sessions only: hash of the on-chain tx that deposited USDC to the canister's EVM address (0x + 64 hex chars).",
+      ),
     evmNetwork: z
       .string()
       .regex(/^eip155:\d+$/, 'Must be CAIP-2 format: eip155:<chainId>')
       .optional()
-      .describe('CAIP-2 network, e.g., "eip155:84532" (for EVM sessions)'),
+      .describe(
+        'EVM sessions only: CAIP-2 chain of the deposit, format "eip155:<chainId>" (e.g. "eip155:84532" = Base Sepolia).',
+      ),
     evmSender: z
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
       .optional()
-      .describe('Payer EVM address for refund (for EVM sessions)'),
+      .describe(
+        "EVM sessions only: the payer's EVM address (0x + 40 hex chars); the unused remainder is refunded here on close.",
+      ),
     evmToken: z
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
       .optional()
-      .describe('ERC-20 token contract address (for EVM sessions)'),
+      .describe(
+        'EVM sessions only: ERC-20 contract address of the deposit token (e.g. USDC), 0x + 40 hex chars.',
+      ),
     evmRecipient: z
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 20-byte EVM address')
       .optional()
-      .describe('Canister EVM address for settlement (for EVM sessions)'),
+      .describe(
+        "EVM sessions only: the canister's EVM address that receives the settled amount, 0x + 40 hex chars.",
+      ),
     authorization: z
       .object({
         from: z.string(),
@@ -546,12 +624,14 @@ server.tool(
         s: z.array(z.number()),
       })
       .optional()
-      .describe('EIP-3009 authorization for EVM session deposit'),
+      .describe(
+        'EVM sessions only: a signed EIP-3009 transferWithAuthorization authorizing the deposit pull. value/validAfter/validBefore MUST be decimal integer strings (uint256 — JS numbers that lose precision are rejected). nonce, r, s are 32-byte number[] arrays; v is the ECDSA recovery value.',
+      ),
     confirm: z
       .boolean()
       .default(false)
       .describe(
-        'Authorize the escrow deposit. Returns the proposed deposit for review when false.',
+        'Two-phase gate: false (default) returns the proposed deposit for human review without moving funds; true executes the escrow deposit. Only pass true after the human approves the proposal.',
       ),
   },
   async ({
@@ -658,10 +738,15 @@ server.tool(
 
 server.tool(
   'session_query',
-  'Send a query through an open session (auto-signs a voucher). Each call consumes costPerCall from the deposit.',
+  'Send a query through an already-open session. Auto-signs a micropayment voucher; each call ' +
+    'consumes costPerCall from the deposit that was escrowed (and human-confirmed) at ' +
+    'open_session, so no new confirmation is requested here. Returns {answer, consumed, ' +
+    'remaining}. Fails if the sessionId is not active in this server process.',
   {
-    sessionId: z.string().describe('Session ID from open_session'),
-    question: z.string().describe('Question or query text'),
+    sessionId: z
+      .string()
+      .describe('Session ID returned by open_session (must be active in this server process).'),
+    question: z.string().describe('Query text to send through the session.'),
   },
   async ({ sessionId, question }) => {
     const session = activeSessions.get(sessionId);
@@ -690,9 +775,10 @@ server.tool(
 
 server.tool(
   'get_session',
-  'Get the current state of an active session (consumed, remaining, voucher count).',
+  'Read the state of an active session: deposited, consumed, and remaining atomic amounts. ' +
+    'Read-only; no funds moved. Only sees sessions opened by this server process.',
   {
-    sessionId: z.string().describe('Session ID'),
+    sessionId: z.string().describe('Session ID returned by open_session.'),
   },
   async ({ sessionId }) => {
     const session = activeSessions.get(sessionId);
@@ -720,14 +806,21 @@ server.tool(
 
 server.tool(
   'close_session',
-  'Close a session — settles consumed amount on-chain and refunds the remainder. Returns a payment receipt. Settles value: pass confirm:true after reviewing the consumed amount.',
+  'Close an active session — SETTLES VALUE on-chain: the consumed amount is paid out and the ' +
+    'unused remainder is refunded to the payer. Two-phase: with confirm:false (default) it ' +
+    'returns the consumed/refund amounts for review without acting; re-invoke with confirm:true ' +
+    'after the human approves. Returns a payment receipt and removes the session from the ' +
+    'active list. (The consumed amount was already counted against the spend caps at deposit ' +
+    'time, so it is not re-charged here.)',
   {
-    sessionId: z.string().describe('Session ID to close'),
+    sessionId: z
+      .string()
+      .describe('Session ID returned by open_session (must be active in this server process).'),
     confirm: z
       .boolean()
       .default(false)
       .describe(
-        'Authorize the on-chain settlement. Returns the consumed amount for review when false.',
+        'Two-phase gate: false (default) returns the consumed amount and refund for review; true executes the on-chain settlement. Only pass true after the human approves.',
       ),
   },
   async ({ sessionId, confirm }) => {
@@ -764,7 +857,8 @@ server.tool(
 
 server.tool(
   'list_sessions',
-  'List all active sessions managed by this MCP server.',
+  'List all sessions currently held by this MCP server process (sessionId, deposited, ' +
+    'consumed, remaining). Read-only; no funds moved. Sessions opened elsewhere are not visible.',
   {},
   async () => {
     const sessions = Array.from(activeSessions.entries()).map(([id, s]) => ({
@@ -784,13 +878,24 @@ server.tool(
 
 server.tool(
   'fetch_content',
-  'Fetch content from a ContentDelivery response. Supports inline, httpUrl, assetCanister, and canisterQuery delivery methods.',
+  'Retrieve content described by a ContentDelivery JSON payload previously returned by a ' +
+    'canister content endpoint. Does NOT purchase or pay for anything — the grant must already ' +
+    'exist. Delivery modes: inline bytes; httpUrl (SSRF-guarded fetch); assetCanister (served ' +
+    'from https://<canisterId>.icp0.io); canisterQuery (chunked reads, restricted to the ' +
+    'getChunk/getContent query methods, max 10000 chunks). Returns {contentId, mimeType, ' +
+    'content} with the bytes decoded as UTF-8 text.',
   {
-    delivery: z.string().describe('ContentDelivery JSON string (as returned by content endpoints)'),
+    delivery: z
+      .string()
+      .describe(
+        'The ContentDelivery JSON string exactly as returned by a content endpoint: an object with "grant" and "delivery" fields, where delivery has exactly one of inline, httpUrl, assetCanister, canisterQuery.',
+      ),
     canisterId: z
       .string()
       .optional()
-      .describe('Canister ID for canisterQuery delivery (defaults to configured canister)'),
+      .describe(
+        'Canister to read chunks from (canisterQuery mode only; defaults to the canister set by configure). Ignored for other delivery modes.',
+      ),
   },
   async ({ delivery: deliveryJson, canisterId }) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -932,15 +1037,38 @@ function errorResult(e: unknown): { content: [{ type: 'text'; text: string }] } 
 
 server.tool(
   'fetch_x402',
-  'Fetch from an x402-gated URL. Full flow: probe URL → canister signs payment → retry with payment header. Signing moves value: pass confirm:true to authorize after reviewing the proposed amount/recipient.',
+  "Fetch an x402 (HTTP 402) payment-gated URL, optionally paying from the canister's EVM " +
+    'wallet. confirm:false (default) = PROBE ONLY: nothing is signed, no funds move; returns ' +
+    'the body if the URL is free, or a confirmation_required proposal ' +
+    '(amount/recipient/asset/chain) if payment is demanded. confirm:true = the canister SIGNS ' +
+    'the payment from its own EVM address and retries the URL with the payment header — this ' +
+    'MOVES FUNDS, is checked against the spend caps, and must only be used after the human ' +
+    'approves the exact amount/recipient/asset/chain. The URL and every redirect hop are ' +
+    'SSRF-validated.',
   {
-    url: z.string().describe('The x402-gated URL to fetch'),
-    chainId: z.number().default(84532).describe('EVM chain ID (default: Base Sepolia 84532)'),
-    canisterId: z.string().optional().describe('Canister to sign with (defaults to configured)'),
+    url: z
+      .string()
+      .describe(
+        'The x402-gated URL to fetch. Must be a public https URL (private/loopback/metadata hosts are rejected; http://localhost only with localDev).',
+      ),
+    chainId: z
+      .number()
+      .default(84532)
+      .describe(
+        "Fallback EVM chain ID used for the probe and when the server's payment requirement lacks a parseable eip155 network (default 84532 = Base Sepolia). The requirement's own network wins when present.",
+      ),
+    canisterId: z
+      .string()
+      .optional()
+      .describe(
+        'Canister whose tECDSA EVM key signs the payment (defaults to the canister set by configure).',
+      ),
     confirm: z
       .boolean()
       .default(false)
-      .describe('Authorize signing the proposed payment. Probe-only (no signing) when false.'),
+      .describe(
+        'Two-phase gate: false (default) probes only and never signs; true signs and sends the payment shown in the prior proposal. Only pass true after the human approves.',
+      ),
   },
   async ({ url, chainId, canisterId, confirm }) => {
     requireClient();
@@ -1096,15 +1224,33 @@ server.tool(
 
 server.tool(
   'register_agent',
-  'Register the canister as an ERC-8004 agent on-chain. Full flow: get nonce+gas → canister signs → broadcast → poll receipt. Broadcasts a signed tx (spends gas): pass confirm:true to authorize.',
+  'Register the canister as an ERC-8004 agent on an EVM chain: fetch nonce+gas, canister signs ' +
+    'the registration tx with its tECDSA key, broadcast, poll for the receipt. BROADCASTS A ' +
+    "TRANSACTION that spends native gas from the canister's EVM address; no token amount is " +
+    'involved, so the spend caps do NOT apply — the confirm gate is the only control. ' +
+    'confirm:false (default) returns a proposal without signing anything. Returns {tokenId, ' +
+    'txHash} on success.',
   {
-    chainId: z.number().default(84532).describe('EVM chain ID (default: Base Sepolia 84532)'),
-    canisterId: z.string().optional().describe('Canister to register (defaults to configured)'),
-    rpcUrl: z.string().optional().describe('Custom EVM RPC URL (defaults to public RPC)'),
+    chainId: z
+      .number()
+      .default(84532)
+      .describe('EVM chain ID to register on (default 84532 = Base Sepolia).'),
+    canisterId: z
+      .string()
+      .optional()
+      .describe('Canister to register as the agent (defaults to the canister set by configure).'),
+    rpcUrl: z
+      .string()
+      .optional()
+      .describe(
+        'Optional custom EVM JSON-RPC endpoint URL (defaults to a public RPC for the chain). SSRF-validated: private/internal hosts are rejected.',
+      ),
     confirm: z
       .boolean()
       .default(false)
-      .describe('Authorize signing and broadcasting the registration tx (spends gas).'),
+      .describe(
+        'Two-phase gate: false (default) returns a proposal without signing; true signs and broadcasts the registration tx (spends native gas). Only pass true after the human approves.',
+      ),
   },
   async ({ chainId, canisterId, rpcUrl, confirm }) => {
     const c = requireClient();
@@ -1162,11 +1308,17 @@ server.tool(
 // Tool: list_services
 // ---------------------------------------------------------------------------
 
-server.tool('list_services', 'List available paid services from the canister.', {}, async () => {
-  const c = requireClient();
-  const services = await c.listServices();
-  return textResult(serialize(services));
-});
+server.tool(
+  'list_services',
+  'List the paid services registered on the canister. Read-only; no funds moved. Use this ' +
+    'before submit_request to find a serviceId.',
+  {},
+  async () => {
+    const c = requireClient();
+    const services = await c.listServices();
+    return textResult(serialize(services));
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Tool: submit_request
@@ -1174,14 +1326,24 @@ server.tool('list_services', 'List available paid services from the canister.', 
 
 server.tool(
   'submit_request',
-  'Submit a paid service request. If the service demands payment, you must opt into autoPayment (via "configure") and pass confirm:true after reviewing the amount/recipient. Returns a job ID for polling.',
+  'Submit a marketplace service request; MOVES FUNDS when the service is paid. Flow: the price ' +
+    'is quoted via a read-only query first; a total of 0 (free or session-billed) submits ' +
+    'immediately with no payment; a paid service requires BOTH operator-enabled autoPayment AND ' +
+    'confirm:true. With confirm:false it returns a confirmation_required proposal with the ' +
+    'exact total (price + ledger fee) — the amount the spend caps are checked against. Returns ' +
+    '{jobId} (plus paidAmount when paid); poll the result with get_job_result.',
   {
-    serviceId: z.string().describe('Service ID to request'),
-    params: z.string().default('').describe('Job parameters (UTF-8 string, sent as bytes)'),
+    serviceId: z.string().describe('ID of the service to request (see list_services).'),
+    params: z
+      .string()
+      .default('')
+      .describe('Job parameters as a UTF-8 string; delivered to the service as raw bytes.'),
     confirm: z
       .boolean()
       .default(false)
-      .describe('Authorize auto-payment of the amount the canister demands.'),
+      .describe(
+        'Two-phase gate for paid services: false (default) returns the quoted total for review; true approves and pays it (price + ledger fee). Ignored for free services. Only pass true after the human approves.',
+      ),
   },
   async ({ serviceId, params, confirm }) => {
     const c = requireClient();
@@ -1283,10 +1445,14 @@ server.tool(
 
 server.tool(
   'get_job_result',
-  'Poll for a job result. Waits until the job completes or times out.',
+  'Poll the canister for a job result until it completes or the attempt limit is reached. ' +
+    'Read-only; no funds moved.',
   {
-    jobId: z.string().describe('Job ID from submit_request'),
-    maxAttempts: z.number().default(15).describe('Max poll attempts'),
+    jobId: z.string().describe('Job ID returned by submit_request.'),
+    maxAttempts: z
+      .number()
+      .default(15)
+      .describe('Maximum polling attempts before giving up (default 15).'),
   },
   async ({ jobId, maxAttempts }) => {
     const c = requireClient();
@@ -1305,10 +1471,15 @@ server.tool(
 
 server.tool(
   'dispute_job',
-  'Dispute a job result (for BuyerConfirm verification services).',
+  'Dispute a job result on the canister (only meaningful for services using BuyerConfirm ' +
+    "verification). State-changing on the canister and may affect how the job's payment " +
+    'settles, but signs no transfer from this server. Use only for a job you submitted whose ' +
+    'result is wrong or missing.',
   {
-    jobId: z.string().describe('Job ID to dispute'),
-    reason: z.string().describe('Reason for dispute'),
+    jobId: z.string().describe('Job ID of the job whose result you are disputing.'),
+    reason: z
+      .string()
+      .describe('Human-readable reason for the dispute (recorded on the canister).'),
   },
   async ({ jobId, reason }) => {
     const c = requireClient();
@@ -1334,14 +1505,28 @@ server.tool(
 
 server.tool(
   'call',
-  'Call a READ-ONLY/query method on the configured canister (allowlisted getters only). State-changing, signing, payment, and admin methods are blocked here — use their dedicated tools.',
+  'Escape hatch: invoke a READ-ONLY query method on the canister. Allowed: a curated getter ' +
+    'allowlist (listContent, getChunk, getAgentCard, getAgentId, verifyGrant, listServices, ' +
+    'getJobStatus, getJob, getJobResult, keccak256, getPolicyConfig), plus other methods named ' +
+    'get*/list*/fetch*/is* whose names contain no state-changing keywords. Any signing, ' +
+    'payment, admin, or otherwise state-changing method is rejected — use its dedicated tool ' +
+    'instead. No funds moved.',
   {
-    method: z.string().describe('Canister query/read method name (allowlisted getters only)'),
-    args: z.string().default('[]').describe('JSON array of arguments'),
+    method: z
+      .string()
+      .describe(
+        'Read-only canister method name: on the allowlist above, or a get*/list*/fetch*/is* getter with no blocked keywords.',
+      ),
+    args: z
+      .string()
+      .default('[]')
+      .describe(
+        'Positional arguments as a JSON array string (default "[]"). Candid opt values are encoded as [] (none) or [value] (some).',
+      ),
     canisterId: z
       .string()
       .optional()
-      .describe('Canister to call (defaults to configured canister)'),
+      .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ method, args, canisterId }) => {
     const cid = canisterId ?? defaultCanisterId;
@@ -1412,8 +1597,16 @@ function adminTool(
     description,
     {
       args: z.string().describe(argsHint),
-      canisterId: z.string().optional().describe('Canister to call (defaults to configured)'),
-      confirm: z.boolean().default(false).describe('Authorize this state-changing/signing action.'),
+      canisterId: z
+        .string()
+        .optional()
+        .describe('Target canister (defaults to the canister set by configure).'),
+      confirm: z
+        .boolean()
+        .default(false)
+        .describe(
+          'Two-phase gate: false (default) returns a confirmation_required proposal without acting; true executes this state-changing/signing action. Only pass true after the human approves.',
+        ),
     },
     async ({ args, canisterId, confirm }) => {
       // S1/S9 + SEC-3: refuse dangerous primitives (raw EIP-712 signing oracle, destructive
@@ -1448,50 +1641,70 @@ function adminTool(
 adminTool(
   'upload_content',
   'uploadContent',
-  'Upload + encrypt content into the canister ContentStore (controller-gated, state-changing).',
-  'JSON array: [id, mimeType, dataBytes] where dataBytes is a number[] of the raw bytes.',
+  'Upload and encrypt content into the canister ContentStore for later paid delivery. ' +
+    'State-changing; controller-gated (the configured identity must control the canister). ' +
+    'DISABLED by default — fails unless the operator started the server with ' +
+    'IC402_MCP_ALLOW_ADMIN_TOOLS=1. Requires confirm:true.',
+  'JSON array [id, mimeType, dataBytes]: id string, mimeType string (e.g. "text/plain"), dataBytes a number[] of the raw content bytes.',
   'Uploads and encrypts content into the canister (controller-gated).',
 );
 adminTool(
   'delete_content',
   'deleteContent',
-  'Delete a content entry from the canister ContentStore (controller-gated, destructive).',
-  'JSON array: [id].',
+  'Permanently delete a content entry from the canister ContentStore. DESTRUCTIVE and ' +
+    'irreversible; controller-gated. DISABLED by default — fails unless the operator started ' +
+    'the server with IC402_MCP_ALLOW_DANGEROUS_TOOLS=1. Requires confirm:true.',
+  'JSON array [id]: the content ID string to delete.',
   'Permanently deletes content from the canister (controller-gated, destructive).',
 );
 adminTool(
   'register_service',
   'registerService',
-  'Register a paid service in the marketplace (controller-gated, state-changing).',
-  'JSON array of registerService args: [name, description, serviceType, pricing, verificationMethod, verifierCanisterId?, verificationKey?, delivery, timeout].',
+  'Register a paid service in the canister marketplace. State-changing; controller-gated. ' +
+    'DISABLED by default — fails unless the operator started the server with ' +
+    'IC402_MCP_ALLOW_ADMIN_TOOLS=1. Requires confirm:true. Use enable_service afterwards so ' +
+    'the service can accept paid requests.',
+  'JSON array of positional registerService args: [name, description, serviceType, pricing, verificationMethod, verifierCanisterId?, verificationKey?, delivery, timeout]. Values must mirror the canister Candid types; optional (opt) args are encoded as [] (none) or [value] (some).',
   'Registers a marketplace service on the canister (controller-gated).',
 );
 adminTool(
   'enable_service',
   'enableService',
-  'Enable a registered service so it can accept paid requests (controller-gated).',
-  'JSON array: [serviceId].',
+  'Enable a registered marketplace service so it can accept paid requests. State-changing; ' +
+    'controller-gated. DISABLED by default — fails unless the operator started the server with ' +
+    'IC402_MCP_ALLOW_ADMIN_TOOLS=1. Requires confirm:true.',
+  'JSON array [serviceId]: the service ID string to enable.',
   'Enables a marketplace service on the canister (controller-gated).',
 );
 adminTool(
   'claim_job',
   'claimJob',
-  'Operator claims a pending marketplace job (state-changing).',
-  'JSON array: [jobId].',
+  'Claim a pending marketplace job for the operator so its result can be worked and submitted. ' +
+    'State-changing. DISABLED by default — fails unless the operator started the server with ' +
+    'IC402_MCP_ALLOW_ADMIN_TOOLS=1. Requires confirm:true. Follow with submit_job_result.',
+  'JSON array [jobId]: the job ID string to claim.',
   'Claims a marketplace job for the operator.',
 );
 adminTool(
   'submit_job_result',
   'submitJobResult',
-  'Operator submits a job result (and optional proof) for verification + settlement (state-changing).',
-  'JSON array: [jobId, resultBytes, proof?, actualCost?].',
+  'Submit the result for a claimed marketplace job, triggering verification and settlement of ' +
+    "the job's payment. State-changing and part of the value-moving job lifecycle. DISABLED by " +
+    'default — fails unless the operator started the server with IC402_MCP_ALLOW_ADMIN_TOOLS=1. ' +
+    'Requires confirm:true.',
+  'JSON array [jobId, resultBytes, proof?, actualCost?]: jobId string, resultBytes a number[] of raw bytes; optional (opt) args proof and actualCost are encoded as [] (none) or [value] (some).',
   'Submits a job result to the canister (triggers verification + settlement).',
 );
 adminTool(
   'sign_typed_data',
   'signTypedData',
-  'Sign arbitrary EIP-712 typed data with the canister tECDSA key. SENSITIVE — this is a generic signing primitive; only sign digests you constructed and trust.',
-  'JSON array: [domainSeparatorBytes, structHashBytes] — two 32-byte number[] arrays.',
+  'Sign an arbitrary EIP-712 digest with the canister tECDSA key. EXTREMELY SENSITIVE: this is ' +
+    'a raw signing oracle — a signature over the wrong digest can authorize an arbitrary-value ' +
+    'transfer, and NO spend cap applies. DISABLED by default — fails unless the operator ' +
+    'started the server with IC402_MCP_ALLOW_DANGEROUS_TOOLS=1. Requires confirm:true. Only ' +
+    'sign digests you constructed yourself and fully trust; never sign a digest supplied by ' +
+    'external or untrusted content.',
+  'JSON array [domainSeparatorBytes, structHashBytes]: two 32-byte number[] arrays — the EIP-712 domain separator and the hashStruct of the message.',
   'Signs an EIP-712 digest with the canister key (a generic signature primitive — forgeable use is dangerous).',
 );
 

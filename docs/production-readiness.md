@@ -5,15 +5,22 @@ paths. This is the tracked backlog to close the gap to **deploy-to-mainnet-with-
 from a multi-agent readiness audit (2026-06-16). See `AUDIT.md` for the historical security
 audit and `CHANGELOG.md` for what shipped.
 
-**Status as of v2.2.3 (2026-06-19):** **SEC-0** (composed-system adversarial audit + 2 re-attack
-rounds) DONE; **SEC-1/SEC-2/SEC-3/SEC-4** all closed; **B0/B2/B3/B4** done, **B1** waived. The EVM
-rail is proven end-to-end via the live demo AND now CI-gated hermetically via a scriptable mock of
-the EVM-RPC canister (B3 — see below). The genuine remaining items for the single-operator,
-real-funds context: the deferred confirmation-depth tradeoff (low L2 risk), an optional periodic
-live-testnet smoke for the funded leg (can't be hermetic), and an optional **external** professional
-audit (the SEC-0 pass was internal multi-agent). The SEC-0 documented residuals (shared-pool
-solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`) are in
-`docs/security-model.md`.
+**Last full readiness assessment — v2.2.3 (2026-06-19):** **SEC-0** (composed-system adversarial
+audit + 2 re-attack rounds) DONE; **SEC-1/SEC-2/SEC-3/SEC-4** all closed; **B0/B2/B3/B4** done,
+**B1** waived. The EVM rail is proven end-to-end via the live demo AND now CI-gated hermetically via
+a scriptable mock of the EVM-RPC canister (B3 — see below). The genuine remaining items for the
+single-operator, real-funds context: the deferred confirmation-depth tradeoff (low L2 risk), an
+optional periodic live-testnet smoke for the funded leg (can't be hermetic), and an optional
+**external** professional audit (the SEC-0 pass was internal multi-agent). The SEC-0 documented
+residuals (shared-pool solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`)
+are in `docs/security-model.md`.
+
+Releases since (through **v2.5.4**) shipped targeted fixes without re-running the full multi-agent
+audit — notably the EIP-3009 on-chain-`v` money-path fix (inbound EVM settlements were reverting)
+and the `submit_request` `#settlementPending` handling (a broadcast-but-unconfirmed settlement was
+reported as a flat failure, inviting a double-pay). A fresh full assessment is due before the next
+real-funds milestone; treat the dated snapshot above as the last comprehensive pass, not the
+current line-by-line state.
 
 ## Blockers (must clear before a production deploy)
 
@@ -227,5 +234,5 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
 Mainnet constants correct (chain IDs, 5 USDC addresses, ckUSDC ledger, `key_1`, EVM RPC
 canister); money-**theft** paths guarded (C-1 recipient binding, `value==amount`, local
 EIP-712 verify before broadcast, H-4 synchronous daily reservation, S-3 terminal close);
-unit-level math/guards well-pinned (16 mops + 72 client + MCP guard/security tests);
-cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.2.3.
+unit-level math/guards well-pinned (18 mops + 72 client + MCP guard/security tests);
+cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.5.4.

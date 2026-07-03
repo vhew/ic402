@@ -264,10 +264,12 @@ redirect-safe `safeFetch` (both in `security.ts`):
   origin 30x's to an internal/metadata target. The x402 probe uses the same per-hop
   `validateRedirect` check.
 
-> **Known limitation — DNS rebinding.** `validateFetchUrl` validates the *literal* host only. A
-> public hostname that resolves to a private IP is **not** covered. Closing it requires resolving
-> the host and re-checking the resolved addresses before connecting (a resolver seam, noted in
-> `security.ts`).
+> **Residual — check-vs-connect rebinding window.** DNS rebinding is closed: `safeFetch` resolves
+> every host and every redirect hop and rejects the request if *any* resolved address is
+> private/loopback/link-local/metadata (`assertResolvedHostIsPublic`, the SEC-0 fix). What remains is
+> a narrow TOCTOU window — the OS re-resolves at connection time, so a name that flips to an internal
+> IP between the check and the connect is not caught. Fully closing it requires pinning the validated
+> IP at the connection layer (a custom undici dispatcher); noted in `security.ts`.
 
 ### The `call` allowlist & blocklist
 
@@ -322,5 +324,5 @@ When `allowSecurityChanges` or `allowDangerousTools` is enabled, the banner adds
   `resolveSecurityConfig`, `isToolAllowed` / `DANGEROUS_TOOLS`, `resolveOperatorConfig`.
 - `src/security.ts` — pure SSRF validation (`validateFetchUrl` and the IPv4/IPv6 helpers) and the
   redirect-safe `safeFetch`.
-- `package.json` — `@ic402/mcp` v2.1.1; `build` runs `tsc`, `start` runs `node dist/index.js`,
+- `package.json` — `@ic402/mcp` v2.5.4; `build` runs `tsc`, `start` runs `node dist/index.js`,
   and the `ic402-mcp` bin maps to `dist/index.js`.
