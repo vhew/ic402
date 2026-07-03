@@ -178,3 +178,40 @@ suite("Gateway.resolveEvmAsset / resolveEvmDomain", func() {
     };
   });
 });
+
+// ── 2.6.2 additive wrappers: per-caller policy removal + EVM pool observability ──
+
+suite("Gateway policy + EVM pool wrappers", func() {
+  let owner = Principal.fromText("aaaaa-aa");
+  let caller = Principal.fromText("2vxsx-fae");
+  let cfg : Types.Config = {
+    recipient = { owner; subaccount = null };
+    tokens = [];
+    evmChains = [];
+    evmRpcCanister = null;
+    ecdsaKeyName = null;
+    nonceExpirySeconds = null;
+  };
+
+  test("removeCallerPolicy reverts the caller to the global policy", func() {
+    let gate = Gateway.Gateway(cfg, owner);
+    let global = gate.getGlobalPolicy();
+    gate.setPolicy(?caller, { global with maxPerTransaction = ?123 });
+    assert (gate.getPolicy(caller).maxPerTransaction == ?123);
+    gate.removeCallerPolicy(caller);
+    assert (gate.getPolicy(caller).maxPerTransaction == global.maxPerTransaction);
+    // Removed ≠ overwritten-with-a-copy: the caller now TRACKS later global changes.
+    gate.setPolicy(null, { global with maxPerTransaction = ?456 });
+    assert (gate.getPolicy(caller).maxPerTransaction == ?456);
+  });
+
+  test("getEvmPoolCap reads back setEvmPoolCap; totalAllocated starts at 0", func() {
+    let gate = Gateway.Gateway(cfg, owner);
+    assert (gate.getEvmPoolCap() == null); // default: unbounded
+    gate.setEvmPoolCap(?5_000);
+    assert (gate.getEvmPoolCap() == ?5_000);
+    gate.setEvmPoolCap(null);
+    assert (gate.getEvmPoolCap() == null);
+    assert (gate.totalAllocated(8453, "0xusdc") == 0); // nothing reserved yet
+  });
+});

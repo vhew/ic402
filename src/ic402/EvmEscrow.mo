@@ -35,6 +35,9 @@ module {
     /// canister's EVM address with.
     public func setPoolCap(cap : ?Nat) { poolCap := cap };
 
+    /// Read the configured pool cap (see setPoolCap). null = unbounded.
+    public func getPoolCap() : ?Nat { poolCap };
+
     /// Reserve a deposit amount for a session. Refuses on a duplicate session, or — when a pool cap
     /// is set — when the new total would exceed the cap (over-allocation).
     public func allocate(sessionId : Text, chainId : Nat, token : Text, amount : Nat) : { #ok; #err : Text } {

@@ -176,4 +176,23 @@ suite("HttpHandler", func() {
       };
     });
   });
+
+  // ── http202JsonWithSettlement (2.6.2 additive) ──
+
+  suite("http202JsonWithSettlement", func() {
+
+    test("202 + PAYMENT-RESPONSE header + JSON body (mirrors the 200 variant)", func() {
+      let resp = HttpHandler.http202JsonWithSettlement("{\"jobId\":\"job-1\"}", "{\"success\":true}");
+      assert(resp.status_code == 202);
+      assert(resp.body == Text.encodeUtf8("{\"jobId\":\"job-1\"}"));
+      var hasSettlement = false;
+      var hasJsonType = false;
+      for ((k, v) in resp.headers.vals()) {
+        if (k == "PAYMENT-RESPONSE") { hasSettlement := true };
+        if (k == "Content-Type" and v == "application/json") { hasJsonType := true };
+      };
+      assert(hasSettlement);
+      assert(hasJsonType);
+    });
+  });
 });

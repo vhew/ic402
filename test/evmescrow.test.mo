@@ -62,4 +62,13 @@ suite("EvmEscrowManager", func() {
     m.setPoolCap(null);
     switch (m.allocate("s5", 8453, "0xusdc", 999999)) { case (#ok) {}; case (#err(_)) { assert false } };
   });
+
+  test("getPoolCap reads back setPoolCap (default null = unbounded)", func() {
+    let m = EvmEscrow.EvmEscrowManager();
+    assert (m.getPoolCap() == null);
+    m.setPoolCap(?9_000);
+    assert (m.getPoolCap() == ?9_000);
+    m.setPoolCap(null);
+    assert (m.getPoolCap() == null);
+  });
 });

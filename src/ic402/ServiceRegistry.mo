@@ -278,6 +278,13 @@ module {
       services.get(id);
     };
 
+    /// The ICP ledger transfer fee this registry's settle economics assume (config.ledgerFee).
+    /// Settle-first consumers should derive expectedAmount = price + ledgerFee() from HERE —
+    /// validateSubmittable checks against this same value, so a consumer that mirrors its own fee
+    /// constant instead can drift and get an insufficient-payment rejection (or, pre-Option-A,
+    /// a stranded payment).
+    public func ledgerFee() : Nat { config.ledgerFee };
+
     // ── Job Lifecycle ──
 
     // C-4 (v2): Funds are custodied at the platform recipient account (where

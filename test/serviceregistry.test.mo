@@ -446,6 +446,13 @@ suite("ServiceRegistry", func() {
         case (#err(_)) { assert false };
       };
     });
+
+    // 2.6.2: consumers derive expectedAmount = price + ledgerFee() from the registry itself, so a
+    // caller-side mirrored fee constant can never drift from what validateSubmittable checks.
+    test("ledgerFee() exposes the registry's configured fee", func() {
+      assert (makeRegistry().ledgerFee() == 0);
+      assert (makeFeeRegistry().ledgerFee() == 10_000);
+    });
   });
 
   // ══════════════════════════════════════════════════

@@ -257,6 +257,19 @@ module {
     };
   };
 
+  /// 202 Accepted (JSON) carrying the v2 `PAYMENT-RESPONSE` settlement header — for async flows
+  /// where the payment settled but the work product is still pending (e.g. a marketplace job was
+  /// created and escrowed; the body points the client at a poll URL).
+  public func http202JsonWithSettlement(json : Text, settlementJson : Text) : Types.HttpResponse {
+    let b64 = Utils.base64Encode(Blob.toArray(Text.encodeUtf8(settlementJson)));
+    {
+      status_code = 202;
+      headers = Array.append(corsHeaders(), [("Content-Type", "application/json"), ("PAYMENT-RESPONSE", b64)]);
+      body = Text.encodeUtf8(json);
+      upgrade = null;
+    };
+  };
+
   /// Build a 200 OK response with content.
   public func http200(contentBody : Blob, mimeType : Text) : Types.HttpResponse {
     {

@@ -955,6 +955,17 @@ module {
     /// this to the USDC you have funded the canister's EVM address with; null = unbounded (legacy).
     public func setEvmPoolCap(cap : ?Nat) { evmEscrowMgr.setPoolCap(cap) };
 
+    /// Read the configured EVM pool cap (see setEvmPoolCap). null = unbounded.
+    public func getEvmPoolCap() : ?Nat { evmEscrowMgr.getPoolCap() };
+
+    /// Total EVM deposit currently reserved by open sessions for a chain+token — read-only pool
+    /// utilisation. Remaining headroom under a cap is getEvmPoolCap() − totalAllocated(chainId,
+    /// token); an operator sizing the cap (or diagnosing "EVM pool over-allocation" rejections)
+    /// reads it here instead of mirroring the escrow accounting.
+    public func totalAllocated(chainId : Nat, token : Text) : Nat {
+      evmEscrowMgr.totalAllocated(chainId, token);
+    };
+
     /// Start recurring timers: close expired/idle sessions every 60s (then GC closed sessions
     /// older than 24h), and hourly GC of daily-spend, rate-limit, and revoked-grant state.
     /// Also one-shot: auto-initializes the HMAC seed from raw_rand, and derives the canister's
@@ -1005,6 +1016,14 @@ module {
         case (null) { policy.setGlobalPolicy(p) };
         case (?c) { policy.setCallerPolicy(c, p) };
       };
+    };
+
+    /// Remove a per-caller policy override, reverting the caller to the global policy — the
+    /// write-path complement of setPolicy(?caller, _). Without it, the only way "back" from an
+    /// override was overwriting it with a copy of the global policy (which then no longer tracks
+    /// later global changes). Gate on the consumer's owner/controller check like setPolicy.
+    public func removeCallerPolicy(caller : Principal) {
+      policy.removeCallerPolicy(caller);
     };
 
     /// Get the effective spending policy for a caller.
