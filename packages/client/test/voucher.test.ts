@@ -26,6 +26,19 @@ describe('encodeVoucherPayload', () => {
     const b = encodeVoucherPayload('cid-2', 'sess-1', 100n, 1n);
     expect(a).not.toEqual(b);
   });
+
+  // CROSS-BOUNDARY GOLDEN VECTOR. The canister rebuilds and Ed25519-verifies this exact byte string
+  // in Sessions.encodeVoucherPayload; test/sessions.test.mo asserts the SAME vector on the mo:cbor
+  // side. If cborg (here) and mo:cbor (canister) ever diverge, one of the two tests fails — the
+  // client↔canister check that was missing when a voucher-payload mismatch could only surface on a
+  // live session (a signed voucher that "does not verify against the registered public key").
+  it('matches the canister golden vector byte-for-byte (aaaaa-aa / sess-1 / 1000 / 2)', () => {
+    const payload = encodeVoucherPayload('aaaaa-aa', 'sess-1', 1000n, 2n);
+    // prettier-ignore
+    expect(Array.from(payload)).toEqual([
+      132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49, 25, 3, 232, 2,
+    ]);
+  });
 });
 
 describe('signVoucher', () => {

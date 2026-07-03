@@ -1,5 +1,7 @@
 /// Motoko unit tests for Sessions pure functions.
 import Sessions "../src/ic402/Sessions";
+import Array "mo:base/Array";
+import Nat8 "mo:base/Nat8";
 import { test; suite } "mo:test";
 
 suite("Sessions", func() {
@@ -65,6 +67,18 @@ suite("Sessions", func() {
       switch (a, c) {
         case (?ba, ?bc) { assert(ba != bc) };
         case (_, _) { assert(false) };
+      };
+    });
+
+    // CROSS-BOUNDARY GOLDEN VECTOR: packages/client/test/voucher.test.ts asserts the client's cborg
+    // encoder produces this SAME byte string. mo:cbor (here) and cborg (client) must agree exactly or
+    // a signed voucher will not verify — the check that was missing when a voucher-payload divergence
+    // (e.g. the M-7 canisterId binding) could only surface on a live session.
+    test("matches the cross-boundary golden vector (aaaaa-aa / sess-1 / 1000 / 2)", func() {
+      let expected : [Nat8] = [132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49, 25, 3, 232, 2];
+      switch (Sessions.encodeVoucherPayload("aaaaa-aa", "sess-1", 1000, 2)) {
+        case (?bytes) { assert Array.equal<Nat8>(bytes, expected, Nat8.equal) };
+        case (null) { assert(false) };
       };
     });
   });

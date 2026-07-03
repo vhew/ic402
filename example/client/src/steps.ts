@@ -1420,9 +1420,20 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
                 `${q} consumed=${String(lastConsumed).padStart(5)}  remaining=${String(lastRemaining).padStart(5)}`,
               );
             } catch (e) {
-              warn(
-                `Voucher ${i + 1}/${questions.length} rejected: ${e instanceof Error ? e.message : String(e)}`,
-              );
+              const msg = e instanceof Error ? e.message : String(e);
+              warn(`Voucher ${i + 1}/${questions.length} rejected: ${msg}`);
+              if (/does not verify|registered public key|Ed25519/i.test(msg)) {
+                // The session opened (the deposit is already escrowed) but its vouchers cannot verify.
+                // The Ed25519 signature is checked against the canisterId bound into the voucher
+                // payload (M-7): the client signs the canister id it was configured with; the canister
+                // rebuilds with its OWN principal. If those differ, every voucher fails exactly like
+                // this. This is NOT a balance problem.
+                warn(
+                  `This is a voucher-signature mismatch, not a balance issue: the client's configured ` +
+                    `canister id likely differs from the canister's own principal (the M-7 voucher ` +
+                    `binding). Check they match. The deposit is recoverable — close the session to refund it.`,
+                );
+              }
               // A rejected voucher does not advance the session, so every later voucher reuses the
               // same sequence and is also rejected — stop here rather than print fake successes.
               break;
