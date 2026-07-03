@@ -36,9 +36,14 @@ MOC="$(mops toolchain bin moc)"
 mkdir -p "$(dirname "$OUT")"
 
 echo "  moc compile -> $RAW" >&2
+# -E M0145: treat a non-exhaustive `switch` as a hard ERROR, not a warning. moc only WARNS on a
+# missing case (and this build has no -Werror), so a settle-result switch that forgot a variant —
+# e.g. dropping #settlementPending and reporting a flat "settlement failed" that invites a double-pay
+# — would otherwise ship silently. This makes every PaymentResult (and any other) switch prove it
+# covers all variants at build time. Adding a variant to a matched type now fails CI until handled.
 # `mops sources` must word-split into separate --package args (it is a multi-line list).
 # shellcheck disable=SC2046
-"$MOC" $(mops sources) --public-metadata candid:service example/main.mo -o "$RAW"
+"$MOC" $(mops sources) -E M0145 --public-metadata candid:service example/main.mo -o "$RAW"
 
 echo "  wasm-opt -O -> $OUT" >&2
 "$WASM_OPT" -O --all-features "$RAW" -o "$OUT"

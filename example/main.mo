@@ -902,7 +902,16 @@ persistent actor KnowledgeBase {
           case (#settlementFailed(r)) { #error("Settlement failed: " # r) };
           case (#networkNotSupported(r)) { #error("Network not supported: " # r) };
           case (#tokenNotAccepted(r)) { #error("Token not accepted: " # r) };
-          case (_) { #error("Payment settlement failed") };
+          // M13: an EVM transfer was BROADCAST but not yet confirmed. Do NOT report a flat failure —
+          // that reads as "retry" and invites a double-payment for a tx that may still mine. Mirror
+          // the search/serve/open-session paths (main.mo:250, :735, :632) and surface the pending
+          // state with its tx hash so the caller re-polls instead of re-paying.
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
+          // No wildcard: handle every PaymentResult variant explicitly so moc's exhaustiveness check
+          // fails the build if a new variant is added — the guard that keeps #settlementPending (and
+          // the reject arms below) from being silently swallowed as a flat "settlement failed" again.
+          case (#reputationTooLow(min)) { #error("Reputation too low: minimum " # Nat.toText(min)) };
+          case (#depositBelowMinimum(min)) { #error("Min deposit: " # Nat.toText(min)) };
         };
       };
     };
