@@ -685,51 +685,55 @@ module {
           authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
         );
 
-        switch (execResult) {
+        // Extract the broadcast tx hash. #maybeSent (ambiguous broadcast — post-dispatch error /
+        // inconsistent RPC / nonce-too-high) carries a hash and MAY still mine, so route it into the
+        // SAME confirm-poll instead of discarding it as a hash-less #settlementFailed (G5/G6). No
+        // double-pay: the EIP-3009 token nonce is single-use on-chain, so if the tx already mined it
+        // yields a receipt below, else it parks as #settlementPending WITH the hash (recoverable).
+        let txHash = switch (execResult) {
           case (#err(msg)) {
             nonceManager.unlock(signature.nonce);
             policy.releaseDaily(evmSender, evmSpendDay, amount);
             return #settlementFailed("EIP-3009 execution failed: " # msg);
           };
-          case (#ok(txHash)) {
-            // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the
-            // transfer actually mined (status == 1) before issuing a receipt; an
-            // on-chain revert (insufficient balance, reused token nonce, paused
-            // token) must not yield a "paid" receipt.
-            switch (await sender.confirmTransaction(chainId, txHash, 4)) {
-              case (#confirmed) {
-                nonceManager.consumeLocked(signature.nonce);
-                let receipt : Types.PaymentReceipt = {
-                  id = nextReceiptId();
-                  amount;
-                  token = tokenAddr;
-                  sender = authz.from;
-                  recipient = canisterEvmAddr;
-                  network = signature.network;
-                  timestamp = Time.now();
-                  txHash = ?txHash;
-                  sessionId = null;
-                  refunded = null;
-                };
-                return #ok(receipt);
-              };
-              case (#reverted) {
-                nonceManager.unlock(signature.nonce);
-                policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, authorization nonce already used, or token paused. Fix the cause and re-sign a fresh authorization.");
-              };
-              case (#pending) {
-                // Keep the nonce locked (GC'd at expiry) so the same challenge is
-                // not re-broadcast; release the daily reservation since no receipt
-                // is issued. Caller MUST NOT deliver value on #settlementPending.
-                policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain).");
-              };
-              case (#err(e)) {
-                policy.releaseDaily(evmSender, evmSpendDay, amount);
-                return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending.");
-              };
+          case (#ok(h)) { h };
+          case (#maybeSent(m)) { m.txHash };
+        };
+        // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the transfer actually
+        // mined (status == 1) before issuing a receipt; an on-chain revert (insufficient balance,
+        // reused token nonce, paused token) must not yield a "paid" receipt.
+        switch (await sender.confirmTransaction(chainId, txHash, 4)) {
+          case (#confirmed) {
+            nonceManager.consumeLocked(signature.nonce);
+            let receipt : Types.PaymentReceipt = {
+              id = nextReceiptId();
+              amount;
+              token = tokenAddr;
+              sender = authz.from;
+              recipient = canisterEvmAddr;
+              network = signature.network;
+              timestamp = Time.now();
+              txHash = ?txHash;
+              sessionId = null;
+              refunded = null;
             };
+            return #ok(receipt);
+          };
+          case (#reverted) {
+            nonceManager.unlock(signature.nonce);
+            policy.releaseDaily(evmSender, evmSpendDay, amount);
+            return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, authorization nonce already used, or token paused. Fix the cause and re-sign a fresh authorization.");
+          };
+          case (#pending) {
+            // Keep the nonce locked (GC'd at expiry) so the same challenge is
+            // not re-broadcast; release the daily reservation since no receipt
+            // is issued. Caller MUST NOT deliver value on #settlementPending.
+            policy.releaseDaily(evmSender, evmSpendDay, amount);
+            return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain).");
+          };
+          case (#err(e)) {
+            policy.releaseDaily(evmSender, evmSpendDay, amount);
+            return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending.");
           };
         };
       };
@@ -909,10 +913,13 @@ module {
     /// 1a: Send an ERC-20 transfer from the canister's EVM address via tECDSA, if EVM is
     /// configured. Returns the tx hash on mempool acceptance.
     ///
-    /// ⚠️ UNCONFIRMED: #ok is only a mempool ack, NOT settlement finality, and #maybeSent
-    /// is collapsed to #err here — callers MUST NOT finalize terminal state on #ok. Prefer
-    /// `sendErc20TransferConfirmed` for any settle/refund path (B2). Retained for callers
-    /// that confirm independently.
+    /// ⚠️ UNCONFIRMED + DOUBLE-PAY FOOTGUN (G3): #ok is only a mempool ack, NOT settlement finality,
+    /// and #maybeSent (ambiguous broadcast) is collapsed to #err here. This is the OUTBOUND rail —
+    /// unlike the inbound EIP-3009 path it is NOT replay-protected on-chain, so an external caller
+    /// that re-sends on #err after a #maybeSent that actually landed would DOUBLE-PAY. Callers MUST
+    /// NOT finalize on #ok and MUST NOT re-broadcast on #err; use `sendErc20TransferConfirmed` (which
+    /// parks #maybeSent as #pending) for any settle/refund path (B2). No in-repo caller uses this
+    /// helper — it exists only for consumers that confirm independently.
     public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
       switch (evmSenderInst) {
         case (?sender) {

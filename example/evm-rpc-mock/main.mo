@@ -45,9 +45,18 @@ persistent actor EvmRpcMock {
     #inconsistentOutlier;
   };
 
+  // G5/G6: how eth_sendRawTransaction resolves. #ok = clean broadcast; #nonceTooHigh makes the
+  // send AMBIGUOUS (#Consistent(#Ok(#NonceTooHigh))), which the library maps to #maybeSent — the
+  // tx may have reached a mempool, so its hash must be preserved/tracked, not discarded as #err.
+  public type SendMode = {
+    #ok;
+    #nonceTooHigh;
+  };
+
   // ── scriptable state ──
   var receiptMode : ReceiptMode = #confirmed;
   var feeMode : FeeMode = #consistent;
+  var sendMode : SendMode = #ok;
   var receiptPolls : Nat = 0; // receipt polls since the last setReceiptMode/reset
   var nonce : Nat = 0; // monotonic, advances once per eth_getTransactionCount
   var sentTxs : [Text] = []; // every raw tx we were asked to broadcast, in order
@@ -61,10 +70,13 @@ persistent actor EvmRpcMock {
 
   public func setFeeMode(m : FeeMode) : async () { feeMode := m };
 
+  public func setSendMode(m : SendMode) : async () { sendMode := m };
+
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   public func reset() : async () {
     receiptMode := #confirmed;
     feeMode := #consistent;
+    sendMode := #ok;
     receiptPolls := 0;
     nonce := 0;
     sentTxs := [];
@@ -82,7 +94,13 @@ persistent actor EvmRpcMock {
     rawTx : Text,
   ) : async EvmRpc.MultiSendRawTransactionResult {
     sentTxs := Array.append(sentTxs, [rawTx]);
-    #Consistent(#Ok(#Ok(?mockTxHash(sentTxs.size()))));
+    switch (sendMode) {
+      // G5/G6: ambiguous broadcast — the raw tx was recorded (it may have reached a mempool), but
+      // the RPC reports NonceTooHigh, which the library maps to #maybeSent(txHash). The caller must
+      // preserve the hash (poll/track) rather than treat it as a clean, safe-to-retry failure.
+      case (#nonceTooHigh) { #Consistent(#Ok(#NonceTooHigh)) };
+      case (#ok) { #Consistent(#Ok(#Ok(?mockTxHash(sentTxs.size())))) };
+    };
   };
 
   public func eth_getTransactionCount(

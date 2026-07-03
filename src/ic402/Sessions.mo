@@ -590,6 +590,11 @@ module {
           sessionOpenLocks.delete(caller);
           return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
         };
+        // G5/G6: ambiguous broadcast (may still mine) — keep its hash and route it into the confirm
+        // poll below, so if it mines the session opens, and if it stays pending it is tracked in
+        // pendingEvmDeposits + surfaced as #settlementPending (recoverable via reconcileEvmDeposit),
+        // rather than stranded as a hash-less #settlementFailed. Single-use EIP-3009 nonce → no double-pay.
+        case (#maybeSent(m)) { m.txHash };
       };
 
       // H-1 (v2): Confirm the deposit transfer actually mined before crediting an

@@ -40,10 +40,12 @@ const ReceiptMode = IDL.Variant({
   pendingThenConfirmed: IDL.Nat,
 });
 const FeeMode = IDL.Variant({ consistent: IDL.Null, inconsistentOutlier: IDL.Null });
+const SendMode = IDL.Variant({ ok: IDL.Null, nonceTooHigh: IDL.Null });
 const mockIdl = () =>
   IDL.Service({
     setReceiptMode: IDL.Func([ReceiptMode], [], []),
     setFeeMode: IDL.Func([FeeMode], [], []),
+    setSendMode: IDL.Func([SendMode], [], []),
     reset: IDL.Func([], [], []),
     sentTxCount: IDL.Func([], [IDL.Nat], ['query']),
     getSentTxs: IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
@@ -151,6 +153,19 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setReceiptMode({ confirmed: null });
     const res = await sweep();
     expect(res).toHaveProperty('confirmed');
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('ambiguous broadcast (#maybeSent via NonceTooHigh) → #pending with the tx recorded, not a hash-less failure (G5/G6)', async () => {
+    if (skip) return;
+    await mock.reset();
+    // The send is ambiguous (NonceTooHigh) — the raw tx WAS dispatched and may have reached a
+    // mempool. The library must surface it as pending WITH the tx hash, never as a clean
+    // safe-to-retry failure. (Exercises the outbound #maybeSent path, which the G5/G6 inbound
+    // change now mirrors: preserve the hash instead of collapsing to a hash-less #settlementFailed.)
+    await mock.setSendMode({ nonceTooHigh: null });
+    const res = await sweep();
+    expect(res).toHaveProperty('pending');
     expect(await mock.sentTxCount()).toBe(1n);
   });
 });

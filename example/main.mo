@@ -902,7 +902,14 @@ persistent actor KnowledgeBase {
         switch (await gate.settle(sig, null)) {
           case (#ok(receipt)) {
             // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
-            #ok({ jobId = registry.createJobFromReceipt(Principal.toText(msg.caller), serviceId, params, receipt, null) });
+            // G2: record the ACTUAL payer as buyer. For an EVM payment the payer is the on-chain
+            // sender (authz.from, in receipt.sender), NOT msg.caller (the ICP caller) — using
+            // msg.caller would mislabel the job as an ICP-principal buyer with no EVM rail, so a
+            // later settle/refund would draw the wrong pool and misdirect the refund. Mirror the
+            // HTTP /service/ handler, which uses receipt.sender. ICP payer stays authenticated
+            // (msg.caller). Rail is keyed off receipt.network (set by the settle path, not spoofable).
+            let buyer = if (Text.startsWith(receipt.network, #text "eip155:")) { receipt.sender } else { Principal.toText(msg.caller) };
+            #ok({ jobId = registry.createJobFromReceipt(buyer, serviceId, params, receipt, null) });
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
           case (#expired(r)) { #error("Nonce expired: " # r) };

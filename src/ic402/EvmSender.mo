@@ -371,7 +371,7 @@ module {
       v : Nat8,
       r : [Nat8],          // 32 bytes
       s : [Nat8],          // 32 bytes
-    ) : async { #ok : Text; #err : Text } {
+    ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
       // Build calldata via the pure module-level encoder, which denormalizes v (0/1 → 27/28)
       // for the on-chain ecrecover. Kept out of this async fn so it is unit-testable.
       let calldata = buildTransferWithAuthorizationCalldata(
@@ -385,15 +385,16 @@ module {
         r,
         s,
       );
-      // transferWithAuthorization uses more gas than a simple transfer (~80k)
-      // B2: collapse #maybeSent → #err. Unlike the outbound rail, the INBOUND EIP-3009
-      // path is replay-protected on-chain (the authorization's token nonce is single-use),
-      // so re-submitting the same authorization reverts rather than double-paying — the
-      // caller (Gateway.settle) safely treats an ambiguous send as failed.
+      // transferWithAuthorization uses more gas than a simple transfer (~80k).
+      // B2 (G5/G6): SURFACE #maybeSent (with its tx hash), do not collapse it to #err. The inbound
+      // EIP-3009 path is replay-protected on-chain (the authorization's token nonce is single-use),
+      // so an ambiguous broadcast cannot double-pay — but it MAY still mine, so the caller must keep
+      // the tx hash to poll/reconcile it rather than stranding a hash-less #settlementFailed. Callers
+      // (Gateway.settle, Sessions.openEvmSession) route the hash into confirmTransaction.
       switch (await sendTransaction(chainId, tokenAddress, calldata, 120_000)) {
         case (#ok(h)) { #ok(h) };
         case (#err(e)) { #err(e) };
-        case (#maybeSent(m)) { #err(m.reason) };
+        case (#maybeSent(m)) { #maybeSent(m) };
       };
     };
 
