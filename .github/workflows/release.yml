@@ -7,11 +7,15 @@ name: Release
 # version already on a registry is skipped, so re-running, or a no-change release (e.g. mops/mcp
 # unchanged, as in 2.5.3), is safe and won't fail.
 #
-# Required secrets — add these as ENVIRONMENT secrets on a `release` environment (Settings →
-# Environments → release), NOT repository secrets, so only this job can read them. Recommended
-# environment protections: required reviewers (a manual approval gate before an irreversible
-# publish) and a deployment-tag restriction to `v*`.
-#   NPM_TOKEN          - npm automation token with publish rights to the @ic402 scope
+# npm auth uses TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN, nothing to leak/rotate/OTP. Configure a
+# Trusted Publisher on npm for BOTH @ic402/client and @ic402/mcp (npmjs.com → each package →
+# Settings → Trusted Publisher): organization `vhew`, repository `ic402`, workflow `release.yml`,
+# environment `release`. The job then authenticates via GitHub OIDC (id-token: write) and publishes
+# with provenance.
+#
+# Required ENVIRONMENT secret on the `release` environment (Settings → Environments → release, NOT a
+# repository secret, so only this job reads it). Recommended protections on that environment:
+# required reviewers + a deployment-tag restriction to `v*`.
 #   MOPS_IDENTITY_PEM  - the mops publishing identity PEM (contents of deploy/ic402-mops.pem)
 
 on:
@@ -21,13 +25,14 @@ on:
 
 permissions:
   contents: write # create the GitHub Release for the tag
+  id-token: write # OIDC for npm Trusted Publishing (no NPM_TOKEN)
 
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Scopes NPM_TOKEN / MOPS_IDENTITY_PEM to this job only; add protections (required reviewers,
-    # tag restriction to v*) on the `release` environment in repo settings.
+    # The `release` environment gates OIDC trusted publishing + scopes MOPS_IDENTITY_PEM to this
+    # job only; add protections (required reviewers, tag restriction to v*) on it in repo settings.
     environment: release
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +45,8 @@ jobs:
       - uses: ZenVoich/setup-mops@v1
       - run: pnpm install --frozen-lockfile
       - run: mops install
+      # npm Trusted Publishing (OIDC) requires npm >= 11.5.1; node 22 ships npm 10.
+      - run: npm install -g npm@latest
 
       # mops.toml is the single source of truth for the version; a tag must match it exactly.
       - name: Guard - tag matches source version
@@ -59,8 +66,6 @@ jobs:
       - run: mops test
 
       - name: Publish @ic402/client to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           V="$(node -p "require('./packages/client/package.json').version")"
           if npm view "@ic402/client@$V" version >/dev/null 2>&1; then
@@ -70,8 +75,6 @@ jobs:
           fi
 
       - name: Publish @ic402/mcp to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           V="$(node -p "require('./integrations/mcp/package.json').version")"
           if npm view "@ic402/mcp@$V" version >/dev/null 2>&1; then
