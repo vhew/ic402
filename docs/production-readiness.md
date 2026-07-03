@@ -15,13 +15,14 @@ optional periodic live-testnet smoke for the funded leg (can't be hermetic), and
 residuals (shared-pool solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`)
 are in `docs/security-model.md`.
 
-Releases since (through **v2.5.5**) shipped targeted fixes without re-running the full multi-agent
+Releases since (through **v2.6.0**) shipped targeted fixes without re-running the full multi-agent
 audit — notably the EIP-3009 on-chain-`v` money-path fix (inbound EVM settlements were reverting),
-the `submit_request` `#settlementPending` handling (a broadcast-but-unconfirmed settlement was
-reported as a flat failure, inviting a double-pay), and the `forceResolveSession` EVM-pool-allocation
-leak (the recovery hatch never released the reservation, eventually blocking new sessions). A fresh
-full assessment is due before the next real-funds milestone; treat the dated snapshot above as the
-last comprehensive pass, not the current line-by-line state.
+the `forceResolveSession` EVM-pool-allocation leak (the recovery hatch never released the
+reservation, eventually blocking new sessions), and the whole **settled-then-job-failed** class
+(v2.6.0): `submit_request` `#settlementPending` handling, honest MCP spend accounting, and
+validate-before-settle so a settled payment always yields a job (`docs/decisions/settled-then-job-failed.md`).
+A fresh full assessment is due before the next real-funds milestone; treat the dated snapshot above
+as the last comprehensive pass, not the current line-by-line state.
 
 ## Blockers (must clear before a production deploy)
 
@@ -236,4 +237,4 @@ Mainnet constants correct (chain IDs, 5 USDC addresses, ckUSDC ledger, `key_1`, 
 canister); money-**theft** paths guarded (C-1 recipient binding, `value==amount`, local
 EIP-712 verify before broadcast, H-4 synchronous daily reservation, S-3 terminal close);
 unit-level math/guards well-pinned (18 mops + 72 client + MCP guard/security tests);
-cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.5.5.
+cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.6.0.

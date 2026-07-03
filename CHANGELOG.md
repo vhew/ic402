@@ -1,12 +1,14 @@
 # Changelog
 
-## v2.5.6 — 2026-07-02
+## v2.6.0 — 2026-07-03
 
-Patch release — closes the **settled-then-job-failed** fund-path class in the service marketplace
+Minor release — closes the **settled-then-job-failed** fund-path class in the service marketplace
 (scoped in `docs/decisions/settled-then-job-failed.md`). No funds could be stolen; the fixes close a
 fund-availability / cap-accounting gap and, on the canister, make **money-moved ⇒ job-exists** an
-invariant. Additive to the mops surface — the `example.did` interface and `STABLE_SCHEMA_VERSION`
-(v1) are unchanged (upgrade-compatible; no migration).
+invariant. Minor (not patch) because it adds public surface: two new `ServiceRegistry` methods
+(`validateSubmittable`, `createJobFromReceipt`) and a `fundsMoved` flag on `@ic402/client`'s
+`Ic402Error` — both **additive**. The `example.did` interface and `STABLE_SCHEMA_VERSION` (v1) are
+unchanged (upgrade-compatible; no migration).
 
 ### Fixed
 
