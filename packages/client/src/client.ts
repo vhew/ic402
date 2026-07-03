@@ -100,6 +100,22 @@ export interface SessionHandle {
 }
 
 /**
+ * Canonical marker the canister prefixes on every error arm reached AFTER a payment has settled or
+ * been broadcast (settle #ok then job-create failed; an EVM settlement/deposit still pending
+ * on-chain). Its presence is the money-moved signal — see docs/decisions/settled-then-job-failed.md.
+ */
+const FUNDS_MOVED_MARKER = 'do NOT retry payment';
+
+/**
+ * Build the Ic402Error for a canister-returned settle/session error, tagging `fundsMoved` when the
+ * canister marked the payment as already moved. Keeps the brittle string match confined to this one
+ * spot so downstream (the MCP refund guard) can rely on the structured `fundsMoved` flag instead.
+ */
+function settleError(text: string): Ic402Error {
+  return new Ic402Error('sign_failed', text, undefined, text.includes(FUNDS_MOVED_MARKER));
+}
+
+/**
  * ic402 TypeScript client SDK.
  *
  * Handles x402 charge payments and streaming sessions against
@@ -298,7 +314,9 @@ export class Ic402Client {
     const result = await actor.openSession(openConfig, sig);
 
     if ('err' in result) {
-      throw new Error(`Failed to open session: ${safeStringify(result.err)}`);
+      // Route through settleError so a #settlementPending open (EVM deposit broadcast, may still
+      // mine) carries fundsMoved=true — the MCP must then KEEP the reservation, not refund it.
+      throw settleError(`Failed to open session: ${result.err as string}`);
     }
 
     const state: SessionState = result.ok;
@@ -775,7 +793,7 @@ export class Ic402Client {
         return retryResult.ok as { jobId: string };
       }
       if (retryResult && typeof retryResult === 'object' && 'error' in retryResult) {
-        throw new Ic402Error('sign_failed', retryResult.error as string);
+        throw settleError(retryResult.error as string);
       }
       throw new Ic402Error('unknown', `Unexpected result: ${safeStringify(retryResult)}`);
     }
@@ -784,7 +802,7 @@ export class Ic402Client {
       return result.ok as { jobId: string };
     }
     if (result && typeof result === 'object' && 'error' in result) {
-      throw new Ic402Error('sign_failed', result.error as string);
+      throw settleError(result.error as string);
     }
     throw new Ic402Error('unknown', `Unexpected result: ${safeStringify(result)}`);
   }

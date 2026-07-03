@@ -102,6 +102,17 @@ function refundSpend(amountAtomic: bigint): void {
   if (sessionSpentAtomic < 0n) sessionSpentAtomic = 0n;
 }
 
+/**
+ * True when an error signals the payment already SETTLED or was BROADCAST (funds moved) — the
+ * client sets Ic402Error.fundsMoved for settle-#ok-then-job-failed and #settlementPending. On such
+ * an error the reservation must be KEPT: refunding it would un-count spend that really happened and
+ * let a later auto-pay exceed the cumulative session cap (and a retry would double-pay). See
+ * docs/decisions/settled-then-job-failed.md (S2/S4).
+ */
+function settleMayHaveMoved(e: unknown): boolean {
+  return e instanceof Ic402Error && e.fundsMoved;
+}
+
 /** Standard MCP text result helper. */
 function textResult(obj: unknown): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj, null, 2) }] };
@@ -703,32 +714,37 @@ server.tool(
     };
 
     // SEC-0: the deposit was reserved against the cumulative cap at confirm time
-    // (requireConfirmation); release the reservation if the on-chain/escrow deposit fails.
-    const session = await c
-      .openSession(prefs, voucherSigner, cid !== defaultCanisterId ? cid : undefined)
-      .catch((e) => {
-        refundSpend(depositAtomic);
-        throw e;
-      });
-
-    activeSessions.set(session.id, session);
-
-    return {
-      content: [
-        {
-          type: 'text' as const,
-          text: JSON.stringify(
-            {
-              sessionId: session.id,
-              deposited: session.deposited.toString(),
-              remaining: session.remaining.toString(),
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
+    // (requireConfirmation). Release the reservation if the deposit fails — but ONLY when funds did
+    // not move: on #settlementPending the EVM deposit was broadcast and may still mine, so keeping it
+    // reserved is correct (docs/decisions/settled-then-job-failed.md, S4). Return a structured
+    // errorResult rather than letting a raw string leak to the agent.
+    try {
+      const session = await c.openSession(
+        prefs,
+        voucherSigner,
+        cid !== defaultCanisterId ? cid : undefined,
+      );
+      activeSessions.set(session.id, session);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                sessionId: session.id,
+                deposited: session.deposited.toString(),
+                remaining: session.remaining.toString(),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (e) {
+      if (!settleMayHaveMoved(e)) refundSpend(depositAtomic);
+      return errorResult(e);
+    }
   },
 );
 
@@ -1433,7 +1449,10 @@ server.tool(
       // SEC-0 (round 2): submitServiceRequest threw without settling (approve error, error-variant,
       // transient) — release the confirm-time reservation so repeated failed submits don't drain the
       // cumulative cap. reservedAmount is 0 for any throw before the gate passed, so this is safe.
-      if (reservedAmount > 0n) refundSpend(reservedAmount);
+      // BUT NOT when the payment already settled (settle #ok then job-create failed, or
+      // #settlementPending): refunding there would un-count real spend and let a later auto-pay
+      // exceed the cap. Keep the reservation on those (docs/decisions/settled-then-job-failed.md, S2).
+      if (reservedAmount > 0n && !settleMayHaveMoved(e)) refundSpend(reservedAmount);
       return errorResult(e);
     }
   },

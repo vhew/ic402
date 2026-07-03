@@ -629,7 +629,7 @@ persistent actor KnowledgeBase {
       case (#err(#policyDenied(r))) { #err("Policy: " # r) };
       case (#err(#depositBelowMinimum(min))) { #err("Min deposit: " # Nat.toText(min)) };
       case (#err(#settlementFailed(r))) { #err("Settlement failed: " # r) };
-      case (#err(#settlementPending(r))) { #err("Settlement pending: " # r) };
+      case (#err(#settlementPending(r))) { #err("Settlement pending — do NOT retry payment: " # r) };
       case (#err(#networkNotSupported(r))) { #err("Network not supported: " # r) };
       case (#err(#expired(r))) { #err("Expired: " # r) };
       case (#err(#tokenNotAccepted(r))) { #err("Token not accepted: " # r) };
@@ -892,7 +892,12 @@ persistent actor KnowledgeBase {
           case (#ok(receipt)) {
             switch (registry.submitRequest(Principal.toText(msg.caller), serviceId, params, receipt, null)) {
               case (#ok(jobId)) { #ok({ jobId }) };
-              case (#err(e)) { #error(e) };
+              // gate.settle already returned #ok → the buyer's funds HAVE moved. submitRequest failing
+              // now means money moved with no job (docs/decisions/settled-then-job-failed.md, S1). Prefix
+              // the canonical funds-moved marker so the client/MCP never refund the spend reservation or
+              // invite a retry (which would double-pay). Root cause is fixed by Option A (validate-before-
+              // settle), which makes this arm unreachable; this marker is the meanwhile safety net.
+              case (#err(e)) { #error("Payment settled but job not created — do NOT retry payment: " # e) };
             };
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };

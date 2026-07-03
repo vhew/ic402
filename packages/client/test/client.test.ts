@@ -722,4 +722,45 @@ describe('Ic402Client', () => {
       await expect(client.disputeJob('job-1', 'reason')).resolves.toBeUndefined();
     });
   });
+
+  // Option C — the settle boundary tags Ic402Error.fundsMoved when the canister marks the payment as
+  // already moved (settle #ok then job failed, or #settlementPending). The MCP keys its refund guard
+  // off this flag, so pin it here at the single string-match seam. See docs/decisions/settled-then-job-failed.md.
+  describe('funds-moved signal at the settle boundary (Option C)', () => {
+    const intent = {
+      suggestedDeposit: 10_000n,
+      costPerCall: [500n],
+      minDeposit: [],
+      network: 'icp:1',
+      token: 'tok',
+      recipient: 'r',
+      expiry: 0n,
+      description: [],
+    };
+
+    it('openSession #settlementPending → Ic402Error.fundsMoved=true (MCP must KEEP the reservation)', async () => {
+      const mockActor = {
+        requestSession: async () => intent,
+        openSession: async () => ({
+          err: 'Settlement pending — do NOT retry payment: EVM deposit broadcast but not yet confirmed (tx 0xabc)',
+        }),
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
+      const err = await client.openSession().catch((e) => e);
+      expect(err).toBeInstanceOf(Ic402Error);
+      expect(err.fundsMoved).toBe(true);
+      expect(err.retryable).toBe(false);
+    });
+
+    it('openSession with a no-funds-moved error → fundsMoved=false (safe to refund the reservation)', async () => {
+      const mockActor = {
+        requestSession: async () => intent,
+        openSession: async () => ({ err: 'Policy: rate limit exceeded' }),
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
+      const err = await client.openSession().catch((e) => e);
+      expect(err).toBeInstanceOf(Ic402Error);
+      expect(err.fundsMoved).toBe(false);
+    });
+  });
 });

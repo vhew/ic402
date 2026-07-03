@@ -392,6 +392,11 @@ describe('Ic402Error', () => {
     expect(err.retryable).toBe(false);
   });
 
+  it('fundsMoved defaults to false and is set by the 4th arg (Option C)', () => {
+    expect(new Ic402Error('sign_failed', 'job create failed').fundsMoved).toBe(false);
+    expect(new Ic402Error('sign_failed', 'settled', undefined, true).fundsMoved).toBe(true);
+  });
+
   it('no_match errors are not retryable', () => {
     const err = new Ic402Error('no_match', 'no option');
     expect(err.retryable).toBe(false);

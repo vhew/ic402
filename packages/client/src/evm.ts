@@ -36,13 +36,21 @@ export class Ic402Error extends Error {
   readonly kind: Ic402ErrorKind;
   readonly retryable: boolean;
   readonly detail?: unknown;
+  /**
+   * True when the canister signalled the payment already SETTLED or was BROADCAST (funds moved)
+   * before this failure — e.g. settle #ok then job-create failed, or an EVM settlement/deposit that
+   * is broadcast-but-unconfirmed. A caller or facilitator MUST NOT refund a spend reservation or
+   * retry the payment on such an error (either would misaccount or double-pay). Default false.
+   */
+  readonly fundsMoved: boolean;
 
-  constructor(kind: Ic402ErrorKind, message: string, detail?: unknown) {
+  constructor(kind: Ic402ErrorKind, message: string, detail?: unknown, fundsMoved = false) {
     super(message);
     this.name = 'Ic402Error';
     this.kind = kind;
     this.retryable = kind === 'transient' || kind === 'nonce_error';
     this.detail = detail;
+    this.fundsMoved = fundsMoved;
   }
 }
 
