@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.5.5 — 2026-07-02
+
+Patch release — **fund-availability fix** in EVM session recovery, plus a reference-example
+payment-handling fix and MCP/docs improvements. No funds could be stolen by any of these; the
+session fix closes a liveness leak. `example.did` is unchanged and `STABLE_SCHEMA_VERSION` stays at
+`1` (upgrade-compatible; no interface or stable change).
+
+### Fixed
+
+- **`forceResolveSession` leaked the EVM escrow pool allocation (and the unconsumed daily-spend
+  reservation).** The controller-only escape hatch for a session stuck in `#closing` set the
+  session to `#closed` and cleared the parked tx but — unlike the other `#closing→#closed` path,
+  `reconcileSession`'s confirmed close — skipped the `deallocate`/`releaseDaily` that terminal close
+  requires. `gcClosedSessions` only deletes the record (it never deallocates), so the pool
+  allocation leaked permanently and, once GC dropped the session, was no longer referenceable. With
+  a `poolCap` set (required for shared-pool solvency), each use of the hatch monotonically shrank
+  the funded pool's headroom until `allocate()` refused new EVM sessions with "EVM pool
+  over-allocation" despite adequate on-chain funding. The reservations are pure canister-side
+  accounting (no funds move), so releasing them on terminal close is always correct. Root cause was
+  duplicated finalize logic drifting across paths; it is now factored into a single
+  `finalizeClosedSession` shared by both recovery paths so they cannot diverge again. The
+  daily-reservation leak was bounded (reset at day rollover); the pool-allocation leak was not.
+
+- **The example service marketplace's `submit_request` reported `#settlementPending` as a flat
+  failure** (example canister, not in the published package). A broadcast-but-unconfirmed EVM
+  settlement fell through a `case (_)` wildcard to "Payment settlement failed" — which reads as
+  "retry" and invites a double-payment for a tx that may still mine, violating the library contract
+  (callers MUST NOT deliver value on `#settlementPending`). It is now handled explicitly, mirroring
+  the search/serve/open-session paths. The settle `switch` is also made exhaustive and
+  `build-example.sh` treats a non-exhaustive `switch` as a hard error (`-E M0145`), so a future
+  `PaymentResult` variant can't be silently swallowed again.
+
+### Changed
+
+- MCP tool descriptions rewritten to state the read-only vs value-moving split, the two-phase
+  confirmation protocol, and atomic-unit encoding, plus a server `instructions` block; new
+  `docs/mcp-install.md` install guide. Retracted a stale "DNS rebinding not covered" note in the MCP
+  README (closed by the SEC-0 resolve-and-reject guard) and refreshed stale version/status strings.
+
 ## v2.5.4 — 2026-07-02
 
 Patch release — **money-path fix**. Every inbound EVM x402 settlement via EIP-3009
