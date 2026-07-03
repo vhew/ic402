@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.7.0 — 2026-07-03
+
+Minor release — four **additive** consumer-facing methods (no existing signature, interface, or
+stable change; `STABLE_SCHEMA_VERSION` stays v1, upgrade-compatible, no migration). Minor (not
+patch) because they are new public API on the published packages. Requested by downstream consumers
+(per-caller-policy removal, EVM pool observability, drift-proof marketplace fee, async-job
+settlement header).
+
+### Added
+
+- **`Gateway.removeCallerPolicy(caller)`** — the write-path complement of `setPolicy(?caller, _)`:
+  removes a per-caller spending-policy override so the caller reverts to (and keeps tracking) the
+  global policy. Previously the only way "back" was overwriting the override with a frozen copy of
+  the global policy. Gate on the consumer's owner/controller check, like `setPolicy`.
+- **`Gateway.getEvmPoolCap()` and `Gateway.totalAllocated(chainId, token)`** (plus
+  `EvmEscrow.getPoolCap()`) — read-only EVM shared-pool observability. Remaining reservation
+  headroom under a cap is `getEvmPoolCap() − totalAllocated(chainId, token)`; previously only
+  `setEvmPoolCap` was exposed, so the cap could be set but never read back or sized against live
+  utilisation.
+- **`ServiceRegistry.ledgerFee()`** — returns the registry's configured `config.ledgerFee`, the
+  value `validateSubmittable` checks. Settle-first marketplace consumers should derive
+  `expectedAmount = price + ledgerFee()` from this getter instead of mirroring their own fee
+  constant, so the two can never drift.
+- **`HttpHandler.http202JsonWithSettlement(json, settlementJson)`** — 202 Accepted mirror of
+  `http200JsonWithSettlement`, so an async "job created, payment escrowed, poll for the result"
+  response can carry the v2 `PAYMENT-RESPONSE` settlement header.
+
 ## v2.6.1 — 2026-07-03
 
 Patch release — fund-safety hardening surfaced by the invariant catalog
