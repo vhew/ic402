@@ -1,5 +1,37 @@
 # Changelog
 
+## v2.6.1 — 2026-07-03
+
+Patch release — fund-safety hardening surfaced by the invariant catalog
+(`docs/fund-safety-invariants.md`). No consumer-facing interface change: `Gateway.settle`'s
+`PaymentResult` is unchanged and `STABLE_SCHEMA_VERSION` stays v1 (upgrade-compatible; no migration).
+The internal `EvmSender.executeTransferWithAuthorization` return type gains an additive `#maybeSent`
+variant (an EVM broadcast primitive; no in-repo direct caller uses it).
+
+### Fixed
+
+- **An ambiguously-broadcast inbound EVM deposit could be stranded with no recovery handle (G5/G6).**
+  When an EIP-3009 transfer returned `#maybeSent` (post-dispatch error / inconsistent RPC / nonce
+  too high — the tx may still mine), `executeTransferWithAuthorization` collapsed it to a hash-less
+  `#err`, so `Gateway.settle` returned `#settlementFailed` and `openEvmSession` returned
+  `#settlementFailed` with **no tx hash** — an ambiguously-broadcast-then-mined deposit was
+  unrecoverable. The hash is now preserved and routed into `confirmTransaction`: if it mines it
+  yields a receipt / opens the session; if it stays pending it parks as `#settlementPending` (tracked
+  in `pendingEvmDeposits`, refundable via `reconcileEvmDeposit`). No double-pay — the EIP-3009 token
+  nonce is single-use on-chain. This aligns the inbound path with the already-correct outbound
+  `sendErc20TransferConfirmed`.
+
+### Changed
+
+- **Example: rail-aware marketplace buyer (G2).** The update-method `submitServiceRequest` recorded
+  the ICP caller as the job buyer regardless of rail — mislabeling an EVM payer's job (misdirected
+  refund / wrong-pool draw). It now uses `receipt.sender` for EVM and `msg.caller` for ICP, matching
+  the HTTP `/service/` handler. Footgun, not reachable via the shipped client (which sends only ICP
+  sigs to that method). Example-only.
+- **Docs: strengthened the `sendErc20Transfer` footgun comment (G3)** — its `#maybeSent→#err`
+  collapse on the replay-unprotected outbound rail is a double-pay risk for an external caller that
+  re-sends on `#err`; use `sendErc20TransferConfirmed`. No in-repo caller.
+
 ## v2.6.0 — 2026-07-03
 
 Minor release — closes the **settled-then-job-failed** fund-path class in the service marketplace
