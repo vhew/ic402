@@ -327,6 +327,60 @@ suite("ServiceRegistry", func() {
   });
 
   // ══════════════════════════════════════════════════
+  // 4a. Option A — validate-before-settle split (money-moved ⇒ job-exists)
+  // ══════════════════════════════════════════════════
+
+  suite("validateSubmittable / createJobFromReceipt (Option A)", func() {
+
+    test("validateSubmittable #ok for an enabled, sufficiently-funded request", func() {
+      let reg = makeRegistry();
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      switch (reg.validateSubmittable(Principal.toText(buyerPrincipal), svcId, 1000)) {
+        case (#ok) {}; case (#err(_)) { assert false };
+      };
+    });
+
+    test("validateSubmittable rejects the same pre-settle cases as submitRequest (before any funds move)", func() {
+      let reg = makeRegistry();
+      let disabledId = switch (reg.registerService(operatorPrincipal, baseDef(operatorPrincipal))) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      switch (reg.validateSubmittable(Principal.toText(buyerPrincipal), disabledId, 1000)) {
+        case (#err(e)) { assert Text.contains(e, #text("disabled")) }; case (#ok) { assert false };
+      };
+      switch (reg.validateSubmittable(Principal.toText(buyerPrincipal), "no-svc", 1000)) {
+        case (#err(e)) { assert Text.contains(e, #text("not found")) }; case (#ok) { assert false };
+      };
+      let svcId = registerAndEnable(reg, operatorPrincipal);
+      switch (reg.validateSubmittable(Principal.toText(buyerPrincipal), svcId, 500)) {
+        case (#err(e)) { assert Text.contains(e, #text("Insufficient")) }; case (#ok) { assert false };
+      };
+      switch (reg.validateSubmittable("notaprincipal", svcId, 1000)) {
+        case (#err(e)) { assert Text.contains(e, #text("Invalid buyer")) }; case (#ok) { assert false };
+      };
+    });
+
+    // The load-bearing invariant: once funds have settled, job creation must NEVER fail. A disabled
+    // service (which validate/submitRequest reject) still gets a job here, proving createJobFromReceipt
+    // does not re-check and so a validated-then-settled request can never strand funds.
+    test("createJobFromReceipt is INFALLIBLE — creates a job even for a DISABLED service", func() {
+      let reg = makeRegistry();
+      let svcId = switch (reg.registerService(operatorPrincipal, baseDef(operatorPrincipal))) {
+        case (#ok(id)) { id }; case (#err(_)) { assert false; "" };
+      };
+      switch (reg.submitRequest(Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p"), mockReceipt(1000), null)) {
+        case (#err(_)) {}; case (#ok(_)) { assert false }; // submitRequest rejects a disabled service
+      };
+      let jobId = reg.createJobFromReceipt(Principal.toText(buyerPrincipal), svcId, Text.encodeUtf8("p"), mockReceipt(1000), null);
+      assert Text.startsWith(jobId, #text("job-"));
+      switch (reg.getJob(jobId)) {
+        case (?job) { assert (job.status == #Pending); assert (job.amount == 1000); assert (job.paymentReceiptId == "rcpt-1") };
+        case (null) { assert false };
+      };
+    });
+  });
+
+  // ══════════════════════════════════════════════════
   // 4b. A1 — ledger-fee threshold (buyer pays price + fee)
   // ══════════════════════════════════════════════════
 

@@ -329,19 +329,14 @@ module {
       ?{ owner = Principal.fromText(buyer); subaccount = null };
     };
 
-    /// Submit a service request. The buyer has already paid (receipt from Gateway).
-    /// The payment is custodied at the platform recipient account until the job is
-    /// verified and settled (see settleJob / expireJobs for the custody model).
-    /// C-5 (v2): `buyer` is Text — a principal for ICP payers, or a 0x EVM address
-    /// for EVM payers (receipt.sender). It is NOT coerced to a Principal, which
-    /// trapped for EVM addresses after the on-chain transfer had already executed.
-    public func submitRequest(
-      buyer : Text,
-      serviceId : Text,
-      params : Blob,
-      receipt : Types.PaymentReceipt,
-      callback : ?Text,
-    ) : { #ok : Text; #err : Text } {
+    /// Pre-settle validation for a service request. Runs every guard submitRequest can reject on
+    /// (invalid buyer, unknown/disabled service, underpayment) against `expectedAmount` — the amount
+    /// that WILL settle — so a caller can validate BEFORE moving funds. A caller that then settles and
+    /// calls createJobFromReceipt gets the money-moved ⇒ job-exists invariant, closing the
+    /// settled-then-no-job strand (docs/decisions/settled-then-job-failed.md, Option A / S1). Uses
+    /// config.ledgerFee (the fee the settle economics assume), so validating `price + <caller fee>`
+    /// here also catches a caller-vs-registry fee skew before any funds move.
+    public func validateSubmittable(buyer : Text, serviceId : Text, expectedAmount : Nat) : { #ok; #err : Text } {
       // Reject a malformed buyer up front (returnable error) rather than storing
       // a string that would later TRAP Principal.fromText in the refund timer.
       if (not Text.startsWith(buyer, #text "0x") and not looksLikePrincipal(buyer)) {
@@ -358,17 +353,27 @@ module {
       switch (svc.pricing) {
         case (#Exact(price)) {
           let total = price + config.ledgerFee;
-          if (receipt.amount < total) return #err("Insufficient payment: need " # Nat.toText(total) # " (price " # Nat.toText(price) # " + fee " # Nat.toText(config.ledgerFee) # "), got " # Nat.toText(receipt.amount));
+          if (expectedAmount < total) return #err("Insufficient payment: need " # Nat.toText(total) # " (price " # Nat.toText(price) # " + fee " # Nat.toText(config.ledgerFee) # "), got " # Nat.toText(expectedAmount));
         };
         case (#Upto(_maxPrice)) {
           // A positive payment that covers at least the ledger fee is required, so the job has
           // something to settle and the pool can afford the outbound transfer.
-          if (receipt.amount < config.ledgerFee + 1) return #err("Payment required: must be at least " # Nat.toText(config.ledgerFee + 1) # " (ledger fee " # Nat.toText(config.ledgerFee) # " + 1) for Upto pricing, got " # Nat.toText(receipt.amount));
+          if (expectedAmount < config.ledgerFee + 1) return #err("Payment required: must be at least " # Nat.toText(config.ledgerFee + 1) # " (ledger fee " # Nat.toText(config.ledgerFee) # " + 1) for Upto pricing, got " # Nat.toText(expectedAmount));
           // Upto: buyer authorizes up to maxPrice + fee; we accept any amount over the fee.
         };
         case (#Session) {}; // Session-based billing handled separately
       };
+      #ok;
+    };
 
+    /// Create the job for an ALREADY-SETTLED payment. INFALLIBLE by contract — no #err, no trap — so a
+    /// caller that ran validateSubmittable before settling is guaranteed money-moved ⇒ job-exists. Do
+    /// NOT add a fallible check or Principal.fromText here (buyer stays Text); that would reintroduce
+    /// the settled-then-no-job strand (docs/decisions/settled-then-job-failed.md, Option A invariant).
+    /// The svc lookup is total: a service can be disabled but never deleted, so a validated caller
+    /// always finds it; the null branch falls back to a 0 timeout rather than trapping.
+    public func createJobFromReceipt(buyer : Text, serviceId : Text, params : Blob, receipt : Types.PaymentReceipt, callback : ?Text) : Text {
+      let timeout = switch (services.get(serviceId)) { case (?s) { s.timeout }; case (null) { 0 } };
       jobCounter += 1;
       let jobId = "job-" # Nat.toText(jobCounter);
       let now = Time.now();
@@ -386,7 +391,7 @@ module {
         result = null;
         proof = null;
         createdAt = now;
-        expiresAt = now + svc.timeout * 1_000_000_000; // seconds → nanos
+        expiresAt = now + timeout * 1_000_000_000; // seconds → nanos
         completedAt = null;
         deliveryCallback = callback;
         parkedTx = null;
@@ -397,7 +402,29 @@ module {
       if (Text.startsWith(buyer, #text "0x")) {
         evmJobRail.put(jobId, { network = receipt.network; token = receipt.token });
       };
-      #ok(jobId);
+      jobId;
+    };
+
+    /// Submit a service request. The buyer has already paid (receipt from Gateway).
+    /// The payment is custodied at the platform recipient account until the job is
+    /// verified and settled (see settleJob / expireJobs for the custody model).
+    /// C-5 (v2): `buyer` is Text — a principal for ICP payers, or a 0x EVM address
+    /// for EVM payers (receipt.sender). It is NOT coerced to a Principal, which
+    /// trapped for EVM addresses after the on-chain transfer had already executed.
+    /// Settle-first callers should instead validateSubmittable BEFORE settling + createJobFromReceipt
+    /// after, so a post-settle rejection can never strand funds (Option A). This wrapper keeps one
+    /// code path for callers that already hold a receipt (validate with receipt.amount, then create).
+    public func submitRequest(
+      buyer : Text,
+      serviceId : Text,
+      params : Blob,
+      receipt : Types.PaymentReceipt,
+      callback : ?Text,
+    ) : { #ok : Text; #err : Text } {
+      switch (validateSubmittable(buyer, serviceId, receipt.amount)) {
+        case (#err(e)) { #err(e) };
+        case (#ok) { #ok(createJobFromReceipt(buyer, serviceId, params, receipt, callback)) };
+      };
     };
 
     /// 1a: the EVM payment rail recorded for a job, if it was paid on-chain (null for ICP

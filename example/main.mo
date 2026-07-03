@@ -541,24 +541,27 @@ persistent actor KnowledgeBase {
       // M14: re-check the service exists and is enabled BEFORE settling — the 402 was minted
       // earlier and the service may have been disabled since, in which case submitRequest would
       // reject after the funds have already moved, with no refund.
-      switch (registry.getService(serviceId)) {
+      let svc = switch (registry.getService(serviceId)) {
         case (null) { return Http.httpError(404, "Service not found") };
-        case (?svc) { if (not svc.enabled) return Http.httpError(404, "Service not available") };
+        case (?s) { if (not s.enabled) { return Http.httpError(404, "Service not available") }; s };
+      };
+      // Option A: validate BEFORE settling (money-moved ⇒ job-exists). The 402 was minted with
+      // price + CKUSDC_FEE (see the GET handler at main.mo:459-460), so validate that same expected
+      // amount; a rejection here moves no funds. See docs/decisions/settled-then-job-failed.md.
+      let svcPrice = switch (svc.pricing) { case (#Exact(p)) { p }; case (#Upto(p)) { p }; case (#Session) { 0 } };
+      switch (registry.validateSubmittable(sig.sender, serviceId, svcPrice + CKUSDC_FEE)) {
+        case (#err(e)) { return Http.httpError(400, e) };
+        case (#ok) {};
       };
       let serviceResult = await gate.settle(sig, null);
       switch (serviceResult) {
         case (#ok(receipt)) {
-          // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM).
-          // Pass it through as Text — do NOT coerce to Principal (that trapped for
-          // EVM senders AFTER the on-chain transfer had already executed).
-          // submitRequest enforces receipt.amount >= price + fee (cross-resource safe).
-          switch (registry.submitRequest(receipt.sender, serviceId, request.body, receipt, null)) {
-            case (#ok(jobId)) {
-              let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
-              return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
-            };
-            case (#err(e)) { return Http.httpError(400, e) };
-          };
+          // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM). Pass it through as
+          // Text — do NOT coerce to Principal (that trapped for EVM senders AFTER the transfer). With
+          // validate-before-settle, createJobFromReceipt is infallible → a #ok settle always yields a job.
+          let jobId = registry.createJobFromReceipt(receipt.sender, serviceId, request.body, receipt, null);
+          let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
+          return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
         };
         // amount unknown on a failed service settle (varies per service); 0 in the response.
         case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, 0)) };
@@ -888,17 +891,18 @@ persistent actor KnowledgeBase {
         };
       };
       case (?sig) {
+        // Option A: validate BEFORE settling so a #ok settle always yields a job (money-moved ⇒
+        // job-exists), closing the settled-then-no-job strand. expectedAmount is what settle will
+        // produce — the 402 nonce was minted via requireAll(amount + CKUSDC_FEE) above.
+        // See docs/decisions/settled-then-job-failed.md (Option A).
+        switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, amount + CKUSDC_FEE)) {
+          case (#err(e)) { return #error(e) }; // rejected before any funds move
+          case (#ok) {};
+        };
         switch (await gate.settle(sig, null)) {
           case (#ok(receipt)) {
-            switch (registry.submitRequest(Principal.toText(msg.caller), serviceId, params, receipt, null)) {
-              case (#ok(jobId)) { #ok({ jobId }) };
-              // gate.settle already returned #ok → the buyer's funds HAVE moved. submitRequest failing
-              // now means money moved with no job (docs/decisions/settled-then-job-failed.md, S1). Prefix
-              // the canonical funds-moved marker so the client/MCP never refund the spend reservation or
-              // invite a retry (which would double-pay). Root cause is fixed by Option A (validate-before-
-              // settle), which makes this arm unreachable; this marker is the meanwhile safety net.
-              case (#err(e)) { #error("Payment settled but job not created — do NOT retry payment: " # e) };
-            };
+            // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
+            #ok({ jobId = registry.createJobFromReceipt(Principal.toText(msg.caller), serviceId, params, receipt, null) });
           };
           case (#policyDenied(r)) { #error("Policy: " # r) };
           case (#expired(r)) { #error("Nonce expired: " # r) };
