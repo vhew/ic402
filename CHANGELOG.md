@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.5.6 — 2026-07-02
+
+Patch release — closes the **settled-then-job-failed** fund-path class in the service marketplace
+(scoped in `docs/decisions/settled-then-job-failed.md`). No funds could be stolen; the fixes close a
+fund-availability / cap-accounting gap and, on the canister, make **money-moved ⇒ job-exists** an
+invariant. Additive to the mops surface — the `example.did` interface and `STABLE_SCHEMA_VERSION`
+(v1) are unchanged (upgrade-compatible; no migration).
+
+### Fixed
+
+- **`submitServiceRequest` could settle a payment and then fail to create the job (Option A / S1).**
+  The example settled FIRST, then called `registry.submitRequest`, which could still reject (a
+  service disabled during the settle await, or a `CKUSDC_FEE` vs `config.ledgerFee` skew) — moving
+  the buyer's funds with no job and no receipt-keyed recovery. `ServiceRegistry.submitRequest` is now
+  split into `validateSubmittable` (all pre-settle-checkable guards, checked against the amount that
+  will settle, using the registry's own fee) and an **infallible** `createJobFromReceipt`; both
+  example call sites (the update method and the HTTP `/service/` handler) now validate → settle →
+  create, so a `#ok` settle always yields a job. `submitRequest` stays (validate + create) so no mops
+  consumer breaks. Additive methods; no stable change.
+
+- **The MCP un-counted spend that actually moved, and could invite a double-pay (Option C / S2, S4).**
+  When a payment settled but a downstream step failed (settle `#ok` then job-create failed, or an EVM
+  settlement/deposit still `#settlementPending`), the MCP called `refundSpend()` on the catch-all —
+  restoring cumulative-cap headroom for money that really left, so a later auto-pay could exceed the
+  session cap; `open_session` additionally leaked a raw error string. The canister now prefixes a
+  canonical `do NOT retry payment` marker on the funds-moved arms; the client tags `Ic402Error` with
+  an additive `fundsMoved` flag; and the MCP refunds a reservation **only** when funds provably did
+  not move (and wraps `open_session` failures in a structured error). `fetch_x402`'s 402-after-pay
+  path was assessed and found already safe (`retryable:false` + human re-confirm + reservation kept).
+
 ## v2.5.5 — 2026-07-02
 
 Patch release — **fund-availability fix** in EVM session recovery, plus a reference-example

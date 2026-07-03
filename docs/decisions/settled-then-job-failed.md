@@ -1,8 +1,9 @@
 # DECISION-SCOPING: `settled-then-job-failed` in the ic402 service marketplace
 
-Status: scoping only. Decide direction + sequencing; do not treat as an implementation plan.
-Produced by a multi-agent scope (map 3 layers → adversarially verify → design options → synthesize),
-every claim verified against source at v2.5.5.
+**Status: RESOLVED in v2.5.6 — shipped Option C (S2/S4) + Option A (S1); S3 refuted; B/D deferred.**
+Decision: honor-with-a-job on disable-mid-settle (Option A); fee-source unification (open question 3)
+left as a follow-up. Produced by a multi-agent scope (map 3 layers → adversarially verify → design
+options → synthesize), every claim verified against source at v2.5.5.
 
 ## 1. Precise problem statement
 
