@@ -977,10 +977,25 @@ module {
       { total; open = nOpen; closing = nClosing; closed = nClosed; expired = nExpired };
     };
 
+    /// Finalize a #closing session to terminal #closed, releasing BOTH canister-side reservations
+    /// it still holds — the EVM escrow POOL ALLOCATION (deallocate) and the unconsumed DAILY-SPEND
+    /// reservation (releaseDaily) — and clearing any parked close tx. Shared by every #closing→#closed
+    /// transition (reconcileSession's confirmed close and the forceResolveSession operator hatch) so
+    /// they cannot drift: dropping deallocate here previously leaked the pool allocation PERMANENTLY
+    /// on the force path (gcClosedSessions only deletes the record, it never deallocates), monotonically
+    /// shrinking the funded pool's headroom until allocate() refuses new sessions. The reservations are
+    /// pure accounting (no funds move); the operator reconciles the on-chain funds out-of-band.
+    private func finalizeClosedSession(s : Types.InternalSessionState) {
+      ignore evmEscrowManager.deallocate(s.id);
+      s.status := #closed;
+      closeParkedTxs.delete(s.id);
+      if (s.deposited > s.consumed) { policy.releaseDaily(s.payer, s.spendDay, s.deposited - s.consumed) };
+    };
+
     /// Operator escape hatch for a session STUCK in #closing (an EVM close whose settle/refund
-    /// broadcast but never confirmed). State assertion only — moves NO funds; the operator
-    /// reconciles the EVM pool out-of-band. Forces the session to #closed so GC can reclaim it.
-    /// The consumer MUST gate this on Principal.isController.
+    /// broadcast but never confirmed). Moves NO funds; the operator reconciles the on-chain EVM
+    /// pool out-of-band. Releases the session's canister-side reservations and forces it to #closed
+    /// so GC can reclaim it. The consumer MUST gate this on Principal.isController.
     public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
       switch (sessions.get(sessionId)) {
         case (null) { #err("Session not found") };
@@ -988,8 +1003,7 @@ module {
           if (s.status != #closing) {
             return #err("Session is not stuck in #closing (status: " # debug_show (s.status) # ")");
           };
-          s.status := #closed;
-          closeParkedTxs.delete(sessionId);
+          finalizeClosedSession(s);
           #ok;
         };
       };
@@ -1013,10 +1027,7 @@ module {
       let refundOwed = Utils.satSub(s2.deposited, s2.consumed);
       switch (sessionReconcileDecision(outcome, parked.leg, refundOwed)) {
         case (#finalizeClose(msg)) {
-          ignore evmEscrowManager.deallocate(s2.id);
-          s2.status := #closed;
-          closeParkedTxs.delete(sessionId);
-          if (s2.deposited > s2.consumed) { policy.releaseDaily(s2.payer, s2.spendDay, s2.deposited - s2.consumed) };
+          finalizeClosedSession(s2); // deallocate + #closed + clear park + releaseDaily (shared with forceResolveSession)
           #ok(msg # " (tx " # parked.txHash # ")");
         };
         case (#settleDoneRefundOwed(msg)) {
