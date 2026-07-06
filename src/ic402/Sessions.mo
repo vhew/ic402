@@ -19,6 +19,7 @@ import Blob "mo:base/Blob";
 import Error "mo:base/Error";
 import CBOR "mo:cbor";
 import Ed25519 "mo:ed25519";
+import Identity "Identity";
 import Debug "mo:base/Debug";
 
 module {
@@ -131,6 +132,32 @@ module {
     var admitRateFn : () -> { #ok; #throttled } = func() : { #ok; #throttled } { #ok };
     /// Wire the global rate-limit gate for openEvmSession's ecRecover (injected by the Gateway).
     public func setAdmitRate(f : () -> { #ok; #throttled }) { admitRateFn := f };
+
+    // Opt-in caller binding for ICP-rail sessions (see setRequireCallerBoundSessions). Transient
+    // by design — an operator-init setting like setAdmitRate/setPolicy, re-applied on upgrade.
+    var requireCallerBoundSessions : Bool = false;
+
+    /// Opt-in (default OFF): require an ICP-rail session's Ed25519 voucher key to be the CALLER'S
+    /// OWN IC identity key — sha224(DER-SPKI(key)) ‖ 0x02 must equal the caller principal — so a
+    /// relying party can conclude the principal that opened (and paid for) a session is the one
+    /// whose key signs its vouchers. Leave OFF unless every session client authenticates with a
+    /// raw Ed25519 identity: Internet Identity delegations and secp256k1/P-256 identities derive
+    /// different principals and would be rejected. ICP rail only — an EVM session's payer identity
+    /// is the on-chain EVM address (authz.from), not msg.caller, so caller binding does not apply.
+    public func setRequireCallerBoundSessions(on : Bool) { requireCallerBoundSessions := on };
+
+    /// Whether a session's registered voucher key is the payer's OWN IC identity key (Ed25519
+    /// self-authenticating principal check — Identity.selfAuthPrincipalOfEd25519). Derived from
+    /// stored state, so it also answers for sessions opened before this method existed. null = no
+    /// such session. false means "not identity-bound" (an ephemeral or delegated voucher key, or a
+    /// non-Ed25519 caller identity) — it never means the session is invalid; EVM-rail sessions are
+    /// typically false because their voucher key is session-ephemeral.
+    public func sessionCallerBound(sessionId : Text) : ?Bool {
+      switch (sessions.get(sessionId)) {
+        case (?s) { ?(Identity.selfAuthPrincipalOfEd25519(s.payerPublicKey) == ?Principal.toBlob(s.payer)) };
+        case (null) { null };
+      };
+    };
 
     func findLedger(identifier : Text) : ?Types.TokenConfig {
       Utils.findLedger(config.tokens, identifier);
@@ -294,6 +321,13 @@ module {
       if (Blob.toArray(sessionPublicKey).size() != 32) {
         sessionOpenLocks.delete(caller);
         return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
+      };
+      // Opt-in caller binding (setRequireCallerBoundSessions): the voucher key must BE the
+      // caller's own IC identity key. Checked here — before the deposit pull — so a rejection
+      // moves no funds. Reuses #invalidSignature (no new variant) with an actionable message.
+      if (requireCallerBoundSessions and Identity.selfAuthPrincipalOfEd25519(sessionPublicKey) != ?Principal.toBlob(caller)) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("Session public key is not the caller's own identity key (its Ed25519 self-authenticating principal does not match the caller) — this canister requires caller-bound sessions. Sign vouchers with the same raw Ed25519 key the caller authenticates with; Internet Identity delegations and secp256k1/P-256 identities cannot satisfy this check."));
       };
 
       // Execute deposit via escrow

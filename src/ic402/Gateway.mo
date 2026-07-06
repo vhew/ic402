@@ -1050,6 +1050,23 @@ module {
       sessionsMgr.sessionCounts();
     };
 
+    /// Opt-in (default OFF): require an ICP-rail session's Ed25519 voucher key to BE the caller's
+    /// own IC identity key (self-authenticating principal check), so the session opener and its
+    /// voucher signer are provably the same principal. Leave OFF unless every session client uses
+    /// a raw Ed25519 identity — II delegations and secp256k1/P-256 callers would be rejected.
+    /// ICP rail only (an EVM session's payer identity is the EVM address, not msg.caller).
+    /// Transient: re-apply at init, like setPolicy/setEvmPoolCap.
+    public func setRequireCallerBoundSessions(on : Bool) {
+      sessionsMgr.setRequireCallerBoundSessions(on);
+    };
+
+    /// Whether a session's voucher key is the payer's own IC identity key (derived, works for
+    /// pre-existing sessions). null = unknown session; false = "not identity-bound", never
+    /// "invalid" — see Identity.selfAuthPrincipalOfEd25519 for the derivation and its limits.
+    public func sessionCallerBound(sessionId : Text) : ?Bool {
+      sessionsMgr.sessionCallerBound(sessionId);
+    };
+
     /// Operator escape hatch: force a session stuck in #closing to a terminal state so it's
     /// GC-eligible (state assertion only — moves no funds). Controller-gate at the consumer.
     public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {

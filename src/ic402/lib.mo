@@ -165,6 +165,13 @@ module {
   public let ContentStore = ContentStoreMod.ContentStore;
   /// ERC-8004 agent identity: metadata and key derivation.
   public let Identity = IdentityMod.Identity;
+  /// IC self-authenticating principal for a raw 32-byte Ed25519 key (sha224(DER-SPKI)‖0x02);
+  /// null if not 32 bytes. Ed25519-only and opportunistic — a mismatch means "not identity-bound",
+  /// never "invalid" (II delegations / secp256k1 / P-256 derive different principals).
+  public let selfAuthPrincipalOfEd25519 = IdentityMod.selfAuthPrincipalOfEd25519;
+  /// caller-binding + possession in one check: the key derives `caller` AND `signature` verifies
+  /// over `message` with it.
+  public let verifyCallerEd25519 = IdentityMod.verifyCallerEd25519;
   /// EIP-712 typed data hashing utilities (domain separators, struct hashes, digest).
   public let Eip712 = Eip712Mod;
   /// EVM address derivation and keccak256 hashing.
