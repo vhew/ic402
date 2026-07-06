@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.8.0 — 2026-07-05
+
+Minor release — **opt-in caller binding for ICP-rail session voucher keys**, all additive (new
+public API ⇒ minor per the 2.6.0/2.7.0 precedent; no interface, stable, or existing-signature
+change; `STABLE_SCHEMA_VERSION` stays v1, upgrade-compatible, no migration).
+
+Previously `openSession` accepted any 32-byte Ed25519 `sig.publicKey` (length check only), so a
+session's vouchers were bound to "some key" — a relying party could not conclude the principal that
+opened (and paid for) a session is the one whose key signs its vouchers.
+
+### Added
+
+- **`Ic402.selfAuthPrincipalOfEd25519(pubkey) : ?Blob`** — the IC self-authenticating principal for
+  a raw 32-byte Ed25519 key (`sha224(DER-SPKI(key)) ‖ 0x02`), verified byte-for-byte against
+  `@icp-sdk` via a golden-vector test. Ed25519-only and opportunistic: a mismatch means "not
+  identity-bound", never "invalid" — Internet Identity delegations and secp256k1/P-256 identities
+  derive different principals.
+- **`Ic402.verifyCallerEd25519(caller, pubkey, signature, message)`** — ownership (the key derives
+  the caller's principal) plus possession (the signature verifies) in one check.
+- **`Gateway.setRequireCallerBoundSessions(on)`** — opt-in, **default OFF**: reject an ICP-rail
+  `openSession` whose voucher key is not the caller's own identity key. Checked before the deposit
+  pull (a rejection moves no funds); reuses `#invalidSignature`. An operator-level knob by design —
+  the relying party is the canister, so a client-supplied `SessionConfig` flag would prove nothing.
+  ICP rail only: an EVM session's payer identity is the on-chain EVM address, not `msg.caller`.
+  Leave OFF unless every session client authenticates with a raw Ed25519 identity.
+- **`Gateway.sessionCallerBound(sessionId) : ?Bool`** — whether a session's voucher key is the
+  payer's own identity key, derived from already-stored state (works for pre-existing sessions).
+  `null` = unknown session; `false` = "not identity-bound", never "invalid" (EVM-rail sessions are
+  typically `false`; their voucher key is session-ephemeral).
+
 ## v2.7.0 — 2026-07-03
 
 Minor release — four **additive** consumer-facing methods (no existing signature, interface, or
