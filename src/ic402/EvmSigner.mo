@@ -121,6 +121,13 @@ module {
       maxFeePerGas : Nat,
       maxPriorityFeePerGas : Nat,
     ) : async { #ok : SignedTransaction; #err : Text } {
+      // Malformed hex (odd length / invalid chars → []) or a wrong-length address would
+      // hit addressToBytes' assert — an uncatchable local trap surfacing as an opaque
+      // IC0503 instead of this module's structured errors. Reject up front.
+      let toBytes = EvmUtils.hexToBytes(toAddress);
+      if (toBytes.size() != 20) {
+        return #err("Invalid 'to' address (expected a 20-byte / 40-hex-char address): " # toAddress);
+      };
       try {
         let pubKey = await getPublicKey();
 
@@ -130,7 +137,7 @@ module {
           maxPriorityFeePerGas;
           maxFeePerGas;
           gasLimit;
-          to = EvmUtils.addressToBytes(toAddress);
+          to = toBytes;
           value;
           data = calldata;
         };
@@ -143,7 +150,8 @@ module {
         });
         let sigBytes = Blob.toArray(signResult.signature);
         let r = Array.subArray(sigBytes, 0, 32);
-        let s = Array.subArray(sigBytes, 32, 32);
+        // Normalize BEFORE parity recovery, so no manual yParity flip is needed.
+        let (s, _) = EvmAddress.normalizeS(Array.subArray(sigBytes, 32, 32));
         let yParity = EvmAddress.recoverYParity(txHash, r, s, pubKey);
 
         let rawTxBytes = EvmUtils.signedRawTx(txParams, r, s, yParity);
@@ -169,6 +177,14 @@ module {
     ) : async { #ok : SignedTransaction; #err : Text } {
       let selector = EvmUtils.functionSelector("transfer(address,uint256)");
       let recipientBytes = EvmUtils.hexToBytes(recipientAddress);
+      // L21 (same hazard as EvmSender.sendErc20Transfer): a malformed recipient (odd/invalid
+      // hex → [], or truncated even-length hex) would be silently zero-extended to address(0)
+      // or left-padded into a DIFFERENT valid address, then signed and handed to the client as
+      // a broadcastable tx. Reject pre-sign. (signTransaction validates the TOKEN address; the
+      // recipient is encoded into calldata HERE, so it needs its own check.)
+      if (recipientBytes.size() != 20) {
+        return #err("Invalid recipient address (expected a 20-byte / 40-hex-char address): " # recipientAddress);
+      };
       let calldata = EvmUtils.abiEncodeFunctionCall(
         selector,
         [
@@ -232,7 +248,8 @@ module {
         });
         let sigBytes = Blob.toArray(signResult.signature);
         let r = Array.subArray(sigBytes, 0, 32);
-        let s = Array.subArray(sigBytes, 32, 32);
+        // USDC's on-chain ECRecover requires low-s; normalize before parity recovery.
+        let (s, _) = EvmAddress.normalizeS(Array.subArray(sigBytes, 32, 32));
         let v = EvmAddress.recoverYParity(digest, r, s, pubKey);
 
         let sigHex = EvmUtils.bytesToHex(Array.append(Array.append(r, s), [v + 27]));
@@ -340,7 +357,8 @@ module {
         });
         let sigBytes = Blob.toArray(signResult.signature);
         let r = Array.subArray(sigBytes, 0, 32);
-        let s = Array.subArray(sigBytes, 32, 32);
+        // OpenZeppelin ECDSA (and EIP-2 generally) rejects high-s; normalize before recovery.
+        let (s, _) = EvmAddress.normalizeS(Array.subArray(sigBytes, 32, 32));
         let v = EvmAddress.recoverYParity(eip712Digest, r, s, pubKey);
 
         let rHex = EvmUtils.bytesToHex(r);

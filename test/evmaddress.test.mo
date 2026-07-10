@@ -245,4 +245,106 @@ suite("EvmAddress", func() {
     assert(recovers(EvmUtils.natToBytes(sig.s, 32)));          // canonical form
     assert(recovers(EvmUtils.natToBytes(secpN - sig.s, 32)));  // malleated form (N - s)
   });
+
+  // ── normalizeS: EIP-2 low-S normalization golden vector ──
+  //
+  // WHAT: pins the public EvmAddress.normalizeS (defensive low-S normalization
+  // applied at every tECDSA sign site before parity recovery) against a
+  // self-verified secp256k1 malleation pair: same digest+r, s_high/s_low twins
+  // (s_low = n - s_high) with flipped yParity, both recovering the same pubkey.
+  // PROVENANCE: make_low_s_vector.py (pure-stdlib Python 3.13, fully deterministic,
+  // textbook EC pubkey-recovery self-check), independently cross-checked with
+  // @noble/curves 2.2.0 (crosscheck_vector.mjs): noble recovers the pubkey from
+  // BOTH twins with the pinned parities; its strict EIP-2 verify accepts s_low and
+  // REJECTS s_high. s_low was additionally re-derived by hand as n - s_high.
+
+  // digest z (arbitrary fixed 32 bytes — ECDSA only sees the scalar)
+  let lsDigest = EvmUtils.hexToBytes("7c8a4c4d0f4b1a2e9d3f5b6a7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f801");
+  let lsR = EvmUtils.hexToBytes("f462a6b51ca3269d8d4281bb1a4caa89802734257221131dfd1e73fa89816604");
+  let lsSHigh = EvmUtils.hexToBytes("9c79b8116b706c9a1b17a1b327eb88df0e7cc67f2ebc7396acb5798dd6907f6d"); // yParity_high = 0
+  let lsSLow = EvmUtils.hexToBytes("638647ee948f9365e4e85e4cd814771fac321667808c2ca5131ce4fef9a5c1d4");  // yParity_low = 1
+  let lsPubkey = EvmUtils.hexToBytes("02cd5346cccf42648c2fcf8ebcf658ba4e107645922aeead717bdf51815a9e1741");
+
+  suite("normalizeS (EIP-2 low-S golden vector)", func() {
+
+    test("vector sanity: sizes, s_low == n - s_high, s_low is low / s_high is high", func() {
+      assert(lsDigest.size() == 32 and lsR.size() == 32);
+      assert(lsSHigh.size() == 32 and lsSLow.size() == 32 and lsPubkey.size() == 33);
+      assert(EvmUtils.bytesToNat(lsSLow) + EvmUtils.bytesToNat(lsSHigh) == secpN);
+      assert(2 * EvmUtils.bytesToNat(lsSLow) <= secpN);
+      assert(2 * EvmUtils.bytesToNat(lsSHigh) > secpN);
+    });
+
+    test("normalizeS(s_high) -> (n - s_high, flipped = true)", func() {
+      let (sOut, flipped) = EvmAddress.normalizeS(lsSHigh);
+      assert(sOut == lsSLow);
+      assert(flipped);
+    });
+
+    test("normalizeS(s_low) is a no-op -> (s_low, flipped = false)", func() {
+      let (sOut, flipped) = EvmAddress.normalizeS(lsSLow);
+      assert(sOut == lsSLow);
+      assert(not flipped);
+    });
+
+    test("boundary: s == floor(n/2) is already low -> unchanged, no flip", func() {
+      let halfN = EvmUtils.natToBytes(secpN / 2, 32);
+      let (sOut, flipped) = EvmAddress.normalizeS(halfN);
+      assert(sOut == halfN);
+      assert(not flipped);
+    });
+
+    test("boundary: s == floor(n/2)+1 (smallest high s) -> flips to floor(n/2)", func() {
+      // n is odd, so n - (floor(n/2) + 1) == floor(n/2).
+      let (sOut, flipped) = EvmAddress.normalizeS(EvmUtils.natToBytes(secpN / 2 + 1, 32));
+      assert(sOut == EvmUtils.natToBytes(secpN / 2, 32));
+      assert(flipped);
+    });
+
+    test("boundary: s == 1 -> unchanged, no flip", func() {
+      let one32 = EvmUtils.natToBytes(1, 32);
+      let (sOut, flipped) = EvmAddress.normalizeS(one32);
+      assert(sOut == one32);
+      assert(not flipped);
+    });
+
+    test("out-of-range clause: s == 0 and s >= n returned unchanged, no flip", func() {
+      // Invalid either way — normalizeS leaves them for recovery to reject downstream.
+      let (s0, f0) = EvmAddress.normalizeS(zero32);
+      assert(s0 == zero32 and not f0);
+      let nBytes = EvmUtils.natToBytes(secpN, 32);
+      let (sN, fN) = EvmAddress.normalizeS(nBytes);
+      assert(sN == nBytes and not fN);
+      let allFF = Array.tabulate<Nat8>(32, func(_ : Nat) : Nat8 { 0xff }); // 2^256 - 1 > n
+      let (sF, fF) = EvmAddress.normalizeS(allFF);
+      assert(sF == allFF and not fF);
+    });
+
+    test("recovery consistency: ecRecover(digest, r, s_high, 0 or 1) still recovers the pubkey", func() {
+      // ecRecover normalizes high-s internally and flips the requested parity, so the
+      // vector's yParity_high = 0 recovers the pubkey directly …
+      assert(EvmAddress.ecRecover(lsDigest, lsR, lsSHigh, 0) == ?lsPubkey);
+      // … and at least one v in {0, 1} recovers it (parity search style used by callers).
+      var found = false;
+      for (vv in [0, 1].vals()) {
+        if (EvmAddress.ecRecover(lsDigest, lsR, lsSHigh, Nat8.fromNat(vv)) == ?lsPubkey) {
+          found := true;
+        };
+      };
+      assert(found);
+    });
+
+    test("recovery consistency: s_low with the vector's yParity_low recovers the pubkey", func() {
+      assert(EvmAddress.ecRecover(lsDigest, lsR, lsSLow, 1) == ?lsPubkey);
+    });
+
+    test("recoverYParity(digest, r, s_low, pubkey) == yParity_low == 1", func() {
+      assert(EvmAddress.recoverYParity(lsDigest, lsR, lsSLow, lsPubkey) == 1);
+      // Sign-site flow pinned end-to-end: normalize FIRST, then recover parity — the
+      // doc-comment's "no manual flip needed" guarantee.
+      let (sNorm, flipped) = EvmAddress.normalizeS(lsSHigh);
+      assert(flipped);
+      assert(EvmAddress.recoverYParity(lsDigest, lsR, sNorm, lsPubkey) == 1);
+    });
+  });
 });

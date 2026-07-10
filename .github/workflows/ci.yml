@@ -53,6 +53,21 @@ jobs:
       - run: ./scripts/check-stable-compat.sh
       - run: ./scripts/check-stable-compat.sh --self-test
 
+  # Guard the Motoko mirrors of EXTERNAL canister interfaces (ICRC-1/2 ledger in Types.mo,
+  # EVM-RPC in EvmRpc.mo): a mirror that drifts decode-unsafe from the official .did traps
+  # mid-settle at runtime (bit the repo twice). Probe actors -> moc --idl -> pinned didc
+  # subtype-check against vendored official .dids (test/fixtures/official/, hermetic).
+  # The self-test proves the gate still discriminates (a didc upgrade or argument-order
+  # regression can't silently neuter it into a green no-op).
+  candid-mirrors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ZenVoich/setup-mops@v1
+      - run: mops install
+      - run: ./scripts/check-candid-mirrors.sh
+      - run: ./scripts/check-candid-mirrors.sh --self-test
+
   test-client:
     runs-on: ubuntu-latest
     steps:

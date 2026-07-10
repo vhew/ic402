@@ -1,0 +1,24 @@
+{
+  "x402Version": 2,
+  "payload": {
+    "authorization": {
+      "from": "0x4a62316623ad457F02cDC5D997deD67a383EC569",
+      "to": "0x99C851eaa3c3976914D63b822C67e201EC0BFBb8",
+      "value": "10000",
+      "validAfter": "0",
+      "validBefore": "1750000300",
+      "nonce": "0x4242424242424242424242424242424242424242424242424242424242424242"
+    },
+    "signature": "0xa6372e1472153966bafb11e8cde2bb04034ce4b284fb2fbc9a83df26aa0ebc0440e9a3bc58d0479a7277b9ebc63aae56b9920211b4660f88625237f0183239d61c"
+  },
+  "resource": { "url": "https://example-canister.icp0.io/content/premium-1" },
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "amount": "10000",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "payTo": "0x99C851eaa3c3976914D63b822C67e201EC0BFBb8",
+    "maxTimeoutSeconds": 300,
+    "extra": { "name": "USDC", "version": "2" }
+  }
+}

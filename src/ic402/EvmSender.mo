@@ -247,7 +247,10 @@ module {
         });
         let sigBytes = Blob.toArray(signResult.signature);
         let r = Array.subArray(sigBytes, 0, 32);
-        let s = Array.subArray(sigBytes, 32, 32);
+        // EIP-2 low-S: the IC's tECDSA normalizes s today, but only as an implementation
+        // detail (the interface spec is silent) — normalize defensively BEFORE parity
+        // recovery, so no manual yParity flip is needed.
+        let (s, _) = EvmAddress.normalizeS(Array.subArray(sigBytes, 32, 32));
 
         let yParity = EvmAddress.recoverYParity(txHash, r, s, pubKey);
 

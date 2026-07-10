@@ -325,8 +325,13 @@ module {
       rlpEncodeBytes(params.data),
       rlpEncodeList([]), // accessList: empty
       rlpEncodeNat(Nat8.toNat(yParity)),
-      rlpEncodeBytes(r),
-      rlpEncodeBytes(s),
+      // signature_r / signature_s are RLP INTEGERS (EIP-2718/1559): minimal encoding,
+      // leading zeros trimmed. Encoding the raw 32-byte slices as byte strings kept
+      // leading zeros, which geth-family nodes reject as "rlp: non-canonical integer" —
+      // an intermittent ~1-in-128 broadcast failure (P(leading zero in r or s) ≈ 0.78%),
+      // whose locally derived tx hash could then never resolve.
+      rlpEncodeNat(bytesToNat(r)),
+      rlpEncodeNat(bytesToNat(s)),
     ]);
     Array.append([0x02 : Nat8], payload);
   };

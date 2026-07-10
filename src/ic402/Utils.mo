@@ -189,31 +189,43 @@ module {
     if (n >= 65 and n <= 90) { Nat8.fromNat(Nat32.toNat(n - 65)) }       // A-Z
     else if (n >= 97 and n <= 122) { Nat8.fromNat(Nat32.toNat(n - 71)) }  // a-z
     else if (n >= 48 and n <= 57) { Nat8.fromNat(Nat32.toNat(n + 4)) }    // 0-9
-    else if (n == 43) { 62 : Nat8 }  // +
-    else if (n == 47) { 63 : Nat8 }  // /
+    else if (n == 43 or n == 45) { 62 : Nat8 }  // + (standard) or - (base64url)
+    else if (n == 47 or n == 95) { 63 : Nat8 }  // / (standard) or _ (base64url)
     else { 255 : Nat8 };             // padding or invalid
   };
 
-  /// Decode a base64-encoded string to bytes. Returns empty on invalid input.
+  /// Decode a base64-encoded string to bytes — STRICT: any character outside the
+  /// standard/URL-safe alphabets (including whitespace), or a misplaced '=', rejects
+  /// the WHOLE input (returns []). Unpadded input is accepted (the final 2-/3-char
+  /// group decodes); a dangling single char (length % 4 == 1 after padding) is invalid.
+  ///
+  /// Strictness is deliberate: the previous decoder skipped/truncated around stray
+  /// bytes on fixed 4-char windows, so the same header could decode to DIFFERENT bytes
+  /// here than in lenient upstream decoders (Node/browsers strip-and-realign) — the
+  /// classic parser-differential surface. Reject-all removes it; callers already treat
+  /// [] as "invalid header" (fail-closed).
   public func base64Decode(encoded : Text) : [Nat8] {
     let chars = Iter.toArray(encoded.chars());
-    let buf = Buffer.Buffer<Nat8>(chars.size() * 3 / 4);
+    // Strip at most two trailing '=' padding chars; any other '=' is rejected below.
+    var dataLen = chars.size();
+    if (dataLen > 0 and chars[dataLen - 1] == '=') { dataLen -= 1 };
+    if (dataLen > 0 and chars[dataLen - 1] == '=') { dataLen -= 1 };
+    if (dataLen % 4 == 1) { return [] }; // no byte count yields a lone trailing char
+    let buf = Buffer.Buffer<Nat8>(dataLen * 3 / 4);
     var i = 0;
-    while (i + 3 < chars.size()) {
-      let a = base64CharValue(chars[i]);
-      let b = base64CharValue(chars[i + 1]);
-      let c = base64CharValue(chars[i + 2]);
-      let d = base64CharValue(chars[i + 3]);
-      if (a == 255 or b == 255) { return Buffer.toArray(buf) };
-
-      buf.add(Nat8.fromNat(Nat8.toNat(a) * 4 + Nat8.toNat(b) / 16));
-      if (c != 255) {
-        buf.add(Nat8.fromNat((Nat8.toNat(b) % 16) * 16 + Nat8.toNat(c) / 4));
-        if (d != 255) {
-          buf.add(Nat8.fromNat((Nat8.toNat(c) % 4) * 64 + Nat8.toNat(d)));
-        };
+    var acc : Nat = 0; // bit accumulator
+    var bits : Nat = 0; // bits currently held in acc
+    while (i < dataLen) {
+      let v = base64CharValue(chars[i]);
+      if (v == 255) { return [] };
+      acc := acc * 64 + Nat8.toNat(v);
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        buf.add(Nat8.fromNat((acc / (2 ** bits)) % 256));
+        acc := acc % (2 ** bits);
       };
-      i += 4;
+      i += 1;
     };
     Buffer.toArray(buf);
   };

@@ -36,6 +36,28 @@ module {
     Array.freeze(buf);
   };
 
+  /// EIP-2 low-S normalization: if `s` falls in the upper half of the curve order,
+  /// replace it with n - s (the recovery point's y-parity flips accordingly — callers
+  /// that normalize BEFORE `recoverYParity` need no manual flip). Returns the
+  /// (possibly unchanged) 32-byte s and whether it was flipped.
+  ///
+  /// The IC's tECDSA normalizes s at the combine step and consensus rejects high-s
+  /// combined signatures — but only in the dfinity/ic implementation, not the
+  /// interface spec. Every post-Homestead EVM chain (EIP-2) and USDC's on-chain
+  /// ECRecover reject high-s, and nothing downstream here would catch one
+  /// (recoverYParity resolves a parity for high-s too), so every sign site
+  /// normalizes the raw s from sign_with_ecdsa before use.
+  /// An out-of-range s (0 or >= n) is returned unchanged — it is invalid either
+  /// way and fails recovery downstream.
+  public func normalizeS(sBytes : [Nat8]) : ([Nat8], Bool) {
+    let s = bytesToNat(sBytes);
+    if (s < SECP256K1_N and s > SECP256K1_N / 2) {
+      (natToBytes(SECP256K1_N - s, 32), true);
+    } else {
+      (sBytes, false);
+    };
+  };
+
   // ── EC Recovery (using herumi's ecdsa library) ──
 
   /// Recover the public key from an ECDSA signature.

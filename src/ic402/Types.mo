@@ -367,7 +367,13 @@ module {
 
   // ── Ledger actor type ──
 
-  /// Actor interface for ICRC-1/2 ledger canisters.
+  /// Actor interface for ICRC-1/2 ledger canisters. Structural subset of the official
+  /// interface (safe: Motoko actor references subtype by width). Field/arm-level fidelity
+  /// to the official .did is CI-gated (scripts/check-candid-mirrors.sh) and pinned by
+  /// officially-encoded fixtures (test/candid-mirrors.test.mo) — a drifted mirror traps
+  /// mid-settle on response decode. NB: icrc1_fee is `query` in the official .did; it is
+  /// declared as an update here because inter-canister calls from update context are
+  /// replicated anyway (correct, just paying consensus latency).
   public type LedgerActor = actor {
     icrc1_transfer : (TransferArg) -> async TransferResult;
     icrc1_fee : () -> async Nat;

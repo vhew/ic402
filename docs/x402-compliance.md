@@ -67,7 +67,7 @@ served too, as an implementation convenience / for non‑browser tooling).
       "extra": {
         "name": "USDC", "version": "2",    // EIP-712 domain (load-bearing for sig verify)
         "assetTransferMethod": "eip3009",  // default method
-        "ic402": { "nonce": "…", "expiry": … }   // NON-STANDARD: ic402-only, ignored by stock clients
+        "ic402Nonce": "…", "ic402Expiry": …   // NON-STANDARD flat keys: ic402-only, ignored by stock clients
       }
     }
     // …one entry per configured EVM chain; the ICP entry is gated (see below)
@@ -78,9 +78,16 @@ served too, as an implementation convenience / for non‑browser tooling).
 Notes:
 - `ResourceInfo.url` is built from the request `Host` header + path (ICP `request.url` is
   path‑only). `description`/`mimeType` are optional.
-- The non‑standard `ic402Nonce`/`expiry` no longer sit as bare top‑level `PaymentRequirements`
-  fields — they live under `extra.ic402` (the only spec‑sanctioned bag), so a stock client
-  ignores them and is unaffected.
+- The non‑standard `ic402Nonce`/`ic402Expiry` no longer sit as bare top‑level
+  `PaymentRequirements` fields — they live as FLAT keys inside `extra` (the only
+  spec‑sanctioned bag), so a stock client ignores them and is unaffected. The distinct key
+  names (`ic402Nonce`, capital N) are deliberate: the canister reads headers with a flat
+  JSON field scanner, and unique names guarantee no collision with `authorization.nonce`.
+- **Client generation matters:** ic402 speaks x402 **v2 only**. The stock npm client of the
+  v1 generation (`x402-fetch@1.x` / `x402@1.x`) validates 402 bodies against the v1 schema
+  (network name enums, `maxAmountRequired`, top‑level string `resource`) and rejects ic402's
+  v2 challenge — and its v1 headers (`network: "base-sepolia"`) are not routable by ic402.
+  Use a v2‑generation client (`@x402/*` packages, or `@ic402/client`).
 
 ### Retry — `PAYMENT-SIGNATURE` header (base64 `PaymentPayload`)
 

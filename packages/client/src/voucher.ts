@@ -29,7 +29,11 @@ export interface VoucherSigner {
 /**
  * Sign a cumulative voucher for a session.
  *
- * @param signer - An object with a sign method (e.g., Ed25519KeyIdentity)
+ * @param signer - A VoucherSigner. NB: an @icp-sdk Ed25519KeyIdentity does NOT satisfy the
+ *   interface directly (its getPublicKey() returns a PublicKey object, not raw bytes) — wrap
+ *   it: `{ sign: (p) => identity.sign(p), getPublicKey: async () => identity.getPublicKey().toRaw() }`.
+ *   Passing a non-raw public key would register the session under a garbage key and every
+ *   voucher would be rejected with #invalidSignature.
  * @param canisterId - The verifying canister's principal text (replay binding)
  * @param sessionId - The session to sign for
  * @param cumulativeAmount - Total amount consumed so far

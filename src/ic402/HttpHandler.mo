@@ -61,6 +61,20 @@ module {
   /// challenge and by the discovery listing. PaymentRequirements use the v2 field names
   /// (`amount`, not `maxAmountRequired`), CAIP-2 `network`, and a real `maxTimeoutSeconds`. The
   /// non-standard ic402 server nonce/expiry live under `extra` where a stock client ignores them.
+  /// EIP-712 domain-name fallback for a token configured without `tokenName`. The name is
+  /// load-bearing: it enters the domain separator the payer signs and the token contract
+  /// verifies on-chain — a wrong name makes every transferWithAuthorization revert with an
+  /// invalid signature. Configure `tokenName` explicitly; this table covers only the
+  /// canonical USDC deployments the docs and demo use. NB: Base Sepolia USDC (FiatToken
+  /// v2.2) is "USDC", NOT "USD Coin" (which is correct for Base mainnet).
+  func defaultEip712Name(network : Text, token : Text) : Text {
+    if (network == "eip155:84532" and Utils.toLower(token) == "0x036cbd53842c5426634e7929541ec2318f3dcf7e") {
+      "USDC";
+    } else {
+      "USD Coin";
+    };
+  };
+
   public func acceptsArrayJson(requirements : [Types.PaymentRequirement]) : Text {
     let now = Time.now();
     var accepts = "";
@@ -68,10 +82,17 @@ module {
     for (i in requirements.keys()) {
       let r = requirements[i];
       if (i > 0) { accepts #= "," };
-      let tName = switch (r.tokenName) { case (?n) { n }; case (null) { "USD Coin" } };
+      let tName = switch (r.tokenName) { case (?n) { n }; case (null) { defaultEip712Name(r.network, r.token) } };
       let tVersion = switch (r.tokenVersion) { case (?v) { v }; case (null) { "2" } };
-      // v2 maxTimeoutSeconds = the real remaining challenge window, not a constant.
-      let timeout : Int = if (r.expiry > now) { (r.expiry - now) / 1_000_000_000 } else { 0 };
+      // v2 maxTimeoutSeconds = the real remaining challenge window — but strictly POSITIVE:
+      // the official v2 schema requires > 0, and a 0 makes strict clients reject the whole
+      // PaymentRequired. expiry == 0 marks a listing with no live nonce (Gateway.describe /
+      // the discovery endpoint) — advertise the standard challenge window instead; an
+      // expired or sub-second window floors at 1.
+      let timeout : Int = if (r.expiry == 0) { 300 } else if (r.expiry > now) {
+        let t = (r.expiry - now) / 1_000_000_000;
+        if (t < 1) { 1 } else { t };
+      } else { 1 };
       accepts #= "{\"scheme\":\"" # Utils.escapeJsonString(r.scheme) # "\""
         # ",\"network\":\"" # Utils.escapeJsonString(r.network) # "\""
         # ",\"amount\":\"" # Nat.toText(r.amount) # "\""
