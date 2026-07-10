@@ -46,7 +46,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: mops install
       # npm Trusted Publishing (OIDC) requires npm >= 11.5.1; node 22 ships npm 10.
-      - run: npm install -g npm@latest
+      # Pinned to the 11.x line: npm 12.0.0 (2026-07-08) ships a broken provenance publish —
+      # MODULE_NOT_FOUND 'sigstore' from libnpmpublish/provenance.js (broke the v2.9.0 run);
+      # 11.18.0 is the proven-green version from the v2.8.0 release. Revisit once npm 12 fixes it.
+      - run: npm install -g npm@11
 
       # mops.toml is the single source of truth for the version; a tag must match it exactly.
       - name: Guard - tag matches source version
