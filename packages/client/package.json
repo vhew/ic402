@@ -51,8 +51,8 @@
   },
   "dependencies": {
     "@icp-sdk/core": "5.4.0",
-    "cborg": "5.1.1",
-    "viem": "2.52.2"
+    "cborg": "5.1.7",
+    "viem": "2.55.0"
   },
   "peerDependencies": {
     "@icp-sdk/core": ">=5.1.0"
@@ -60,6 +60,6 @@
   "devDependencies": {
     "@icp-sdk/core": "5.4.0",
     "typescript": "6.0.3",
-    "vitest": "4.1.8"
+    "vitest": "4.1.10"
   }
 }
