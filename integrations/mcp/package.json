@@ -3,6 +3,7 @@
   "version": "2.9.0",
   "description": "MCP server for ic402 — exposes x402 charges and streaming sessions as tools",
   "license": "Apache-2.0",
+  "author": "Vaughn Hew",
   "repository": {
     "type": "git",
     "url": "https://github.com/vhew/ic402.git",

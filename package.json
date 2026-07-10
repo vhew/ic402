@@ -2,7 +2,7 @@
   "name": "ic402",
   "version": "2.9.0",
   "private": true,
-  "author": "vhew",
+  "author": "Vaughn Hew",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.12.0"

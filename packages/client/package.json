@@ -3,7 +3,7 @@
   "version": "2.9.0",
   "description": "TypeScript client SDK for ic402-enabled ICP canisters",
   "license": "Apache-2.0",
-  "author": "ic402 contributors",
+  "author": "Vaughn Hew",
   "repository": {
     "type": "git",
     "url": "https://github.com/vhew/ic402.git",
