@@ -15,8 +15,10 @@ optional periodic live-testnet smoke for the funded leg (can't be hermetic), and
 residuals (shared-pool solvency operator-invariant; SSRF connect-pin; `recoverBuyerActionSigner`)
 are in `docs/security-model.md`.
 
-Releases since (through **v2.8.0**) shipped targeted fixes without re-running the full multi-agent
+Releases since (through **v2.9.0**) shipped targeted fixes without re-running the full multi-agent
 audit — notably the EIP-3009 on-chain-`v` money-path fix (inbound EVM settlements were reverting),
+the v2.9.0 EIP-1559 signature-RLP fix (leading-zero `r`/`s` made ~1-in-128 outbound broadcasts
+node-rejected with an unresolvable local tx hash) plus the golden-vector conformance sweep behind it,
 the `forceResolveSession` EVM-pool-allocation leak (the recovery hatch never released the
 reservation, eventually blocking new sessions), the whole **settled-then-job-failed** class (v2.6.0:
 `submit_request` `#settlementPending` handling, honest MCP spend accounting, and validate-before-settle
@@ -238,5 +240,9 @@ a `#pending`/`#reverted`/RPC-`#err` outbound leg now parks the job in `#Settling
 Mainnet constants correct (chain IDs, 5 USDC addresses, ckUSDC ledger, `key_1`, EVM RPC
 canister); money-**theft** paths guarded (C-1 recipient binding, `value==amount`, local
 EIP-712 verify before broadcast, H-4 synchronous daily reservation, S-3 terminal close);
-unit-level math/guards well-pinned (19 mops + 86 client + MCP guard/security tests);
-cycles attached, timers/GC bounded; `.did` in sync; versions uniform at 2.8.0.
+unit-level math/guards well-pinned (20 mops + 86 client + 135 root-vitest + MCP guard/security
+tests); every fund-path byte encoding golden-vector-pinned against its official reference
+implementation (EIP-1559 via viem/ethers, candid mirrors via the official `.did`s + the
+`check-candid-mirrors.sh` CI drift gate, x402 v2 wire via `@x402/core` schemas, Ed25519 via
+`@icp-sdk`, base64/hex via RFC 4648/Node); cycles attached, timers/GC bounded; `.did` in sync;
+versions uniform at 2.9.0.
