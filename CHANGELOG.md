@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.9.1 — 2026-07-14
+
+Patch release — **dependency and toolchain refresh**, no ic402 API or behavior change. Every
+golden-vector suite from v2.9.0 re-verified the upgrades byte-for-byte.
+
+### Changed
+
+- **moc 1.9.0 → 1.11.0** — full battery green: 20 mops test files (incl. the wasi candid
+  suite), stable-compat gate (baseline still upgrade-compatible), candid-mirror gate +
+  self-test, example build (`-E M0145`, wasm locals 96), regenerated `example.did`
+  byte-identical.
+- **@icp-sdk/core 5.4.0 → 6.0.0** — runtime dependency of `@ic402/client` and `@ic402/mcp`;
+  all 86 client + 135 root tests green, Ed25519 goldens unaffected.
+- **viem 2.55.2, cborg 5.1.7** (client runtime) — voucher-CBOR and EIP-1559 golden vectors
+  confirm byte-stable encodings.
+- **@x402/core 2.17.0 → 2.18.0** — the conformance suite re-ran clean: the deliberate
+  upstream-drift check; Coinbase's v2 wire is unchanged.
+- Dev tooling: eslint 10.7.0, typescript-eslint 8.64.0, prettier 3.9.5, vitest 4.1.10,
+  tsx 4.23.1, lint-staged 17.0.8, @types/node 26.1.1, @icp-sdk/icp-cli 1.0.2.
+
+### Held back (deliberate)
+
+- **TypeScript stays 6.0.3** (latest 6.x, now an explicit root devDep): tsc 7.0.2 compiles
+  the workspace, but typescript-eslint 8.64 crashes loading TS 7 (peer `<6.1.0`) — revisit
+  when typescript-eslint supports TS 7.
+- **wasmtime 44.0.0** (mops still passes `-Spreview2=n`) and **npm@11** in release.yml
+  (npm 12.0.0 provenance breakage; 12.0.1 unverified) keep their documented pins.
+
 ## v2.9.0 — 2026-07-10
 
 Minor release — **protocol golden-vector sweep**: every externally-defined byte encoding on a
