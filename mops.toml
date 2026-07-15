@@ -31,9 +31,5 @@ chacha = "1.0.1"
 test = "2.1.2"
 
 [toolchain]
-moc = "1.9.0"
-# wasmtime pinned to 44.0.0 for the wasi-mode tests (test/candid-mirrors.test.mo): mops
-# passes -Spreview2=n; wasmtime 45 prints a deprecation warning on stderr, which mops
-# treats as a test failure, and wasmtime >=47 (2026-07-20) makes the flag a hard error.
-# Revisit when mops stops passing the flag.
+moc = "1.11.0"
 wasmtime = "44.0.0"

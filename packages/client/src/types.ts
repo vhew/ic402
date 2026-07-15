@@ -111,10 +111,7 @@ export interface AccessGrant {
 }
 
 export type AccessGrantResult =
-  | { ok: null }
-  | { expired: null }
-  | { invalidGrant: null }
-  | { revoked: null };
+  { ok: null } | { expired: null } | { invalidGrant: null } | { revoked: null };
 
 export type DeliveryMethod =
   | { inline: Uint8Array }

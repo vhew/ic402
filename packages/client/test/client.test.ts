@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Ic402Client, type Ic402ClientConfig } from '../src/client.js';
 import { Ic402Error } from '../src/evm.js';
-import type { Job, JobStatus, ServiceDefinition } from '../src/types.js';
+import type { Job, ServiceDefinition } from '../src/types.js';
 
 function makeConfig(overrides?: Partial<Ic402ClientConfig>): Ic402ClientConfig {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
