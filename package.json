@@ -33,7 +33,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@icp-sdk/core": "6.0.0",
-    "@icp-sdk/icp-cli": "1.0.2",
+    "@icp-sdk/icp-cli": "1.1.0",
     "@noble/hashes": "2.2.0",
     "@x402/core": "2.18.0",
     "eslint": "10.7.0",

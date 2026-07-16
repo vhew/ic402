@@ -15,8 +15,8 @@ importers:
         specifier: 6.0.0
         version: 6.0.0
       '@icp-sdk/icp-cli':
-        specifier: 1.0.2
-        version: 1.0.2
+        specifier: 1.1.0
+        version: 1.1.0
       '@noble/hashes':
         specifier: 2.2.0
         version: 2.2.0
@@ -46,7 +46,7 @@ importers:
         version: 8.64.0(eslint@10.7.0)(typescript@6.0.3)
       vitest:
         specifier: 4.1.10
-        version: 4.1.10(@types/node@26.1.1)(vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
+        version: 4.1.10(@types/node@26.1.1)(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
 
   example/client:
     dependencies:
@@ -106,7 +106,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: 4.1.10
-        version: 4.1.10(@types/node@26.1.1)(vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
+        version: 4.1.10(@types/node@26.1.1)(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
 
 packages:
 
@@ -501,33 +501,33 @@ packages:
   '@icp-sdk/core@6.0.0':
     resolution: {integrity: sha512-z+oHm+MTB/Xo27LQCYXDpVcUyFQwceupoyqkYCW6aaiZ2GJ1BvhRbSMsm7XDHAgCuZmWULPxpiTFUnHZLDEKzw==}
 
-  '@icp-sdk/icp-cli-darwin-arm64@1.0.2':
-    resolution: {integrity: sha512-3eCLEnQuyOtcZmy4ey9LbhNhztjK4Lf5KoUDepntk73m0szDGUv/IYjPAmu1i8QGvf4phlzN+eIoiq9zKGF3Og==}
+  '@icp-sdk/icp-cli-darwin-arm64@1.1.0':
+    resolution: {integrity: sha512-ZvCRWm1/qgAJFKR0rp47mvTrysvkqJST5Vzb3BaKCKwB9jht0IqY+DcWEPCPFOBaoRGQ9HaE1bAdWBrc2xPv1A==}
     cpu: [arm64]
     os: [darwin]
 
-  '@icp-sdk/icp-cli-darwin-x64@1.0.2':
-    resolution: {integrity: sha512-s27k0Kv48l2pDPYAEzS9C6zcr5U3cpMVEK1BcWn3nZszueiwOmNv/ITjZsNJZoovF0D6FPP+/UBWx3tLcEeGdw==}
+  '@icp-sdk/icp-cli-darwin-x64@1.1.0':
+    resolution: {integrity: sha512-C66Wh6QoQ8JfMuMplkZkVMQA/A3hSbc3S+XZm/dJwPOLxdv1wwIFVCvhFgDM5S7H+s6QuA+RHRHNIGSoTU0k1g==}
     cpu: [x64]
     os: [darwin]
 
-  '@icp-sdk/icp-cli-linux-arm64@1.0.2':
-    resolution: {integrity: sha512-6PqBqxDc1Ns/CNySKJPA1reGJspecwxTplxdQC9ORuT2I1CQ4fAV7WTjvw7RkgxYuCjsEN0tf4FSaAdIljOOrA==}
+  '@icp-sdk/icp-cli-linux-arm64@1.1.0':
+    resolution: {integrity: sha512-/OZvwabWABygKgbS6s9JYeKvdIu/D84BoJlyqlpe/tAmmJEKBixGmqFXdKrP9eZdmrFok7ejOOcGj84B5SppwQ==}
     cpu: [arm64]
     os: [linux]
 
-  '@icp-sdk/icp-cli-linux-x64@1.0.2':
-    resolution: {integrity: sha512-B6qivQ49U65aAYZKccLz8b2oJqf9973d7dUTi8f1s94UXPQciYlDlHpvDVD3J0Cr5BDdxXiePscY8Ibav5BoDA==}
+  '@icp-sdk/icp-cli-linux-x64@1.1.0':
+    resolution: {integrity: sha512-Tzh8zFWDP3B1gb4qkxgXG2xA68F7fqXPstA2AUEukooboeqs5V7dc6ViTdaHr5yCk5o7re/kzL3xFK2XCBjFUQ==}
     cpu: [x64]
     os: [linux]
 
-  '@icp-sdk/icp-cli-win32-x64@1.0.2':
-    resolution: {integrity: sha512-22bKmVwVG2NkzjQOTS0TFY3fq9Be1HmxAEI7I+SsivhtCWzvuNjPjP6gyjdzlrx41p2MtqDe85NOfIxGYS8vig==}
+  '@icp-sdk/icp-cli-win32-x64@1.1.0':
+    resolution: {integrity: sha512-F5DOUg0VD9iFQ6zxT6NskRKS6fqoE5jiSxVIJfMpFMfKEqwyRGn8H48LIU3RYWLYvdWVKb/HIuon8iTPKrD5mw==}
     cpu: [x64]
     os: [win32]
 
-  '@icp-sdk/icp-cli@1.0.2':
-    resolution: {integrity: sha512-0p9wqmvu2HD5AGaYz5JRY2bI4TJHluhoaKX2b1DQgi9y+poBLrXJHbNK4P+to846bIDXZWNxi9z5QYkigB9iiQ==}
+  '@icp-sdk/icp-cli@1.1.0':
+    resolution: {integrity: sha512-PgGH7YZNxU2egKCTyZBWwdkV9D64u8qNXYMiz0cchjjTM4u67450/GeROGAKmFldrDSdhS/XB1TAWNe+8d+40A==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
@@ -544,8 +544,11 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
-  '@napi-rs/wasm-runtime@1.1.1':
-    resolution: {integrity: sha512-p64ah1M1ld8xjWv3qbvFwHiFVWrq1yFvV4f7w+mzaqiR4IlSgkqhcRdHwsGgomwzBH51sRY4NEowLxnaBjcW/A==}
+  '@napi-rs/wasm-runtime@1.1.6':
+    resolution: {integrity: sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg==}
+    peerDependencies:
+      '@emnapi/core': ^1.7.1
+      '@emnapi/runtime': ^1.7.1
 
   '@noble/ciphers@1.3.0':
     resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
@@ -687,8 +690,8 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@tybys/wasm-util@0.10.1':
-    resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
+  '@tybys/wasm-util@0.10.3':
+    resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -1365,8 +1368,8 @@ packages:
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
-  nanoid@3.3.11:
-    resolution: {integrity: sha512-N8SpfPUnUp1bK+PMYW8qSWdl9U+wwNWI4QKxOYDy9JAro3WMX7p2OeVRF9v+347pnakNevPmiHhNmZ2HbFA76w==}
+  nanoid@3.3.16:
+    resolution: {integrity: sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
@@ -1444,12 +1447,16 @@ packages:
     resolution: {integrity: sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A==}
     engines: {node: '>=12'}
 
+  picomatch@4.0.5:
+    resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
+    engines: {node: '>=12'}
+
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
 
-  postcss@8.5.8:
-    resolution: {integrity: sha512-OW/rX8O/jXnm82Ey1k44pObPtdblfiuWnrd8X7GJ7emImCOstunGbXUpp7HdBrFQX6rJzn3sPT397Wp5aCwCHg==}
+  postcss@8.5.19:
+    resolution: {integrity: sha512-Mz8SaolMd8nB+G13WkORcxQKHZ/NE4xXevtkJHVuG+guo9/wYKlIMTKAqGdEmYOXR2ijPjTYNHssizdaVSUNdQ==}
     engines: {node: ^10 || ^12 || >=14}
 
   prelude-ls@1.2.1:
@@ -1605,6 +1612,10 @@ packages:
 
   tinyglobby@0.2.15:
     resolution: {integrity: sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ==}
+    engines: {node: '>=12.0.0'}
+
+  tinyglobby@0.2.17:
+    resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
   tinyrainbow@3.1.0:
@@ -2048,28 +2059,28 @@ snapshots:
       '@scure/bip39': 2.2.0
       asn1js: 3.0.7
 
-  '@icp-sdk/icp-cli-darwin-arm64@1.0.2':
+  '@icp-sdk/icp-cli-darwin-arm64@1.1.0':
     optional: true
 
-  '@icp-sdk/icp-cli-darwin-x64@1.0.2':
+  '@icp-sdk/icp-cli-darwin-x64@1.1.0':
     optional: true
 
-  '@icp-sdk/icp-cli-linux-arm64@1.0.2':
+  '@icp-sdk/icp-cli-linux-arm64@1.1.0':
     optional: true
 
-  '@icp-sdk/icp-cli-linux-x64@1.0.2':
+  '@icp-sdk/icp-cli-linux-x64@1.1.0':
     optional: true
 
-  '@icp-sdk/icp-cli-win32-x64@1.0.2':
+  '@icp-sdk/icp-cli-win32-x64@1.1.0':
     optional: true
 
-  '@icp-sdk/icp-cli@1.0.2':
+  '@icp-sdk/icp-cli@1.1.0':
     optionalDependencies:
-      '@icp-sdk/icp-cli-darwin-arm64': 1.0.2
-      '@icp-sdk/icp-cli-darwin-x64': 1.0.2
-      '@icp-sdk/icp-cli-linux-arm64': 1.0.2
-      '@icp-sdk/icp-cli-linux-x64': 1.0.2
-      '@icp-sdk/icp-cli-win32-x64': 1.0.2
+      '@icp-sdk/icp-cli-darwin-arm64': 1.1.0
+      '@icp-sdk/icp-cli-darwin-x64': 1.1.0
+      '@icp-sdk/icp-cli-linux-arm64': 1.1.0
+      '@icp-sdk/icp-cli-linux-x64': 1.1.0
+      '@icp-sdk/icp-cli-win32-x64': 1.1.0
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
@@ -2095,11 +2106,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@napi-rs/wasm-runtime@1.1.1':
+  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)':
     dependencies:
       '@emnapi/core': 1.9.1
       '@emnapi/runtime': 1.9.1
-      '@tybys/wasm-util': 0.10.1
+      '@tybys/wasm-util': 0.10.3
     optional: true
 
   '@noble/ciphers@1.3.0': {}
@@ -2158,9 +2169,12 @@ snapshots:
   '@rolldown/binding-openharmony-arm64@1.0.0-rc.10':
     optional: true
 
-  '@rolldown/binding-wasm32-wasi@1.0.0-rc.10':
+  '@rolldown/binding-wasm32-wasi@1.0.0-rc.10(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.1
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
     optional: true
 
   '@rolldown/binding-win32-arm64-msvc@1.0.0-rc.10':
@@ -2199,7 +2213,7 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@tybys/wasm-util@0.10.1':
+  '@tybys/wasm-util@0.10.3':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -2321,13 +2335,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.0
 
-  '@vitest/mocker@4.1.10(vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))':
+  '@vitest/mocker@4.1.10(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 4.1.10
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)
+      vite: 8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)
 
   '@vitest/pretty-format@4.1.10':
     dependencies:
@@ -2702,6 +2716,10 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.4
 
+  fdir@6.5.0(picomatch@4.0.5):
+    optionalDependencies:
+      picomatch: 4.0.5
+
   file-entry-cache@8.0.0:
     dependencies:
       flat-cache: 4.0.1
@@ -2939,7 +2957,7 @@ snapshots:
 
   ms@2.1.3: {}
 
-  nanoid@3.3.11: {}
+  nanoid@3.3.16: {}
 
   natural-compare@1.4.0: {}
 
@@ -3009,11 +3027,13 @@ snapshots:
 
   picomatch@4.0.4: {}
 
+  picomatch@4.0.5: {}
+
   pkce-challenge@5.0.1: {}
 
-  postcss@8.5.8:
+  postcss@8.5.19:
     dependencies:
-      nanoid: 3.3.11
+      nanoid: 3.3.16
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
@@ -3056,7 +3076,7 @@ snapshots:
 
   rfdc@1.4.1: {}
 
-  rolldown@1.0.0-rc.10:
+  rolldown@1.0.0-rc.10(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1):
     dependencies:
       '@oxc-project/types': 0.120.0
       '@rolldown/pluginutils': 1.0.0-rc.10
@@ -3073,9 +3093,12 @@ snapshots:
       '@rolldown/binding-linux-x64-gnu': 1.0.0-rc.10
       '@rolldown/binding-linux-x64-musl': 1.0.0-rc.10
       '@rolldown/binding-openharmony-arm64': 1.0.0-rc.10
-      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.10
+      '@rolldown/binding-wasm32-wasi': 1.0.0-rc.10(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
       '@rolldown/binding-win32-arm64-msvc': 1.0.0-rc.10
       '@rolldown/binding-win32-x64-msvc': 1.0.0-rc.10
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
 
   router@2.2.0:
     dependencies:
@@ -3200,6 +3223,11 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
 
+  tinyglobby@0.2.17:
+    dependencies:
+      fdir: 6.5.0(picomatch@4.0.5)
+      picomatch: 4.0.5
+
   tinyrainbow@3.1.0: {}
 
   toidentifier@1.0.1: {}
@@ -3266,24 +3294,27 @@ snapshots:
       - utf-8-validate
       - zod
 
-  vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0):
+  vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.32.0
-      picomatch: 4.0.4
-      postcss: 8.5.8
-      rolldown: 1.0.0-rc.10
-      tinyglobby: 0.2.15
+      picomatch: 4.0.5
+      postcss: 8.5.19
+      rolldown: 1.0.0-rc.10(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)
+      tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 26.1.1
       esbuild: 0.27.4
       fsevents: 2.3.3
       tsx: 4.23.1
       yaml: 2.9.0
+    transitivePeerDependencies:
+      - '@emnapi/core'
+      - '@emnapi/runtime'
 
-  vitest@4.1.10(@types/node@26.1.1)(vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)):
+  vitest@4.1.10(@types/node@26.1.1)(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)):
     dependencies:
       '@vitest/expect': 4.1.10
-      '@vitest/mocker': 4.1.10(vite@8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
+      '@vitest/mocker': 4.1.10(vite@8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0))
       '@vitest/pretty-format': 4.1.10
       '@vitest/runner': 4.1.10
       '@vitest/snapshot': 4.1.10
@@ -3300,7 +3331,7 @@ snapshots:
       tinyexec: 1.2.4
       tinyglobby: 0.2.15
       tinyrainbow: 3.1.0
-      vite: 8.0.1(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)
+      vite: 8.0.1(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@26.1.1)(esbuild@0.27.4)(tsx@4.23.1)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 26.1.1
