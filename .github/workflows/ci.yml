@@ -157,7 +157,10 @@ jobs:
           cache: pnpm
       - uses: ZenVoich/setup-mops@v1
       - name: Install icp CLI
-        run: npm install -g @icp-sdk/icp-cli
+        # PINNED: unpinned @latest broke CI when 1.1.0 (2026-07-15) made `root-key` required
+        # for connected networks (icp.yaml carries it as hex so 1.0.x parses too). Bump
+        # deliberately, with a local `icp canister status`/predemo check on the new version.
+        run: npm install -g @icp-sdk/icp-cli@1.1.0
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local
@@ -190,7 +193,10 @@ jobs:
           cache: pnpm
       - uses: ZenVoich/setup-mops@v1
       - name: Install icp CLI
-        run: npm install -g @icp-sdk/icp-cli
+        # PINNED: unpinned @latest broke CI when 1.1.0 (2026-07-15) made `root-key` required
+        # for connected networks (icp.yaml carries it as hex so 1.0.x parses too). Bump
+        # deliberately, with a local `icp canister status`/predemo check on the new version.
+        run: npm install -g @icp-sdk/icp-cli@1.1.0
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local

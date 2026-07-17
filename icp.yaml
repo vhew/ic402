@@ -59,6 +59,12 @@ networks:
   - name: mainnet
     mode: connected
     url: https://icp-api.io
+    # REQUIRED by icp-cli >= 1.1.0 for connected networks (previously an implicit default).
+    # This is the canonical IC mainnet root key (matches @icp-sdk/core's IC_ROOT_KEY), spelled
+    # as HEX rather than 1.1.0's "mainnet" keyword so that icp-cli 1.0.x — which knows the
+    # field but hex-decodes it — still parses this manifest. Responses from the URL above are
+    # verified against this key.
+    root-key: 308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100814c0e6ec71fab583b08bd81373c255c3c371b2e84863c98a4f1e08b74235d14fb5d9c0cd546d9685f913a0c0b2cc5341583bf4b4392e467db96d65b9bb4cb717112f8472e0d5a4d14505ffd7484b01291091c5f87b98883463f98091a0baaae
 
 environments:
   - name: local
