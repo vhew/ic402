@@ -1207,6 +1207,25 @@ persistent actor KnowledgeBase {
     gate.setEvmDrainMode(on);
   };
 
+  // ── Runtime EVM chain reconfiguration (controller-only) ──
+  //
+  // Repoint the EVM rail (402 `accepts`, verify/settle, session opens) at a different chain
+  // set — e.g. Base Sepolia ↔ Base mainnet — without redeploying. Open sessions and in-flight
+  // requests keep the chains they started on and drain naturally (see Gateway.setEvmChains).
+  // NB TRANSIENT: this demo does NOT persist the override, so an upgrade reverts to the
+  // compiled-in config. A production consumer should persist its choice in ITS stable state
+  // (e.g. `stable var evmChainsOverride : ?[Ic402.EvmChainConfig]`) and re-apply it after
+  // loadStable in the actor body — then verify with getEvmChains.
+  public shared (msg) func setEvmChains(chains : [Ic402.EvmChainConfig]) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    gate.setEvmChains(chains);
+  };
+
+  public shared query (msg) func getEvmChains() : async [Ic402.EvmChainConfig] {
+    requireController(msg.caller);
+    gate.getEvmChains();
+  };
+
   public shared query (msg) func getEvmDrainMode() : async Bool {
     requireController(msg.caller);
     gate.getEvmDrainMode();

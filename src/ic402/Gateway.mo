@@ -22,6 +22,7 @@ import SHA256 "mo:sha2/Sha256";
 import Utils "Utils";
 import EvmAddress "EvmAddress";
 import EvmEscrow "EvmEscrow";
+import EvmRpc "EvmRpc";
 import EvmSender "EvmSender";
 import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
@@ -95,6 +96,10 @@ module {
     var receiptCounter : Nat = 0;
     // Self-derived EVM address (from tECDSA key). Populated by deriveEvmRecipient().
     var evmRecipient : ?Text = null;
+    // Live EVM chain set (see setEvmChains). Starts as the constructor config's evmChains;
+    // every Gateway chain lookup (findEvmChain, requireEvm, describeAll, supportedJson) reads
+    // THIS, never config.evmChains, so a runtime swap takes effect for new requests.
+    var liveEvmChains : [Types.EvmChainConfig] = config.evmChains;
 
     // SEC-1: a GLOBAL (caller-agnostic) admission gate for the UNAUTHENTICATED facilitator update
     // endpoints (POST /verify, /settle). The per-caller policy rate limit is bypassable — an
@@ -269,9 +274,9 @@ module {
       };
     };
 
-    /// Look up an EVM chain config by chain ID.
+    /// Look up an EVM chain config by chain ID (in the LIVE set — see setEvmChains).
     func findEvmChain(chainId : Nat) : ?Types.EvmChainConfig {
-      for (chain in config.evmChains.vals()) {
+      for (chain in liveEvmChains.vals()) {
         if (chain.chainId == chainId) return ?chain;
       };
       null;
@@ -294,8 +299,8 @@ module {
     /// PaymentRequirements for them if you want them offered.
     public func requireEvm(amount : Nat) : [Types.PaymentRequirement] {
       if (amount == 0) { Debug.trap("ic402: requireEvm() called with amount = 0; payment amount must be positive") };
-      let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size());
-      for (chain in config.evmChains.vals()) {
+      let buf = Buffer.Buffer<Types.PaymentRequirement>(liveEvmChains.size());
+      for (chain in liveEvmChains.vals()) {
         // Skip chains with no tokens configured
         if (chain.tokens.size() == 0) { /* skip */ } else {
         let expiry = Time.now() + nonceExpiryNanos();
@@ -333,7 +338,7 @@ module {
     /// PaymentSignature.asset, but are not advertised by this helper — build custom
     /// PaymentRequirements for them if you want them offered.
     public func describeAll(amount : Nat) : [Types.PaymentRequirement] {
-      let buf = Buffer.Buffer<Types.PaymentRequirement>(config.evmChains.size() + 1);
+      let buf = Buffer.Buffer<Types.PaymentRequirement>(liveEvmChains.size() + 1);
       switch (price(amount)) {
         case (?p) {
           buf.add({
@@ -344,7 +349,7 @@ module {
         };
         case (null) {};
       };
-      for (chain in config.evmChains.vals()) {
+      for (chain in liveEvmChains.vals()) {
         if (chain.tokens.size() == 0) { /* skip */ } else {
           let tok = chain.tokens[0];
           buf.add({
@@ -389,7 +394,7 @@ module {
     public func supportedJson() : Text {
       var kinds = "";
       var first = true;
-      for (chain in config.evmChains.vals()) {
+      for (chain in liveEvmChains.vals()) {
         if (chain.tokens.size() == 0) { /* skip */ } else {
           if (not first) { kinds #= "," };
           kinds #= "{\"x402Version\":2,\"scheme\":\"exact\",\"network\":\"eip155:" # Nat.toText(chain.chainId) # "\"}";
@@ -957,6 +962,86 @@ module {
 
     /// Read the configured EVM pool cap (see setEvmPoolCap). null = unbounded.
     public func getEvmPoolCap() : ?Nat { evmEscrowMgr.getPoolCap() };
+
+    // Canonical advertised form: "0x" + 40 hex chars. Internal comparisons (addressesEqual /
+    // hexToBytes) tolerate bare or 0X-prefixed hex, but 402 challenges carry the configured
+    // string VERBATIM (requireEvm/describeAll), and strict x402 clients (viem isAddress)
+    // reject non-canonical forms — so setEvmChains refuses them up front.
+    func isCanonicalEvmAddress(a : Text) : Bool {
+      Text.startsWith(a, #text "0x") and a.size() == 42 and EvmUtils.hexToBytes(a).size() == 20;
+    };
+
+    /// Replace the accepted EVM chain/token set at RUNTIME — repoint the EVM rail at a
+    /// different chain (e.g. Base Sepolia ↔ Base mainnet), add or remove chains or tokens —
+    /// without a redeploy. Takes effect immediately for NEW 402 challenges (`requireEvm`/
+    /// `describeAll`/`supportedJson`), verify/settle chain resolution, AND session opens:
+    /// Sessions holds its own captured copy of the chain list (Motoko records are value
+    /// bindings), so this method updates BOTH cells in the same call — a Gateway-only swap
+    /// would silently leave the session rail on the old chains.
+    ///
+    /// Already-OPEN sessions are unaffected and drain naturally: close/reconcile/park use
+    /// session-stored fields (network/token/subaccount), never this list. In-flight MESSAGES
+    /// complete on the chain set they resolved at entry (every money path resolves its chain
+    /// into locals before its first await). A 402 challenge or session intent minted PRE-swap
+    /// for a chain/token the swap removed fails CLEANLY at settle/open (nonce unlocked,
+    /// nothing broadcast, no funds move) — the client re-requests a fresh challenge.
+    ///
+    /// TRANSIENT, like setPolicy/setAdmitRate/setRequireCallerBoundSessions: reverts to the
+    /// constructor config on upgrade. Persist the choice in YOUR stable state and re-apply at
+    /// init — a forgotten re-apply on a mainnet-flipped canister silently reverts it to the
+    /// compiled-in chains (verify with getEvmChains after upgrades). No caller auth here:
+    /// gate this behind your own controller check.
+    public func setEvmChains(chains : [Types.EvmChainConfig]) : { #ok; #err : Text } {
+      // Validation is all-or-nothing: a rejected set leaves the live set untouched. Beyond
+      // the constructor's (nonexistent) checks, reject what would settle ambiguously or
+      // brokenly; an empty list turns the EVM rail off, and zero-token chains are tolerated
+      // and skipped by the advertising helpers, as at construction.
+      var i = 0;
+      for (chain in chains.vals()) {
+        if (chain.chainId == 0) {
+          return #err("chainId must be nonzero (eip155:0 is not a network)");
+        };
+        // The RPC provider table is STATIC (EvmRpc.rpcServices): a chain it cannot serve
+        // would still be advertised and mint nonces, then fail every broadcast — an
+        // advertised-but-dead rail whose only symptom is client-side settle failures.
+        if (EvmRpc.rpcServices(chain.chainId) == null) {
+          return #err("chainId " # Nat.toText(chain.chainId) # " has no EVM-RPC provider mapping (see EvmRpc.rpcServices) — it would advertise 402 challenges that can never settle");
+        };
+        var j = 0;
+        for (other in chains.vals()) {
+          if (j < i and other.chainId == chain.chainId) {
+            return #err("duplicate chainId " # Nat.toText(chain.chainId) # " — chain lookups resolve the FIRST match, so later duplicates would be dead config");
+          };
+          j += 1;
+        };
+        if (chain.recipient != "" and not isCanonicalEvmAddress(chain.recipient)) {
+          return #err("chain " # Nat.toText(chain.chainId) # ": recipient must be a 0x-prefixed 20-byte hex address (advertised verbatim in 402 challenges): " # chain.recipient);
+        };
+        var t = 0;
+        for (tok in chain.tokens.vals()) {
+          if (not isCanonicalEvmAddress(tok.address)) {
+            return #err("chain " # Nat.toText(chain.chainId) # ": token address must be a 0x-prefixed 20-byte hex address (advertised verbatim in 402 challenges): " # tok.address);
+          };
+          var u = 0;
+          for (other in chain.tokens.vals()) {
+            if (u < t and EvmUtils.addressesEqual(other.address, tok.address)) {
+              return #err("chain " # Nat.toText(chain.chainId) # ": duplicate token address " # tok.address # " — domain lookups resolve the first match, so the duplicate's EIP-712 domain would be dead config");
+            };
+            u += 1;
+          };
+          t += 1;
+        };
+        i += 1;
+      };
+      liveEvmChains := chains;
+      sessionsMgr.setEvmChains(chains);
+      #ok;
+    };
+
+    /// The EVM chain set currently in effect: the constructor config's until setEvmChains
+    /// overrides it. Pair with setEvmChains to verify a flip (and after upgrades, to catch a
+    /// forgotten re-apply).
+    public func getEvmChains() : [Types.EvmChainConfig] { liveEvmChains };
 
     /// Total EVM deposit currently reserved by open sessions for a chain+token — read-only pool
     /// utilisation. Remaining headroom under a cap is getEvmPoolCap() − totalAllocated(chainId,

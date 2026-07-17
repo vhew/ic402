@@ -133,6 +133,19 @@ module {
     /// Wire the global rate-limit gate for openEvmSession's ecRecover (injected by the Gateway).
     public func setAdmitRate(f : () -> { #ok; #throttled }) { admitRateFn := f };
 
+    // Live EVM chain set consulted by openEvmSession's chain lookup. Starts as the constructor
+    // config's evmChains; replaced at runtime via setEvmChains. Motoko records are immutable
+    // value bindings, so this class holds its OWN copy of the chain list — a Gateway that only
+    // mutated its own binding would silently leave the session-open path on the construction-time
+    // chains. Gateway.setEvmChains therefore updates BOTH in the same call. Transient like
+    // setAdmitRate/setPolicy: reverts to the constructor config on upgrade.
+    var liveEvmChains : [Types.EvmChainConfig] = config.evmChains;
+
+    /// Replace the EVM chain set for session opens (injected by Gateway.setEvmChains — call
+    /// directly only if you constructed this Sessions instance yourself). Open sessions are
+    /// unaffected: close/reconcile/park use session-stored fields, not this list.
+    public func setEvmChains(chains : [Types.EvmChainConfig]) { liveEvmChains := chains };
+
     // Opt-in caller binding for ICP-rail sessions (see setRequireCallerBoundSessions). Transient
     // by design — an operator-init setting like setAdmitRate/setPolicy, re-applied on upgrade.
     var requireCallerBoundSessions : Bool = false;
@@ -515,7 +528,9 @@ module {
       // Return error if chain not configured (wrong defaults cause silent sig failure).
       let evmChain : Types.EvmChainConfig = do {
         var found : ?Types.EvmChainConfig = null;
-        for (c in config.evmChains.vals()) { if (c.chainId == chainId) found := ?c };
+        // First match wins (same order as Gateway.findEvmChain; setEvmChains rejects duplicates
+        // anyway, but the two rails must never resolve the same chainId differently).
+        for (c in liveEvmChains.vals()) { if (found == null and c.chainId == chainId) found := ?c };
         switch (found) {
           case (?chain) { chain };
           case (null) {
@@ -526,11 +541,21 @@ module {
       };
       // Multi-token: key the EIP-712 domain off the SESSION's token (tokenAddr = intent.token), not
       // tokens[0], so a deposit in a non-first configured token verifies against its OWN domain.
+      // STRICT membership (parity with Gateway.settle's resolveEvmDomain): an unconfigured token
+      // must NOT fall through to the "USD Coin"/"2" default domain — for canonical USDC that
+      // default VERIFIES, so a token removed via setEvmChains could otherwise still open new
+      // sessions. First match wins, as in Gateway.resolveEvmDomain.
+      var tokenConfigured = false;
       for (tok in evmChain.tokens.vals()) {
-        if (EvmUtils.addressesEqual(tok.address, tokenAddr)) {
+        if ((not tokenConfigured) and EvmUtils.addressesEqual(tok.address, tokenAddr)) {
           tokenName := tok.name;
           tokenVersion := tok.version;
+          tokenConfigured := true;
         };
+      };
+      if (not tokenConfigured) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("Unsupported asset " # tokenAddr # " on chain " # Nat.toText(chainId) # " — not in the chain's configured token list (it may have been removed via setEvmChains); request a fresh session intent"));
       };
 
       // SEC-0 (round 2): rate-limit the expensive ecRecover in verifyAuthorization below behind the

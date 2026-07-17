@@ -215,6 +215,7 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `consumeVoucher(voucher)` | Verify + consume session voucher |
 | `closeSession(caller, id)` | Settle consumed, refund remainder |
 | `setPolicy(caller?, policy)` | Set spending policy |
+| `setEvmChains(chains)` / `getEvmChains()` | Swap the accepted EVM chain/token set at runtime (e.g. Base Sepolia ↔ Base mainnet) — no redeploy; open sessions drain on their original chains. Transient: persist your choice consumer-side and re-apply after upgrade |
 | `getGlobalPolicy()` | Read back the live global spending policy (example exposes it as the `getPolicyConfig` query) |
 | `issueGrant(...)` / `verifyGrant(caller, grant)` | HMAC access grants (non-transferable — `caller` must equal `grant.grantee`) |
 | `startTimers<system>()` | Start background timers |

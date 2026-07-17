@@ -249,6 +249,20 @@ type HttpRequest =
    method: text;
    url: text;
  };
+type EvmTokenConfig = 
+ record {
+   address: text;
+   decimals: nat8;
+   name: opt text;
+   symbol: text;
+   version: opt text;
+ };
+type EvmChainConfig = 
+ record {
+   chainId: nat;
+   recipient: text;
+   tokens: vec EvmTokenConfig;
+ };
 type Eip3009Authorization = 
  record {
    from: text;
@@ -379,6 +393,7 @@ service : {
       paymentRequired: vec PaymentRequirement;
     });
   getEvmAddress: () -> (text);
+  getEvmChains: () -> (vec EvmChainConfig) query;
   getEvmDrainMode: () -> (bool) query;
   getEvmPublicKey: () -> (blob);
   getJob: (jobId: text) -> (opt Job) query;
@@ -482,6 +497,10 @@ service : {
       error: text;
       ok: text;
     });
+  setEvmChains: (chains: vec EvmChainConfig) -> (variant {
+                                                   err: text;
+                                                   ok;
+                                                 });
   setEvmDrainMode: (on: bool) -> ();
   setEvmPayout: (address: text) -> (variant {
                                       err: text;
