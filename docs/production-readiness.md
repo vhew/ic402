@@ -245,4 +245,4 @@ tests); every fund-path byte encoding golden-vector-pinned against its official 
 implementation (EIP-1559 via viem/ethers, candid mirrors via the official `.did`s + the
 `check-candid-mirrors.sh` CI drift gate, x402 v2 wire via `@x402/core` schemas, Ed25519 via
 `@icp-sdk`, base64/hex via RFC 4648/Node); cycles attached, timers/GC bounded; `.did` in sync;
-versions uniform at 2.9.1.
+versions uniform at 2.10.0.

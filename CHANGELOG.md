@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.10.0 — 2026-07-17
+
+Minor release — **runtime EVM chain reconfiguration**. A single deployment can now repoint its
+EVM rail (the 402 `accepts` list, verify/settle resolution, and session opens) at a different
+chain set at runtime — e.g. Base Sepolia ↔ Base mainnet, or add/remove a chain — without a
+redeploy. Additive public API ⇒ minor per the 2.6.0 precedent; no interface, stable, or
+existing-signature change; `STABLE_SCHEMA_VERSION` stays v1, upgrade-compatible, no migration.
+
+### Added
+
+- **`Gateway.setEvmChains(chains) : { #ok; #err : Text }`** — swap the accepted EVM
+  chain/token set live. All-or-nothing validation: nonzero AND RPC-serveable chainIds
+  (membership in the static `EvmRpc.rpcServices` provider table — an unserveable chain would
+  advertise 402 challenges that can never settle), no duplicate chainIds or per-chain token
+  addresses (first-match shadowing), canonical `0x`-prefixed 20-byte addresses (challenges
+  advertise the configured strings verbatim; strict clients reject bare/`0X` forms). An empty
+  list turns the EVM rail off.
+  - **The capture fix**: Sessions receives `config` by value at construction and performs its
+    own `evmChains` lookup at session-open, so a Gateway-only swap would silently leave the
+    session rail on the old chains. Both classes now read live cells that `setEvmChains`
+    updates in one synchronous call — pinned by `test/evmchains.test.mo`, which drives the
+    real async open path and was mutation-verified to fail against a Gateway-only swap.
+  - **Drain semantics** (adversarially reviewed; every money path verified fail-closed):
+    in-flight messages complete on the chain set they resolved at entry; already-open
+    sessions on a removed chain still close/reconcile/park (those paths use session-stored
+    fields, never the live list); a pre-swap 402 challenge or session intent for a removed
+    chain/token fails cleanly at settle/open — nonce unlocked, nothing broadcast, no funds
+    move.
+  - **TRANSIENT** like `setPolicy`/`setRequireCallerBoundSessions`: reverts to the
+    constructor config on upgrade. Persist the choice in the consumer's stable state and
+    re-apply at init; verify with `getEvmChains()` after upgrades.
+- **`Gateway.getEvmChains()`** — the chain set currently in effect.
+- Example canister: controller-gated `setEvmChains`/`getEvmChains` endpoints demonstrating
+  the pattern (the demo does not persist the override; the doc comment shows how a production
+  consumer should).
+- `@ic402/client` needs no change: it takes the chain from `config.network` or extracts it
+  from the server-advertised 402 options at runtime.
+
+### Fixed
+
+- **`Sessions.openEvmSession` now requires the deposit token to be in the (live) chain's
+  configured token list** — surfaced by the adversarial review of this feature. Previously an
+  unconfigured `intent.token` fell through to the default `"USD Coin"/"2"` EIP-712 domain,
+  which is canonical USDC's real domain — so a genuine signature over a token the operator
+  had just delisted still verified and opened a new funded session (not fund-losing: the
+  refund is paid in-kind from the payer's own deposit; but it kept a delisted rail alive).
+  Now rejected with a typed error, matching `Gateway.settle`'s strict `resolveEvmDomain`.
+  The chain and token lookups on both rails were also unified to first-match resolution.
+
 ## v2.9.1 — 2026-07-14
 
 Patch release — **dependency and toolchain refresh**, no ic402 API or behavior change. Every
