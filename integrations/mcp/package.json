@@ -29,11 +29,11 @@
   "dependencies": {
     "@ic402/client": "workspace:*",
     "@icp-sdk/core": "6.0.0",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "26.1.1",
+    "@types/node": "26.1.2",
     "typescript": "6.0.3"
   }
 }
