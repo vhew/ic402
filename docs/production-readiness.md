@@ -244,5 +244,7 @@ unit-level math/guards well-pinned (20 mops + 86 client + 135 root-vitest + MCP 
 tests); every fund-path byte encoding golden-vector-pinned against its official reference
 implementation (EIP-1559 via viem/ethers, candid mirrors via the official `.did`s + the
 `check-candid-mirrors.sh` CI drift gate, x402 v2 wire via `@x402/core` schemas, Ed25519 via
-`@icp-sdk`, base64/hex via RFC 4648/Node); cycles attached, timers/GC bounded; `.did` in sync;
-versions uniform at 2.10.0.
+`@icp-sdk`, base64/hex via RFC 4648/Node); cycles attached, timers/GC bounded **and self-arming**
+(the expiry sweeps run only while there is state to sweep — see [costs
+§5](costs-and-rails.md#5-fixed-idle-cost-recurring-timers)); `.did` in sync; versions uniform at
+2.11.0.

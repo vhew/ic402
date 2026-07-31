@@ -1,5 +1,88 @@
 # Changelog
 
+## v2.11.0 — 2026-07-31
+
+Minor release — **self-arming expiry timers**. `startTimers()` used to arm two unconditional
+60-second recurring timers for the canister's entire life. A recurring timer is billed **per
+tick** — the message-execution base fee — regardless of what its callback finds, so a canister
+that never opened a session or created a job still paid for 120 ticks/hour. They now run only
+while there is state to sweep. Additive public API ⇒ minor; no existing signature, interface, or
+stable-type change; `STABLE_SCHEMA_VERSION` stays v1, upgrade-compatible, no migration.
+
+### Fixed
+
+- **The two 60s sweeps no longer tick on an idle canister.** Reported with mainnet measurements
+  by a consumer embedding ic402 in a per-user canister (one canister per user, so every fixed
+  cost multiplies by the fleet): two independent production canisters agreeing to four
+  significant figures at **4.449B cycles/hour with no user activity**, of which **~2.84B/hour
+  (64%) was these two timers** — ~2T/month/canister, for callbacks that iterated an empty map
+  120 times an hour. Attributed by tick count at **~23.6M cycles/tick**; the charge is the tick,
+  not the body, so guarding inside the callback saves nothing.
+  - **Session expiry** (`Gateway.startTimers`) is armed by the session-creating paths and
+    **disarms itself** when the last session record is GC'd: **0 ticks/hour when idle**.
+  - **Job expiry** (`ServiceRegistry.startTimers`) drops to a **1 tick/hour idle poll** instead
+    of disarming, because its only job-creating entry point, `createJobFromReceipt`, is
+    *synchronous* — and a synchronous Motoko function cannot hold the `system` capability, so it
+    cannot arm a timer. The poll is the safety net; see `armExpiryTimer` below to remove even
+    that latency.
+  - Net: ic402's fixed cost on an idle canister goes from **121 ticks/hour to 2** (~2.86B →
+    ~47M cycles/hour, ~$2.77 → ~$0.05 per canister-month). The hourly policy/grant GC is
+    unchanged — it does real work.
+  - **Expiry semantics are unchanged**: a session/job is still swept within 60s of its deadline
+    while any exist. Nothing about settlement or refund correctness depended on the cadence (a
+    close settles from the canister's own escrow with its own signature — there is no external
+    deadline to miss), which is what made this safe to fix rather than fund knowingly.
+
+### Added
+
+- **`Gateway.sessionExpiryTimerArmed()`**, **`ServiceRegistry.expiryTimerArmed()` /
+  `expiryTimerActive()`** — is the sweep ticking, and at which cadence. Steady state on an idle
+  canister is `false` / `false`; `sessionExpiryTimerArmed() = true` with zero sessions is a bug.
+  The example surfaces all three under `health().timers`, so a fleet operator can attribute a
+  canister's fixed burn instead of guessing.
+- **`ServiceRegistry.armExpiryTimer<system>()`** — call it on the job-creating path, from the
+  async context your settle already runs in, and a new job's expiry starts at the working cadence
+  instead of waiting for the idle poll. `example/main.mo` calls it at both call sites **before**
+  `gate.settle`, not next to `createJobFromReceipt`: that keeps the arm out of the window between
+  the funds moving and the job existing, so it adds no new trap surface to Option A's
+  money-moved ⇒ job-exists invariant (`docs/decisions/settled-then-job-failed.md`). Arming for a
+  settle that then fails is harmless — the sweep finds no work and drops back to the idle poll.
+  With every call site arming, `setExpiryIdlePollSeconds(0)` gives zero idle ticks on the job
+  side too.
+- **Cadence knobs** (the consumer's second ask): `Gateway.setSessionExpiryIntervalSeconds<system>`,
+  `ServiceRegistry.setExpiryIntervalSeconds<system>` (default 60), and
+  `ServiceRegistry.setExpiryIdlePollSeconds<system>` (default 3600). Note this trade is *not*
+  free the way self-arming is: expiry latency is bounded by the interval, and a stale session
+  holds its slice of `maxConcurrentSessions` and of the EVM pool cap until it is closed.
+- **`Gateway.armSessionExpiryTimer<system>()`** — for a consumer that drives a `Sessions`
+  instance itself and restores it outside `startTimers`.
+- `docs/costs-and-rails.md` §5 — the fixed per-canister idle cost, the measured tick price, the
+  before/after tick table, and why the job sweep polls rather than disarming.
+
+### Notes for consumers
+
+- **No action required**: `startTimers()` keeps its contract (timers are running when it
+  returns) and still arms **unconditionally** — deliberately, because a `persistent actor`
+  re-runs its init body *before* `postupgrade` restores stable sessions, so a predicate-gated
+  arm would leave exactly the canisters that DO have live sessions unswept. The first tick
+  disarms if there is nothing to do; the cost is at most one tick per install/upgrade.
+- Marketplace consumers who want no expiry latency should add the one
+  `registry.armExpiryTimer<system>()` line after job creation.
+- `example/main.mo`'s `health()` gained a `timers` field (additive record field — old clients
+  decode unchanged); `@ic402/client`'s IDL now includes `health`.
+
+### Internal
+
+- `Utils.expiryCadence(hasWork, fastMode, idlePollSeconds)` — the pure cadence decision the
+  tick's atomic tail takes, module-level so it is exhaustively unit-testable. `mops test` cannot
+  arm a real timer (the interpreter has no `global_timer_set`; `wasi` mode rejects the async
+  modules), so the decision, the work predicates, and the arm SITES are covered separately:
+  `test/expirytimer.test.mo`, the replica-backed `test/integration.test.ts` (polls for a real
+  disarm), and `scripts/check-expiry-arm-sites.sh` — a CI source gate, with a self-test, that
+  fails if a session-creating path stops arming the sweep. That gate exists because the failure
+  is asymmetric and silent: a missed **arm** site means sessions never expire, while a missed
+  disarm only wastes cycles.
+
 ## v2.10.0 — 2026-07-17
 
 Minor release — **runtime EVM chain reconfiguration**. A single deployment can now repoint its
