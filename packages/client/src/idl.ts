@@ -374,6 +374,40 @@ export const exampleIdlFactory = () =>
     setPolicy: IDL.Func([SpendingPolicy], [], []),
     getPolicyConfig: IDL.Func([], [SpendingPolicy], ['query']),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
+    // Operator health (controller-only). `timers` explains the canister's FIXED cycle burn: a
+    // recurring timer is billed per tick regardless of what its callback finds, so ic402's expiry
+    // sweeps arm only while there is state to sweep. Steady state on an idle canister is
+    // sessionExpiryArmed = false and jobExpiryActive = false.
+    health: IDL.Func(
+      [],
+      [
+        IDL.Record({
+          cyclesBalance: IDL.Nat,
+          jobs: IDL.Record({
+            total: IDL.Nat,
+            settling: IDL.Nat,
+            settled: IDL.Nat,
+            refunded: IDL.Nat,
+            expired: IDL.Nat,
+            active: IDL.Nat,
+            parked: IDL.Nat,
+          }),
+          sessions: IDL.Record({
+            total: IDL.Nat,
+            open: IDL.Nat,
+            closing: IDL.Nat,
+            closed: IDL.Nat,
+            expired: IDL.Nat,
+          }),
+          timers: IDL.Record({
+            sessionExpiryArmed: IDL.Bool,
+            jobExpiryArmed: IDL.Bool,
+            jobExpiryActive: IDL.Bool,
+          }),
+        }),
+      ],
+      ['query'],
+    ),
     // Remote signer: sign-only endpoints (client broadcasts)
     signX402Payment: IDL.Func(
       [IDL.Nat, IDL.Text, IDL.Text, IDL.Nat, IDL.Text, IDL.Text],

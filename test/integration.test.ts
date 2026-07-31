@@ -456,6 +456,53 @@ describe('ic402 integration', () => {
     });
   });
 
+  // ── Expiry timers (cycle cost) ──
+  //
+  // A recurring timer is billed per TICK — the message-execution base fee — no matter what its
+  // callback finds, so ic402's two 60s sweeps used to cost a canister ~2.8B cycles/hour whether or
+  // not it had ever opened a session or created a job. They now arm only while there is state to
+  // sweep. This is the ONLY place that can prove it: `mops test` has no timer system API, so a
+  // unit test cannot arm a timer, let alone observe a callback disarming one.
+  describe('expiry timers', () => {
+    it('the session sweep DISARMS itself on a canister with no session state', async () => {
+      if (skip) return;
+      const h0 = await actor.health();
+      // Precondition: nothing to sweep. Session records are retained 24h after close, so if an
+      // earlier run left state on this replica the sweep is *correctly* still armed and this
+      // assertion doesn't apply.
+      if (h0.sessions.total > 0n) {
+        console.warn(
+          `[integration] ${h0.sessions.total} session record(s) present — sweep is correctly still armed; disarm assertion skipped.`,
+        );
+        return;
+      }
+      // startTimers arms unconditionally at install/upgrade (the init body re-runs BEFORE
+      // postupgrade restores stable sessions, so it cannot gate on "are there sessions?"), and the
+      // FIRST tick — at most one interval later — is what disarms. Poll rather than assume how
+      // long ago this canister was deployed.
+      const deadline = Date.now() + 90_000;
+      let armed = h0.timers.sessionExpiryArmed;
+      while (armed && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        armed = (await actor.health()).timers.sessionExpiryArmed;
+      }
+      expect(armed).toBe(false);
+    }, 120_000);
+
+    it('the job sweep is ARMED and at its working cadence while jobs exist', async () => {
+      if (skip) return;
+      const h = await actor.health();
+      // The service suite above settled a job, so there is job state on this canister.
+      expect(h.jobs.total).toBeGreaterThan(0n);
+      // Armed at the working cadence because example/main.mo calls registry.armExpiryTimer right
+      // after createJobFromReceipt (which is synchronous and so cannot arm a timer itself). If
+      // this is armed-but-not-active, that call site was dropped and a new job's expiry would
+      // wait for the hourly idle poll instead.
+      expect(h.timers.jobExpiryArmed).toBe(true);
+      expect(h.timers.jobExpiryActive).toBe(true);
+    });
+  });
+
   // ── EVM Signer ──
 
   describe('evm signer', () => {

@@ -421,6 +421,12 @@ service : {
          open: nat;
          total: nat;
        };
+      timers:
+       record {
+         jobExpiryActive: bool;
+         jobExpiryArmed: bool;
+         sessionExpiryArmed: bool;
+       };
     }) query;
   http_request: (request: HttpRequest) -> (HttpResponse) query;
   http_request_update: (request: HttpRequest) -> (HttpResponse);

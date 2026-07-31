@@ -1058,13 +1058,19 @@ module {
     /// Must be called from actor context (requires <system> capability). A consumer that does
     /// not call this must schedule closeExpiredSessions()/GC itself, or sessions never expire
     /// and rate-limit logs grow unbounded.
+    ///
+    /// CYCLES: the session sweep is SELF-ARMING (since 2.11.0) — it runs only while sessions
+    /// exist and disarms itself when the last one is GC'd, so an idle canister is left with just
+    /// the hourly GC tick below. A recurring timer is billed per tick regardless of what the
+    /// callback does, which made the old always-on 60s sweep the largest fixed cost of embedding
+    /// ic402 in a many-small-canisters topology. Confirm with sessionExpiryTimerArmed().
     public func startTimers<system>() {
-      // Close expired sessions every 60 seconds, then GC stale entries
-      ignore Timer.recurringTimer<system>(#seconds 60, func() : async () {
-        let _results = await sessionsMgr.closeExpiredSessions();
-        // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
-        sessionsMgr.gcClosedSessions();
-      });
+      // Close expired sessions every 60 seconds, then GC stale entries. Armed unconditionally:
+      // on upgrade a `persistent actor` re-runs its init body (where this call lives) BEFORE
+      // postupgrade restores stable sessions, so gating the arm on "are there sessions?" would
+      // leave exactly the canisters that DO have live sessions unswept. The first tick disarms
+      // if there is nothing to do — at most one wasted tick per install/upgrade.
+      sessionsMgr.armExpiryTimer<system>();
       // Garbage-collect stale policy data and revoked grants every hour
       ignore Timer.recurringTimer<system>(#seconds 3600, func() : async () {
         policy.gcDailySpend();
@@ -1092,6 +1098,26 @@ module {
         case (null) {};
       };
     };
+
+    /// Whether the session-expiry sweep is currently armed. `false` on an idle canister is the
+    /// expected steady state (nothing to expire ⇒ nothing ticking ⇒ no per-tick cycle burn);
+    /// `true` while any session record exists. Pair it with sessionCounts() to explain a
+    /// canister's timer burn without guessing.
+    public func sessionExpiryTimerArmed() : Bool { sessionsMgr.expiryTimerArmed() };
+
+    /// Set the session-expiry sweep cadence in seconds (default 60), applied immediately.
+    /// A session is closed within this interval of passing its maxDuration/idleTimeout, and until
+    /// then holds its slice of maxConcurrentSessions and of the EVM pool cap — nothing about
+    /// settlement correctness depends on the cadence, so this trades expiry latency (and held
+    /// capacity) for cycles. Prefer leaving it at 60: with the self-arming sweep an idle canister
+    /// already pays nothing, so raising it only helps canisters that hold sessions continuously.
+    public func setSessionExpiryIntervalSeconds<system>(seconds : Nat) : { #ok; #err : Text } {
+      sessionsMgr.setExpiryIntervalSeconds<system>(seconds);
+    };
+
+    /// Arm the session-expiry sweep (idempotent). startTimers already does this; call it directly
+    /// only if you restore sessions into a Sessions instance you drive yourself.
+    public func armSessionExpiryTimer<system>() { sessionsMgr.armExpiryTimer<system>() };
 
     // ── Policy ──
 

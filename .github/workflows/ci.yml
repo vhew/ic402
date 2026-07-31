@@ -119,6 +119,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/check-patch-patterns.sh
+      # The session-expiry sweep DISARMS itself when no session state remains, which is only safe
+      # while every session-creating path arms it back. A missed arm site is silent (sessions
+      # never expire) and cannot be unit-tested — `mops test` has no timer system API — so the
+      # invariant is enforced against the source here. The self-test proves the gate still
+      # discriminates rather than having decayed into a green no-op.
+      - run: bash scripts/check-expiry-arm-sites.sh
+      - run: bash scripts/check-expiry-arm-sites.sh --self-test
 
   # B0: the example canister must stay INSTALLABLE on the IC. moc unrolls SHA-256
   # (mo:sha2) into >2000 Wasm locals in one function, over the IC's per-function install

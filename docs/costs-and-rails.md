@@ -10,6 +10,7 @@
 - Cost is **bimodal**: everything is cheap *except* signing **and** broadcasting an EVM transaction.
 - A single **EVM settle nets ~17B cycles** (measured, local replica) — far below the `~100B` you'll see in code comments. That `~100B` / `MIN_BROADCAST_CYCLES = 120B` is a **safety reserve**, not consumption.
 - **Per‑call EVM settle is underwater below ~$0.05–0.10.** For micropayments, use the **ICP rail** (settle ≈ <$0.001) or **sessions** (one settle amortized over thousands of calls).
+- There is also a **fixed, per‑canister idle cost** that has nothing to do with payments — recurring timers. Since **2.11.0** ic402's expiry sweeps arm only while there is something to sweep; see §5, and read it before embedding ic402 in a many‑small‑canisters topology.
 
 ## 1. Measured cost per operation
 
@@ -59,6 +60,58 @@ The figures above are **local**. On mainnet, expect **higher** per‑EVM‑settl
 - **HTTPS outcalls scale with subnet replication.** The EVM‑RPC canister runs on a 34‑node subnet, so each `sendRawTransaction` / confirm poll costs more than locally.
 - **Estimate: ~40–80B net per EVM settle leg on mainnet** (sign‑dominated), **plus the EVM gas the canister pays in ETH** (~80k–120k gas for an EIP‑3009 transfer). Sessions still amortize all of this toward ~0 per call.
 - **Re‑measure on your target subnet** before relying on a number — the method (`health().cyclesBalance` net at quiet points, §1) is reproducible against the interactive demo.
+
+## 5. Fixed idle cost: recurring timers
+
+Everything above is **per operation**. A canister embedding ic402 also burns cycles doing
+*nothing*, because a recurring timer is billed **per tick** — the message‑execution base fee —
+regardless of what its callback finds. Guarding inside the callback saves nothing; the timer
+itself has to stop.
+
+**Measured on mainnet** by a consumer running one canister per user (two independent production
+canisters agreeing to four significant figures, attributed by tick count): **~23.6M cycles per
+tick**, i.e. **~1.4B cycles/hour for a 60‑second timer** that never finds any work. Before 2.11.0
+ic402 armed two such timers unconditionally — session expiry and job expiry — so **~2.8B
+cycles/hour (~2T/month, ~$2.7/month) per canister** was fixed cost, whether or not that canister
+had ever opened a session or created a job. In a one‑canister‑per‑user topology that multiplies
+by the fleet, and it is invisible to a consumer reading only their own source.
+
+**Since 2.11.0** the sweeps arm only while there is state to sweep:
+
+| Timer | Idle (no sessions / no jobs) | While work exists |
+| --- | --- | --- |
+| Session expiry (`Gateway.startTimers`) | **disarmed** — 0 ticks | 60s (`setSessionExpiryIntervalSeconds`) |
+| Job expiry (`ServiceRegistry.startTimers`) | **1 tick/hour** idle poll (`setExpiryIdlePollSeconds`) | 60s (`setExpiryIntervalSeconds`) |
+| Policy/grant GC (`Gateway.startTimers`) | 1 tick/hour — real work, unchanged | — |
+
+That takes ic402's fixed cost on an idle canister from **~121 ticks/hour to 2** (~47M cycles/hour,
+~$0.05/month). Verify on a live canister with `health().timers`: steady state is
+`sessionExpiryArmed = false`, `jobExpiryActive = false`.
+
+Give it one interval before you read it. `startTimers()` arms **unconditionally** at install and at
+every upgrade — it has to, because a `persistent actor` re-runs its init body *before*
+`postupgrade` restores stable sessions, so an arm that asked "are there sessions?" would skip
+exactly the canisters that have them. The first tick is what disarms. So `sessionExpiryArmed = true`
+with `sessions.total = 0` is **expected for up to one interval** (60s by default) after a deploy;
+if it is still true a few minutes later, that is a bug — please report it.
+
+**Why the job sweep polls instead of disarming.** Its only job‑creating entry point,
+`createJobFromReceipt`, is **synchronous**, and a synchronous Motoko function cannot hold the
+`system` capability, so it cannot arm a timer. The hourly poll is the safety net for a job created
+by a caller that did not arm the sweep itself. If your call sites do arm it — one
+`registry.armExpiryTimer<system>()` on the job-creating path, from the async context you are
+already in — you can set `setExpiryIdlePollSeconds(0)` and pay **nothing** when idle.
+`example/main.mo` places that call **before** `gate.settle` rather than next to
+`createJobFromReceipt`, so the arm cannot trap in the window between the funds moving and the job
+existing; copy that ordering.
+
+**Tuning the cadence is a different trade.** Self‑arming is free: an idle canister has no sessions
+to expire, so nothing is delayed. Raising the *interval* is not free — expiry latency is bounded
+by it, and until a session expires it holds its slice of `maxConcurrentSessions` and of the EVM
+pool cap (a timed‑out job likewise stays escrowed until refunded). Nothing about settlement or
+refund **correctness** depends on the cadence — a close settles from the canister's own escrow
+with its own signature, so there is no external deadline to miss — so raise it only if you hold
+sessions continuously and want to trade latency for cycles.
 
 ## Where these figures come from
 

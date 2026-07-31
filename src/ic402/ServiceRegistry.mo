@@ -1075,11 +1075,109 @@ module {
       { total; settling; settled; refunded; expired; active; parked };
     };
 
+    // ── Expiry timer (self-adjusting cadence) ──
+    //
+    // A recurring timer is billed per TICK — the message-execution base fee — not per unit of
+    // work, so an always-on 60s job-expiry sweep costs a canister ~1.4B cycles/hour whether or
+    // not it has ever seen a job (measured: ~23.6M cycles/tick). This sweep therefore runs at its
+    // working cadence only while jobs exist, and falls back to a slow idle poll when none do.
+    //
+    // WHY A POLL RATHER THAN A CLEAN DISARM (as Sessions does): the only job-CREATING entry point
+    // is createJobFromReceipt, which is SYNCHRONOUS — and a synchronous Motoko function cannot
+    // hold the `system` capability, so it cannot arm a timer. Adding `<system>` to it would be a
+    // hard compile error for every sync caller (M0197), and it is also the function that must
+    // stay infallible for the money-moved ⇒ job-exists invariant (docs/decisions/
+    // settled-then-job-failed.md), so it is the wrong place to grow. The idle poll is the safety
+    // net: a job created behind the timer's back is picked up within expiryIdlePollSeconds, and
+    // the sweep switches straight back to its working cadence. A caller that wants expiry to
+    // start IMMEDIATELY calls armExpiryTimer<system>() right after creating the job (async
+    // context required — see example/main.mo); then the poll never has to catch anything.
+    var expiryTimer : ?Timer.TimerId = null;
+    var expiryIntervalSeconds : Nat = 60;
+    var expiryIdlePollSeconds : Nat = 3600;
+    var expiryFastMode : Bool = false;
+
+    /// Whether the job-expiry sweep is armed at all (it is, at the idle cadence, unless
+    /// setExpiryIdlePollSeconds(0) turned the poll off and there are no jobs).
+    public func expiryTimerArmed() : Bool { expiryTimer != null };
+
+    /// Whether the sweep is running at its working cadence (jobs exist) rather than idle-polling.
+    public func expiryTimerActive() : Bool { expiryTimer != null and expiryFastMode };
+
+    /// Whether the sweep has anything to act on: ANY job record. Non-terminal jobs can time out;
+    /// terminal ones are still awaiting the 24h gcTerminalJobs reclaim (and a job carrying an
+    /// unresolved parkedTx is deliberately kept, so its timer stays armed too).
+    public func hasExpiryWork() : Bool { jobs.size() > 0 };
+
+    func cancelExpiryTimer() {
+      switch (expiryTimer) {
+        case (?id) { Timer.cancelTimer(id); expiryTimer := null };
+        case (null) {};
+      };
+    };
+
+    func armExpiryAt<system>(seconds : Nat, fast : Bool) {
+      cancelExpiryTimer();
+      expiryFastMode := fast;
+      expiryTimer := ?Timer.recurringTimer<system>(
+        #seconds seconds,
+        func() : async () {
+          ignore await expireJobs();
+          // ── ATOMIC TAIL — do NOT introduce an `await` below this line. ──
+          // State commits at each await, so a job created by another message DURING the sweep
+          // above is already visible to hasExpiryWork() here, and one created after the cadence
+          // switch below is picked up by the next tick. An await between the check and the
+          // re-arm would reopen the window where a live job is left on the slow cadence.
+          switch (Utils.expiryCadence(hasExpiryWork(), expiryFastMode, expiryIdlePollSeconds)) {
+            case (#stay) {};
+            case (#switchToFast) { armExpiryAt<system>(expiryIntervalSeconds, true) };
+            case (#switchToIdle) { armExpiryAt<system>(expiryIdlePollSeconds, false) };
+            case (#disarm) { cancelExpiryTimer() };
+          };
+        },
+      );
+    };
+
     /// Start the job expiry timer. Call once at canister init.
+    /// Armed unconditionally at the working cadence: on upgrade a `persistent actor` re-runs its
+    /// init body (where this call lives) BEFORE postupgrade restores stable jobs, so gating the
+    /// arm on "are there jobs?" would leave exactly the canisters that DO have live jobs unswept.
+    /// The first tick drops to the idle poll if there is nothing to expire.
     public func startTimers<system>() {
-      ignore Timer.recurringTimer<system>(#seconds 60, func() : async () {
-        ignore await expireJobs();
-      });
+      armExpiryAt<system>(expiryIntervalSeconds, true);
+    };
+
+    /// Arm the sweep at its working cadence if it is not already there (idempotent). Call this
+    /// right after createJobFromReceipt/submitRequest — from an async context, which every
+    /// settle-then-create call site already is — so a new job's expiry starts within
+    /// expiryIntervalSeconds instead of waiting for the idle poll to notice it.
+    public func armExpiryTimer<system>() {
+      if (expiryTimer != null and expiryFastMode) return;
+      armExpiryAt<system>(expiryIntervalSeconds, true);
+    };
+
+    /// Set the working cadence in seconds (default 60), applied immediately. Expiry latency is
+    /// bounded by this interval: a timed-out job is refunded within `seconds` of passing
+    /// expiresAt. Nothing about refund correctness depends on the cadence — the buyer's escrow is
+    /// intact until the sweep runs — so this trades refund latency for cycles.
+    public func setExpiryIntervalSeconds<system>(seconds : Nat) : { #ok; #err : Text } {
+      if (seconds == 0) { return #err("expiry interval must be at least 1 second") };
+      expiryIntervalSeconds := seconds;
+      if (expiryTimer != null and expiryFastMode) { armExpiryAt<system>(seconds, true) };
+      #ok;
+    };
+
+    /// Set the idle poll cadence in seconds (default 3600 = one tick per hour), applied
+    /// immediately. This is the worst-case delay before a job created by a caller that did not
+    /// call armExpiryTimer starts being swept. 0 disarms the timer entirely when there are no
+    /// jobs — zero idle cost, but then expiry NEVER starts unless every job-creating call site
+    /// arms it, so only use 0 if you control them all.
+    public func setExpiryIdlePollSeconds<system>(seconds : Nat) : { #ok; #err : Text } {
+      expiryIdlePollSeconds := seconds;
+      if (expiryTimer != null and not expiryFastMode) {
+        if (seconds == 0) { cancelExpiryTimer() } else { armExpiryAt<system>(seconds, false) };
+      };
+      #ok;
     };
 
     // ── Stable State ──

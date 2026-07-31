@@ -218,7 +218,9 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `setEvmChains(chains)` / `getEvmChains()` | Swap the accepted EVM chain/token set at runtime (e.g. Base Sepolia ↔ Base mainnet) — no redeploy; open sessions drain on their original chains. Transient: persist your choice consumer-side and re-apply after upgrade |
 | `getGlobalPolicy()` | Read back the live global spending policy (example exposes it as the `getPolicyConfig` query) |
 | `issueGrant(...)` / `verifyGrant(caller, grant)` | HMAC access grants (non-transferable — `caller` must equal `grant.grantee`) |
-| `startTimers<system>()` | Start background timers |
+| `startTimers<system>()` | Start background timers (session expiry is **self-arming**: it runs only while sessions exist and disarms itself, so an idle canister burns no per-tick cycles — see [costs §5](docs/costs-and-rails.md#5-fixed-idle-cost-recurring-timers)) |
+| `sessionExpiryTimerArmed()` | Whether the session sweep is ticking (`false` on an idle canister is the expected steady state) |
+| `setSessionExpiryIntervalSeconds<system>(n)` | Sweep cadence, default 60s — bounds expiry latency and how long a stale session holds pool/concurrency capacity |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
 
 ### ServiceRegistry (optional)
@@ -235,6 +237,9 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `disputeJob(buyer, jobId, reason)` | Buyer disputes |
 | `resolveDispute(jobId, refundBuyer)` | Admin: settle to operator or refund buyer (gate access) |
 | `expireJobs()` | Timer: refund stale/disputed jobs |
+| `armExpiryTimer<system>()` | Call on the job-creating path (the example calls it just **before** `settle`, keeping it out of the money-moved ⇒ job-exists window) so expiry starts at the 60s cadence instead of waiting for the hourly idle poll — `createJobFromReceipt` is sync and cannot arm it itself |
+| `expiryTimerArmed()` / `expiryTimerActive()` | Whether the job sweep is armed at all / at its working cadence |
+| `setExpiryIntervalSeconds<system>(n)` / `setExpiryIdlePollSeconds<system>(n)` | Working cadence (default 60s) and idle cadence (default 3600s; `0` disarms when there are no jobs — only if every call site arms it) |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
 
 Funds are custodied at the platform recipient account; `settleJob` pays the operator and refunds the buyer from there.

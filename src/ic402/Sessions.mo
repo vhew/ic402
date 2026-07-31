@@ -21,6 +21,7 @@ import CBOR "mo:cbor";
 import Ed25519 "mo:ed25519";
 import Identity "Identity";
 import Debug "mo:base/Debug";
+import Timer "mo:base/Timer";
 
 module {
 
@@ -410,6 +411,10 @@ module {
       };
 
       sessions.put(sessionId, session);
+      // Self-arming expiry: this is a session-CREATING path, so it owns an arm site (see the
+      // expiry timer contract above). Free here — openSession is async, so the `system`
+      // capability is available without changing any signature.
+      armExpiryTimer<system>();
       policy.recordSpend(caller, deposit);
       sessionOpenLocks.delete(caller);
 
@@ -721,6 +726,8 @@ module {
       };
 
       sessions.put(sessionId, session);
+      // Self-arming expiry: second of the two session-CREATING paths (see the contract above).
+      armExpiryTimer<system>();
       policy.recordSpend(caller, deposit);
       sessionOpenLocks.delete(caller);
 
@@ -959,6 +966,116 @@ module {
         sessionId = ?session.id;
         refunded = ?refunded;
       });
+    };
+
+    // ── Expiry timer (self-arming) ──
+    //
+    // A recurring timer is billed per TICK — the message-execution base fee — not per unit of
+    // work done, so guarding inside the callback saves nothing and an always-on 60s sweep is a
+    // fixed cost for the canister's entire life (measured by a consumer running one canister per
+    // user: ~23.6M cycles/tick, i.e. ~1.4B cycles/hour for this timer alone, on a canister that
+    // never opened a session). So the sweep is armed only while there is session state to act on.
+    //
+    // CONTRACT: arm on every path that CREATES session state; the callback disarms itself once no
+    // session state remains. The asymmetry is deliberate — a missed ARM site silently stops expiry
+    // (deposits stay escrowed past their deadline), a missed DISARM only wastes cycles — so arm
+    // aggressively and let the callback decide when to stop. Both session-creating paths live in
+    // this module (openSession's ICP insert and openEvmSession's), and startTimers arms
+    // unconditionally, so a consumer never has to reason about this.
+    //
+    // ADDING A THIRD SESSION-CREATING PATH? It must call armExpiryTimer<system>() right after its
+    // `sessions.put`. No unit test can catch a miss — `mops test` has no timer system API, so
+    // nothing here can arm or observe a real timer — so the guard is a SOURCE gate:
+    // scripts/check-expiry-arm-sites.sh (CI job `verify-scripts`, with a --self-test). It requires
+    // every `sessions.put` in this file to either arm the sweep or be listed there as covered
+    // some other way (loadStable is, via startTimers' unconditional arm).
+    var expiryTimer : ?Timer.TimerId = null;
+    var expiryIntervalSeconds : Nat = 60;
+    // Cadence to fall back to when there is no work, instead of disarming outright. 0 = disarm
+    // (the default here: this module owns its arm sites, so nothing can create work behind the
+    // timer's back). ServiceRegistry defaults this to an hourly poll because its job-creating
+    // entry point is synchronous and therefore cannot arm a timer — see its own note.
+    var expiryIdlePollSeconds : Nat = 0;
+    var expiryFastMode : Bool = false;
+
+    /// Whether the expiry sweep is currently armed. Read it to confirm an idle canister really
+    /// has stopped ticking (and, on a busy one, that expiry is actually scheduled).
+    public func expiryTimerArmed() : Bool { expiryTimer != null };
+
+    /// Whether the expiry sweep has anything to act on: ANY session record at all. `#open`
+    /// sessions expire; `#closed`/`#expired` ones are still awaiting the 24h GC; `#closing`
+    /// (parked mid-settle) ones are deliberately included — the sweep can't advance them, but
+    /// keeping the timer armed on a parked deposit costs cycles while disarming on one risks
+    /// leaving real state unattended, and the disarm side is the dangerous side.
+    public func hasExpiryWork() : Bool { sessions.size() > 0 };
+
+    func cancelExpiryTimer() {
+      switch (expiryTimer) {
+        case (?id) { Timer.cancelTimer(id); expiryTimer := null };
+        case (null) {};
+      };
+    };
+
+    // Arm (or re-arm) the sweep at `seconds`. `fast` records which cadence is running so a tick
+    // can tell "idle poll that just found work" from "already sweeping".
+    func armExpiryAt<system>(seconds : Nat, fast : Bool) {
+      cancelExpiryTimer();
+      expiryFastMode := fast;
+      expiryTimer := ?Timer.recurringTimer<system>(
+        #seconds seconds,
+        func() : async () {
+          let _results = await closeExpiredSessions();
+          // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
+          gcClosedSessions();
+          // ── ATOMIC TAIL — do NOT introduce an `await` below this line. ──
+          // Motoko commits state at each await, so a session opened by another message DURING the
+          // awaits above is already visible to hasExpiryWork() here (we won't disarm on it), and a
+          // session opened after the cancel below sees expiryTimer == null and re-arms. An await
+          // between the check and the cancel would reopen exactly the window where an #open
+          // session is left with no timer to expire it.
+          switch (Utils.expiryCadence(hasExpiryWork(), expiryFastMode, expiryIdlePollSeconds)) {
+            case (#stay) {};
+            case (#switchToFast) { armExpiryAt<system>(expiryIntervalSeconds, true) };
+            case (#switchToIdle) { armExpiryAt<system>(expiryIdlePollSeconds, false) };
+            case (#disarm) { cancelExpiryTimer() };
+          };
+        },
+      );
+    };
+
+    /// Arm the expiry sweep at its working cadence if it is not already running there
+    /// (idempotent). Called automatically by every session-creating path and by
+    /// Gateway.startTimers; call it directly only if you drive this Sessions instance yourself
+    /// (e.g. after loadStable on upgrade). Arming is UNCONDITIONAL by design: on upgrade a
+    /// `persistent actor` re-runs its init body — where startTimers lives — BEFORE postupgrade
+    /// restores stable sessions, so a predicate-gated arm would leave exactly the canisters that
+    /// DO have live sessions with no timer. The first tick disarms if there is nothing to do.
+    public func armExpiryTimer<system>() {
+      if (expiryTimer != null and expiryFastMode) return;
+      armExpiryAt<system>(expiryIntervalSeconds, true);
+    };
+
+    /// Set the sweep cadence in seconds (default 60), applied immediately if armed. Expiry
+    /// latency is bounded by this interval: a session is closed within `seconds` of passing its
+    /// maxDuration/idleTimeout, and until then it holds its slice of maxConcurrentSessions and of
+    /// the EVM pool cap. Nothing about settlement correctness depends on the cadence (a close
+    /// settles from the canister's own escrow with its own signature — there is no external
+    /// deadline to miss), so raising it trades expiry latency and held capacity for cycles.
+    public func setExpiryIntervalSeconds<system>(seconds : Nat) : { #ok; #err : Text } {
+      if (seconds == 0) { return #err("expiry interval must be at least 1 second") };
+      expiryIntervalSeconds := seconds;
+      if (expiryTimer != null and expiryFastMode) { armExpiryAt<system>(seconds, true) };
+      #ok;
+    };
+
+    /// Cadence to poll at when there is nothing to expire; 0 (the default) disarms instead.
+    /// Leave it at 0 unless you create sessions through a path outside this module.
+    public func setExpiryIdlePollSeconds<system>(seconds : Nat) : { #ok; #err : Text } {
+      expiryIdlePollSeconds := seconds;
+      if (expiryTimer != null and not expiryFastMode) {
+        if (seconds == 0) { cancelExpiryTimer() } else { armExpiryAt<system>(seconds, false) };
+      };
+      #ok;
     };
 
     /// Close all expired or idle sessions.

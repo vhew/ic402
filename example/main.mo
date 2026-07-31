@@ -553,6 +553,14 @@ persistent actor KnowledgeBase {
         case (#err(e)) { return Http.httpError(400, e) };
         case (#ok) {};
       };
+      // Cycles: the registry's expiry sweep idles at one tick/hour when there are no jobs, and
+      // createJobFromReceipt is synchronous so it cannot arm it (a sync Motoko function has no
+      // `system` capability). Arm it HERE — before the settle, not after the job is created —
+      // so this adds no new trap surface between the funds moving and the job existing (Option A's
+      // money-moved ⇒ job-exists invariant, docs/decisions/settled-then-job-failed.md). Arming for
+      // a settle that then fails is harmless: the sweep finds no work and drops back to the idle
+      // poll on its next tick.
+      registry.armExpiryTimer<system>();
       let serviceResult = await gate.settle(sig, null);
       switch (serviceResult) {
         case (#ok(receipt)) {
@@ -899,6 +907,9 @@ persistent actor KnowledgeBase {
           case (#err(e)) { return #error(e) }; // rejected before any funds move
           case (#ok) {};
         };
+        // Arm the job-expiry sweep BEFORE settling — see the /service/ handler for why the arm
+        // belongs on this side of the fund move rather than next to createJobFromReceipt.
+        registry.armExpiryTimer<system>();
         switch (await gate.settle(sig, null)) {
           case (#ok(receipt)) {
             // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
@@ -1118,12 +1129,27 @@ persistent actor KnowledgeBase {
     cyclesBalance : Nat;
     jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat };
     sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat };
+    timers : { sessionExpiryArmed : Bool; jobExpiryArmed : Bool; jobExpiryActive : Bool };
   } {
     requireController(msg.caller);
     {
       cyclesBalance = Cycles.balance();
       jobs = registry.jobCounts();
       sessions = gate.sessionCounts();
+      // Cycles observability: a recurring timer is billed per TICK regardless of what its
+      // callback finds, so these three booleans explain the canister's fixed burn. Steady state
+      // on an idle canister is sessionExpiryArmed = false (nothing to expire ⇒ nothing ticking)
+      // and jobExpiryActive = false (the job sweep idle-polls hourly). Both go true while there
+      // is real work. Right after an install or upgrade those two read true with zero
+      // sessions/jobs for up to one interval — startTimers arms unconditionally (the init body
+      // re-runs BEFORE postupgrade restores stable state) and the first tick is what disarms;
+      // staying true past that is a bug. jobExpiryArmed, by contrast, stays true on an idle
+      // canister by design: that is the hourly idle poll, not the working cadence.
+      timers = {
+        sessionExpiryArmed = gate.sessionExpiryTimerArmed();
+        jobExpiryArmed = registry.expiryTimerArmed();
+        jobExpiryActive = registry.expiryTimerActive();
+      };
     };
   };
 

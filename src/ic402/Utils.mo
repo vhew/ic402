@@ -283,6 +283,28 @@ module {
     ?result;
   };
 
+  /// What a self-arming expiry sweep should do at the end of a tick. Pure (module-level →
+  /// unit-testable without a live timer, which is why the decision lives here rather than inline
+  /// in the callback: a timer callback never fires under `mops test`).
+  ///
+  /// A recurring timer is billed per TICK — the message-execution base fee — regardless of what
+  /// its callback does, so a sweep with nothing to sweep should stop ticking rather than guard
+  /// inside the body. `idlePollSeconds == 0` means "disarm outright" (safe only when every path
+  /// that creates work can arm the timer back); otherwise the sweep drops to a slow poll that
+  /// notices work created by a path that could not arm it.
+  public type ExpiryCadence = {
+    #stay; // already on the right cadence
+    #switchToFast; // idle poll found work → resume the working cadence
+    #switchToIdle; // working cadence found nothing left → drop to the slow poll
+    #disarm; // nothing left and no idle poll configured → stop ticking entirely
+  };
+
+  public func expiryCadence(hasWork : Bool, fastMode : Bool, idlePollSeconds : Nat) : ExpiryCadence {
+    if (hasWork) { if (fastMode) { #stay } else { #switchToFast } } else if (idlePollSeconds == 0) {
+      #disarm;
+    } else if (fastMode) { #switchToIdle } else { #stay };
+  };
+
   /// Find a token config by principal text or CAIP-2 network prefix.
   /// Accepts both "ryjl3-tyaaa-..." (principal) and "icp:1" (network).
   /// For ICP networks, returns the first configured token since ICP
