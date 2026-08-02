@@ -22,6 +22,7 @@ import EvmSignerMod "EvmSigner";
 import Eip712Mod "Eip712";
 import EvmAddressMod "EvmAddress";
 import EvmUtilsMod "EvmUtils";
+import UtilsMod "Utils";
 import ServiceRegistryMod "ServiceRegistry";
 
 module {
@@ -180,6 +181,12 @@ module {
   public let EvmUtils = EvmUtilsMod;
   /// EVM remote signer: canister signs, client broadcasts.
   public let EvmSigner = EvmSignerMod;
+  /// ICRC-1 textual account encoding (`<owner>` for the default subaccount — byte-identical to
+  /// `Principal.toText` — else `<owner>-<checksum>.<subaccount-hex>`). The library uses it for
+  /// every 402 `recipient`/`payTo` and ICP receipt stamp it controls; use it yourself anywhere
+  /// YOU render an ICP account a payer or auditor will read — e.g. `SessionIntent.recipient`,
+  /// which the library advertises verbatim (see example/main.mo's requestSession).
+  public let icrc1AccountText = UtilsMod.icrc1AccountText;
   /// Service marketplace: register services, manage jobs, verify and settle.
   public let ServiceRegistry = ServiceRegistryMod.ServiceRegistry;
 

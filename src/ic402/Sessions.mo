@@ -959,7 +959,14 @@ module {
         amount = session.consumed;
         token = session.token;
         sender = Principal.toText(session.payer);
-        recipient = session.recipient;
+        // Stamp the account funds actually SETTLED into — recipientAccount(), in ICRC-1
+        // textual form — not the consumer-supplied intent.recipient display text. On this
+        // (ICP) rail the settle above is directed by config, so a subaccounted config with a
+        // bare-principal intent text would otherwise produce a receipt naming an account the
+        // funds never touched (the 2.12.0 defect class, one rail over). The EVM close receipt
+        // (closeEvmSessionInternal) keeps session.recipient: there the text IS the transfer
+        // target the canister signed for.
+        recipient = Utils.icrc1AccountText(config.recipient.owner, config.recipient.subaccount);
         network = session.network;
         timestamp = Time.now();
         txHash = closeTxHash;

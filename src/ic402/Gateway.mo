@@ -196,11 +196,18 @@ module {
       "rcpt-" # Nat.toText(receiptCounter);
     };
 
-    // Owner principal as text for stamping receipts. A configured subaccount is intentionally NOT
-    // rendered here (both arms were identical); the actual transfer target — recipientAccount() —
-    // does carry the subaccount.
+    // The account payers and operators SEE: the 402 `recipient`/`payTo` field and receipt
+    // stamps. ICRC-1 textual encoding, so a configured subaccount is part of the advertised
+    // identity — for a null (or all-zero) subaccount this is byte-identical to the bare owner
+    // principal; otherwise `<owner>-<checksum>.<subaccount-hex>`, the SAME account
+    // recipientAccount() settles into. Before 2.12.0 this dropped the subaccount, so payTo and
+    // receipts named an account (owner, default subaccount) that funds never touched. Note no
+    // ICP fund movement is ever DIRECTED by this text — settle is an ICRC-2 pull to
+    // recipientAccount() — so the old behaviour was an advertisement/receipt integrity bug,
+    // not a misdelivery path; but anything reconciling against payTo or auditing receipts got
+    // the wrong account whenever a subaccount was configured.
     func recipientText() : Text {
-      Principal.toText(config.recipient.owner);
+      Utils.icrc1AccountText(config.recipient.owner, config.recipient.subaccount);
     };
 
     func recipientAccount() : Types.Account {

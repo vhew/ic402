@@ -597,7 +597,11 @@ persistent actor KnowledgeBase {
     gate.offerSession({
       network = "icp:1";
       token = CKUSDC;
-      recipient = Principal.toText(Principal.fromActor(KnowledgeBase));
+      // ICRC-1 textual account encoding — for this config (null subaccount) it is byte-identical
+      // to Principal.toText, but use the encoder anyway: intent.recipient is CONSUMER-built and
+      // advertised to the payer verbatim, so a config with a recipient subaccount would otherwise
+      // advertise an account the settlement never touches (the 2.12.0 defect class).
+      recipient = Ic402.icrc1AccountText(Principal.fromActor(KnowledgeBase), null);
       suggestedDeposit = 50_000;
       minDeposit = ?5_000;
       expiry = Time.now() + 300_000_000_000;

@@ -10,6 +10,7 @@ import Text "mo:base/Text";
 import Char "mo:base/Char";
 import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
+import Blob "mo:base/Blob";
 
 module {
 
@@ -303,6 +304,88 @@ module {
     if (hasWork) { if (fastMode) { #stay } else { #switchToFast } } else if (idlePollSeconds == 0) {
       #disarm;
     } else if (fastMode) { #switchToIdle } else { #stay };
+  };
+
+  // ── ICRC-1 account textual encoding ──
+
+  /// CRC-32 (IEEE 802.3: reflected, polynomial 0xEDB88320, init/xorout 0xFFFFFFFF) — the
+  /// checksum the ICRC-1 textual account encoding requires. Bitwise, no table: callers hash
+  /// ~61 bytes once per 402 challenge, so the 8-step inner loop beats carrying a 1KiB table.
+  /// Check value pinned in test/utils.test.mo: crc32("123456789") = 0xCBF43926.
+  public func crc32(data : [Nat8]) : Nat32 {
+    var crc : Nat32 = 0xFFFFFFFF;
+    for (b in data.vals()) {
+      crc := crc ^ Nat32.fromNat(Nat8.toNat(b));
+      var i = 0;
+      while (i < 8) {
+        crc := if (crc & 1 == 1) { (crc >> 1) ^ 0xEDB88320 } else { crc >> 1 };
+        i += 1;
+      };
+    };
+    crc ^ 0xFFFFFFFF;
+  };
+
+  /// ICRC-1 textual encoding of an account — the ledger-standard single-string form:
+  ///   `<owner-principal>`                                        null or all-zero subaccount
+  ///   `<owner>-<checksum>.<subaccount-hex, leading zeros stripped>`   otherwise
+  /// where checksum = base32(lowercase, unpadded) of CRC-32 big-endian over
+  /// (principal-bytes ‖ 32-byte subaccount). The null/default collapse is byte-identical to
+  /// `Principal.toText(owner)` BY THE SPEC, which is what makes adopting this encoding in an
+  /// advertised field backward-compatible for every default-subaccount config.
+  ///
+  /// Golden-vector-pinned (test/utils.test.mo) against an independent implementation
+  /// (Python zlib.crc32 + base32) that was itself confirmed on ICP mainnet by a real transfer
+  /// landing in the encoded subaccount, and against the ICRC-1 spec's own `-6cc627i.1` example.
+  ///
+  /// A subaccount blob shorter than 32 bytes is left-padded with zeros for encoding (such a
+  /// config is already ledger-invalid for transfers — ICRC-1 fixes the subaccount at exactly
+  /// 32 bytes — so this only affects what a broken config displays as, never where funds go).
+  public func icrc1AccountText(owner : Principal, subaccount : ?Blob) : Text {
+    let ownerText = Principal.toText(owner);
+    let sub = switch (subaccount) {
+      case (null) { return ownerText };
+      case (?s) { Blob.toArray(s) };
+    };
+    let padded = if (sub.size() >= 32) { sub } else {
+      let offset = 32 - sub.size() : Nat;
+      Array.tabulate<Nat8>(32, func(i) { if (i < offset) { 0 } else { sub[i - offset] } });
+    };
+    var allZero = true;
+    for (b in padded.vals()) { if (b != 0) { allZero := false } };
+    // ICRC-1: the default (all-zero) subaccount's textual form IS the bare owner principal.
+    if (allZero) { return ownerText };
+
+    let pb = Blob.toArray(Principal.toBlob(owner));
+    let data = Buffer.Buffer<Nat8>(pb.size() + padded.size());
+    for (b in pb.vals()) { data.add(b) };
+    for (b in padded.vals()) { data.add(b) };
+    let c = crc32(Buffer.toArray(data));
+
+    // RFC 4648 base32 (lowercase, unpadded) of the 4 big-endian checksum bytes: 32 bits << 3
+    // gives 35 = 7×5, so seven clean 5-bit groups MSB-first (the final quantum's three pad
+    // bits land as the low zeros of the last group, exactly per the RFC).
+    let alphabet = Text.toArray("abcdefghijklmnopqrstuvwxyz234567");
+    let v = Nat32.toNat(c) * 8;
+    var checksum = "";
+    var i = 0;
+    while (i < 7) {
+      checksum #= Text.fromChar(alphabet[(v / (2 ** (5 * (6 - i : Nat)))) % 32]);
+      i += 1;
+    };
+
+    // Subaccount hex, lowercase, with leading '0' CHARACTERS (nibbles, not bytes) stripped —
+    // the spec's compressed form. Non-empty because the all-zero case returned above.
+    let hexChars = Text.toArray("0123456789abcdef");
+    var hex = "";
+    var leading = true;
+    for (b in padded.vals()) {
+      let hi = Nat8.toNat(b) / 16;
+      let lo = Nat8.toNat(b) % 16;
+      if (not (leading and hi == 0)) { leading := false; hex #= Text.fromChar(hexChars[hi]) };
+      if (not (leading and lo == 0)) { leading := false; hex #= Text.fromChar(hexChars[lo]) };
+    };
+
+    ownerText # "-" # checksum # "." # hex;
   };
 
   /// Find a token config by principal text or CAIP-2 network prefix.

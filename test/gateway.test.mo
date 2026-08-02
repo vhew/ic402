@@ -8,6 +8,10 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Text "mo:base/Text";
+import Nat8 "mo:base/Nat8";
+import Nat32 "mo:base/Nat32";
+import Char "mo:base/Char";
+import Iter "mo:base/Iter";
 import { test; suite } "mo:test";
 
 suite("Gateway.verifyPayment", func() {
@@ -338,5 +342,52 @@ suite("Gateway.setEvmChains", func() {
     let vA = gate.verifyPayment(sigFor("eip155:84532", tokA.address), 5000, recip, tokA.address);
     assert (not vA.isValid);
     assert (vA.invalidReason == ?"invalid_network");
+  });
+});
+
+// ── recipient/payTo wiring: Gateway must render via the ICRC-1 account encoding ──
+//
+// WIRING PIN for the 2.12.0 fix. The encoder itself is golden-vector-pinned in
+// test/utils.test.mo, but every other Gateway test config uses subaccount = null — under
+// which the encoding is byte-identical to the old owner-only rendering — so before this
+// suite existed, reverting recipientText() to `Principal.toText(config.recipient.owner)`
+// (the exact consumer-reported bug) passed the ENTIRE test suite. These configs carry a
+// non-null subaccount precisely so that revert fails here.
+suite("Gateway.require recipient encoding", func() {
+
+  func subBlob(hex : Text) : Blob {
+    let chars = Iter.toArray(hex.chars());
+    Blob.fromArray(Array.tabulate<Nat8>(chars.size() / 2, func(i : Nat) : Nat8 {
+      func nib(c : Char) : Nat8 {
+        let n = Char.toNat32(c);
+        if (n >= 48 and n <= 57) { Nat8.fromNat(Nat32.toNat(n - 48)) }
+        else { Nat8.fromNat(Nat32.toNat(n - 87)) };
+      };
+      nib(chars[i * 2]) * 16 + nib(chars[i * 2 + 1]);
+    }));
+  };
+
+  let subOwner = Principal.fromText("ygnfq-3aaaa-aaaaj-qsdha-cai");
+  let ledgerP = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai");
+
+  func cfgWith(sub : ?Blob) : Types.Config = {
+    recipient = { owner = subOwner; subaccount = sub };
+    tokens = [{ ledger = ledgerP; symbol = "ckUSDC"; decimals = 6 : Nat8 }];
+    evmChains = [];
+    evmRpcCanister = null;
+    ecdsaKeyName = null;
+    nonceExpirySeconds = null;
+  };
+
+  test("a configured subaccount reaches the advertised recipient (mainnet-confirmed vector)", func() {
+    let gate = Gateway.Gateway(cfgWith(?subBlob("01de7d91c348c22b3f2b202bdda82ce1b91cabe83f7e981d052d158df5020000")), subOwner);
+    let req = gate.require({ token = ledgerP; amount = 5000; network = "icp:1" });
+    assert (req.recipient == "ygnfq-3aaaa-aaaaj-qsdha-cai-cxlntxq.1de7d91c348c22b3f2b202bdda82ce1b91cabe83f7e981d052d158df5020000");
+  });
+
+  test("null subaccount stays byte-identical to the bare owner principal (compat guarantee)", func() {
+    let gate = Gateway.Gateway(cfgWith(null), subOwner);
+    let req = gate.require({ token = ledgerP; amount = 5000; network = "icp:1" });
+    assert (req.recipient == Principal.toText(subOwner));
   });
 });

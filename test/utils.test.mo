@@ -12,7 +12,11 @@ import Utils "../src/ic402/Utils";
 import Array "mo:base/Array";
 import Blob "mo:base/Blob";
 import Nat8 "mo:base/Nat8";
+import Nat32 "mo:base/Nat32";
 import Text "mo:base/Text";
+import Char "mo:base/Char";
+import Iter "mo:base/Iter";
+import Principal "mo:base/Principal";
 import { test; suite } "mo:test";
 
 func eqBytes(a : [Nat8], b : [Nat8]) : Bool = Array.equal<Nat8>(a, b, Nat8.equal);
@@ -331,6 +335,96 @@ suite("Utils", func() {
         let bytes = Array.tabulate<Nat8>(len, func(i : Nat) : Nat8 { Nat8.fromNat((i * 37 + 11) % 256) });
         assert(eqBytes(Utils.base64Decode(Utils.base64Encode(bytes)), bytes));
       };
+    });
+  });
+
+  // ── ICRC-1 account textual encoding ──
+  //
+  // GOLDEN VECTORS: every expected string below was produced by an INDEPENDENT implementation
+  // (Python zlib.crc32 + base64.b32encode — see the 2.12.0 review notes), which was itself
+  // validated two ways before being trusted as the oracle: (1) the ygnfq-… vector was confirmed
+  // on ICP MAINNET by a real transfer — a wallet parsed the string and icrc1_balance_of on
+  // (owner, subaccount) returned the exact amount, with the equivalent legacy 64-hex account-id
+  // resolving to the same account; (2) the k2t6j-…-6cc627i.1 vector is the ICRC-1 spec's own
+  // published example. These pin the payTo/recipient wire value: a payer/tooling on the other
+  // side of the 402 resolves this string with the STANDARD decoder, so our encoder drifting
+  // from the standard misdirects reconciliation even though no ic402 fund movement uses it.
+
+  suite("crc32", func() {
+    test("canonical check value: crc32(\"123456789\") = 0xCBF43926", func() {
+      assert(Utils.crc32(utf8("123456789")) == 0xCBF43926);
+    });
+    test("empty input = 0", func() {
+      assert(Utils.crc32([]) == 0);
+    });
+  });
+
+  suite("icrc1AccountText", func() {
+    func p(t : Text) : Principal = Principal.fromText(t);
+    func sub(hex : Text) : ?Blob {
+      // minimal test-local hex decoder (even-length lowercase hex only)
+      let chars = Iter.toArray(hex.chars());
+      let out = Array.tabulate<Nat8>(chars.size() / 2, func(i : Nat) : Nat8 {
+        func nib(c : Char) : Nat8 {
+          let n = Char.toNat32(c);
+          if (n >= 48 and n <= 57) { Nat8.fromNat(Nat32.toNat(n - 48)) }
+          else { Nat8.fromNat(Nat32.toNat(n - 87)) }; // a-f
+        };
+        nib(chars[i * 2]) * 16 + nib(chars[i * 2 + 1]);
+      });
+      ?Blob.fromArray(out);
+    };
+
+    test("null subaccount is BYTE-IDENTICAL to Principal.toText (the compat guarantee)", func() {
+      let owner = p("xevnm-gaaaa-aaaar-qafnq-cai");
+      assert(Utils.icrc1AccountText(owner, null) == Principal.toText(owner));
+      assert(Utils.icrc1AccountText(p("aaaaa-aa"), null) == "aaaaa-aa");
+    });
+
+    test("all-zero subaccount collapses to the bare principal (ICRC-1 default account)", func() {
+      assert(
+        Utils.icrc1AccountText(p("aaaaa-aa"), sub("0000000000000000000000000000000000000000000000000000000000000000"))
+        == "aaaaa-aa"
+      );
+    });
+
+    test("MAINNET-CONFIRMED vector: subaccount with a leading zero nibble", func() {
+      assert(
+        Utils.icrc1AccountText(p("ygnfq-3aaaa-aaaaj-qsdha-cai"), sub("01de7d91c348c22b3f2b202bdda82ce1b91cabe83f7e981d052d158df5020000"))
+        == "ygnfq-3aaaa-aaaaj-qsdha-cai-cxlntxq.1de7d91c348c22b3f2b202bdda82ce1b91cabe83f7e981d052d158df5020000"
+      );
+    });
+
+    test("ICRC-1 spec's own example: subaccount …01 compresses to \".1\"", func() {
+      assert(
+        Utils.icrc1AccountText(p("k2t6j-2nvnp-4zjm3-25dtz-6xhaa-c7boj-5gayf-oj3xs-i43lp-teztq-6ae"), sub("0000000000000000000000000000000000000000000000000000000000000001"))
+        == "k2t6j-2nvnp-4zjm3-25dtz-6xhaa-c7boj-5gayf-oj3xs-i43lp-teztq-6ae-6cc627i.1"
+      );
+    });
+
+    test("no-leading-zero and all-0xff subaccounts render in full", func() {
+      assert(
+        Utils.icrc1AccountText(p("k2t6j-2nvnp-4zjm3-25dtz-6xhaa-c7boj-5gayf-oj3xs-i43lp-teztq-6ae"), sub("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"))
+        == "k2t6j-2nvnp-4zjm3-25dtz-6xhaa-c7boj-5gayf-oj3xs-i43lp-teztq-6ae-dfxgiyy.102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      );
+      assert(
+        Utils.icrc1AccountText(p("2vxsx-fae"), sub("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+        == "2vxsx-fae-i7iipzy.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      );
+    });
+
+    test("ledger-config realism: ckUSDC principal + treasury-style subaccount", func() {
+      assert(
+        Utils.icrc1AccountText(p("xevnm-gaaaa-aaaar-qafnq-cai"), sub("7700000000000000000000000000000000000000000000000000000000000000"))
+        == "xevnm-gaaaa-aaaar-qafnq-cai-awsphwi.7700000000000000000000000000000000000000000000000000000000000000"
+      );
+    });
+
+    test("short subaccount blob is left-padded to 32 bytes for encoding", func() {
+      // A 1-byte blob 0x01 reads as the 32-byte subaccount …01 — same account text as the spec
+      // example above modulo owner. Such configs are already ledger-invalid for transfers
+      // (ICRC-1 fixes subaccounts at exactly 32 bytes); this only pins the display behaviour.
+      assert(Utils.icrc1AccountText(p("2vxsx-fae"), sub("01")) == "2vxsx-fae-22yutvy.1");
     });
   });
 });

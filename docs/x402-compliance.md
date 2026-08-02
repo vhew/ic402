@@ -127,6 +127,14 @@ error reason maps to the v2 vocabulary (`invalid_exact_evm_payload_authorization
 - The ckUSDC / ICRC‑2 rail emits a clearly non‑standard scheme and **is gated behind a
   non‑strict mode** so a strict v2 client only sees the `eip155:*` `exact` option it can pay.
   It is documented as an ic402 extension, never claimed as x402‑conformant.
+- **`payTo` / `recipient` on `icp:*` networks is the ICRC‑1 textual account encoding** (since
+  2.12.0): the bare owner principal for the default subaccount, otherwise
+  `<owner>-<crc32‑base32>.<subaccount‑hex, leading zeros stripped>` — the standard "one string"
+  form every ICP wallet and ledger tool parses. x402 defines `payTo` as scheme/network‑specific
+  text (an EVM address on `eip155:*`), so the `icp:*` mapping is ic402's to define, and this is
+  it. Note the field is **informational on the ICP rail**: settlement is an ICRC‑2 *pull* to the
+  configured account (`recipientAccount()`), never a push to this string — before 2.12.0 the
+  string dropped a configured subaccount and therefore named an account funds never touched.
 - The Ed25519 cumulative‑voucher streaming‑session subsystem has no x402 message type and is
   invoked over Candid, **outside** the x402 `accepts[]` envelope. It stays there. v2
   exact‑equality does **not** apply to session cap‑deposits.
