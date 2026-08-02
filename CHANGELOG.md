@@ -1,5 +1,61 @@
 # Changelog
 
+## v2.12.0 — 2026-08-02
+
+Minor release — **`payTo`/`recipient` now carries a configured subaccount** (ICRC-1 textual
+account encoding). Reported by a consumer with a mainnet-confirmed test vector. Additive public
+API (`Ic402.icrc1AccountText`, plus `Utils.crc32`) ⇒ minor; no interface, stable, or
+existing-signature change.
+
+### Fixed
+
+- **The advertised ICP `recipient` (x402 `payTo`) and receipt stamps dropped a configured
+  `recipient.subaccount`.** `recipientText()` rendered only the owner principal while settlement
+  (`recipientAccount()`, an ICRC-2 `transfer_from` pull) honoured the subaccount — so with a
+  non-null subaccount, every 402 challenge and every receipt named an account (owner, default
+  subaccount) that funds never touched. Now both render the **ICRC-1 textual encoding**:
+  `<owner>` for a null/all-zero subaccount — **byte-identical to the previous output**, so every
+  default-subaccount config (effectively all working configs today) sees no change — and
+  `<owner>-<crc32-base32-checksum>.<subaccount-hex, leading zeros stripped>` otherwise.
+- **ICP session-close receipts had the same defect one rail over** (found by this release's
+  adversarial review, not the original report): `closeSessionInternal` settles consumed funds to
+  `recipientAccount()` but stamped the receipt with the consumer-supplied `intent.recipient`
+  display text. The ICP close receipt now stamps the ICRC-1 encoding of the account funds
+  actually settled into. The **EVM** close receipt keeps `session.recipient` — there the text
+  *is* the transfer target the canister signed for. Residual, deliberately out of library scope:
+  `SessionIntent.recipient` itself is consumer-built and advertised verbatim — build it with the
+  newly exported `Ic402.icrc1AccountText` (the example's `requestSession` now does).
+  - **Scope, precisely**: no ICP fund movement is ever *directed* by this text — ic402's ICP
+    rail settles by ICRC-2 pull and sessions escrow to canister subaccounts — so this was an
+    advertisement/receipt **integrity** defect, not a misdelivery path. But external tooling
+    reconciling against `payTo`, receipt audits, and any payer resolving the advertised account
+    got the wrong answer whenever a subaccount was configured. A client that pushed funds to
+    the (wrong) advertised account now fails **closed** (the textual form doesn't parse as a
+    bare principal) instead of open.
+  - **Spec position**: x402 defines `payTo` as scheme/network-specific text; the `icp:*`
+    mapping is ic402's to define and is now documented in `docs/x402-compliance.md` as the
+    ICRC-1 textual encoding.
+
+### Added
+
+- **`Ic402.icrc1AccountText(owner, subaccount)`** (exported via `lib.mo`) — pure ICRC-1 textual
+  account encoder (handles the null/all-zero collapse the spec requires; left-pads short blobs,
+  which are already ledger-invalid for transfers, for display). Exported because consumers build
+  `SessionIntent.recipient` themselves and previously had no correct encoder to reach for.
+  `Utils.crc32` — IEEE CRC-32, required by the encoding.
+- **Wiring pin** (`test/gateway.test.mo`): a Gateway constructed with a non-null recipient
+  subaccount must advertise the encoded account from `require()`. Added because the adversarial
+  review demonstrated that reverting `recipientText()` to the pre-fix body passed the entire
+  previous suite (every other test config uses `subaccount = null`, where old and new output are
+  byte-identical). Mutation-verified: that exact revert now fails this test and only this test.
+- Golden-vector tests (`test/utils.test.mo`): the reporter's **mainnet-confirmed** vector
+  (verified by a real transfer landing in the encoded subaccount, cross-checked against the
+  legacy 64-hex account-id), the **ICRC-1 spec's own** `-6cc627i.1` example, the CRC-32
+  canonical check value `0xCBF43926`, exact-equality-with-`Principal.toText` for the
+  null/all-zero collapse, and full-length/padding edge cases — all expected strings produced by
+  an independent implementation (Python `zlib.crc32` + base32), per the 2.9.0 golden-vector
+  methodology.
+
 ## v2.11.0 — 2026-07-31
 
 Minor release — **self-arming expiry timers**. `startTimers()` used to arm two unconditional

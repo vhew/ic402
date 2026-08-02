@@ -1,6 +1,6 @@
 {
   "name": "@ic402/example-client",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "private": true,
   "description": "Interactive demo client for the ic402 example canister",
   "license": "Apache-2.0",
