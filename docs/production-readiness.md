@@ -247,4 +247,4 @@ implementation (EIP-1559 via viem/ethers, candid mirrors via the official `.did`
 `@icp-sdk`, base64/hex via RFC 4648/Node); cycles attached, timers/GC bounded **and self-arming**
 (the expiry sweeps run only while there is state to sweep — see [costs
 §5](costs-and-rails.md#5-fixed-idle-cost-recurring-timers)); `.did` in sync; versions uniform at
-2.12.0.
+2.13.0.

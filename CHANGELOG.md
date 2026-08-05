@@ -1,5 +1,78 @@
 # Changelog
 
+## v2.13.0 — 2026-08-04
+
+Minor release — **field-driven EIP-712 encoding** (consumer-requested). `Eip712` gains a generic
+struct-encoding path beside the hardcoded `TransferWithAuthorization`: given an ordered
+`[(fieldName, solidityType)]` and matching values, it produces the canonical type string, its
+typeHash, `encodeData`, and `hashStruct` — the missing construction half of the advice
+`EvmSigner.signTypedData` has always given ("construct the structHash yourself from validated
+parameters"), which was previously unfollowable for any struct but EIP-3009's. Additive public
+API ⇒ minor; no interface, stable, or existing-signature change.
+
+### Added
+
+- **`Eip712.encodeTypeString` / `typeHashOf` / `encodeData` / `hashStructOf`** +
+  **`Eip712.FieldValue`** (`#address`/`#uint`/`#bool`/`#string`/`#bytes`/`#fixedBytes`).
+  Trap-free — every entry point returns `#err` on invalid input, matching the L19/L28 pattern on
+  the verification paths.
+  - **Deliberately flat and atomic**: `address`, `bool`, `string`, `bytes`, `bytes1..32`,
+    `uint8..256`. No arrays, no nested structs, no `int*` — those drag in transitive type
+    collection and alphabetical dependency sorting, whose failure mode is a **valid signature
+    over the wrong struct**; they are rejected at the boundary with an error saying the
+    exclusion is deliberate. Also rejected: bare `uint` (EIP-712 forbids the alias),
+    zero-padded widths (`uint08` — two spellings must not alias one type), duplicate field
+    names, empty field lists, and — security-critical — **non-identifier struct/field names**,
+    which would otherwise inject syntax into the canonical type string and alias a different
+    type than the one an auditor reviewed.
+  - Values are validated against the *declared* type: `uintN` range-checked, `bytesN`
+    length-exact (no implicit value padding), addresses 0x-prefixed 20-byte hex, no tag
+    coercion.
+  - **Audit note** (for layers rendering "what am I signing"): `string`/`bytes` words in
+    `encodeData` are keccak256 *digests* of the contents per spec — render human-readable views
+    from the `FieldValue`s, never by decoding `encodeData`.
+- Golden vectors (`test/eip712.test.mo`, viem 2.55.2 as the independent oracle): the generic
+  path over `TransferWithAuthorization`'s field list reproduces the **hardcoded mainnet-proven
+  constant** byte-for-byte (typeHash and hashStruct); an all-types struct (unicode string,
+  dynamic bytes, `bytes1`/`bytes32`, `uint8` at 255, >64-bit `uint256`) pinned at type-string,
+  typeHash, hashStruct, **and full-digest** level through the existing
+  `domainSeparator`/`digest`; empty-string/empty-bytes/false/zero edge vector; a rejection
+  table covering every excluded type, injection attempt, and conformance violation.
+  Mutation-verified: flipping the `bytesN` pad direction and dropping the typeHash prefix each
+  break exactly the pinning vectors.
+- `EvmSigner.signTypedData` doc now names `Eip712.hashStructOf` as the sanctioned construction
+  path. Mechanism/policy split preserved: type registration, per-field rules, cool-offs, and
+  audit rendering remain consumer-side.
+
+### Hardened by this release's adversarial review (pre-release, all fixed)
+
+- **Struct-NAME namespace was unvalidated** — the identifier check closed type-*string*
+  injection but accepted names with reserved protocol semantics:
+  - `"EIP712Domain"` — standard implementations sign the **domain only** for that primaryType
+    (viem drops the struct part of the digest entirely), so a digest built from it is
+    unverifiable everywhere; worse, its `hashStruct` over the standard domain fields is a
+    **byte-identical domain separator**, inviting parameter-swap confusion in
+    `digest(domainSep, structHash)`. Now rejected as reserved.
+  - Atomic-shadowing names (`"address"`, `"uint256"`, `"string"`, …) — in an EIP-712 types map
+    they shadow the atomic type; viem refuses them (`InvalidStructTypeError`) the moment the
+    name is referenced, which the domain's own `string`/`uint256`/`address` fields always do.
+    A signature over such a struct is unverifiable by standard tooling. Now rejected, matching
+    viem's rule exactly (exact `address`/`bool`/`string`, or any `uint`/`bytes`/`int` prefix).
+- **Field-count cap (64)** — the duplicate-name scan is O(n²) and the module promises never to
+  trap on relayed input; an uncapped multi-thousand-field list was measured crossing the IC
+  per-message instruction limit (a trap also rolls back the SEC-1 admission-token decrement —
+  the metering bypass the L19/L28 comment guards against). Real structs have a handful of
+  fields.
+- **Array rejections now tell the truth**: `uint256[]` previously reported *"invalid uint
+  width"* — a false diagnosis (256 is valid; the *array* is the exclusion) that would send an
+  integrator retrying `uint128[]`/`uint64[]`… without ever learning arrays are categorically
+  out. The `[` check now runs first, and an `int`-prefixed identifier (`intent`) is reported
+  as an unsupported nested type, not a signed integer.
+- **Three surviving mutations pinned**: dropping the `uintN % 8` rule, an off-by-one in the
+  identifier digit rule, and swapping underscore→comma in the identifier alphabet each passed
+  the entire pre-review suite (viem hashes `uint12` happily, masking the first from golden
+  vectors). Each now fails exactly one added test.
+
 ## v2.12.0 — 2026-08-02
 
 Minor release — **`payTo`/`recipient` now carries a configured subaccount** (ICRC-1 textual
