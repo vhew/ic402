@@ -278,6 +278,8 @@ Funds are custodied at the platform recipient account; `settleJob` pays the oper
 |--------|-------------|
 | `domainSeparator(name, version, chainId, contract)` | Build EIP-712 domain separator |
 | `digest(domainSep, structHash)` | Compute EIP-712 message digest |
+| `encodeTypeString(name, fields)` / `typeHashOf(name, fields)` | Canonical type string + typeHash from an ordered `[(fieldName, solidityType)]` — the reviewable artifact an audit layer should store |
+| `encodeData(name, fields, values)` / `hashStructOf(name, fields, values)` | Field-driven struct encoding (`FieldValue` variants) — flat atomic types only (`address`/`bool`/`string`/`bytes`/`bytes1..32`/`uint8..256`); arrays, nested structs, and `int*` are rejected fail-closed, so what gets signed is auditable field-by-field, never an opaque hash |
 
 ### EvmAddress / EvmUtils (crypto primitives)
 

@@ -337,7 +337,11 @@ module {
     ///
     /// For security: the consuming canister should construct the domainSeparator
     /// and structHash itself from validated parameters — do NOT pass pre-computed
-    /// values from an untrusted client.
+    /// values from an untrusted client. Since 2.13.0 the library provides the
+    /// construction path: Eip712.hashStructOf(structName, fields, values) (with
+    /// Eip712.domainSeparator for the domain) builds the structHash from a visible,
+    /// validated field list — flat atomic types only, fail-closed — so what gets
+    /// signed is auditable field-by-field instead of arriving as an opaque hash.
     public func signTypedData(
       domainSeparator : [Nat8], // 32 bytes: keccak256(EIP712Domain(...))
       structHash : [Nat8],      // 32 bytes: keccak256(typeHash || encodedFields)

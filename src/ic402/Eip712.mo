@@ -9,7 +9,14 @@
 ///   EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
 
 import Array "mo:base/Array";
+import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
+import Nat32 "mo:base/Nat32";
+import Text "mo:base/Text";
+import Char "mo:base/Char";
+import Iter "mo:base/Iter";
+import Option "mo:base/Option";
+import Buffer "mo:base/Buffer";
 import EvmAddress "EvmAddress";
 import EvmUtils "EvmUtils";
 
@@ -194,6 +201,296 @@ module {
   public func transferWithAuthorizationSelector() : [Nat8] {
     // 0xe3ee160e
     [0xe3, 0xee, 0x16, 0x0e];
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Field-driven encoding (generic flat structs)
+  // ═══════════════════════════════════════════════════════════════════════
+  //
+  // A caller-supplied ordered [(fieldName, solidityType)] plus matching values, encoded per
+  // EIP-712: canonical type string → typeHash → encodeData → hashStruct. Pair the result with
+  // domainSeparator()/digest() above and EvmSigner.signTypedData — the struct's CONTENTS are
+  // then visible and validated at the signing boundary, instead of arriving as an opaque
+  // 32-byte hash nothing can audit.
+  //
+  // DELIBERATELY FLAT AND ATOMIC: address, bool, string, bytes, bytes1..32, uint8..256 — no
+  // arrays, no nested structs, no int*. Nested/array support drags in transitive type
+  // collection and the alphabetical dependency-sorting rule, whose failure mode is the
+  // dangerous one: a VALID signature over the WRONG struct. Requests for those types are
+  // rejected at the boundary with an error saying so, which is strictly better than encoding
+  // them subtly wrong. Every entry point is trap-free (#err, never assert) — inputs may be
+  // relayed from untrusted callers.
+  //
+  // AUDIT NOTE for layers rendering "what am I signing": `string`/`bytes` words in encodeData
+  // are keccak256 DIGESTS of the contents (per spec). Render human-readable views from the
+  // FieldValues themselves, never by decoding encodeData — a digest rendered as data would
+  // show garbage while still verifying.
+
+  /// A value for one field of a flat EIP-712 struct. The tag must match the field's DECLARED
+  /// type (`#uint` for `uint8..256`, `#fixedBytes` for `bytes1..32`, `#bytes` only for dynamic
+  /// `bytes`, …) — a mismatch is an #err, not a coercion.
+  public type FieldValue = {
+    #address : Text; // 0x-prefixed 40-hex-char EVM address (any case; encoded as raw bytes)
+    #uint : Nat; // range-checked against the declared uintN width
+    #bool : Bool;
+    #string : Text; // dynamic: encoded as keccak256(utf8 bytes)
+    #bytes : [Nat8]; // dynamic: encoded as keccak256(contents)
+    #fixedBytes : [Nat8]; // bytesN: size must EQUAL the declared N; right-padded to 32
+  };
+
+  // Parsed form of a declared solidity type (whitelist — see the module note on exclusions).
+  type ParsedType = {
+    #address;
+    #bool;
+    #string;
+    #bytes;
+    #uint : Nat; // bit width 8..256, multiple of 8
+    #fixedBytes : Nat; // byte width 1..32
+  };
+
+  // Strict decimal parse: pure digits, no leading zero (solidity type names never carry one —
+  // "uint08"/"bytes08" are not types, and accepting them would let two spellings of one type
+  // produce different canonical strings).
+  func parseWidth(t : Text) : ?Nat {
+    let chars = Iter.toArray(t.chars());
+    if (chars.size() == 0 or chars.size() > 3) return null;
+    if (chars[0] == '0') return null;
+    var n = 0;
+    for (c in chars.vals()) {
+      if (c < '0' or c > '9') return null;
+      n := n * 10 + (Nat32.toNat(Char.toNat32(c)) - 48);
+    };
+    ?n;
+  };
+
+  // True when every char is a decimal digit (and non-empty) — used to tell a signed-integer
+  // TYPE ("int", "int256") from an int-prefixed IDENTIFIER ("intent"), so rejections name the
+  // real reason.
+  func isAllDigits(t : Text) : Bool {
+    var any = false;
+    for (c in t.chars()) { if (c < '0' or c > '9') return false; any := true };
+    any;
+  };
+
+  func parseFieldType(t : Text) : { #ok : ParsedType; #err : Text } {
+    // Array check FIRST: 'uint256[]' must be rejected AS AN ARRAY, not as a bad uint width —
+    // an error claiming "invalid width" about a valid width would send the caller retrying
+    // uint128[]/uint64[]… without ever learning that arrays are categorically out of scope.
+    if (Text.contains(t, #char '[')) {
+      return #err("array type '" # t # "' is DELIBERATELY unsupported (flat atomic fields only — arrays require encoding rules this encoder refuses to risk getting subtly wrong)");
+    };
+    if (t == "address") return #ok(#address);
+    if (t == "bool") return #ok(#bool);
+    if (t == "string") return #ok(#string);
+    if (t == "bytes") return #ok(#bytes);
+    switch (Text.stripStart(t, #text "uint")) {
+      case (?rest) {
+        switch (parseWidth(rest)) {
+          case (?n) { if (n >= 8 and n <= 256 and n % 8 == 0) return #ok(#uint(n)) };
+          case (null) {};
+        };
+        if (rest == "") return #err("type 'uint' is not canonical EIP-712 — spell it 'uint256'");
+        if (isAllDigits(rest)) return #err("invalid uint width in '" # t # "' (uint8..uint256, multiples of 8)");
+      };
+      case (null) {};
+    };
+    switch (Text.stripStart(t, #text "bytes")) {
+      case (?rest) {
+        switch (parseWidth(rest)) {
+          case (?n) { if (n >= 1 and n <= 32) return #ok(#fixedBytes(n)) };
+          case (null) {};
+        };
+        if (isAllDigits(rest)) return #err("invalid bytes width in '" # t # "' (bytes1..bytes32, or dynamic 'bytes')");
+      };
+      case (null) {};
+    };
+    if (t == "int" or (Text.stripStart(t, #text "int") != null and isAllDigits(Option.get(Text.stripStart(t, #text "int"), "")))) {
+      return #err("signed type '" # t # "' is DELIBERATELY unsupported (flat unsigned/atomic fields only)");
+    };
+    #err("type '" # t # "' is not a supported atomic type — nested structs and non-atomic types are DELIBERATELY unsupported (they require transitive type collection + alphabetical dependency sorting, whose failure mode is a valid signature over the wrong struct)");
+  };
+
+  // Identifier check for struct and field names: [A-Za-z_][A-Za-z0-9_]*. This is
+  // SECURITY-CRITICAL, not cosmetics: names are interpolated into the canonical type string,
+  // so a name like "a,address evil)Other(" would alias a DIFFERENT type than the one any
+  // auditor reviewed — a valid signature over an unreviewed struct.
+  func isIdentifier(t : Text) : Bool {
+    let chars = Iter.toArray(t.chars());
+    if (chars.size() == 0) return false;
+    var i = 0;
+    for (c in chars.vals()) {
+      let alpha = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_';
+      let digit = c >= '0' and c <= '9';
+      if (not (alpha or (i > 0 and digit))) return false;
+      i += 1;
+    };
+    true;
+  };
+
+  // Hard cap on field count. Real EIP-712 structs have a handful of fields (venue order
+  // structs run ~10-20); the cap exists because validation below is O(n²) in fields.size()
+  // (the duplicate-name scan) and the module promises NEVER to trap on relayed untrusted
+  // input — an uncapped multi-thousand-field list would blow the IC per-message instruction
+  // limit inside the loop, and a trap rolls back the caller's SEC-1 admission-token decrement
+  // (the exact metering bypass the L19/L28 comment on verifyAuthorization guards against).
+  let MAX_FIELDS : Nat = 64;
+
+  // Validate the struct shape shared by every entry point: identifiers, whitelisted types,
+  // no duplicate field names, at least one field, bounded field count, and a struct NAME that
+  // no standard EIP-712 implementation treats specially.
+  func validateFields(structName : Text, fields : [(Text, Text)]) : { #ok : [ParsedType]; #err : Text } {
+    if (not isIdentifier(structName)) {
+      return #err("struct name '" # structName # "' is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*) — names are interpolated into the canonical type string, so anything else could alias a different type");
+    };
+    // Reserved: EIP-712 gives "EIP712Domain" protocol semantics. viem/ethers DROP the struct
+    // part of the digest when primaryType is EIP712Domain (domain-only signing), so no
+    // standard tool could ever verify a digest built from this struct — and worse, its
+    // hashStruct over the standard domain fields IS a byte-identical domain separator, ripe
+    // for parameter-swap confusion in digest(domainSep, structHash).
+    if (structName == "EIP712Domain") {
+      return #err("struct name 'EIP712Domain' is reserved by EIP-712 — standard implementations sign the DOMAIN ONLY for this primaryType, so a digest built from it is unverifiable everywhere; name your struct something else");
+    };
+    // Atomic-shadowing names: in an EIP-712 `types` map a struct named "address"/"uint256"/…
+    // SHADOWS the atomic type, so viem refuses such names outright (InvalidStructTypeError —
+    // exact "address"/"bool"/"string" or any "bytes"/"uint"/"int" prefix) the moment the name
+    // is referenced, which the standard domain fields (string/uint256/address) always do.
+    // A signature over such a struct would be unverifiable by standard tooling; reject to
+    // match viem's rule exactly.
+    if (
+      structName == "address" or structName == "bool" or structName == "string"
+      or Text.startsWith(structName, #text "bytes") or Text.startsWith(structName, #text "uint")
+      or Text.startsWith(structName, #text "int")
+    ) {
+      return #err("struct name '" # structName # "' shadows a solidity atomic type family — viem/ethers reject or misencode types maps containing it, so a signature over this struct would be unverifiable by standard tooling; choose a name not starting with 'uint'/'bytes'/'int' and not 'address'/'bool'/'string'");
+    };
+    if (fields.size() == 0) {
+      return #err("empty field list — a zero-field struct signs nothing reviewable; declare at least one field");
+    };
+    if (fields.size() > MAX_FIELDS) {
+      return #err("too many fields (" # Nat.toText(fields.size()) # " > " # Nat.toText(MAX_FIELDS) # ") — real EIP-712 structs have a handful; the cap keeps validation safely inside the IC per-message instruction budget on relayed input");
+    };
+    let parsed = Buffer.Buffer<ParsedType>(fields.size());
+    var i = 0;
+    for ((name, ty) in fields.vals()) {
+      if (not isIdentifier(name)) {
+        return #err("field name '" # name # "' is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)");
+      };
+      var j = 0;
+      for ((other, _) in fields.vals()) {
+        if (j < i and other == name) {
+          return #err("duplicate field name '" # name # "' — an audit rendering could not distinguish the two");
+        };
+        j += 1;
+      };
+      switch (parseFieldType(ty)) {
+        case (#ok(p)) { parsed.add(p) };
+        case (#err(e)) { return #err("field '" # name # "': " # e) };
+      };
+      i += 1;
+    };
+    #ok(Buffer.toArray(parsed));
+  };
+
+  /// (a) The canonical EIP-712 type string: `Name(type1 field1,type2 field2,…)`.
+  /// This is the reviewable artifact — an audit/registration layer should store and display
+  /// exactly this string, because its keccak256 is the typeHash the signature commits to.
+  public func encodeTypeString(structName : Text, fields : [(Text, Text)]) : { #ok : Text; #err : Text } {
+    switch (validateFields(structName, fields)) {
+      case (#err(e)) { return #err(e) };
+      case (#ok(_)) {};
+    };
+    var s = structName # "(";
+    var first = true;
+    for ((name, ty) in fields.vals()) {
+      if (not first) { s #= "," };
+      s #= ty # " " # name;
+      first := false;
+    };
+    #ok(s # ")");
+  };
+
+  /// (b) keccak256 of the canonical type string.
+  public func typeHashOf(structName : Text, fields : [(Text, Text)]) : { #ok : [Nat8]; #err : Text } {
+    switch (encodeTypeString(structName, fields)) {
+      case (#ok(s)) { #ok(EvmAddress.keccak256Text(s)) };
+      case (#err(e)) { #err(e) };
+    };
+  };
+
+  // Encode one validated (type, value) pair to its 32-byte word.
+  func encodeWord(name : Text, ty : ParsedType, v : FieldValue) : { #ok : [Nat8]; #err : Text } {
+    switch (ty, v) {
+      case (#address, #address(hex)) {
+        if (not Text.startsWith(hex, #text "0x")) {
+          return #err("field '" # name # "': address must be 0x-prefixed");
+        };
+        let bytes = EvmUtils.hexToBytes(hex);
+        if (bytes.size() != 20) {
+          return #err("field '" # name # "': address must be exactly 20 bytes of hex (40 hex chars)");
+        };
+        #ok(Array.append(Array.freeze(Array.init<Nat8>(12, 0 : Nat8)), bytes));
+      };
+      case (#uint(width), #uint(n)) {
+        if (n >= 2 ** width) {
+          return #err("field '" # name # "': value does not fit uint" # Nat.toText(width));
+        };
+        #ok(EvmUtils.natToBytes(n, 32));
+      };
+      case (#bool, #bool(b)) {
+        #ok(EvmUtils.natToBytes(if (b) { 1 } else { 0 }, 32));
+      };
+      case (#string, #string(s)) {
+        #ok(EvmAddress.keccak256Text(s)); // dynamic: hash of contents, per spec
+      };
+      case (#bytes, #bytes(b)) {
+        #ok(EvmAddress.keccak256(b)); // dynamic: hash of contents, per spec
+      };
+      case (#fixedBytes(width), #fixedBytes(b)) {
+        if (b.size() != width) {
+          return #err("field '" # name # "': bytes" # Nat.toText(width) # " value must be exactly " # Nat.toText(width) # " bytes (got " # Nat.toText(b.size()) # ") — no implicit padding of the VALUE; the word is right-padded per spec");
+        };
+        #ok(Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { if (i < width) { b[i] } else { 0 } }));
+      };
+      case (_, _) {
+        #err("field '" # name # "': supplied value tag does not match the declared type — no coercion (e.g. dynamic 'bytes' takes #bytes, 'bytes32' takes #fixedBytes)");
+      };
+    };
+  };
+
+  /// (c) encodeData per EIP-712: the concatenation of each field's 32-byte word, in declared
+  /// order. Does NOT include the typeHash (hashStructOf prepends it). `string`/`bytes` words
+  /// are keccak256 digests of the contents — see the module audit note.
+  public func encodeData(structName : Text, fields : [(Text, Text)], values : [FieldValue]) : { #ok : [Nat8]; #err : Text } {
+    let parsed = switch (validateFields(structName, fields)) {
+      case (#ok(p)) { p };
+      case (#err(e)) { return #err(e) };
+    };
+    if (values.size() != fields.size()) {
+      return #err("field/value arity mismatch: " # Nat.toText(fields.size()) # " fields, " # Nat.toText(values.size()) # " values");
+    };
+    let out = Buffer.Buffer<Nat8>(fields.size() * 32);
+    var i = 0;
+    for ((name, _) in fields.vals()) {
+      switch (encodeWord(name, parsed[i], values[i])) {
+        case (#ok(word)) { for (b in word.vals()) { out.add(b) } };
+        case (#err(e)) { return #err(e) };
+      };
+      i += 1;
+    };
+    #ok(Buffer.toArray(out));
+  };
+
+  /// hashStruct = keccak256(typeHash ‖ encodeData) — the value to pair with domainSeparator()
+  /// in digest(), and what EvmSigner.signTypedData should be handed as structHash.
+  public func hashStructOf(structName : Text, fields : [(Text, Text)], values : [FieldValue]) : { #ok : [Nat8]; #err : Text } {
+    let th = switch (typeHashOf(structName, fields)) {
+      case (#ok(h)) { h };
+      case (#err(e)) { return #err(e) };
+    };
+    switch (encodeData(structName, fields, values)) {
+      case (#ok(data)) { #ok(EvmAddress.keccak256(Array.append(th, data))) };
+      case (#err(e)) { #err(e) };
+    };
   };
 
   // ═══════════════════════════════════════════════════════════════════════
