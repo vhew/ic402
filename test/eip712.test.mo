@@ -358,3 +358,121 @@ suite("field-driven: review-round pins (namespace, cap, message truth, mutations
     assert(isErr(Eip712.typeHashOf("T", [("a,b", "uint256")])));
   });
 });
+
+suite("field-driven: colon-namespaced struct names (2.13.1, venue convention)", func() {
+  // GOLDEN VECTORS from viem 2.55.2 over the venue's REAL type — Hyperliquid's user-signed
+  // withdraw (primaryType "HyperliquidTransaction:Withdraw", domain HyperliquidSignTransaction/
+  // "1"/42161/zero address). The consumer that reported the refusal verified ethers v5/v6, viem,
+  // alloy, and Turnkey all accept and hash the colon literally; 2.13.0's identifier rule was
+  // stricter than the ecosystem it cited, and a name this encoder refuses is a digest no one
+  // can produce through it.
+  let hlFields : [(Text, Text)] = [
+    ("hyperliquidChain", "string"), ("destination", "string"), ("amount", "string"), ("time", "uint64"),
+  ];
+  let hlValues : [Eip712.FieldValue] = [
+    #string("Mainnet"),
+    #string("0x2222222222222222222222222222222222222222"),
+    #string("123.45"),
+    #uint(1754300000000),
+  ];
+
+  test("the venue's real type round-trips WHOLE through encodeTypeString", func() {
+    switch (Eip712.encodeTypeString("HyperliquidTransaction:Withdraw", hlFields)) {
+      case (#ok(s)) { assert(s == "HyperliquidTransaction:Withdraw(string hyperliquidChain,string destination,string amount,uint64 time)") };
+      case (#err(_)) { assert(false) };
+    };
+  });
+
+  test("typeHash + hashStruct + FULL DIGEST match viem under the venue's real domain", func() {
+    switch (Eip712.typeHashOf("HyperliquidTransaction:Withdraw", hlFields)) {
+      case (#ok(th)) { assert(th == EvmUtils.hexToBytes("0xdbde952fa0de88158fc71336e44c61876611a2a65553bebd4d52b44a2a000d9a")) };
+      case (#err(_)) { assert(false) };
+    };
+    switch (Eip712.hashStructOf("HyperliquidTransaction:Withdraw", hlFields, hlValues)) {
+      case (#ok(sh)) {
+        assert(sh == EvmUtils.hexToBytes("0x8dbb8dc11dc51644d73fca69eef464bbc59f13b5342ffa41390572ef97f6c248"));
+        let ds = Eip712.domainSeparator("HyperliquidSignTransaction", "1", 42161, EvmUtils.hexToBytes("0x0000000000000000000000000000000000000000"));
+        assert(Eip712.digest(ds, sh) == EvmUtils.hexToBytes("0x3c26236b8c2b1514bff511f1410bee0cf51735e6cde94cd995e4e502f2ab2ae7"));
+      };
+      case (#err(_)) { assert(false) };
+    };
+  });
+
+  test("ANTI-NORMALIZATION PIN: the namespaced name never aliases its bare suffix", func() {
+    // ':' is a scope separator in many policy DSLs — any matcher that splits on it would
+    // silently alias HyperliquidTransaction:Withdraw to Withdraw. The two must commit to
+    // DIFFERENT hashes, and the bare form is itself pinned to viem so a normalizing encoder
+    // cannot sneak through by producing the suffix's (valid) hash.
+    let ns = switch (Eip712.hashStructOf("HyperliquidTransaction:Withdraw", hlFields, hlValues)) {
+      case (#ok(h)) { h }; case (#err(_)) { assert(false); [] };
+    };
+    let bare = switch (Eip712.hashStructOf("Withdraw", hlFields, hlValues)) {
+      case (#ok(h)) { h }; case (#err(_)) { assert(false); [] };
+    };
+    assert(ns != bare);
+    assert(bare == EvmUtils.hexToBytes("0xaf72848c0697f192e893325116981750acf737bf78e15ac617b5b05e05ab8376")); // viem
+  });
+
+  test("colon boundaries stay closed: empty segments, multi-colon, colon in FIELD names", func() {
+    func isErr(r : { #ok : [Nat8]; #err : Text }) : Bool {
+      switch (r) { case (#err(_)) { true }; case (#ok(_)) { false } };
+    };
+    assert(isErr(Eip712.typeHashOf(":Withdraw", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf("Foo:", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf("Foo::Bar", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf("A:B:C", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf(":", [("a", "uint256")])));
+    // Field names carry no namespacing anywhere in the ecosystem — strict rule unchanged.
+    assert(isErr(Eip712.typeHashOf("T", [("a:b", "uint256")])));
+    // Reserved rule unchanged; a FIRST SEGMENT of EIP712Domain is also refused — viem injects
+    // an EIP712Domain entry into every types map and truncates the primaryType at the colon
+    // for dependency lookup, so "EIP712Domain:X" diverges between viem and ethers PERMANENTLY
+    // (empirically verified against viem 2.55.2).
+    assert(isErr(Eip712.typeHashOf("EIP712Domain", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf("EIP712Domain:X", [("a", "uint256")])));
+  });
+
+  test("SECURITY: structural characters inside a colon SEGMENT are rejected — both segments", func() {
+    func isErr(r : { #ok : [Nat8]; #err : Text }) : Bool {
+      switch (r) { case (#err(_)) { true }; case (#ok(_)) { false } };
+    };
+    // Review-found gap: every earlier rejection failed on emptiness/count/shadow, so a mutant
+    // of isStructName that only checked segments non-empty passed the whole suite while
+    // accepting these — which alias NESTED struct definitions under the canonical grammar
+    // (e.g. ethers reads "Order:Safe(Evil e)Evil(address owner)" as Order:Safe{Evil e} +
+    // Evil{address owner}): a valid signature over an unreviewed struct.
+    assert(isErr(Eip712.typeHashOf("Order:Safe(Evil e)Evil", [("owner", "address")]))); // 2nd segment
+    assert(isErr(Eip712.typeHashOf("Evil(uint256 a)X:Withdraw", [("a", "uint256")]))); // 1st segment
+    assert(isErr(Eip712.typeHashOf("A:B c", [("a", "uint256")]))); // space
+    assert(isErr(Eip712.typeHashOf("A:B,C", [("a", "uint256")]))); // comma
+    assert(isErr(Eip712.typeHashOf("A:B)C(", [("a", "uint256")]))); // parens
+    assert(isErr(Eip712.typeHashOf("Foo:2Bar", [("a", "uint256")]))); // digit-leading 2nd segment
+  });
+
+  test("colon names are EXEMPT from the atomic-shadow prefix rule (viem/ethers verify them)", func() {
+    // Review round 2: the prefix arm ran against the FULL name, refusing "intents:Swap" with
+    // an error claiming standard tooling rejects it — disproved on the full wallet path
+    // (viem 2.55.2 + ethers 6.17.0 sign AND verify these with singleton types maps). No
+    // solidity atomic contains a colon, and these names can only ever be the primaryType
+    // here, so nothing can shadow.
+    switch (Eip712.typeHashOf("intents:Swap", [("a", "uint256")])) {
+      case (#ok(_)) {}; case (#err(_)) { assert(false) };
+    };
+    switch (Eip712.typeHashOf("uint256:Foo", [("a", "uint256")])) {
+      case (#ok(_)) {}; case (#err(_)) { assert(false) };
+    };
+    // Bare atomic-family names stay refused (that rule is unchanged for non-colon names).
+    func isErr(r : { #ok : [Nat8]; #err : Text }) : Bool {
+      switch (r) { case (#err(_)) { true }; case (#ok(_)) { false } };
+    };
+    assert(isErr(Eip712.typeHashOf("intents", [("a", "uint256")])));
+    assert(isErr(Eip712.typeHashOf("uint256", [("a", "uint256")])));
+  });
+
+  test("MUTATION PIN: digits/underscores accepted in BOTH segments (positive round-trip)", func() {
+    switch (Eip712.encodeTypeString("Venue_2:Order_1", [("a", "uint256")])) {
+      case (#ok(s)) { assert(s == "Venue_2:Order_1(uint256 a)") };
+      case (#err(_)) { assert(false) };
+    };
+  });
+});

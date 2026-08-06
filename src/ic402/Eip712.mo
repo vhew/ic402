@@ -310,7 +310,7 @@ module {
     #err("type '" # t # "' is not a supported atomic type — nested structs and non-atomic types are DELIBERATELY unsupported (they require transitive type collection + alphabetical dependency sorting, whose failure mode is a valid signature over the wrong struct)");
   };
 
-  // Identifier check for struct and field names: [A-Za-z_][A-Za-z0-9_]*. This is
+  // Identifier check for FIELD names and struct-name SEGMENTS: [A-Za-z_][A-Za-z0-9_]*. This is
   // SECURITY-CRITICAL, not cosmetics: names are interpolated into the canonical type string,
   // so a name like "a,address evil)Other(" would alias a DIFFERENT type than the one any
   // auditor reviewed — a valid signature over an unreviewed struct.
@@ -327,6 +327,35 @@ module {
     true;
   };
 
+  // Struct names admit ONE colon-namespaced segment pair — the venue convention for
+  // user-signed action types (e.g. Hyperliquid's "HyperliquidTransaction:Withdraw"), which
+  // ethers v5/v6, viem, alloy, and Turnkey all accept (consumer-verified across all five).
+  // The colon is safe to admit in OUR emitter because it is not structural in the canonical
+  // type-string grammar — only '(' ')' ',' and space are — so encodeTypeString stays
+  // injective: the struct name is everything before the first '('.
+  //
+  // INTEROP CAVEAT (pinned by test/eip712-colon-interop.test.ts): viem does NOT hash colon
+  // names context-free. Its dependency lookup truncates the primaryType at the first
+  // non-\w character (`/^\w*/u`), so if the VERIFIER'S types map also contains a struct named
+  // exactly the first segment ("Order" beside "Order:V2"), viem silently appends that struct
+  // to its type string and the digests diverge — fail-closed (the signature just never
+  // verifies; our single-group string cannot equal viem's two-group one), but a confusing
+  // outage. With a singleton types map — the motivating venue's real shape — viem, ethers,
+  // and this encoder agree byte-for-byte. A policy layer SHOULD refuse to register a
+  // namespaced type whose first segment equals another registered type's name.
+  //
+  // FIELD names stay strict single identifiers; nothing in the ecosystem namespaces field
+  // names, so widening them would buy nothing and cost review surface.
+  func isStructName(t : Text) : Bool {
+    let parts = Iter.toArray(Text.split(t, #char ':'));
+    // Exactly one or two segments. The lower bound is NOT redundant: Text.split("") yields an
+    // EMPTY iterator (not [""]), so without it the empty name would skip the segment loop
+    // entirely and be accepted — caught by the injection suite's typeHashOf("") pin.
+    if (parts.size() == 0 or parts.size() > 2) return false;
+    for (p in parts.vals()) { if (not isIdentifier(p)) return false }; // ":A" / "A:" stay out
+    true;
+  };
+
   // Hard cap on field count. Real EIP-712 structs have a handful of fields (venue order
   // structs run ~10-20); the cap exists because validation below is O(n²) in fields.size()
   // (the duplicate-name scan) and the module promises NEVER to trap on relayed untrusted
@@ -339,8 +368,8 @@ module {
   // no duplicate field names, at least one field, bounded field count, and a struct NAME that
   // no standard EIP-712 implementation treats specially.
   func validateFields(structName : Text, fields : [(Text, Text)]) : { #ok : [ParsedType]; #err : Text } {
-    if (not isIdentifier(structName)) {
-      return #err("struct name '" # structName # "' is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*) — names are interpolated into the canonical type string, so anything else could alias a different type");
+    if (not isStructName(structName)) {
+      return #err("struct name '" # structName # "' is not a valid identifier or colon-namespaced identifier pair ([A-Za-z_][A-Za-z0-9_]*(:[A-Za-z_][A-Za-z0-9_]*)?) — names are interpolated into the canonical type string, so anything else could alias a different type");
     };
     // Reserved: EIP-712 gives "EIP712Domain" protocol semantics. viem/ethers DROP the struct
     // part of the digest when primaryType is EIP712Domain (domain-only signing), so no
@@ -350,18 +379,30 @@ module {
     if (structName == "EIP712Domain") {
       return #err("struct name 'EIP712Domain' is reserved by EIP-712 — standard implementations sign the DOMAIN ONLY for this primaryType, so a digest built from it is unverifiable everywhere; name your struct something else");
     };
-    // Atomic-shadowing names: in an EIP-712 `types` map a struct named "address"/"uint256"/…
-    // SHADOWS the atomic type, so viem refuses such names outright (InvalidStructTypeError —
-    // exact "address"/"bool"/"string" or any "bytes"/"uint"/"int" prefix) the moment the name
-    // is referenced, which the standard domain fields (string/uint256/address) always do.
-    // A signature over such a struct would be unverifiable by standard tooling; reject to
-    // match viem's rule exactly.
+    // A FIRST SEGMENT of "EIP712Domain" diverges UNCONDITIONALLY under viem (empirically
+    // verified against 2.55.2): viem injects an EIP712Domain entry into every types map and
+    // its dependency lookup truncates the primaryType at the colon, so "EIP712Domain:X" pulls
+    // the domain struct into viem's type string while ethers (and we) hash the name
+    // context-free — the two ecosystems disagree on the digest, permanently.
+    if (Text.startsWith(structName, #text "EIP712Domain:")) {
+      return #err("struct name '" # structName # "' has the reserved first segment 'EIP712Domain' — viem's dependency lookup truncates the primaryType at the colon and always finds its injected EIP712Domain entry, so viem and ethers permanently disagree on this name's digest; choose a different namespace");
+    };
+    // Atomic-shadowing names — NON-COLON names only. In an EIP-712 `types` map a struct named
+    // "address"/"uint256"/… SHADOWS the atomic type, and viem refuses such names
+    // (InvalidStructTypeError — exact "address"/"bool"/"string" or any "bytes"/"uint"/"int"
+    // prefix) the moment the name is referenced as a FIELD type, which the standard domain
+    // fields (string/uint256/address) always do. Colon-bearing names are exempt: no solidity
+    // atomic contains ':', ic402 categorically refuses nested field types so these names are
+    // only ever the primaryType, and viem/ethers were empirically verified (2.55.2 / 6.17.0)
+    // to sign AND verify "uint256:Foo"/"intents:Swap" end-to-end with singleton maps.
     if (
-      structName == "address" or structName == "bool" or structName == "string"
-      or Text.startsWith(structName, #text "bytes") or Text.startsWith(structName, #text "uint")
-      or Text.startsWith(structName, #text "int")
+      not Text.contains(structName, #char ':') and (
+        structName == "address" or structName == "bool" or structName == "string"
+        or Text.startsWith(structName, #text "bytes") or Text.startsWith(structName, #text "uint")
+        or Text.startsWith(structName, #text "int")
+      )
     ) {
-      return #err("struct name '" # structName # "' shadows a solidity atomic type family — viem/ethers reject or misencode types maps containing it, so a signature over this struct would be unverifiable by standard tooling; choose a name not starting with 'uint'/'bytes'/'int' and not 'address'/'bool'/'string'");
+      return #err("struct name '" # structName # "' shadows a solidity atomic type family — viem refuses types maps that reference such a name (InvalidStructTypeError via its domain fields), so a signature over this struct would be unverifiable by standard tooling; choose a name not starting with 'uint'/'bytes'/'int' and not 'address'/'bool'/'string'");
     };
     if (fields.size() == 0) {
       return #err("empty field list — a zero-field struct signs nothing reviewable; declare at least one field");
