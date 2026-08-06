@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.13.1 — 2026-08-05
+
+Patch — **colon-namespaced struct names** (consumer-reported, blocking a real venue). 2.13.0's
+identifier rule (`[A-Za-z_][A-Za-z0-9_]*`) refused struct names like Hyperliquid's
+`HyperliquidTransaction:Withdraw`, whose colon is part of the primaryType, participates in the
+typeHash, and is verified against exactly that digest by the venue's servers. The rule was
+stricter than the ecosystem: the reporting consumer verified ethers v5/v6, viem, alloy, and
+Turnkey all accept the colon; a name the encoder refuses is a digest no one can produce through
+it — a functional block, not a safety margin.
+
+### Fixed
+
+- **Struct names now admit one colon-namespaced segment pair**:
+  `[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z_][A-Za-z0-9_]*)?`. The colon is safe in *our* emitter
+  because it is not structural in the canonical type-string grammar (only `(` `)` `,` and
+  space are), so `encodeTypeString` stays injective — the struct name is everything before the
+  first `(`. **Field names stay strict** single identifiers; empty segments, multiple colons,
+  and bare `:` remain rejected; `EIP712Domain` stays reserved. Implementation note: Motoko's
+  `Text.split("")` yields an *empty* iterator, so the empty-name rejection needed an explicit
+  lower bound — caught during implementation by the existing injection suite's
+  `typeHashOf("")` pin, which is exactly what that pin is for.
+- **Golden vectors over the venue's real type** (viem 2.55.2): `HyperliquidTransaction:Withdraw`
+  with its actual fields (`string`×3 + `uint64`), pinned at type-string, typeHash, hashStruct,
+  and full-digest level under the real domain (`HyperliquidSignTransaction`/`1`/42161/zero
+  address).
+- **Anti-normalization pin**, from the reporter's own hazard note: `:` is a scope separator in
+  many policy DSLs, so any downstream matcher that splits on it would silently alias
+  `HyperliquidTransaction:Withdraw` to `Withdraw`. A test asserts the name round-trips *whole*
+  and that the namespaced and bare forms commit to **different** hashes — with the bare form's
+  hash also pinned to viem, so a normalizing encoder can't hide behind producing the suffix's
+  (valid) digest. ic402 never *normalizes* on `:` (validation splits, encoding never does);
+  the pin makes that a contract.
+
+### Hardened by this release's adversarial review (pre-release, all fixed)
+
+- **viem does not hash colon names context-free** — the review disproved this patch's own
+  initial rationale ("viem hashes the colon literally"). viem's dependency lookup truncates
+  the primaryType at the first non-word character, so its digest for a colon name is
+  **contingent on the verifier's types map**: with a singleton map (the venue's real shape)
+  viem/ethers/ic402 agree byte-for-byte, but a verifier whose map *also* holds a struct named
+  exactly the first segment gets a silently different viem digest (ethers hard-throws
+  "ambiguous" on the same map). Strictly fail-closed — ic402's single-group type string can
+  never equal viem's two-group one — but documented now in `isStructName`'s comment and
+  **pinned as a drift alarm** in `packages/client/test/eip712-colon-interop.test.ts` (if viem
+  changes this behaviour, that suite says so). Policy layers should refuse to register a
+  namespaced type whose first segment names another registered type.
+- **`EIP712Domain:*` is rejected outright**: viem injects an `EIP712Domain` entry into every
+  types map, so for this prefix the truncated lookup *always* resolves and viem permanently
+  disagrees with ethers (and us) on the digest — verified empirically, no verifier
+  configuration avoids it.
+- **The atomic-shadowing rule no longer misfires on colon names.** It ran against the full
+  name, refusing `intents:Swap`/`uint256:Foo` with an error claiming standard tooling rejects
+  them — disproved on the full wallet path (viem 2.55.2 and ethers 6.17.0 sign *and verify*
+  both, singleton maps). No solidity atomic contains `:`, and these names can only ever be the
+  primaryType here, so nothing can shadow: colon names are now exempt; bare-name behaviour is
+  unchanged.
+- **Character-level injection pins for both colon segments.** Two natural `isStructName`
+  implementations (checking segments only for non-emptiness) passed the entire suite while
+  accepting `Order:Safe(Evil e)Evil` — whose type string ethers reads as a *nested* struct
+  definition, verbatim the valid-signature-over-an-unreviewed-struct failure the module
+  exists to prevent. Both mutants now die on dedicated tests covering structural characters
+  in either segment, digit-leading second segments, and a positive digits/underscore
+  round-trip.
+
 ## v2.13.0 — 2026-08-04
 
 Minor release — **field-driven EIP-712 encoding** (consumer-requested). `Eip712` gains a generic
