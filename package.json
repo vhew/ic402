@@ -32,18 +32,18 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@icp-sdk/core": "6.0.0",
-    "@icp-sdk/icp-cli": "1.0.2",
-    "@noble/hashes": "2.2.0",
-    "@x402/core": "2.18.0",
-    "eslint": "10.7.0",
+    "@icp-sdk/core": "6.1.0",
+    "@icp-sdk/icp-cli": "1.3.0",
+    "@noble/hashes": "2.3.0",
+    "@x402/core": "2.23.0",
+    "eslint": "10.9.0",
     "husky": "9.1.7",
-    "lint-staged": "17.0.8",
-    "prettier": "3.9.5",
-    "tsx": "4.23.1",
+    "lint-staged": "17.3.0",
+    "prettier": "3.9.6",
+    "tsx": "4.23.12",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.64.0",
-    "vitest": "4.1.10"
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.11"
   },
   "lint-staged": {
     "packages/client/**/*.ts": [
