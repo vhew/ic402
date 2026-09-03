@@ -50,16 +50,16 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@icp-sdk/core": "6.0.0",
+    "@icp-sdk/core": "6.1.0",
     "cborg": "5.1.7",
-    "viem": "2.55.2"
+    "viem": "2.56.0"
   },
   "peerDependencies": {
     "@icp-sdk/core": ">=5.1.0"
   },
   "devDependencies": {
-    "@icp-sdk/core": "6.0.0",
+    "@icp-sdk/core": "6.1.0",
     "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }
