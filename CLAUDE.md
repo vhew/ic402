@@ -27,3 +27,28 @@ IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts
 - `packages/client/` — TypeScript client SDK (@ic402/client)
 - `integrations/mcp/` — MCP server for AI agent access
 - `scripts/` — Dev tooling (setup, version bump, deployment)
+
+## Linear handoff (coding agent)
+
+You are the **ic402** coding agent. Work comes from Linear team **Engramx** (issue key `EGX`).
+
+### Claim filter (required)
+Only pick issues that have **all** of:
+- label `coding-agent`
+- label `repo:ic402`
+- status **Todo**
+
+Ignore: `needs-routing`, other `repo:*`, parent/umbrella issues, and anything already In Progress by someone else.
+
+### Protocol
+1. Set status **In Progress**.
+2. Implement only this repo (`vhew/ic402`). Do not touch engramx / engramx-platform / engramx-workshop.
+3. Stay inside the issue’s acceptance criteria — no invented scope.
+4. Open a PR; comment the Linear issue with the PR URL.
+5. Set status **In Review** (not Done). Done is after human/ops merge.
+6. If the issue is clearly wrong-repo: do **not** claim it. Comment `wrong-repo → suggest repo:…` and leave Todo / needs-routing.
+
+### Project hint
+Prefer issues on Linear project **ic402** when listed.
+
+Linear status is the done signal — not Slack or Discord.
