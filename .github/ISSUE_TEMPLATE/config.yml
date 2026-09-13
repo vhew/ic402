@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/vhew/ic402/security/policy
+    about: >-
+      ic402 handles funds. Never report a vulnerability in a public issue — use the
+      private process in SECURITY.md.
+  - name: Questions and discussion
+    url: https://discord.gg/dxQMw7Rc6
+    about: Ask on Discord — usage questions, integration help, and design discussion.
+  - name: Contributing guide
+    url: https://github.com/vhew/ic402/blob/master/CONTRIBUTING.md
+    about: Dev setup, project layout, tests, and PR conventions.

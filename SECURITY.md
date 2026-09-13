@@ -186,7 +186,7 @@ discussion for a security report.
 
 - **Preferred:** open a GitHub private security advisory:
   <https://github.com/vhew/ic402/security/advisories/new>
-- **Security contact:** `[maintainer: set a security contact]`
+- **Security contact:** [developer@engramx.ai](mailto:developer@engramx.ai)
 
 Please include: the affected version/commit, the module and `file:line` if known, a
 description of the impact (especially any money-theft or fund-loss path), and a proof of

@@ -1,0 +1,87 @@
+name: Bug report
+description: Something in ic402 behaves incorrectly
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+
+        **Do not use this form for security vulnerabilities.** ic402 handles funds —
+        report anything with a security impact privately via
+        [SECURITY.md](https://github.com/vhew/ic402/security/policy) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The smallest sequence that reproduces it. Include the call you made and
+        the response or trap message you got back.
+      placeholder: |
+        1. pnpm setup:local
+        2. Call `...` with `...`
+        3. Canister traps with `...`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - src/ic402 — Motoko library
+        - packages/client — TypeScript client SDK (@ic402/client)
+        - integrations/mcp — MCP server (@ic402/mcp)
+        - example/ — example canister or demo client
+        - scripts/ — setup, deploy, or release tooling
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ic402 version
+      description: The mops/npm version, or the commit SHA if building from source.
+      placeholder: 2.13.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Where did this happen
+      options:
+        - Local replica
+        - ICP mainnet
+        - mops test / CI
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: |
+        Canister trap messages, `icp` CLI output, or test failures.
+        This is rendered as code, so no backticks needed.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: |
+        Chain, ledger, or token involved; whether it is reproducible; anything you
+        already ruled out.
