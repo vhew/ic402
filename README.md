@@ -383,6 +383,15 @@ For services requiring trustless verification, deploy a Groth16 verifier caniste
 Dev setup, project layout, and conventions: **[CONTRIBUTING.md](CONTRIBUTING.md)**. Cutting a
 release — version bump, the stable-schema gate, publishing to mops + npm: **[RELEASING.md](RELEASING.md)**.
 
+## Community
+
+- **Questions, integration help, design discussion:** [Discord](https://discord.gg/dxQMw7Rc6)
+- **Bugs and feature requests:** [GitHub Issues](https://github.com/vhew/ic402/issues)
+- **Security vulnerabilities:** never in a public issue — use the private process in
+  [SECURITY.md](SECURITY.md)
+
+Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
 [Apache 2.0](LICENSE)

@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest a capability or improvement for ic402
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Questions and open-ended design discussion are
+        often faster on [Discord](https://discord.gg/dxQMw7Rc6) — use this form
+        when you have a concrete change in mind.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What are you trying to do that ic402 makes hard or impossible today?
+        Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would like ic402 to do.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - src/ic402 — Motoko library
+        - packages/client — TypeScript client SDK (@ic402/client)
+        - integrations/mcp — MCP server (@ic402/mcp)
+        - example/ — example canister or demo client
+        - scripts/ — setup, deploy, or release tooling
+        - Docs
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, and why they were not enough.
+
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      description: |
+        ic402 canisters hold funds and are upgraded in place, so breaking changes
+        are expensive. Tick anything you believe your proposal would require.
+      options:
+        - label: Changes a public Motoko API
+        - label: Changes the stable state layout (would need a STABLE_SCHEMA_VERSION bump)
+        - label: Changes the HTTP/x402 wire format
+        - label: Changes the @ic402/client API
+        - label: I do not think this is breaking
