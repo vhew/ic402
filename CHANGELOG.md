@@ -1,5 +1,76 @@
 # Changelog
 
+## v2.14.0 — 2026-09-20
+
+Minor — **threshold Schnorr signing** (Ed25519 and BIP340-secp256k1) beside the existing
+threshold ECDSA. Purely additive: no existing type, method or behaviour changes, the stable
+contract is untouched (`STABLE_SCHEMA_VERSION` stays 1), and `EvmSigner`'s hardcoded empty
+derivation path is deliberately left exactly as it was. No wire/HTTP or `@ic402/client`
+breaking changes.
+
+### Added
+
+- **`SchnorrSigner`** (`src/ic402/SchnorrSigner.mo`, exported as `Ic402.SchnorrSigner`) —
+  `getPublicKey(algorithm, path)`, `sign(algorithm, path, message, aux)`,
+  `getBip340XOnlyKey(path)` and `signatureCost(algorithm)`. A low-level primitive by design:
+  no policy, no spend caps, no audit logging, no state beyond a transient public-key cache,
+  and nothing in stable memory. The calling canister wraps it and enforces its own rule that
+  no signature leaves without a policy check and a log entry.
+- **The derivation path is a required parameter, never a default.** A published address or key
+  becomes permanent the moment a customer uses it, so the choice belongs to the caller.
+- **No internal retry, deliberately.** The interface spec warns that a `SYS_UNKNOWN` or
+  `CANISTER_ERROR` reject does not mean no signature was produced — so a retry could hand out
+  two signatures for one authorised request. One call in, at most one signature out.
+- **Fail-closed validation before the call is built**: empty and oversized messages, overlong
+  derivation paths, `#bip341` aux on `#ed25519`, and a `merkle_root_hash` that is neither empty
+  nor 32 bytes. This matters because oversized arguments *trap* the calling canister at
+  `ic0.call_data_append` rather than rejecting, and a trap cannot be caught.
+- **Example endpoints** `schnorrPublicKey` / `schnorrSign` in `example/main.mo`, controller-gated,
+  showing both algorithms and the BIP341 path.
+- **New CI step** `Schnorr suite (replica-enforced)` in the `test-integration` job, gated by
+  `IC402_REQUIRE_SCHNORR=1`.
+
+### Notes
+
+- **Key names are shared with ECDSA** — `dfx_test_key`, `test_key_1`, `key_1`. The algorithm is
+  a separate field of `key_id`, so one name serves both Schnorr variants.
+- **`bip340secp256k1` returns a 33-byte SEC1-compressed key**; BIP340 verification needs the
+  32-byte x-only form. With `aux = #bip341` the signature verifies against the **tweaked** output
+  key, not the returned `internal_pubkey`.
+- **Ed25519 threshold signatures are non-deterministic** — verify, never compare bytes.
+- **Both algorithms sign the message whole**, not a digest (unlike `sign_with_ecdsa`'s mandatory
+  32-byte `message_hash`).
+- Cost per signature is set by the subnet the *key* lives on, not the caller's, and is identical
+  for both algorithms and for ECDSA: 10,000,000,000 cycles for `test_key_1`,
+  26,153,846,153 for `key_1`. `schnorr_public_key` is free. There is no cycle constant in
+  `mo:ic` to read — `Cost.signWithSchnorr` resolves it from the replica at call time, which is
+  what `signatureCost` surfaces.
+- **A caller may supply at most 254 derivation-path elements, not 255.** The spec's "at most
+  255" is the whole extended-BIP32 path and the IC prepends the calling canister's id. Verified
+  against a live replica: 254 succeeds, 255 is rejected by the management canister's Candid
+  decoder. `MAX_DERIVATION_PATH_ELEMENTS` is 254 so that value fails closed in-library rather
+  than on a wasted cross-subnet round trip.
+
+### Testing
+
+- 24 Motoko unit tests over the pure validation and encoding helpers, including a literal pin
+  on the bound constants (every other bound test is written in terms of them, so a wrong
+  constant would stay green — which is exactly how the 254 bound below was caught). Signing itself is
+  **not unit-testable**: the `mops test` interpreter has no `costSignWithSchnorr` primitive, and
+  `mo:ic/Call` does not type-check under `-wasi-system-api` — so every signing path is proven
+  against a real replica instead.
+- 16 replica-backed tests (`test/schnorr.test.ts`) signing with both algorithms and verifying each
+  signature with `@noble/curves`, including a BIP341-tweaked signature checked against the
+  independently recomputed tweaked key — and asserted *not* to verify against the untweaked key,
+  so the test would fail if the aux were silently dropped.
+- Adds `@noble/curves` 2.2.0 as a root devDependency (BIP340/BIP341 verification; it was only
+  reachable transitively before).
+
+### Not included (follow-ups)
+
+HTTP message signatures, SSH certificates, JWS, Solana/Bitcoin transaction builders. No EngramX
+changes.
+
 ## v2.13.1 — 2026-08-05
 
 Patch — **colon-namespaced struct names** (consumer-reported, blocking a real venue). 2.13.0's
