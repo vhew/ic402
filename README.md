@@ -272,6 +272,52 @@ Funds are custodied at the platform recipient account; `settleJob` pays the oper
 | `signRegistration(...)` | Sign ERC-8004 registration tx |
 | `getEvmAddress()` | Canister's tECDSA-derived EVM address |
 
+### SchnorrSigner (optional)
+
+Threshold Schnorr beside `EvmSigner`'s threshold ECDSA — Ed25519 (Solana, RFC8032) and
+BIP340-secp256k1 (Bitcoin taproot, Nostr). A low-level primitive: no policy, no caps, no
+audit log. Wrap it and enforce your own policy check and log entry before signing.
+
+| Method | Description |
+|--------|-------------|
+| `getPublicKey(algorithm, path)` | Derive a threshold public key + chain code. Costs no cycles |
+| `sign(algorithm, path, message, aux)` | Sign a message. `aux` carries the BIP341 taproot tweak |
+| `getBip340XOnlyKey(path)` | The 32-byte x-only key BIP340 verification needs |
+| `signatureCost(algorithm)` | Cycles the next `sign` will attach, read from the replica |
+
+The derivation path is a **required parameter, never a default** — a published key is
+permanent once a customer uses it, so the choice is the caller's. Pass `[]` for the
+canister's own root key.
+
+```motoko
+transient let schnorr = Ic402.SchnorrSigner.SchnorrSigner("key_1");
+
+switch (await schnorr.sign(#ed25519, [Text.encodeUtf8("agent-1")], message, null)) {
+  case (#ok(sig)) { /* 64 bytes */ };
+  case (#err(e)) { /* fails closed */ };
+};
+```
+
+Things that bite:
+
+- **Key names are shared with ECDSA** — `dfx_test_key` (local), `test_key_1`, `key_1`. The
+  algorithm is a separate field, so one name serves both variants.
+- **`bip340secp256k1` returns a 33-byte SEC1-compressed key.** BIP340 verification needs the
+  32-byte x-only form — drop the leading parity byte, or use `getBip340XOnlyKey`.
+- **With `aux = #bip341`, the signature verifies against the TWEAKED output key**, not the key
+  `getPublicKey` returns (that is BIP341's `internal_pubkey`). Apply the taproot tweak first.
+  `#bip341` is rejected for `#ed25519`.
+- **Ed25519 signatures are non-deterministic** — the same message signs to different bytes each
+  time. Verify; never compare signature bytes.
+- **Messages are signed whole, not hashed** — unlike `sign_with_ecdsa`'s mandatory 32-byte
+  digest, both Schnorr algorithms take arbitrary-length input.
+- **No internal retry.** A `SYS_UNKNOWN`/`CANISTER_ERROR` reject does not prove no signature was
+  produced, so retrying could yield two signatures for one authorised request.
+
+Cost per signature is set by the subnet the KEY lives on, not the caller's, and is the same for
+both algorithms (and for ECDSA): 10,000,000,000 cycles for `test_key_1`, 26,153,846,153 for
+`key_1`. `getPublicKey` is free.
+
 ### Eip712 (hashing utilities)
 
 | Method | Description |
@@ -334,6 +380,7 @@ src/ic402/               Motoko library (published to mops)
   Gateway.mo             Charges, settlement, sessions, policy
   ServiceRegistry.mo     Paid services: jobs, verification, settlement
   EvmSigner.mo           Remote EVM + EIP-712 signing (client broadcasts)
+  SchnorrSigner.mo       Threshold Schnorr: Ed25519 + BIP340-secp256k1
   Eip712.mo              EIP-712 typed data hashing (domain separators, digests)
   EvmAddress.mo          EVM address derivation + keccak256
   EvmUtils.mo            ABI encoding, hex conversion, byte utilities

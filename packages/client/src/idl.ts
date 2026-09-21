@@ -286,6 +286,27 @@ const SignedTypedDataRecord = IDL.Record({
 });
 const SignedTypedDataResult = IDL.Variant({ ok: SignedTypedDataRecord, err: IDL.Text });
 
+// ── Threshold Schnorr ──
+
+const SchnorrAlgorithm = IDL.Variant({
+  ed25519: IDL.Null,
+  bip340secp256k1: IDL.Null,
+});
+// Only variant; valid for bip340secp256k1 alone. merkle_root_hash is empty (key-path-only
+// spend) or exactly 32 bytes.
+const SchnorrAux = IDL.Variant({
+  bip341: IDL.Record({ merkle_root_hash: IDL.Vec(IDL.Nat8) }),
+});
+const SchnorrPublicKeyRecord = IDL.Record({
+  publicKey: IDL.Vec(IDL.Nat8),
+  chainCode: IDL.Vec(IDL.Nat8),
+});
+const SchnorrPublicKeyResult = IDL.Variant({
+  ok: SchnorrPublicKeyRecord,
+  err: IDL.Text,
+});
+const SchnorrSignResult = IDL.Variant({ ok: IDL.Vec(IDL.Nat8), err: IDL.Text });
+
 // ── Service Marketplace ──
 
 const ServiceType = IDL.Variant({ Sync: IDL.Null, Async: IDL.Null });
@@ -428,6 +449,17 @@ export const exampleIdlFactory = () =>
     // EIP-712 generic signing
     signTypedData: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [SignedTypedDataResult], []),
     keccak256: IDL.Func([IDL.Vec(IDL.Nat8)], [IDL.Vec(IDL.Nat8)], ['query']),
+    // Threshold Schnorr signing
+    schnorrPublicKey: IDL.Func(
+      [SchnorrAlgorithm, IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [SchnorrPublicKeyResult],
+      [],
+    ),
+    schnorrSign: IDL.Func(
+      [SchnorrAlgorithm, IDL.Vec(IDL.Vec(IDL.Nat8)), IDL.Vec(IDL.Nat8), IDL.Opt(SchnorrAux)],
+      [SchnorrSignResult],
+      [],
+    ),
     // Service marketplace
     registerService: IDL.Func(
       [

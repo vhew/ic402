@@ -1088,6 +1088,60 @@ persistent actor KnowledgeBase {
   };
 
   // ═══════════════════════════════════════════════════════════════════════
+  // OPTIONAL: Threshold Schnorr signing (Ed25519 / BIP340-secp256k1)
+  //
+  // A second signing rail beside tECDSA, for protocols that need Schnorr:
+  // Ed25519 (Solana, RFC8032 consumers) and BIP340-secp256k1 (Bitcoin taproot,
+  // Nostr). The library module is a bare primitive — it holds no policy and no
+  // audit log. THIS canister is where that policy lives, which is why both
+  // endpoints below are controller-gated.
+  //
+  // Note the derivation path is a PARAMETER, not a constant. A published key is
+  // permanent once a customer uses it, so the choice belongs to the deployment,
+  // not to ic402. Passing `[]` signs with the canister's own root key.
+  //
+  // Remove this section if you only need ECDSA.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  transient let schnorr = Ic402.SchnorrSigner.SchnorrSigner("key_1"); // patched to "dfx_test_key" for local
+
+  /// Derive a threshold Schnorr public key. Costs no cycles.
+  ///
+  /// Returns the 32-byte RFC8032 key for `#ed25519`, or the 33-byte SEC1-compressed
+  /// key for `#bip340secp256k1` — drop its first byte for BIP340's x-only form.
+  /// `chainCode` accompanies the key for BIP32-style off-chain derivation.
+  public shared (msg) func schnorrPublicKey(
+    algorithm : Ic402.SchnorrAlgorithm,
+    derivationPath : [Blob],
+  ) : async { #ok : Ic402.SchnorrPublicKey; #err : Text } {
+    requireController(msg.caller);
+    await schnorr.getPublicKey(algorithm, derivationPath);
+  };
+
+  /// Sign a message with the canister's threshold Schnorr key.
+  ///
+  /// `aux` carries the BIP341 taproot tweak and is valid only for
+  /// `#bip340secp256k1`; when supplied, the signature verifies against the TWEAKED
+  /// output key, not the key `schnorrPublicKey` returns.
+  ///
+  /// Returns 64 raw signature bytes. Ed25519 threshold signatures are
+  /// non-deterministic — the same message signs to different bytes each time, so
+  /// verify rather than compare.
+  ///
+  /// A real deployment would record the (caller, path, message hash) here before
+  /// returning, and check a spend policy first. The library deliberately does
+  /// neither — see the SchnorrSigner doc comment.
+  public shared (msg) func schnorrSign(
+    algorithm : Ic402.SchnorrAlgorithm,
+    derivationPath : [Blob],
+    message : Blob,
+    aux : ?Ic402.SchnorrAux,
+  ) : async { #ok : [Nat8]; #err : Text } {
+    requireController(msg.caller);
+    await schnorr.sign(algorithm, derivationPath, message, aux);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
   // OPTIONAL: ERC-8004 Identity Metadata
   //
   // Stores agent metadata for discovery. Registration is done via
