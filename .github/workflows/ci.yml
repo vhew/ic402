@@ -179,6 +179,15 @@ jobs:
         run: bash scripts/predemo.sh
       - name: Integration suite (replica-enforced)
         run: IC402_REQUIRE_REPLICA=1 pnpm test:integration
+      # Threshold Schnorr (Ed25519 + BIP340) rides the SAME replica — it needs no fixture
+      # overlay, so it is a step here rather than its own job. It cannot be a `mops test`:
+      # the Motoko interpreter has no `costSignWithSchnorr` primitive and `mo:ic/Call` does
+      # not type-check in wasi mode, so the replica is the ONLY place any signing path runs.
+      # IC402_REQUIRE_SCHNORR=1 turns "replica cannot serve Schnorr keys" into a hard failure
+      # instead of a silent green skip (its own flag: a replica without a TestThresholdKeys
+      # subnet still satisfies IC402_REQUIRE_REPLICA).
+      - name: Schnorr suite (replica-enforced)
+        run: IC402_REQUIRE_SCHNORR=1 pnpm exec vitest run test/schnorr.test.ts
 
   # B3: gate the EVM-OUTBOUND rail (sign → broadcast → confirm / park / reconcile) HERMETICALLY —
   # no funded testnet, no HTTPS outcall. setup:local deploys the replica + example; predemo exports

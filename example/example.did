@@ -127,6 +127,17 @@ type ServiceDefinition =
    timeout: nat;
    verification: VerificationMethod;
  };
+type SchnorrPublicKey = 
+ record {
+   chainCode: vec nat8;
+   publicKey: vec nat8;
+ };
+type SchnorrAux = variant {bip341: record {merkle_root_hash: blob;};};
+type SchnorrAlgorithm = 
+ variant {
+   bip340secp256k1;
+   ed25519;
+ };
 type PricingScheme = 
  variant {
    Exact: nat;
@@ -492,6 +503,34 @@ service : {
                                                        err: text;
                                                        ok;
                                                      });
+  /// Derive a threshold Schnorr public key. Costs no cycles.
+  /// 
+  /// Returns the 32-byte RFC8032 key for `#ed25519`, or the 33-byte SEC1-compressed
+  /// key for `#bip340secp256k1` — drop its first byte for BIP340's x-only form.
+  /// `chainCode` accompanies the key for BIP32-style off-chain derivation.
+  schnorrPublicKey: (algorithm: SchnorrAlgorithm, derivationPath:
+   vec blob) -> (variant {
+                   err: text;
+                   ok: SchnorrPublicKey;
+                 });
+  /// Sign a message with the canister's threshold Schnorr key.
+  /// 
+  /// `aux` carries the BIP341 taproot tweak and is valid only for
+  /// `#bip340secp256k1`; when supplied, the signature verifies against the TWEAKED
+  /// output key, not the key `schnorrPublicKey` returns.
+  /// 
+  /// Returns 64 raw signature bytes. Ed25519 threshold signatures are
+  /// non-deterministic — the same message signs to different bytes each time, so
+  /// verify rather than compare.
+  /// 
+  /// A real deployment would record the (caller, path, message hash) here before
+  /// returning, and check a spend policy first. The library deliberately does
+  /// neither — see the SchnorrSigner doc comment.
+  schnorrSign: (algorithm: SchnorrAlgorithm, derivationPath: vec blob,
+   message: blob, aux: opt SchnorrAux) -> (variant {
+                                             err: text;
+                                             ok: vec nat8;
+                                           });
   search: (searchQuery: text, paymentSig: opt PaymentSignature) ->
    (variant {
       error: text;

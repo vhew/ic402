@@ -19,6 +19,7 @@ import IdentityMod "Identity";
 import HttpHandlerMod "HttpHandler";
 import ICTypes "mo:ic/Types";
 import EvmSignerMod "EvmSigner";
+import SchnorrSignerMod "SchnorrSigner";
 import Eip712Mod "Eip712";
 import EvmAddressMod "EvmAddress";
 import EvmUtilsMod "EvmUtils";
@@ -146,6 +147,13 @@ module {
   /// Signed EIP-712 typed data (generic — works for any EIP-712 protocol).
   public type SignedTypedData = EvmSignerMod.SignedTypedData;
 
+  /// Which threshold Schnorr variant to sign with: `#ed25519` or `#bip340secp256k1`.
+  public type SchnorrAlgorithm = SchnorrSignerMod.Algorithm;
+  /// BIP341 taproot auxiliary input. Valid only for `#bip340secp256k1`.
+  public type SchnorrAux = SchnorrSignerMod.Aux;
+  /// A derived threshold Schnorr public key plus its chain code.
+  public type SchnorrPublicKey = SchnorrSignerMod.PublicKey;
+
   // ── HTTP ──
 
   /// IC HTTP gateway request.
@@ -181,6 +189,10 @@ module {
   public let EvmUtils = EvmUtilsMod;
   /// EVM remote signer: canister signs, client broadcasts.
   public let EvmSigner = EvmSignerMod;
+  /// Threshold Schnorr signer (Ed25519 / BIP340-secp256k1). A low-level primitive beside
+  /// `EvmSigner`'s threshold ECDSA — no policy, no caps, no logging, and a caller-supplied
+  /// derivation path. Wrap it and enforce your own policy check + audit log before signing.
+  public let SchnorrSigner = SchnorrSignerMod;
   /// ICRC-1 textual account encoding (`<owner>` for the default subaccount — byte-identical to
   /// `Principal.toText` — else `<owner>-<checksum>.<subaccount-hex>`). The library uses it for
   /// every 402 `recipient`/`payTo` and ICP receipt stamp it controls; use it yourself anywhere
