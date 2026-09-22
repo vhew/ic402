@@ -1082,6 +1082,47 @@ persistent actor KnowledgeBase {
     await signer.signTypedData(domainSeparator, structHash);
   };
 
+  // ── Derivation-path signers (2.15.0) ──
+  //
+  // `signer` above is constructed with the one-argument form, so it signs on the
+  // canister's own root key — the empty path. That is the library default, not a
+  // recommendation: a deployment running more than one purpose off one key name should
+  // give each purpose its own labelled path, e.g. ["myapp", "payments", "secp256k1", "1"].
+  //
+  // The choice is permanent. The address derived under a path gets published to payers,
+  // and a published address must never move — so pick the path BEFORE anyone sends funds
+  // to the address it derives.
+
+  /// The EVM address derived under an explicit derivation path.
+  /// Refuses an over-limit path with `#err` rather than trapping.
+  public shared (msg) func evmAddressAt(derivationPath : [Blob]) : async {
+    #ok : Text;
+    #err : Text;
+  } {
+    requireController(msg.caller);
+    switch (Ic402.EvmSigner.EvmSignerAt("key_1", derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok(s)) {
+        let addr = await s.getEvmAddress();
+        if (addr == "") { #err("address derivation failed") } else { #ok(addr) };
+      };
+    };
+  };
+
+  /// Sign EIP-712 typed data under an explicit derivation path.
+  /// The returned digest + r/s/v let a caller recover the signer independently.
+  public shared (msg) func signTypedDataAt(
+    derivationPath : [Blob],
+    domainSeparator : [Nat8],
+    structHash : [Nat8],
+  ) : async { #ok : Ic402.SignedTypedData; #err : Text } {
+    requireController(msg.caller);
+    switch (Ic402.EvmSigner.EvmSignerAt("key_1", derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok(s)) { await s.signTypedData(domainSeparator, structHash) };
+    };
+  };
+
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   public query func keccak256(data : [Nat8]) : async [Nat8] {
     Ic402.EvmAddress.keccak256(data);

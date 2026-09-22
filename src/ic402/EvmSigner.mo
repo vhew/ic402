@@ -28,6 +28,7 @@ import IC "mo:ic";
 import Call "mo:ic/Call";
 import Eip712 "Eip712";
 import Utils "Utils";
+import SchnorrSigner "SchnorrSigner";
 
 module {
 
@@ -67,7 +68,17 @@ module {
   /// EVM transaction signer using canister's tECDSA key.
   /// Does not make any EVM RPC calls — the client provides chain state
   /// (nonce, gas prices) and handles broadcasting.
-  public class EvmSigner(ecdsaKeyName : Text) {
+  ///
+  /// `derivationPath` is fixed for the life of the instance — there is no setter and no
+  /// per-call override. An EVM address derived under a path is PUBLISHED, and a published
+  /// address must never move; letting it change after construction would silently strand
+  /// funds sent to the old one. One signer per purpose, constructed once.
+  ///
+  /// Construct it through `EvmSigner(keyName)` (empty path, the 2.14.0 behaviour) or
+  /// `EvmSignerAt(keyName, path)` (validated). This class is not called directly in the
+  /// one-argument case only because Motoko has no constructor overloading — see the
+  /// factories below.
+  public class Signer(ecdsaKeyName : Text, derivationPath : [Blob]) {
 
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
@@ -83,7 +94,7 @@ module {
           let result = await IC.ic.ecdsa_public_key({
             key_id = { name = ecdsaKeyName; curve = #secp256k1 };
             canister_id = null;
-            derivation_path = [];
+            derivation_path = derivationPath;
           });
           let pk = Blob.toArray(result.public_key);
           cachedPubKey := ?pk;
@@ -145,7 +156,7 @@ module {
 
         let signResult = await Call.signWithEcdsa({
           key_id = { name = ecdsaKeyName; curve = #secp256k1 };
-          derivation_path = [];
+          derivation_path = derivationPath;
           message_hash = Blob.fromArray(txHash);
         });
         let sigBytes = Blob.toArray(signResult.signature);
@@ -243,7 +254,7 @@ module {
         // Sign with tECDSA
         let signResult = await Call.signWithEcdsa({
           key_id = { name = ecdsaKeyName; curve = #secp256k1 };
-          derivation_path = [];
+          derivation_path = derivationPath;
           message_hash = Blob.fromArray(digest);
         });
         let sigBytes = Blob.toArray(signResult.signature);
@@ -356,7 +367,7 @@ module {
         // Sign with tECDSA
         let signResult = await Call.signWithEcdsa({
           key_id = { name = ecdsaKeyName; curve = #secp256k1 };
-          derivation_path = [];
+          derivation_path = derivationPath;
           message_hash = Blob.fromArray(eip712Digest);
         });
         let sigBytes = Blob.toArray(signResult.signature);
@@ -380,6 +391,44 @@ module {
       } catch (e) {
         #err("EIP-712 signing failed: " # Error.message(e));
       };
+    };
+  };
+  // ── Construction ──
+  //
+  // Motoko has no constructor overloading (two classes of one name is M0051), and a class
+  // constructor cannot return a Result (M0134). So the two forms are factory functions over
+  // one class. `EvmSigner` stays both a TYPE and a one-argument constructor, so every 2.14.0
+  // caller — `EvmSigner.EvmSigner("key_1")`, and any `: EvmSigner.EvmSigner` annotation —
+  // compiles unchanged.
+
+  /// The signer type. Unchanged name so existing annotations keep resolving.
+  public type EvmSigner = Signer;
+
+  /// Signer on the canister's own root key — the 2.14.0 behaviour, byte for byte.
+  ///
+  /// The empty path is a DEFAULT, not a decision: it is what this library did before paths
+  /// existed, kept so no caller has to change. It is not a recommendation. A deployment that
+  /// runs more than one purpose off one key name should give each purpose its own labelled
+  /// path via `EvmSignerAt` — and must choose before publishing an address, because the
+  /// address cannot move afterwards.
+  public func EvmSigner(ecdsaKeyName : Text) : Signer = Signer(ecdsaKeyName, []);
+
+  /// Signer on an explicit derivation path, validated.
+  ///
+  /// Refuses rather than traps, the way the rest of the library refuses: the bounds are
+  /// SchnorrSigner's own `validateDerivationPath` (at most `MAX_DERIVATION_PATH_ELEMENTS`
+  /// elements totalling at most `MAX_DERIVATION_PATH_BYTES` bytes) — reused, not restated,
+  /// so the two signers can never drift apart on what a valid path is.
+  ///
+  /// The path is permanent from here: the address derived from it gets published, and a
+  /// published address must never move.
+  public func EvmSignerAt(
+    ecdsaKeyName : Text,
+    derivationPath : [Blob],
+  ) : { #ok : Signer; #err : Text } {
+    switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok) { #ok(Signer(ecdsaKeyName, derivationPath)) };
     };
   };
 };
