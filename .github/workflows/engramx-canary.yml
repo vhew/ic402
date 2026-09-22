@@ -40,12 +40,12 @@ jobs:
     environment: canary # scopes ENGRAMX_READ_TOKEN to this job
     steps:
       - name: Checkout ic402 (HEAD under test)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: ic402
 
       - name: Checkout EngramX (private, read-only)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: vhew/engramx # <-- confirm the real owner/name
           token: ${{ secrets.ENGRAMX_READ_TOKEN }}
