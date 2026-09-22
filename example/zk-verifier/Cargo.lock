@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "zk-verifier"
-version = "2.14.0"
+version = "2.15.0"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",
