@@ -21,6 +21,7 @@ import HashMap "mo:base/HashMap";
 import SHA256 "mo:sha2/Sha256";
 import Utils "Utils";
 import EvmAddress "EvmAddress";
+import SchnorrSigner "SchnorrSigner";
 import EvmEscrow "EvmEscrow";
 import EvmRpc "EvmRpc";
 import EvmSender "EvmSender";
@@ -88,9 +89,73 @@ module {
     let escrowManager = Escrow.EscrowManager(selfPrincipal);
     let grants = GrantsMod.Grants(selfPrincipal);
     let evmEscrowMgr = EvmEscrow.EvmEscrowManager();
-    let evmSenderInst : ?EvmSender.EvmSender = switch (config.ecdsaKeyName) {
+    // The path every EVM key in this gateway derives under: the inbound recipient AND the
+    // outbound sender. Transient by necessity — a consumer may not add a field to
+    // Types.Config (its Stable*State types are structurally inlined into the consumer's own
+    // stable signature), so this is re-applied after upgrade exactly like setEvmChains. It
+    // defaults to [], which is what every pre-2.16.0 gateway did, so leaving it alone is
+    // byte-identical to the old behaviour.
+    var evmDerivationPath : [Blob] = [];
+
+    // `var`, not `let`: setEvmDerivationPath rebuilds it so the outbound sender follows the
+    // recipient. Before 2.16.0 this was a `let` on the empty path, which made the same-path
+    // invariant unreachable — a labelled recipient would have been funded at one address and
+    // spent from another.
+    var evmSenderInst : ?EvmSender.EvmSender = switch (config.ecdsaKeyName) {
       case (?keyName) { ?EvmSender.EvmSender(keyName, config.evmRpcCanister) };
       case (null) { null };
+    };
+
+    /// Move every EVM key in this gateway onto `derivationPath` — the outbound sender now,
+    /// and the inbound recipient when `deriveEvmRecipient`/`…At` next derives it.
+    ///
+    /// Call this BEFORE the recipient is derived and before any address is published. A
+    /// recipient that already exists cannot move (see `deriveEvmRecipientAt`), so changing
+    /// the path afterwards would split funds from the ability to spend them — which is why
+    /// this refuses once the recipient is set.
+    ///
+    /// NOT PERSISTED. Re-apply after every upgrade, in the same init path that calls
+    /// `loadStable` — the same requirement `setEvmChains` carries.
+    public func setEvmDerivationPath(derivationPath : [Blob]) : { #ok; #err : Text } {
+      switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
+        case (#err(e)) { return #err(e) };
+        case (#ok) {};
+      };
+      switch (evmRecipient) {
+        case (?addr) {
+          if (not pathsEqual(derivationPath, evmDerivationPath)) {
+            return #err(
+              "recipient already derived as " # addr
+              # " under a different path; a published recipient cannot move"
+            );
+          };
+        };
+        case (null) {};
+      };
+      evmDerivationPath := derivationPath;
+      evmSenderInst := switch (config.ecdsaKeyName) {
+        case (?keyName) {
+          switch (EvmSender.EvmSenderAt(keyName, config.evmRpcCanister, derivationPath)) {
+            case (#ok(snd)) { ?snd };
+            case (#err(e)) { return #err(e) };
+          };
+        };
+        case (null) { null };
+      };
+      #ok;
+    };
+
+    /// The path this gateway's EVM keys derive under. `[]` is the default.
+    public func getEvmDerivationPath() : [Blob] { evmDerivationPath };
+
+    func pathsEqual(a : [Blob], b : [Blob]) : Bool {
+      if (a.size() != b.size()) { return false };
+      var i = 0;
+      while (i < a.size()) {
+        if (a[i] != b[i]) { return false };
+        i += 1;
+      };
+      true;
     };
 
     var receiptCounter : Nat = 0;
@@ -168,20 +233,86 @@ module {
     ///
     /// ecdsaKeyName: "dfx_test_key" for local replica, "key_1" for mainnet IC.
     public func deriveEvmRecipient(ecdsaKeyName : Text) : async () {
+      // Derives under the gateway's CURRENT path, which defaults to [] — so a consumer that
+      // never calls setEvmDerivationPath gets byte-identical pre-2.16.0 behaviour, and one
+      // that does cannot accidentally derive the recipient off the sender's path.
+      ignore await deriveRecipient(ecdsaKeyName, evmDerivationPath);
+    };
+
+    /// Derive the inbound EVM recipient under an explicit derivation path, validated.
+    ///
+    /// INVARIANT — THE SAME PATH EVERYWHERE. This address is what payers are told to send
+    /// to. The `EvmSigner` that spends from it and the `EvmSender` that settles outbound
+    /// must be constructed under THIS SAME PATH. Derive the recipient under one path and
+    /// sign under another and the canister signs from an address nothing funds, while
+    /// deposits pile up at an address it never spends from.
+    ///
+    /// The recipient is a single persisted slot (`StableGatewayState.evmRecipient`), so the
+    /// first successful derivation wins and later calls return early — a gateway has ONE
+    /// recipient. Choose the path before publishing it; a published address cannot move.
+    public func deriveEvmRecipientAt(
+      ecdsaKeyName : Text,
+      derivationPath : [Blob],
+    ) : async { #ok; #err : Text } {
+      switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
+        case (#err(e)) { return #err(e) };
+        case (#ok) {};
+      };
+      // The outbound sender must already be on this path, or settling would sign from an
+      // address the deposits never reach. Refuse rather than create that split.
+      if (not pathsEqual(derivationPath, evmDerivationPath)) {
+        return #err(
+          "gateway's EVM sender is on a different derivation path; "
+          # "call setEvmDerivationPath first so the recipient and the sender are one address"
+        );
+      };
+      try { await deriveRecipient(ecdsaKeyName, derivationPath) } catch (e) {
+        #err("EVM recipient derivation failed: " # Error.message(e));
+      };
+    };
+
+    // Shared body. Returns early when already derived — the slot is persisted and a
+    // gateway's recipient must never move once payers have it.
+    func deriveRecipient(ecdsaKeyName : Text, derivationPath : [Blob]) : async {
+      #ok;
+      #err : Text;
+    } {
       switch (evmRecipient) {
-        case (?_) { return }; // Already derived
+        // Already derived. Do NOT report a bare #ok: the slot is persisted, so on any
+        // gateway upgraded from <=2.15.0 it already holds the EMPTY-path address, and a
+        // caller asking for a labelled path would read that #ok as "your path was applied"
+        // and then publish one address while signing for another. Confirm the existing
+        // recipient IS the one this path derives, and say so plainly when it is not.
+        case (?existing) {
+          let check = await management_canister.ecdsa_public_key({
+            key_id = { name = ecdsaKeyName; curve = #secp256k1 };
+            canister_id = null;
+            derivation_path = derivationPath;
+          });
+          switch (EvmAddress.fromCompressedPublicKey(Blob.toArray(check.public_key))) {
+            case (#ok(addr)) {
+              if (addr == existing) { return #ok };
+              return #err(
+                "recipient already derived as " # existing
+                # " under a different path; a published recipient cannot move"
+              );
+            };
+            case (#err(msg)) { return #err("EVM address derivation failed: " # msg) };
+          };
+        };
         case (null) {};
       };
       let result = await management_canister.ecdsa_public_key({
         key_id = { name = ecdsaKeyName; curve = #secp256k1 };
         canister_id = null;
-        derivation_path = [];
+        derivation_path = derivationPath;
       });
       // H-2: Surface error instead of silently swallowing — operators can see this in canister logs
       switch (EvmAddress.fromCompressedPublicKey(Blob.toArray(result.public_key))) {
-        case (#ok(addr)) { evmRecipient := ?addr };
+        case (#ok(addr)) { evmRecipient := ?addr; #ok };
         case (#err(msg)) {
           Debug.print("ic402 CRITICAL: EVM address derivation failed: " # msg # ". EVM payments will be unavailable.");
+          #err("EVM address derivation failed: " # msg);
         };
       };
     };

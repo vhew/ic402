@@ -1,5 +1,98 @@
 # Changelog
 
+## v2.16.0 — 2026-09-22
+
+Minor — **the derivation path reaches every deriving site.** Additive: every current caller
+compiles and behaves exactly as in 2.15.0, `STABLE_SCHEMA_VERSION` stays 1, and no config
+record or stable type gained a field.
+
+2.15.0 gave `EvmSigner` a per-instance path, but four other sites still derived from the
+empty path on the same key name — so a consumer moving its signer to a labelled path would
+sign from an address nothing funds, while deposits and outbound settlement kept using the
+unlabelled one. `grep -rn "derivation_path = \[\]" src/ic402/` now returns nothing.
+
+### Added
+
+- **`EvmSenderAt(ecdsaKeyName, evmRpcCanister, derivationPath)`** → `{ #ok : Sender; #err : Text }`.
+  Both of EvmSender's deriving sites read the instance path; its cache was already
+  per-instance. `EvmSender(keyName, rpc)` is unchanged and stays a type.
+- **`Identity.getPublicKeyAt(keyName, derivationPath)`** → `async { #ok : Blob; #err : Text }`,
+  beside the unchanged `getPublicKey(keyName)`.
+- **`Gateway.setEvmDerivationPath(derivationPath)`** → `{ #ok; #err : Text }`, moving the
+  gateway's outbound sender AND its inbound recipient onto one path, plus
+  **`Gateway.getEvmDerivationPath()`**. **Not persisted** — re-apply after every upgrade in
+  the same init path that calls `loadStable`, exactly as `setEvmChains` requires.
+- **`Gateway.deriveEvmRecipientAt(ecdsaKeyName, derivationPath)`** → `async { #ok; #err : Text }`,
+  beside the unchanged `deriveEvmRecipient(ecdsaKeyName)`. It refuses a path the gateway's
+  sender is not already on, and refuses to report success for a recipient derived under a
+  different path.
+- **`Ic402.EvmSender`** is now exported from `lib.mo` — it was reachable only by direct module
+  import before.
+- **A CI gate**, `scripts/check-derivation-paths.sh`, failing the build if a hardcoded empty
+  derivation path reappears under `src/ic402/`. Its allowlist is empty and meant to stay
+  empty; `--self-test` proves it still catches a planted violation, including a whitespace
+  variant, rather than having decayed into a green no-op.
+
+### Fixed
+
+- **The Gateway's own outbound sender could not follow the path.** `evmSenderInst` was a
+  `let` on the empty path with no setter, and it is the signer behind every outbound money
+  path (Sessions, the EIP-3009 relay, `sendErc20Transfer`, `sendErc20TransferConfirmed`,
+  `confirmEvmTransaction`). A labelled recipient would have been funded at one address and
+  spent from another — the exact split this release exists to prevent, inside the Gateway
+  itself. It is now a `var` rebuilt by `setEvmDerivationPath`, and `deriveEvmRecipient`
+  derives under the gateway's current path (default `[]`, so unchanged by default).
+- **`deriveEvmRecipientAt` reported success for a path it had not applied.** The
+  already-derived branch returned a bare `#ok`. Since `evmRecipient` is persisted, every
+  gateway upgraded from ≤2.15.0 has that slot filled at the empty path, so a consumer asking
+  for a labelled one would read `#ok` as "applied", publish one address and sign for another.
+  It now confirms the existing recipient is the one the requested path derives, and says
+  plainly when it is not.
+- **`Identity`'s public-key cache was a single unkeyed slot**, so `getPublicKey(keyNameA)`
+  followed by `getPublicKey(keyNameB)` returned A's key. It is now keyed by
+  `(keyName, derivationPath)`. Pre-existing, and adding a path would have widened the same
+  confusion to paths.
+
+### Notes
+
+- **THE SAME PATH EVERYWHERE.** A gateway's recipient, the `EvmSigner` that spends from it
+  and the `EvmSender` that settles outbound must all be derived under one path. They are one
+  address; deriving them apart splits funds from the ability to spend them.
+- **A published path is permanent.** These addresses are given to payers and cannot move, so
+  choose before publishing. `Gateway.evmRecipient` is a single persisted slot
+  (`StableGatewayState.evmRecipient`) and the first successful derivation wins, which is what
+  enforces that.
+- **No config record gained a field.** A consumer structurally inlines this library's
+  `Stable*State` types into its own stable signature, so a new field on anything that can
+  reach stable state would fail the consumer's stable-compatibility gate. The path is carried
+  as an argument throughout, exactly as 2.15.0 did.
+- Bounds everywhere are `SchnorrSigner.validateDerivationPath` — reused, never restated; a
+  unit test asserts each `…At` form accepts and refuses at exactly the counts SchnorrSigner
+  does.
+- `Utils.derivationCacheKey` is now the single injective path encoder, used by both
+  `SchnorrSigner.cacheKey` and Identity's cache. Its prefix is length-prefixed: without that,
+  `("a", ["b"])` and `("a/62", [])` collide — a latent edge for today's key names, caught by
+  its own test.
+
+### Testing
+
+- 13 Motoko unit tests over construction, validation, bound-sharing and the cache-key
+  encoding.
+- 15 replica-backed tests (`test/derivation-paths.test.ts`), including the cross-module one:
+  `EvmSigner`, `EvmSender` and the identity under the same path yield the **same** address,
+  with a companion test proving that agreement is not vacuous.
+- Mutation-verified: reverting the four sites fails 5 tests and trips the new CI gate
+  (exit 1); un-keying Identity's cache fails 6; removing both Gateway path guards fails the
+  silent-success test. The two guards are mutually redundant — each alone still produces the
+  right answer, which is why only removing both is caught.
+- **Not covered:** the Gateway recipient's labelled-path derivation on a FRESH canister — its
+  slot is persisted and `setup:local` fills it at the default path. Also not exercised is the
+  address-comparison branch, which is reachable only after an upgrade where the consumer
+  forgot to re-apply `setEvmDerivationPath`; the harness cannot upgrade in place. What IS
+  proven on a replica: the gateway's own sender and its published recipient are one address,
+  a path that cannot be applied is refused rather than reported as success, and the setter
+  refuses to move a gateway whose recipient already exists.
+
 ## v2.15.0 — 2026-09-22
 
 Minor — **`EvmSigner` accepts a derivation path.** Additive: every current caller compiles

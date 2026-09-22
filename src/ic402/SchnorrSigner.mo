@@ -62,6 +62,7 @@ import HashMap "mo:base/HashMap";
 import IC "mo:ic";
 import ICTypes "mo:ic/Types";
 import Call "mo:ic/Call";
+import Utils "Utils";
 
 module {
 
@@ -232,11 +233,7 @@ module {
       case (#ed25519) { "ed25519" };
       case (#bip340secp256k1) { "bip340secp256k1" };
     };
-    var key = tag;
-    for (element in derivationPath.vals()) {
-      key #= "/" # hexNoPrefix(Blob.toArray(element));
-    };
-    key;
+    Utils.derivationCacheKey(tag, derivationPath);
   };
 
   // ── Signer ──

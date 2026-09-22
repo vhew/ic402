@@ -19,6 +19,7 @@ import IdentityMod "Identity";
 import HttpHandlerMod "HttpHandler";
 import ICTypes "mo:ic/Types";
 import EvmSignerMod "EvmSigner";
+import EvmSenderMod "EvmSender";
 import SchnorrSignerMod "SchnorrSigner";
 import Eip712Mod "Eip712";
 import EvmAddressMod "EvmAddress";
@@ -189,6 +190,10 @@ module {
   public let EvmUtils = EvmUtilsMod;
   /// EVM remote signer: canister signs, client broadcasts.
   public let EvmSigner = EvmSignerMod;
+  /// Outbound EVM sender: signs, broadcasts and CONFIRMS via the EVM-RPC canister.
+  /// `EvmSenderAt(keyName, rpc, path)` derives under a labelled path — it must match the
+  /// `EvmSigner` and the `Gateway` recipient for the same address.
+  public let EvmSender = EvmSenderMod;
   /// Threshold Schnorr signer (Ed25519 / BIP340-secp256k1). A low-level primitive beside
   /// `EvmSigner`'s threshold ECDSA — no policy, no caps, no logging, and a caller-supplied
   /// derivation path. Wrap it and enforce your own policy check + audit log before signing.

@@ -376,6 +376,17 @@ service : {
                                   ok;
                                 });
   deleteContent: (id: text) -> (ContentStoreResult);
+  /// Derive the gateway's inbound EVM recipient under an explicit path.
+  /// 
+  /// The recipient is a SINGLE persisted slot, so the first successful derivation wins and
+  /// later calls return `#ok` without re-deriving — a gateway has one recipient and a
+  /// published address must never move. Validation still runs first, so an invalid path is
+  /// refused even when the slot is already filled.
+  deriveGatewayRecipientAt: (derivationPath: vec blob) ->
+   (variant {
+      err: text;
+      ok;
+    });
   disableService: (id: text) -> (variant {
                                    err: text;
                                    ok;
@@ -400,6 +411,16 @@ service : {
                                                err: text;
                                                ok;
                                              });
+  /// The path the gateway's EVM keys derive under.
+  gatewayDerivationPath: () -> (vec blob) query;
+  /// The gateway's current inbound EVM recipient, if derived.
+  gatewayRecipient: () -> (opt text) query;
+  /// The address the gateway's OWN outbound sender signs from — the one that must equal the
+  /// published recipient. Derived here through the same path the gateway holds.
+  gatewaySenderAddress: () -> (variant {
+                                 err: text;
+                                 ok: text;
+                               });
   getAgentCard: () -> (AgentCard) query;
   getAgentId: () -> (opt nat) query;
   getChunk: (grant: AccessGrant, index: nat) -> (opt blob) query;
@@ -447,6 +468,12 @@ service : {
     }) query;
   http_request: (request: HttpRequest) -> (HttpResponse) query;
   http_request_update: (request: HttpRequest) -> (HttpResponse);
+  /// The identity public key under an explicit path, as a 0x-prefixed EVM address.
+  identityAddressAt: (derivationPath: vec blob) ->
+   (variant {
+      err: text;
+      ok: text;
+    });
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   keccak256: (data: vec nat8) -> (vec nat8) query;
   listContent: () -> (vec ContentEntry) query;
@@ -543,6 +570,14 @@ service : {
       ok: vec text;
       paymentRequired: vec PaymentRequirement;
     });
+  /// The EVM address an EvmSender derives under an explicit path.
+  /// Must equal `evmAddressAt(path)` and `gatewayRecipientAt(path)` for the same path —
+  /// the signer, the outbound sender and the inbound recipient are one address.
+  senderAddressAt: (derivationPath: vec blob) ->
+   (variant {
+      err: text;
+      ok: text;
+    });
   sessionQuery: (voucher: Voucher, question: text) ->
    (variant {
       error: text;
@@ -557,6 +592,15 @@ service : {
                                       err: text;
                                       ok;
                                     });
+  /// Move the gateway's EVM keys — outbound sender and inbound recipient — onto one path.
+  /// 
+  /// NOT PERSISTED: a production consumer re-applies this after every upgrade, in the same
+  /// init block that calls loadStable, exactly as it would for setEvmChains.
+  setGatewayDerivationPath: (derivationPath: vec blob) ->
+   (variant {
+      err: text;
+      ok;
+    });
   setPolicy: (p: SpendingPolicy) -> ();
   /// Sign an ERC-8004 agent registration tx.
   /// Client provides nonce + gas from their RPC, broadcasts + polls receipt.

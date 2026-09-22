@@ -402,4 +402,43 @@ module {
     };
     null;
   };
+  // ── Derivation-path cache keys ──
+
+  /// Lowercase hex, NO `0x` prefix. Deliberately not `EvmUtils.bytesToHex`, which prefixes:
+  /// `derivationCacheKey`'s injectivity argument needs a fixed-width, hex-alphabet-only
+  /// encoding, and borrowing a prefixing helper would make that an accident of an unrelated
+  /// function's formatting.
+  func hexNoPrefix(bytes : [Nat8]) : Text {
+    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
+    var out = "";
+    for (b in bytes.vals()) {
+      let n = Nat8.toNat(b);
+      out #= digits[n / 16] # digits[n % 16];
+    };
+    out;
+  };
+
+  /// Stable, injective cache key for `prefix` + a derivation path.
+  ///
+  /// One definition for every keyed derivation cache in the library (SchnorrSigner's public
+  /// keys, Identity's) so they cannot drift apart.
+  ///
+  /// INJECTIVITY: each element is emitted as `/` followed by fixed-width hex (two chars per
+  /// byte, from `0-9a-f`). `/` is outside that alphabet, so it is unambiguously an element
+  /// boundary and no two distinct paths share an encoding — `["ab","cd"]` gives `/ab/cd`
+  /// where `["abcd"]` gives `/abcd`. The separator is the load-bearing part; remove it and
+  /// the two collide, which for a key cache means handing back the key derived for one path
+  /// in answer to a request for another.
+  /// The prefix is LENGTH-PREFIXED, not just concatenated. Without that,
+  /// `("a", ["b"])` and `("a/62", [])` both encode to `a/62` — a prefix containing the
+  /// separator could impersonate a path element. Today's prefixes are key names with no
+  /// `/`, so this is a latent edge rather than a live bug, but a cache that returns KEYS
+  /// should not rely on its callers' spelling.
+  public func derivationCacheKey(prefix : Text, derivationPath : [Blob]) : Text {
+    var key = Nat.toText(prefix.size()) # ":" # prefix;
+    for (element in derivationPath.vals()) {
+      key #= "/" # hexNoPrefix(Blob.toArray(element));
+    };
+    key;
+  };
 };

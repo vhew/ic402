@@ -12,6 +12,7 @@
 
 import Ic402 "../src/ic402/lib";
 import Principal "mo:base/Principal";
+import Blob "mo:base/Blob";
 import Nat "mo:base/Nat";
 import Int "mo:base/Int";
 import Time "mo:base/Time";
@@ -1122,6 +1123,85 @@ persistent actor KnowledgeBase {
       case (#ok(s)) { await s.signTypedData(domainSeparator, structHash) };
     };
   };
+
+  /// The EVM address an EvmSender derives under an explicit path.
+  /// Must equal `evmAddressAt(path)` and `gatewayRecipientAt(path)` for the same path —
+  /// the signer, the outbound sender and the inbound recipient are one address.
+  public shared (msg) func senderAddressAt(derivationPath : [Blob]) : async {
+    #ok : Text;
+    #err : Text;
+  } {
+    requireController(msg.caller);
+    switch (Ic402.EvmSender.EvmSenderAt("key_1", null, derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok(snd)) {
+        let addr = await snd.getEvmAddress();
+        if (addr == "") { #err("address derivation failed") } else { #ok(addr) };
+      };
+    };
+  };
+
+  /// The identity public key under an explicit path, as a 0x-prefixed EVM address.
+  public shared (msg) func identityAddressAt(derivationPath : [Blob]) : async {
+    #ok : Text;
+    #err : Text;
+  } {
+    requireController(msg.caller);
+    switch (await identity.getPublicKeyAt("key_1", derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok(pk)) {
+        switch (Ic402.EvmAddress.fromCompressedPublicKey(Blob.toArray(pk))) {
+          case (#ok(a)) { #ok(a) };
+          case (#err(m)) { #err(m) };
+        };
+      };
+    };
+  };
+
+  /// Move the gateway's EVM keys — outbound sender and inbound recipient — onto one path.
+  ///
+  /// NOT PERSISTED: a production consumer re-applies this after every upgrade, in the same
+  /// init block that calls loadStable, exactly as it would for setEvmChains.
+  public shared (msg) func setGatewayDerivationPath(derivationPath : [Blob]) : async {
+    #ok;
+    #err : Text;
+  } {
+    requireController(msg.caller);
+    gate.setEvmDerivationPath(derivationPath);
+  };
+
+  /// The path the gateway's EVM keys derive under.
+  public query func gatewayDerivationPath() : async [Blob] { gate.getEvmDerivationPath() };
+
+  /// The address the gateway's OWN outbound sender signs from — the one that must equal the
+  /// published recipient. Derived here through the same path the gateway holds.
+  public shared (msg) func gatewaySenderAddress() : async { #ok : Text; #err : Text } {
+    requireController(msg.caller);
+    switch (Ic402.EvmSender.EvmSenderAt("key_1", null, gate.getEvmDerivationPath())) {
+      case (#err(e)) { #err(e) };
+      case (#ok(snd)) {
+        let addr = await snd.getEvmAddress();
+        if (addr == "") { #err("address derivation failed") } else { #ok(addr) };
+      };
+    };
+  };
+
+  /// Derive the gateway's inbound EVM recipient under an explicit path.
+  ///
+  /// The recipient is a SINGLE persisted slot, so the first successful derivation wins and
+  /// later calls return `#ok` without re-deriving — a gateway has one recipient and a
+  /// published address must never move. Validation still runs first, so an invalid path is
+  /// refused even when the slot is already filled.
+  public shared (msg) func deriveGatewayRecipientAt(derivationPath : [Blob]) : async {
+    #ok;
+    #err : Text;
+  } {
+    requireController(msg.caller);
+    await gate.deriveEvmRecipientAt("key_1", derivationPath);
+  };
+
+  /// The gateway's current inbound EVM recipient, if derived.
+  public query func gatewayRecipient() : async ?Text { gate.getEvmRecipient() };
 
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   public query func keccak256(data : [Nat8]) : async [Nat8] {
