@@ -15,6 +15,7 @@ import Error "mo:base/Error";
 import Cycles "mo:base/ExperimentalCycles";
 import IC "mo:ic";
 import Call "mo:ic/Call";
+import SchnorrSigner "SchnorrSigner";
 
 module {
 
@@ -101,7 +102,12 @@ module {
   };
 
   /// EVM transaction sender with tECDSA signing.
-  public class EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) {
+  /// `derivationPath` is fixed for the life of the instance — an EVM address derived under a
+  /// path is PUBLISHED, and a published address must never move. Construct through
+  /// `EvmSender(keyName, rpc)` (empty path, the pre-2.16.0 behaviour) or `EvmSenderAt(...)`
+  /// (validated). It must match the path of the signer and gateway recipient it settles for —
+  /// see `Gateway.deriveEvmRecipientAt`.
+  public class Sender(ecdsaKeyName : Text, evmRpcCanister : ?Text, derivationPath : [Blob]) {
 
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
@@ -134,7 +140,7 @@ module {
           let result = await IC.ic.ecdsa_public_key({
             key_id = { name = ecdsaKeyName; curve = #secp256k1 };
             canister_id = null;
-            derivation_path = [];
+            derivation_path = derivationPath;
           });
           let pk = Blob.toArray(result.public_key);
           cachedPubKey := ?pk;
@@ -242,7 +248,7 @@ module {
         // Sign (auto-cycles via ic mops package)
         let signResult = await Call.signWithEcdsa({
           key_id = { name = ecdsaKeyName; curve = #secp256k1 };
-          derivation_path = [];
+          derivation_path = derivationPath;
           message_hash = Blob.fromArray(txHash);
         });
         let sigBytes = Blob.toArray(signResult.signature);
@@ -501,6 +507,39 @@ module {
         };
       };
       #pending;
+    };
+  };
+  // ── Construction ──
+  //
+  // Same shape as EvmSigner's (2.15.0): Motoko has no constructor overloading (M0051) and a
+  // constructor cannot return a Result (M0134), so both forms are factories over one class.
+  // `EvmSender` stays a TYPE and a two-argument constructor, so every pre-2.16.0 caller
+  // compiles unchanged.
+
+  /// The sender type. Unchanged name so existing annotations keep resolving.
+  public type EvmSender = Sender;
+
+  /// Sender on the canister's own root key — the pre-2.16.0 behaviour, byte for byte.
+  /// The empty path is a DEFAULT, not a decision.
+  public func EvmSender(ecdsaKeyName : Text, evmRpcCanister : ?Text) : Sender =
+    Sender(ecdsaKeyName, evmRpcCanister, []);
+
+  /// Sender on an explicit derivation path, validated.
+  ///
+  /// Bounds are SchnorrSigner's own `validateDerivationPath` — reused, not restated, so the
+  /// signers cannot drift apart on what a valid path is. Returns `#err`; never traps.
+  ///
+  /// INVARIANT: this path must equal the path of the `EvmSigner` that signs for the same
+  /// address and the `Gateway` recipient that receives on it. Settling from one path while
+  /// funds arrive at another spends from an address nothing funds.
+  public func EvmSenderAt(
+    ecdsaKeyName : Text,
+    evmRpcCanister : ?Text,
+    derivationPath : [Blob],
+  ) : { #ok : Sender; #err : Text } {
+    switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
+      case (#err(e)) { #err(e) };
+      case (#ok) { #ok(Sender(ecdsaKeyName, evmRpcCanister, derivationPath)) };
     };
   };
 };

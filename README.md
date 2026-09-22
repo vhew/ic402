@@ -287,6 +287,26 @@ transient let payments = switch (
 ) { case (#ok(s)) { s }; case (#err(e)) { Debug.trap(e) } };
 ```
 
+The same applies to the other deriving sites — since 2.16.0 each has an `…At` form beside its
+default, and **all of them must use the same path** for one address:
+
+```motoko
+Ic402.EvmSender.EvmSenderAt("key_1", rpc, path)  // outbound settlement
+identity.getPublicKeyAt("key_1", path)           // ERC-8004 agent identity
+gate.setEvmDerivationPath(path)                  // the gateway's sender AND recipient
+await gate.deriveEvmRecipientAt("key_1", path)   // the inbound recipient payers are told
+```
+
+`setEvmDerivationPath` is **not persisted** — re-apply it after every upgrade, in the same
+init block that calls `loadStable`, exactly as `setEvmChains` requires. It refuses once the
+recipient exists, and `deriveEvmRecipientAt` refuses a path the sender is not already on, so
+the two can never drift apart.
+
+Derive the recipient under one path and sign under another and the canister signs from an
+address nothing funds, while deposits pile up at an address it never spends from. A CI gate
+(`scripts/check-derivation-paths.sh`) fails the build if any library site reverts to a
+hardcoded empty path.
+
 One key per purpose; the empty path is the library default, not a decision. **The choice is
 permanent** — the address derived under a path is published to payers, and a published
 address must never move, so pick the path before anyone sends funds to it. There is no

@@ -24,6 +24,11 @@ import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
 import Ed25519 "mo:ed25519";
 import IC "mo:ic";
+import Text "mo:base/Text";
+import Error "mo:base/Error";
+import HashMap "mo:base/HashMap";
+import Utils "Utils";
+import SchnorrSigner "SchnorrSigner";
 
 module {
 
@@ -71,7 +76,12 @@ module {
 
     var agentId : ?Nat = null;
     var evmAddress : ?Text = null;
-    var cachedPubKey : ?[Nat8] = null;
+    // Keyed by (keyName, derivationPath) via Utils.derivationCacheKey — NOT a single slot.
+    // It was one `var` before 2.16.0, which meant getPublicKey(keyNameA) followed by
+    // getPublicKey(keyNameB) returned A's key; adding a derivation path would have widened
+    // that same confusion to paths. Not stable state (StableIdentityState is
+    // { agentId; evmAddress }), so keying it changes no persisted type.
+    let cachedPubKeys = HashMap.HashMap<Text, [Nat8]>(4, Text.equal, Text.hash);
 
     /// Get the agent card metadata.
     public func getCard() : Types.AgentCard {
@@ -93,17 +103,48 @@ module {
       agentId := ?id;
     };
 
-    /// Get the canister's secp256k1 public key (SEC1 compressed, 33 bytes).
+    /// Get the canister's secp256k1 public key (SEC1 compressed, 33 bytes) on the root key.
+    ///
+    /// The empty path is a DEFAULT, not a decision — it is what this class did before paths
+    /// existed, kept so no caller has to change. Use `getPublicKeyAt` to choose one.
+    /// Unchanged signature: it still throws rather than returning a Result.
     public func getPublicKey(keyName : Text) : async Blob {
-      switch (cachedPubKey) {
+      await derivePublicKey(keyName, []);
+    };
+
+    /// Get the public key under an explicit derivation path, validated.
+    ///
+    /// Bounds are SchnorrSigner's own `validateDerivationPath` — reused, not restated.
+    /// Returns `#err`; it never traps.
+    ///
+    /// INVARIANT: an agent identity published under a path must keep using that path — the
+    /// ERC-8004 registration binds the derived address, and a published address cannot move.
+    public func getPublicKeyAt(
+      keyName : Text,
+      derivationPath : [Blob],
+    ) : async { #ok : Blob; #err : Text } {
+      switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
+        case (#err(e)) { return #err(e) };
+        case (#ok) {};
+      };
+      try { #ok(await derivePublicKey(keyName, derivationPath)) } catch (e) {
+        #err("Public key derivation failed: " # Error.message(e));
+      };
+    };
+
+    // Shared body. Caches per (keyName, path); only successes are cached, since an await
+    // failure throws before the put.
+    func derivePublicKey(keyName : Text, derivationPath : [Blob]) : async Blob {
+      let ck = Utils.derivationCacheKey(keyName, derivationPath);
+      switch (cachedPubKeys.get(ck)) {
         case (?pk) { Blob.fromArray(pk) };
         case (null) {
           let result = await IC.ic.ecdsa_public_key({
             key_id = { name = keyName; curve = #secp256k1 };
             canister_id = null;
-            derivation_path = [];
+            derivation_path = derivationPath;
           });
-          cachedPubKey := ?Blob.toArray(result.public_key);
+          cachedPubKeys.put(ck, Blob.toArray(result.public_key));
           result.public_key;
         };
       };

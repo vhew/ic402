@@ -460,6 +460,30 @@ export const exampleIdlFactory = () =>
       [SignedTypedDataResult],
       [],
     ),
+    // Derivation-path deriving sites (2.16.0)
+    senderAddressAt: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Text, err: IDL.Text })],
+      [],
+    ),
+    identityAddressAt: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Text, err: IDL.Text })],
+      [],
+    ),
+    setGatewayDerivationPath: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Null, err: IDL.Text })],
+      [],
+    ),
+    gatewayDerivationPath: IDL.Func([], [IDL.Vec(IDL.Vec(IDL.Nat8))], ['query']),
+    gatewaySenderAddress: IDL.Func([], [IDL.Variant({ ok: IDL.Text, err: IDL.Text })], []),
+    deriveGatewayRecipientAt: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Null, err: IDL.Text })],
+      [],
+    ),
+    gatewayRecipient: IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
     // Threshold Schnorr signing
     schnorrPublicKey: IDL.Func(
       [SchnorrAlgorithm, IDL.Vec(IDL.Vec(IDL.Nat8))],

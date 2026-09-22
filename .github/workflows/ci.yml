@@ -126,6 +126,14 @@ jobs:
       # discriminates rather than having decayed into a green no-op.
       - run: bash scripts/check-expiry-arm-sites.sh
       - run: bash scripts/check-expiry-arm-sites.sh --self-test
+      # Every deriving site in the library must take its path from the caller. A literal
+      # `derivation_path = []` pins that site to the key name's root key, so a consumer on a
+      # labelled path would sign from an address nothing funds while deposits and outbound
+      # settlement kept using the unlabelled one. The allowlist in the script is empty and
+      # meant to stay empty; the self-test proves the gate still catches a planted violation
+      # (including a whitespace variant) rather than having decayed into a green no-op.
+      - run: bash scripts/check-derivation-paths.sh
+      - run: bash scripts/check-derivation-paths.sh --self-test
 
   # B0: the example canister must stay INSTALLABLE on the IC. moc unrolls SHA-256
   # (mo:sha2) into >2000 Wasm locals in one function, over the IC's per-function install
