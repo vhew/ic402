@@ -1,5 +1,56 @@
 # Changelog
 
+## v2.15.0 — 2026-09-22
+
+Minor — **`EvmSigner` accepts a derivation path.** Additive: every current caller compiles
+and behaves exactly as in 2.14.0, `STABLE_SCHEMA_VERSION` stays 1, and no stable state is
+touched.
+
+Threshold Schnorr has taken a path per call since 2.14.0; EvmSigner took none at all — it
+passed `derivation_path = []` at all four of its management-canister sites, so a deployment
+labelling its keys could not label the EVM one. It now takes a path **per instance**, not
+per call, because an EVM address is published to payers and must never move.
+
+### Added
+
+- **`EvmSignerAt(ecdsaKeyName, derivationPath)`** → `{ #ok : Signer; #err : Text }`. Validates
+  the path with `SchnorrSigner.validateDerivationPath` — the same
+  `MAX_DERIVATION_PATH_ELEMENTS` (254) and `MAX_DERIVATION_PATH_BYTES` (8_192) bounds,
+  reused rather than restated so the two signers cannot drift apart on what a valid path is.
+  It **returns `#err`; it never traps.**
+- **`EvmSigner(ecdsaKeyName)` is unchanged** — same name, same one-argument call, same empty
+  path, same addresses. `EvmSigner` also remains a *type*, so existing annotations still
+  resolve.
+- Example endpoints `evmAddressAt` / `signTypedDataAt` showing the labelled-path form.
+
+### Notes
+
+- **The path is fixed at construction.** No setter, no per-call override: an address derived
+  under a path gets published, and letting it move afterwards would strand funds sent to the
+  old one. Choose before publishing an address.
+- The empty path is a **default, not a decision** — it is what the library did before paths
+  existed, kept so no caller has to change. A deployment running more than one purpose off
+  one key name should give each its own labelled path.
+- **Why factories rather than a second constructor.** Motoko has neither constructor
+  overloading (two classes of one name is `M0051`) nor a constructor that can return a
+  `Result` (`M0134`). Both forms are therefore functions over one class, `Signer`, which is
+  what keeps the one-argument spelling working while still allowing a refusal.
+- The public-key/address cache is per-instance class state, so two signers on different paths
+  cannot share an entry — no cache-key change was needed.
+
+### Testing
+
+- 6 Motoko unit tests over construction and validation, including a drift test asserting
+  `EvmSignerAt` accepts and refuses at exactly the counts `SchnorrSigner` does.
+- 9 replica-backed tests (`test/evmsigner-path.test.ts`): two paths on one key name derive
+  different addresses; each signature **recovers independently** (via `@noble/curves`, from
+  the returned digest and r/s/v — not the canister's own `signer` field) to that path's own
+  address; the one-argument form and the explicit `[]` form derive the **same** address; and
+  over-limit paths are refused in-library.
+- Mutation-verified: reverting the four sites to `derivation_path = []` fails exactly the
+  three path-dependence tests, and replacing the shared bound with a private looser one fails
+  the drift test.
+
 ## v2.14.0 — 2026-09-20
 
 Minor — **threshold Schnorr signing** (Ed25519 and BIP340-secp256k1) beside the existing

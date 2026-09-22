@@ -389,6 +389,12 @@ service : {
                                   ok;
                                 });
   endSession: (sessionId: text) -> (PaymentResult);
+  /// The EVM address derived under an explicit derivation path.
+  /// Refuses an over-limit path with `#err` rather than trapping.
+  evmAddressAt: (derivationPath: vec blob) -> (variant {
+                                                 err: text;
+                                                 ok: text;
+                                               });
   forceCloseSession: (sessionId: text) -> (PaymentResult);
   forceResolveSession: (sessionId: text) -> (variant {
                                                err: text;
@@ -581,6 +587,13 @@ service : {
       err: text;
       ok: SignedTypedData;
     });
+  /// Sign EIP-712 typed data under an explicit derivation path.
+  /// The returned digest + r/s/v let a caller recover the signer independently.
+  signTypedDataAt: (derivationPath: vec blob, domainSeparator: vec nat8,
+   structHash: vec nat8) -> (variant {
+                               err: text;
+                               ok: SignedTypedData;
+                             });
   /// Sign an EIP-3009 authorization for x402 payment.
   /// Client probes the URL, extracts chain/token/recipient/amount from the 402, and calls this.
   /// Canister signs → returns header → client retries with header.

@@ -272,6 +272,28 @@ Funds are custodied at the platform recipient account; `settleJob` pays the oper
 | `signRegistration(...)` | Sign ERC-8004 registration tx |
 | `getEvmAddress()` | Canister's tECDSA-derived EVM address |
 
+Construct it one of two ways:
+
+```motoko
+// The canister's own root key — the library default.
+transient let signer = Ic402.EvmSigner.EvmSigner("key_1");
+
+// A labelled derivation path — one key per purpose.
+transient let payments = switch (
+  Ic402.EvmSigner.EvmSignerAt("key_1", [
+    Text.encodeUtf8("myapp"), Text.encodeUtf8("payments"),
+    Text.encodeUtf8("secp256k1"), Text.encodeUtf8("1"),
+  ])
+) { case (#ok(s)) { s }; case (#err(e)) { Debug.trap(e) } };
+```
+
+One key per purpose; the empty path is the library default, not a decision. **The choice is
+permanent** — the address derived under a path is published to payers, and a published
+address must never move, so pick the path before anyone sends funds to it. There is no
+setter and no per-call override for that reason. `EvmSignerAt` validates against
+`SchnorrSigner`'s own `MAX_DERIVATION_PATH_ELEMENTS` / `MAX_DERIVATION_PATH_BYTES` and
+returns `#err` rather than trapping.
+
 ### SchnorrSigner (optional)
 
 Threshold Schnorr beside `EvmSigner`'s threshold ECDSA — Ed25519 (Solana, RFC8032) and

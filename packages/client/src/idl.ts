@@ -449,6 +449,17 @@ export const exampleIdlFactory = () =>
     // EIP-712 generic signing
     signTypedData: IDL.Func([IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)], [SignedTypedDataResult], []),
     keccak256: IDL.Func([IDL.Vec(IDL.Nat8)], [IDL.Vec(IDL.Nat8)], ['query']),
+    // Derivation-path EVM signers (2.15.0)
+    evmAddressAt: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Text, err: IDL.Text })],
+      [],
+    ),
+    signTypedDataAt: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8)), IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
+      [SignedTypedDataResult],
+      [],
+    ),
     // Threshold Schnorr signing
     schnorrPublicKey: IDL.Func(
       [SchnorrAlgorithm, IDL.Vec(IDL.Vec(IDL.Nat8))],
