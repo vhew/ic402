@@ -94,7 +94,7 @@ Client → pay USDC (any chain)
 Client → GET + X-PAYMENT header → 200 + content
 ```
 
-**Streaming sessions:** deposit once → stream Ed25519 vouchers × N → close (settle + refund). 2 on-chain txns for any number of calls.
+**Streaming sessions:** deposit once → stream Ed25519 vouchers × N → close (settle + refund). A fixed few on-chain transactions (deposit, settle, refund), however many calls the deposit covers.
 
 **Paid services (coordinator):**
 ```
@@ -122,7 +122,7 @@ Client provides nonce+gas → canister signs tx → client broadcasts
 | Feature | Description |
 |---------|-------------|
 | **x402 charges** | Standard HTTP 402, works with any x402 client |
-| **Streaming sessions** | Escrow + Ed25519 vouchers, 5,000x cheaper than per-call |
+| **Streaming sessions** | Escrow + Ed25519 vouchers: a fixed few on-chain transactions (deposit, settle, refund), however many calls the deposit covers |
 | **Paid services** | Coordinator pattern: escrow, assign, verify (ZK/hash/buyer), settle |
 | **Cross-rail settlement** | Marketplace jobs and streaming sessions settle/refund on their native rail — ICP from the pool, or on-chain to the EVM payout address (confirmed broadcast) |
 | **EIP-712 signing** | Generic typed data signing — DEX agent wallets, permits, any EIP-712 protocol |
@@ -151,7 +151,7 @@ Costs are bimodal — everything is cheap except signing **and** broadcasting an
 |-----------|----------|
 | x402 verify / 402 / content delivery | trivial (query, no outcall) |
 | ICP settle (ICRC‑2) | ~10–500M cycles (≈ <$0.001) |
-| Session voucher | trivial (Ed25519, in‑canister) — the 5,000× lever |
+| Session voucher | ~420M cycles on a 13‑node subnet (≈ $0.0006): the in‑canister Ed25519 check; no outcall, no gas |
 | EVM settle (sign + broadcast + confirm) | **~17B cycles** local / ~40–80B mainnet est. (≈ $0.02–0.10) + EVM gas |
 
 Per‑call EVM settle is **underwater below ~$0.05–0.10** — use the ICP rail or sessions for micropayments. Measured numbers, the cycle buffer to hold, and rail‑selection guidance: **[docs/costs-and-rails.md](docs/costs-and-rails.md)**.
@@ -182,7 +182,7 @@ pnpm demo           # interactive walkthrough (10 steps)
 4. **DELETE Content** — lifecycle management
 5. **SELL Services over x402** — register service, buyer pays, your client computes, canister verifies (ZK/auto), settles
 6. **BUY over x402** — canister signs, client pays external API (GoldRush)
-7. **Streaming Micropayments** — sessions with 5,000x settlement reduction
+7. **Streaming Micropayments** — sessions: a fixed few on-chain transactions for many calls
 8. **Agent Identity** — ERC-8004 on Base
 9. **EIP-712 Delegate Signing** — generic typed data signing for DEX agent wallets (Hyperliquid, Vertex, Aevo)
 10. **Policy + Summary** — dual-sided spending limits

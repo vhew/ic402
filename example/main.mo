@@ -587,12 +587,14 @@ persistent actor KnowledgeBase {
   // OPTIONAL: Streaming Sessions
   //
   // For high-frequency access (e.g., AI agents querying thousands of
-  // times per day). Reduces on-chain transactions from N to 2.
+  // times per day). Reduces on-chain transactions from N to a fixed few (deposit, settle, refund).
   //
   // Flow:
   //   1. Deposit: client signs EIP-3009 (EVM) or ICRC-2 approve (ICP)
-  //   2. Stream: client sends Ed25519-signed vouchers per call (off-chain, free)
-  //   3. Close: canister settles consumed amount + refunds remainder via tECDSA
+  //   2. Stream: client signs an Ed25519 voucher per call off-chain; the canister verifies
+  //      each one (no ledger call or gas; ~420M cycles on a 13-node subnet)
+  //   3. Close: canister settles consumed amount + refunds remainder (ICRC-1 transfers on ICP,
+  //      tECDSA-signed ERC-20 transfers on EVM)
   //
   // Remove this section if you only need per-request charges.
   // ═══════════════════════════════════════════════════════════════════════

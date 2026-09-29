@@ -30,7 +30,7 @@ upstream below an attribution header), and the `mo:ed25519` dependency is gone.
   `verifyCallerEd25519`'s doc). Every malformed input now returns false.
 - **Cost.** One 0.1.0 verification allocated 244.7 MB and ran 4.96 billion instructions, just
   under the 5 billion query limit. A fresh canister went from 8.1 MB to 337 MB after one call.
-  The vendored verifier allocates 8.4 MB and runs 206 million.
+  The vendored verifier allocates 8.4 MB and runs ~200–206 million, depending on the signature.
 
 ### Changed
 
@@ -45,6 +45,24 @@ upstream below an attribution header), and the `mo:ed25519` dependency is gone.
   unchanged.
 - **Example canister:** two diagnostic queries, `ed25519Verify` and `ed25519VerifyCost`
   (additive to `example.did` and the client IDL).
+
+### Docs
+
+- **The voucher cost was wrong.** `docs/costs-and-rails.md` put a session voucher at under 1M
+  cycles, and the README called sessions "5,000× cheaper". Measured for this release with the
+  doc's own method (40 vouchers through `@ic402/client`, local replica, 13-node pricing), one
+  voucher costs ~415M cycles, ~96% of it the signature check. Wasm64 execution is billed at 2
+  cycles per instruction, so that is the mainnet price on a 13-node subnet too. Under 0.1.0 it
+  was ~10B. The 5,000× was never cycles: it counted 10,000 per-call settlements against a
+  session's 2, and a session is really a fixed few transactions (deposit, settle, refund; plus
+  the payer's approve on ICP). In cycles, at 10,000 calls an EVM session is ~40× cheaper than
+  per-call EVM settlement locally (the ceiling; fewer calls save less), and more on mainnet.
+  On ICP a voucher can cost the canister more than a per-call settle; there, a session saves
+  the payer's per-transfer ledger fees. `docs/costs-and-rails.md` has the numbers and the
+  pricing floor: price session calls above ~$0.0006, the voucher check's cost, plus the legs
+  spread over the calls. The README, getting-started, mcp-install, the client README and the
+  demo drop the 5,000× and two-transaction claims, and the README, the client README and the
+  demo now state the voucher cost.
 
 ### Notes
 

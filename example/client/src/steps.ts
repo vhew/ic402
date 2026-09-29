@@ -1315,19 +1315,19 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
     // ══════════════════════════════════════════════════════════════════
     {
       name: 'Streaming Micropayments (Sessions)',
-      description: 'Deposit once, stream vouchers, settle on close — 5,000x cheaper',
+      description: 'Deposit once, stream vouchers, settle on close — a few on-chain txns total',
       run: async (rl: ReadlineInterface) => {
         header('Step 7: Streaming Micropayments');
 
         section('What sessions are for');
         info("Sessions let a client pay for repeated access to THIS canister's services.");
         info('Instead of settling every call on-chain, the client deposits once and streams');
-        info('signed vouchers. The canister verifies each voucher in constant time — no');
-        info('ledger calls, no gas, no latency. Settlement happens once when the session closes.');
+        info('signed vouchers. The canister verifies each voucher itself — no ledger calls,');
+        info('no gas, no ledger round trip. Settlement happens once when the session closes.');
         info('');
         info('Use case: an AI agent querying a knowledge base thousands of times per day.');
         info('Without sessions, every query is an on-chain transaction. With sessions,');
-        info('the entire day is 2 transactions (open + close).');
+        info('the entire day is a few transactions (deposit, settle, refund).');
 
         section('Charges vs Sessions');
         state('Charges (x402)', 'Standard HTTP 402 — works with any x402 client or browser');
@@ -1337,19 +1337,24 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         state('', 'NOT accessible via HTTP or x402 browsers — designed for agents/backends');
 
         info('Charges pay per request; sessions amortize. Deposit, stream, settle.');
-        info('10,000 calls = 2 on-chain transactions. Here is the math:');
+        info('10,000 calls = a few on-chain transactions. Here is the math:');
 
         section('Economics');
-        state('Per-call model', '10K calls/day × $0.001/tx = $10/day settlement overhead');
-        state('Session model', '10K calls/day × 2 txns = $0.002/day settlement overhead');
-        state('Savings', '5,000x — same results, fraction of the cost');
+        state(
+          'Per-call model',
+          '10K calls/day = 10K on-chain settlements, a ledger fee or gas each',
+        );
+        state('Session model', 'deposit + settle + refund, plus 10K in-canister voucher checks');
+        state('Voucher check', 'no ledger call, no gas; ~420M cycles (~$0.0006) each');
+        state('10K vouchers', '~4.2T cycles (~$5.60/day) paid by the canister');
+        state('Savings', 'thousands of times fewer on-chain transactions, fees and gas');
 
         section('Protocol');
         state('1. Deposit', 'Client sends tokens to canister (ICP ckUSDC or EVM USDC)');
         state('2. Stream', 'Ed25519-signed vouchers per call (cumulative, monotonic)');
-        state('3. Verify', 'In-canister, constant time, zero ledger calls per voucher');
+        state('3. Verify', 'In-canister Ed25519 check, zero ledger calls per voucher');
         state('4. Close', 'Settle consumed → canister operator, refund remainder → client');
-        state('Total txns', '2 (open + close) regardless of call count');
+        state('Total txns', 'deposit, settle, refund — regardless of call count');
 
         info('');
         info('Requesting session pricing...');
@@ -1382,7 +1387,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         section('Session Deposit Method');
         info('The client deposits tokens to open a session.');
         info('ICP: ICRC-2 escrow. EVM: EIP-3009 (same as charges — gasless for client).');
-        info('On close, canister settles consumed + refunds remainder via tECDSA.');
+        info('On close, the canister settles consumed + refunds the remainder');
+        info('(ICRC-1 transfers on ICP, tECDSA-signed ERC-20 transfers on EVM).');
         info('');
         state('  1', `ICP ckUSDC — ICRC-2 escrow (${CKUSDC_LEDGER})`);
         for (let i = 0; i < EVM_CHAINS.length; i++) {
@@ -1401,7 +1407,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           ];
           info('');
           info(`Streaming ${questions.length} queries through the session...`);
-          info('Each query signs a voucher (off-chain). The canister verifies in constant time.');
+          info('Each query signs a voucher (off-chain). The canister verifies it in-canister.');
           let lastConsumed = 0;
           let lastRemaining = deposited;
           let succeeded = 0;
@@ -1587,7 +1593,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             const isEvmSettle = /0x[0-9a-fA-F]{6,}/.test(txHash);
             if (isEvmSettle) {
               success(`EVM session closed — settled on-chain (tECDSA ERC-20 on ${chain.name})`);
-              highlight('Same 5,000x reduction — works on any EVM chain.');
+              highlight('Same few on-chain txns for any number of calls — works on any EVM chain.');
             } else {
               warn(`Session closed, but the receipt is NOT an EVM on-chain settlement.`);
               info(
@@ -1733,9 +1739,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
               }
             }
             const qWord = ran === 1 ? 'voucher' : 'vouchers';
-            state('On-chain txns', `2 (open + close) for ${ran} ${qWord}`);
+            state('On-chain txns', `deposit + close, for ${ran} ${qWord}`);
             highlight(
-              `${ran} ${qWord}, 2 on-chain transactions. Scale to thousands at the same cost.`,
+              `${ran} ${qWord}, no on-chain transaction per call (each voucher costs the canister ~420M cycles to verify).`,
             );
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -2067,7 +2073,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         );
         state(
           'Sessions',
-          'Deposit once, stream Ed25519 vouchers, settle on close — 5,000x cheaper',
+          'Deposit once, stream Ed25519 vouchers, settle on close — a few on-chain txns total',
         );
         state(
           'EIP-712 signing',
