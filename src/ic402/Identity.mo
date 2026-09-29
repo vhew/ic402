@@ -22,7 +22,7 @@ import Debug "mo:base/Debug";
 import Array "mo:base/Array";
 import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
-import Ed25519 "mo:ed25519";
+import Ed25519 "Ed25519";
 import IC "mo:ic";
 import Text "mo:base/Text";
 import Error "mo:base/Error";
@@ -56,16 +56,19 @@ module {
   /// `signature` is a valid Ed25519 signature by that key over `message` — i.e. the caller
   /// both OWNS the key (it derives their principal) and POSSESSES it (they signed with it).
   ///
-  /// Wrong-length inputs return false. KNOWN SHARP EDGE (shared with the voucher verify in
-  /// Sessions.consumeVoucher): a 64-byte signature whose R is not a valid curve-point encoding
-  /// makes mo:ed25519 TRAP rather than return false — benign (the message rolls back, no state
-  /// change) but callers on adversarial input see a canister_error instead of `false`.
+  /// Total: any malformed input — wrong lengths, a non-canonical or off-curve R or A, S >= L —
+  /// returns false, never a trap. Policy (RFC 8032, strict): canonical encodings, S < L, the
+  /// cofactorless equation [S]B = R + [k]A, and small-order public keys refused.
+  ///
+  /// Before 2.16.1 this used `mo:ed25519` 0.1.0, which refused about 1 valid signature in 32,
+  /// ACCEPTED a malleated partner of each of those, trapped on a bad R encoding, and allocated
+  /// ~245 MB per call. See src/ic402/Ed25519.mo.
   public func verifyCallerEd25519(caller : Principal, pubkey : Blob, signature : Blob, message : Blob) : Bool {
     if (signature.size() != 64) { return false };
     switch (selfAuthPrincipalOfEd25519(pubkey)) {
       case (?p) {
         if (p != Principal.toBlob(caller)) { return false };
-        Ed25519.ED25519.verify(Blob.toArray(signature), Blob.toArray(message), Blob.toArray(pubkey));
+        Ed25519.verify(signature, message, pubkey);
       };
       case (null) { false };
     };

@@ -18,7 +18,7 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Error "mo:base/Error";
 import CBOR "mo:cbor";
-import Ed25519 "mo:ed25519";
+import Ed25519 "Ed25519";
 import Identity "Identity";
 import Debug "mo:base/Debug";
 import Timer "mo:base/Timer";
@@ -791,13 +791,11 @@ module {
         case (?p) { p };
         case (null) { return #payloadOverflow };
       };
-      let sigBytes = Blob.toArray(voucher.signature);
-      let pubKeyBytes = Blob.toArray(session.payerPublicKey);
+      if (voucher.signature.size() != 64) { return #invalidSignature };
+      if (session.payerPublicKey.size() != 32) { return #invalidSignature };
 
-      if (sigBytes.size() != 64) { return #invalidSignature };
-      if (pubKeyBytes.size() != 32) { return #invalidSignature };
-
-      if (not Ed25519.ED25519.verify(sigBytes, payload, pubKeyBytes)) {
+      // Total (never traps) and RFC 8032-strict — see src/ic402/Ed25519.mo.
+      if (not Ed25519.verify(voucher.signature, Blob.fromArray(payload), session.payerPublicKey)) {
         return #invalidSignature;
       };
 

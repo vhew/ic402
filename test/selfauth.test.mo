@@ -16,8 +16,16 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
-import Ed25519 "mo:ed25519";
+import Ed25519 "../src/ic402/Ed25519";
 import { test; suite } "mo:test";
+
+// Test fixtures are signed with ic402's own vendored RFC 8032 signer (src/ic402/Ed25519.mo).
+// Before 2.16.1 they used `mo:ed25519` 0.1.0, whose `sign` and `getPublicKey` were wrong about
+// 1 time in 32. Argument order kept as the old (message, seed) so each call site is a one-token
+// swap; the externally-signed goldens below remain the independent cross-check.
+func pubOf(seed : [Nat8]) : [Nat8] = Blob.toArray(Ed25519.publicKey(Blob.fromArray(seed)));
+func signWith(message : [Nat8], seed : [Nat8]) : [Nat8] =
+  Blob.toArray(Ed25519.sign(Blob.fromArray(seed), Blob.fromArray(message)));
 
 // @icp-sdk golden fixture (shared by both suites below):
 // Ed25519KeyIdentity.fromSecretKey(new Uint8Array(32).fill(7)) — @icp-sdk/core@5.4.0;
@@ -50,7 +58,7 @@ suite("Identity.selfAuthPrincipalOfEd25519", func() {
 suite("Identity.verifyCallerEd25519 (ownership + possession)", func() {
 
   let privKey : [Nat8] = Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { Nat8.fromNat((i + 42) % 256) });
-  let pubKey = Ed25519.ED25519.getPublicKey(privKey);
+  let pubKey = pubOf(privKey);
   // The key's OWN principal — internal-consistency use is fine here: the derivation itself is
   // pinned externally by the golden vector above.
   let boundCaller = switch (Identity.selfAuthPrincipalOfEd25519(Blob.fromArray(pubKey))) {
@@ -58,7 +66,7 @@ suite("Identity.verifyCallerEd25519 (ownership + possession)", func() {
     case (null) { Principal.fromText("aaaaa-aa") }; // unreachable (32-byte key)
   };
   let message : [Nat8] = [1, 2, 3, 4, 5];
-  let signature = Ed25519.ED25519.sign(message, privKey);
+  let signature = signWith(message, privKey);
 
   test("accepts the bound caller with a valid signature", func() {
     assert Identity.verifyCallerEd25519(boundCaller, Blob.fromArray(pubKey), Blob.fromArray(signature), Blob.fromArray(message));
@@ -70,19 +78,18 @@ suite("Identity.verifyCallerEd25519 (ownership + possession)", func() {
 
   test("rejects a wrong message / another key's signature / wrong-length signature (possession fails)", func() {
     assert not Identity.verifyCallerEd25519(boundCaller, Blob.fromArray(pubKey), Blob.fromArray(signature), Blob.fromArray([9, 9, 9]));
-    // A signature by a DIFFERENT key over the same message: a well-formed curve point (so the
-    // underlying lib returns false rather than trapping — see the doc-comment's sharp edge),
-    // but not the bound key's signature.
+    // A signature by a DIFFERENT key over the same message: well-formed, but not the bound
+    // key's signature.
     let otherPriv : [Nat8] = Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { Nat8.fromNat((i + 99) % 256) });
-    let otherSig = Ed25519.ED25519.sign(message, otherPriv);
+    let otherSig = signWith(message, otherPriv);
     assert not Identity.verifyCallerEd25519(boundCaller, Blob.fromArray(pubKey), Blob.fromArray(otherSig), Blob.fromArray(message));
     // Wrong-length signature is guarded (returns false, never reaches the point decode).
     assert not Identity.verifyCallerEd25519(boundCaller, Blob.fromArray(pubKey), Blob.fromArray([1, 2, 3]), Blob.fromArray(message));
   });
 
   // EXTERNAL golden fixture C: the positive path pinned against a signature the canister-side
-  // library did NOT create — this replaces reliance on self-signed (mo:ed25519-signed) cases for
-  // the positive path, so a shared RFC-8032 deviation in mo:ed25519 can no longer pass silently.
+  // library did NOT create — so a shared RFC-8032 deviation between the canister-side signer and
+  // verifier cannot pass silently. (That is exactly what happened with `mo:ed25519` 0.1.0.)
   // Provenance: @icp-sdk/core@5.4.0 Ed25519KeyIdentity.fromSecretKey(new Uint8Array(32).fill(0x07))
   // .sign(Uint8Array [1,2,3,4,5]) — the GOLDEN_PUBKEY/GOLDEN_PRINCIPAL identity above. The
   // signature is byte-identical to @noble/ed25519@3.1.0 signAsync(msg, seed) and was independently
@@ -104,7 +111,7 @@ suite("Sessions.sessionCallerBound (derived view)", func() {
 
   let canisterP = Principal.fromText("aaaaa-aa");
   let privKey : [Nat8] = Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { Nat8.fromNat((i + 1) % 256) });
-  let pubKey = Ed25519.ED25519.getPublicKey(privKey);
+  let pubKey = pubOf(privKey);
   let boundPayer = switch (Identity.selfAuthPrincipalOfEd25519(Blob.fromArray(pubKey))) {
     case (?p) { Principal.fromBlob(p) };
     case (null) { canisterP }; // unreachable

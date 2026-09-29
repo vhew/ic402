@@ -484,6 +484,17 @@ export const exampleIdlFactory = () =>
       [],
     ),
     gatewayRecipient: IDL.Func([], [IDL.Opt(IDL.Text)], ['query']),
+    // Ed25519 verification (2.16.1) — raw RFC 8032 check + a cost diagnostic
+    ed25519Verify: IDL.Func(
+      [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
+      [IDL.Bool],
+      ['query'],
+    ),
+    ed25519VerifyCost: IDL.Func(
+      [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat8)],
+      [IDL.Record({ valid: IDL.Bool, instructions: IDL.Nat64, allocatedBytes: IDL.Nat })],
+      ['query'],
+    ),
     // Threshold Schnorr signing
     schnorrPublicKey: IDL.Func(
       [SchnorrAlgorithm, IDL.Vec(IDL.Vec(IDL.Nat8))],

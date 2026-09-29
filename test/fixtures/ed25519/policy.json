@@ -1,0 +1,35 @@
+{
+  "_provenance": "Generated 2026-09-29 for ic402 2.16.1 with node:crypto (OpenSSL 3.6.3) and @noble/curves 2.2.0, under the RFC 8032 TEST 1 key (secret scalar a from its seed). Each vector is built so that exactly ONE check of the policy refuses it: remove that check and the vector verifies. All are invalid under ic402 policy (cofactorless, canonical encodings). `openssl` and `noble_strict` record those verifiers’ verdicts; noble checks the COFACTORED equation, so it accepts the order-2 R that the cofactorless check refuses.",
+  "vectors": [
+    {
+      "name": "non-canonical R (y = p + 1)",
+      "note": "R is the identity point encoded as y = p + 1 (not reduced), S = k*a mod L with k hashed over those bytes, so [S]B - [k]A = O, which IS the point those bytes decode to if y is reduced. Only the y < p check refuses it.",
+      "pub": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg": "696334303220706f6c6963793a2079203e3d2070",
+      "sig": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f04ba2029ce712871c94c90f48d7296c03b7409e0399f0b606a0e96d36a4ad80f",
+      "valid": false,
+      "noble_strict": false,
+      "openssl": false
+    },
+    {
+      "name": "R = (0, -1), result O = (0, 1)",
+      "note": "R is the canonical order-2 point (0, -1); S = k*a mod L makes [S]B - [k]A = O = (0, 1). Same x as R, different y, so a verifier comparing only x accepts it.",
+      "pub": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg": "696334303220706f6c6963793a20636f6d706172652079",
+      "sig": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fb2cd815c08addea56c9161b2b3871263d33331db41d8a8a7def8cc7d9177df0c",
+      "valid": false,
+      "noble_strict": true,
+      "openssl": false
+    },
+    {
+      "name": "R negated, result -R",
+      "note": "R = -[r]B, S = r + k*a mod L with k hashed over R, so [S]B - [k]A = [r]B = -R. Same y as R, opposite x, so a verifier comparing only y accepts it.",
+      "pub": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "msg": "696334303220706f6c6963793a20636f6d706172652078",
+      "sig": "d52b4d39e590393bb4ab6529c7816330e85f44ade5eb8d54cb2bb49c3831d20bd912b223612a9638b26cac450d0726e5a22992b5e24eef5cb58c0b7da7946702",
+      "valid": false,
+      "noble_strict": false,
+      "openssl": false
+    }
+  ]
+}

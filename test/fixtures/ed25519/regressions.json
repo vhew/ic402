@@ -1,0 +1,86 @@
+{
+  "_provenance": "Generated 2026-09-29 for ic402 2.16.1 with node:crypto (OpenSSL 3.6.3) and @noble/curves 2.2.0. Every entry below was also run through mo:ed25519 0.1.0 inside a deployed canister, with the outcome recorded in `mo_ed25519_0_1_0`.",
+  "pinned": {
+    "note": "EngramX's reported vector: valid (OpenSSL, noble), S < 2^244. mo:ed25519 0.1.0 refused it.",
+    "pub": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "msg": "656e6772616d782e616374696f6e2e76317c72796a6c332d74796161612d61616161612d61616162612d6361697c6f70657261746f722e656e726f6c7c656e726f6c6c65643d343437646b2d62796775712d66716b666e2d37683472362d6c706b37342d6974626e682d6d6b75746a2d6d36746d792d69676166662d686d66656c2d6371657c696e766974653d494e562d45327c6e6f6e63653d30",
+    "sig": "158c143f2d5af89d41271cf5c3ff219392eb598f0715bb381b8d1c62c75846daae6ba09d0ecbc8e3fe5ea873085ff795c697ed8e4b79682e160f794f73b30900",
+    "valid": true,
+    "mo_ed25519_0_1_0": "refused"
+  },
+  "band": [
+    {
+      "note": "Valid, S >= 2^247 inside [2^247, 2^247+2^240) with no carry out of byte 29 -- outside the reported S < 2^247 rule, but mo:ed25519 0.1.0 refused it.",
+      "pub": "4900397e4fb805d378ad103252c28d5c26a163cbf3ea9e488196c4f58bd1d1a9",
+      "msg": "c958ab9231de15065727f03fbe0d6681f360a010",
+      "sig": "6729033b6b17b6fe62c60e9731f7bd0ac28baf25d9ea493e89c5c90c5060e9233c6e7ba4ddf23691c9cc6b40e7de5ed5737b518afe63c27d0738cbee000f8000",
+      "valid": true,
+      "mo_ed25519_0_1_0": "refused"
+    },
+    {
+      "note": "Valid, in the same band WITH the carry -- mo:ed25519 0.1.0 accepted it (control).",
+      "pub": "0a7144e3647cb1258665b4c8346ac18db4b10cf67377505839cb90e47ea80f70",
+      "msg": "72a72bafb6a5cc8eeca7c3ebfabd09ab8d69d6b20a58b06d426f7d9ac7",
+      "sig": "8516e87f20595431ac5f900ce7784199ab11a5afc1c17f8683f623dc5e8e8fdbbf33c5d30812e971724912030e0517f1d800f45d1dda6b66d4d65a0ab7858000",
+      "valid": true,
+      "mo_ed25519_0_1_0": "accepted"
+    }
+  ],
+  "malleated": [
+    {
+      "note": "Valid original (refused by 0.1.0) and its partner S' = (S + 2^256) mod L, which OpenSSL and noble REJECT and 0.1.0 ACCEPTED.",
+      "pub": "641e5da89344995f74cd422fc4b82c3d8838ba5e985df24d9f4e8d31a3b0e5ff",
+      "msg": "931cccc037080a39ae4c6cf5",
+      "sig": "6e77f33c5a063fccfd706b747be5647a1c58d6deec20f99ccb76f88dba9e7bb36aee7fdcd4a8a0dc6da6f204222f41d18f88b748725f13eee1124a7732ab7d00",
+      "malleated": "6e77f33c5a063fccfd706b747be5647a1c58d6deec20f99ccb76f88dba9e7bb39aaf220d2f777a5b08d978d5379151838e88b748725f13eee1124a7732ab7d00",
+      "mo_ed25519_0_1_0": {
+        "original": "refused",
+        "malleated": "accepted"
+      }
+    },
+    {
+      "note": "Valid original (refused by 0.1.0) and its partner S' = (S + 2^256) mod L, which OpenSSL and noble REJECT and 0.1.0 ACCEPTED.",
+      "pub": "9057f98c71bb6eb003e49c5113adba1e105a6d7cb0753f08c583fe5459c40956",
+      "msg": "87108389b5f1461f4521f3b15ac26dd7",
+      "sig": "2297d51ea7032449d137f990eb2dc8dcbd976fdb585fb70090901333590730097c0508a3ff68e0cb2a758da4873c1fb541f01df900ba9111371679f3e0a90400",
+      "malleated": "2297d51ea7032449d137f990eb2dc8dcbd976fdb585fb7009090133359073009acc6aad35937ba4ac5a713759d9e2f6740f01df900ba9111371679f3e0a90400",
+      "mo_ed25519_0_1_0": {
+        "original": "refused",
+        "malleated": "accepted"
+      }
+    },
+    {
+      "note": "Valid original (refused by 0.1.0) and its partner S' = (S + 2^256) mod L, which OpenSSL and noble REJECT and 0.1.0 ACCEPTED.",
+      "pub": "ed5efca7a930acde5740785be6d898d0be9c7e61a95c7119ae2da3eb1cc77fe6",
+      "msg": "b421cbc20a2cf360739124ef19cb000af3c612fb36e366ae590e195c83f762",
+      "sig": "1e26aa847a42e49153787d90ce6de9c524236e63f810d8d94f68f5eede51b30482344c500c1bf4f0755d310a9390db83a173aa167764853bf66b808164034300",
+      "malleated": "1e26aa847a42e49153787d90ce6de9c524236e63f810d8d94f68f5eede51b304b2f5ee8066e9cd6f1090b7daa8f2eb35a073aa167764853bf66b808164034300",
+      "mo_ed25519_0_1_0": {
+        "original": "refused",
+        "malleated": "accepted"
+      }
+    },
+    {
+      "note": "Valid original (refused by 0.1.0) and its partner S' = (S + 2^256) mod L, which OpenSSL and noble REJECT and 0.1.0 ACCEPTED.",
+      "pub": "73a94b9cdb249af1b7cbb7bd8005d3c9cff83046588959e07c1a2cebf09f026a",
+      "msg": "d9f39cd36903beb038194e6d44c27709e5ce5ece58819f7cf006dd82af1dc9e90374fae0bce96a070119523b0756bf7f8c16919e40a93674e44c71997b",
+      "sig": "d363b38c814146ef35627b080e8c7845fc4e88015c64db696a36c59566e217fcdf277c32ee51c7f64659714bdcb27df17fff38fbc2024bc7e008f55dae6c1d00",
+      "malleated": "d363b38c814146ef35627b080e8c7845fc4e88015c64db696a36c59566e217fc0fe91e634820a175e18bf71bf2148ea37eff38fbc2024bc7e008f55dae6c1d00",
+      "mo_ed25519_0_1_0": {
+        "original": "refused",
+        "malleated": "accepted"
+      }
+    },
+    {
+      "note": "Valid original (refused by 0.1.0) and its partner S' = (S + 2^256) mod L, which OpenSSL and noble REJECT and 0.1.0 ACCEPTED.",
+      "pub": "f4a85dc11f9a670722ede0f98f10f9e6167549e5c80e5fb60015ff15490c724f",
+      "msg": "1602beb7175771a75e0f735d16a9c4c681d2d9ac144a0f26e50798ec19377fdc21cded8988984a579e1ce2db858372592726f765b0ec8188ed77f4e9d1013de847",
+      "sig": "4cd03eadcd0e5aca929b7b11faae1c737f7e14313a58ae3baab59664359e24f49401c621c85630a8260ebd4612ea3354643ecc7f9b6cefefe8a9b51c135c4000",
+      "malleated": "4cd03eadcd0e5aca929b7b11faae1c737f7e14313a58ae3baab59664359e24f4c4c2685222250a27c1404317284c4406633ecc7f9b6cefefe8a9b51c135c4000",
+      "mo_ed25519_0_1_0": {
+        "original": "refused",
+        "malleated": "accepted"
+      }
+    }
+  ]
+}

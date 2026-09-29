@@ -395,6 +395,20 @@ service : {
                                                 err: text;
                                                 ok;
                                               });
+  /// True iff `signature` (64 bytes, R ‖ S) is a valid Ed25519 signature of `message` under the
+  /// raw 32-byte `publicKey`. False for anything malformed.
+  ed25519Verify: (signature: blob, message: blob, publicKey: blob) ->
+   (bool) query;
+  /// The same check, plus what it cost: instructions, and bytes allocated during the call.
+  /// Before 2.16.1 one verification allocated ~245 MB and burned ~4.96 billion instructions. On
+  /// an update path (a voucher, a caller check) wasm memory never shrinks, so that peak stayed
+  /// as canister memory; a query's growth is discarded.
+  ed25519VerifyCost: (signature: blob, message: blob, publicKey: blob) ->
+   (record {
+      allocatedBytes: nat;
+      instructions: nat64;
+      valid: bool;
+    }) query;
   enableService: (id: text) -> (variant {
                                   err: text;
                                   ok;

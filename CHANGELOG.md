@@ -1,5 +1,92 @@
 # Changelog
 
+## v2.16.1 — 2026-09-29
+
+Patch — **Ed25519 verification agrees with RFC 8032.** `Identity.verifyCallerEd25519` and the
+voucher check in `Sessions.consumeVoucher` keep their names and types,
+`selfAuthPrincipalOfEd25519` is untouched, `STABLE_SCHEMA_VERSION` stays 1, and no stable type
+changed.
+
+Both checks used `mo:ed25519` 0.1.0, which refused about 1 valid signature in 32, accepted a
+malleated partner of each one it refused, and allocated ~245 MB per check. ic402 now verifies with
+a vendored copy of ic-agent-mo's Ed25519 (`src/ic402/Ed25519.mo`, Apache-2.0, byte-identical to
+upstream below an attribution header), and the `mo:ed25519` dependency is gone.
+
+### Fixed
+
+- **Valid signatures were refused.** In 0.1.0, `bitrightshift(0, n)` returns 2^n − 1 instead of
+  0 (`utils.mo:670`, `let bit = if (num > 0) false else true`). Its base-point multiply walks
+  8-bit windows; when the window carried into the top is zero, the bug turns it into 255 and
+  adds −2^256·B. The result: every valid signature with S < 2^247 was refused, plus a thin band
+  in [2^247, 2^247 + 2^240) where no carry crosses byte 29. Over 400,000 uniformly drawn S that
+  is 3.10% — about 1 in 32, with the band adding about 1 in 7,100.
+- **Some invalid signatures were accepted.** For each refused (R, S), 0.1.0 accepted
+  (R, (S + 2^256) mod L) — a second "signature" on the same message, which OpenSSL and noble
+  reject. Confirmed 5 of 5 inside a deployed canister. ic402's own vouchers could not be
+  replayed this way (`sequence` and `cumulativeAmount` are signed and must strictly increase),
+  but **a consumer that keys replay or dedup on signature bytes** should check what the old
+  verifier let in.
+- **A bad R encoding trapped** instead of returning false (the "KNOWN SHARP EDGE" in
+  `verifyCallerEd25519`'s doc). Every malformed input now returns false.
+- **Cost.** One 0.1.0 verification allocated 244.7 MB and ran 4.96 billion instructions, just
+  under the 5 billion query limit. A fresh canister went from 8.1 MB to 337 MB after one call.
+  The vendored verifier allocates 8.4 MB and runs 206 million.
+
+### Changed
+
+- **The policy is stated and pinned**: RFC 8032, strict and cofactorless. A and R must be
+  canonical encodings (y < p, the point exists, no negative zero); S must be below L; k is
+  hashed over the original bytes; and small-order public keys are refused. That is stricter
+  than OpenSSL on small-order and non-canonical public keys (ed25519-speccheck cases 0, 1 and
+  11) and agrees with it everywhere else. Why each case falls where it does is written beside it
+  in `test/ed25519.test.mo`.
+- **`mo:ed25519` removed from `mops.toml`.** `HttpHandler`'s hex encoder, the only other use,
+  is now local and byte-identical over all 256 byte values, so the `ic402Nonce` wire format is
+  unchanged.
+- **Example canister:** two diagnostic queries, `ed25519Verify` and `ed25519VerifyCost`
+  (additive to `example.did` and the client IDL).
+
+### Notes
+
+- **The memory plateau is the GC, not the verifier.** Repeated verifications on the example
+  canister grow its memory ~8.4 MB per call until the first collection (~67 MB of heap), after
+  which it sits at 202.75 MB. A no-crypto probe allocating 8.4 MB per call follows the same
+  curve to the same 202.75 MB, and one allocating 1 MB per call gets there at call 60 instead of
+  call 8. That is Motoko's incremental GC; less garbage per call only delays it.
+- **If you import `mo:ed25519` yourself**, it has the same defects: its `verify` refuses and
+  accepts as above, and its `sign` and `getPublicKey` are wrong about 1 time in 32 for the same
+  reason (3.14% of seeds get a wrong public key). Upstream has only ever published 0.1.0.
+- ic402 calls only `Ed25519.verify`. The vendored file also carries upstream's `sign` and
+  `publicKey`, which ic402's tests use; they are reachable as `mo:ic402/Ed25519` but are not part
+  of ic402's API, and they are not constant-time (nor was the package they replace).
+
+### Testing
+
+- `test/ed25519.test.mo` (58 tests, `mops test`): the RFC 8032 §7.1 vectors (verified, and
+  reproduced by the vendored signer), all 151 Wycheproof vectors by flag, the 12
+  ed25519-speccheck cases with the policy per case, 13 regression vectors from 0.1.0, three
+  policy vectors that each pin one check (y < p, and each half of the final comparison), the
+  small-order universal forgery, and totality over malformed lengths and encodings.
+- `test/ed25519.test.ts`, inside the deployed canister: 2,000 fresh OpenSSL key/message pairs
+  (messages 0–300 bytes) plus one corruption of each must match OpenSSL; the run must reach
+  S < 2^247. It also runs Wycheproof, speccheck (where ic402 is stricter than OpenSSL, so the
+  differential cannot see it), the policy vectors, the regressions, and a budget of 400 M
+  instructions and 16 MB per verify. About 5 minutes on a local replica.
+- CI: an Ed25519 step in `test-integration`, and a new `ed25519-fixtures-sync` job that pins the
+  vendored Wycheproof and speccheck files to their upstream bytes and fails if `Vectors.mo` is
+  stale. Provenance: `test/fixtures/ed25519/README.md`.
+- Mutation-verified, every new test failing at least once against a mutant that compiles:
+  - All 58 Motoko tests, each run in isolation.
+  - The seven canister tests, against eight mutants built into the example and reinstalled:
+    - refusing S < 2^247 fails the differential and the regressions;
+    - accepting whatever decodes fails the differential's invalid direction;
+    - dropping S < L fails Wycheproof;
+    - dropping the small-order check fails speccheck;
+    - dropping y < p fails the policy vectors;
+    - 16 MB of extra allocation, or three times the multiply, fails the budget;
+    - an unreachable canister fails the gate under `IC402_REQUIRE_REPLICA=1`.
+- `mops test` is about 6× faster, 45 s to 8 s, because the old tests signed with 0.1.0.
+
 ## v2.16.0 — 2026-09-22
 
 Minor — **the derivation path reaches every deriving site.** Additive: every current caller

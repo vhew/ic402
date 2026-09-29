@@ -19,6 +19,9 @@ import Time "mo:base/Time";
 import Text "mo:base/Text";
 import Cycles "mo:base/ExperimentalCycles";
 import Debug "mo:base/Debug";
+import Prim "mo:⛔"; // rts_total_allocation, for the ed25519VerifyCost diagnostic only
+import IC "mo:base/ExperimentalInternetComputer";
+import Ed25519 "../src/ic402/Ed25519";
 
 persistent actor KnowledgeBase {
 
@@ -1206,6 +1209,40 @@ persistent actor KnowledgeBase {
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   public query func keccak256(data : [Nat8]) : async [Nat8] {
     Ic402.EvmAddress.keccak256(data);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // DIAGNOSTICS: Ed25519 verification
+  //
+  // The raw RFC 8032 check behind Ic402.verifyCallerEd25519 and the session voucher gate —
+  // exposed so a client can confirm the canister agrees with its own Ed25519 library, and
+  // so CI can check that agreement against OpenSSL over thousands of fresh signatures.
+  //
+  // Policy: canonical S (< L), canonical A and R, cofactorless [S]B = R + [k]A, small-order
+  // public keys refused, and false — never a trap — for any malformed input.
+  //
+  // Queries: verification is pure and costs no state. Remove this section if unwanted.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /// True iff `signature` (64 bytes, R ‖ S) is a valid Ed25519 signature of `message` under the
+  /// raw 32-byte `publicKey`. False for anything malformed.
+  public query func ed25519Verify(signature : Blob, message : Blob, publicKey : Blob) : async Bool {
+    Ed25519.verify(signature, message, publicKey);
+  };
+
+  /// The same check, plus what it cost: instructions, and bytes allocated during the call.
+  /// Before 2.16.1 one verification allocated ~245 MB and burned ~4.96 billion instructions. On
+  /// an update path (a voucher, a caller check) wasm memory never shrinks, so that peak stayed
+  /// as canister memory; a query's growth is discarded.
+  public query func ed25519VerifyCost(signature : Blob, message : Blob, publicKey : Blob) : async {
+    valid : Bool;
+    instructions : Nat64;
+    allocatedBytes : Nat;
+  } {
+    var valid = false;
+    let before = Prim.rts_total_allocation();
+    let instructions = IC.countInstructions(func() { valid := Ed25519.verify(signature, message, publicKey) });
+    { valid; instructions; allocatedBytes = Prim.rts_total_allocation() - before };
   };
 
   // ═══════════════════════════════════════════════════════════════════════

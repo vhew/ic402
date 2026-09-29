@@ -28,7 +28,6 @@ import Array "mo:base/Array";
 import Buffer "mo:base/Buffer";
 import Char "mo:base/Char";
 import Iter "mo:base/Iter";
-import Ed25519 "mo:ed25519";
 import Utils "Utils";
 
 module {
@@ -511,15 +510,25 @@ module {
 
   // ── Internal helpers ──
 
+  // Lowercase hex, no `0x` — byte-identical to the `mo:ed25519` Utils.bytesToHex it replaces
+  // (checked over all 256 byte values on the switch). It feeds `ic402Nonce` in the 402 body, so
+  // its output is wire format and must not change.
+  let HEX_DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
   func blobToHex(b : Blob) : Text {
-    Ed25519.Utils.bytesToHex(Blob.toArray(b));
+    var out = "";
+    for (byte in b.vals()) {
+      let n = Nat8.toNat(byte);
+      out #= HEX_DIGITS[n / 16] # HEX_DIGITS[n % 16];
+    };
+    out;
   };
 
   func hexToBlob(hex : Text) : Blob {
     // L22: use the LOCAL non-trapping hexToBytes ([] on odd-length / non-hex input). The
-    // Ed25519.Utils version traps (Option.unwrap on a bad nibble, and a Nat underflow on a 1-char
-    // value), and parsePaymentHeader reaches this on a fully attacker-controlled PAYMENT-SIGNATURE
-    // header — a malformed value must degrade to a failed verification, not trap http_request_update.
+    // `mo:ed25519` Utils version this once used traps (Option.unwrap on a bad nibble, and a Nat
+    // underflow on a 1-char value), and parsePaymentHeader reaches this on a fully
+    // attacker-controlled PAYMENT-SIGNATURE header — a malformed value must degrade to a failed
+    // verification, not trap http_request_update.
     Blob.fromArray(hexToBytes(hex));
   };
 

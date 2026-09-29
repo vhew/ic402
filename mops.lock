@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "mopsTomlDepsHash": "e45b0d5979de9dd4557f60ea310dba2bb375513286d48747a6bacb9a56ca37d5",
+  "mopsTomlDepsHash": "5d96605528ff72ececa7158ecdd0058e9891b273b0651c29e11541673bebe36b",
   "deps": {
     "asn1@3": "3.1.0",
     "base": "0.16.0",
@@ -13,7 +13,6 @@
     "core@1": "1.0.0",
     "core@2": "2.5.0",
     "ecdsa": "8.0.1",
-    "ed25519": "0.1.0",
     "hmac": "1.1.0",
     "ic": "4.2.0",
     "iterext": "https://github.com/timohanke/motoko-iterext#v2.0.0",
@@ -65,9 +64,6 @@
       "sha2@0": "0.1.14",
       "xtended-iter@1": "1.1.0",
       "xtended-numbers@2": "2.3.0"
-    },
-    "ed25519@0.1.0": {
-      "base": "https://github.com/dfinity/motoko-base#0d42146536771a60933786d8387b7c4ea4a1614b@0d42146536771a60933786d8387b7c4ea4a1614b"
     },
     "hmac@1.1.0": {
       "core@1": "1.0.0",
@@ -333,23 +329,6 @@
       "ecdsa@8.0.1/src/Signature.mo": "1989063b717faac95643557a35c8a8e59c2ab447884187eeeb41e39eabbb9f28",
       "ecdsa@8.0.1/src/Util.mo": "f80dd1208394ebd6061a79f5db4b160194eb4c764ae6d8965ebfe6d6c890771e",
       "ecdsa@8.0.1/src/lib.mo": "abfbe3c07ef078fbc7e79bdbc70ade7463cf8afe7b8c9cac6f61909271430311"
-    },
-    "ed25519@0.1.0": {
-      "ed25519@0.1.0/LICENSE": "df373768f1ba2c42c83f7279adf18966ed2e96ad42f472a3e609dec918173ced",
-      "ed25519@0.1.0/README.md": "811f4452b565377777d7c92d215820278cabb007301370345148c1121ae44b15",
-      "ed25519@0.1.0/mops.toml": "65dfe892a92c2d0636e796be41f93f10e3b2edca7107c5e4475d4960baf6b77f",
-      "ed25519@0.1.0/src/const.mo": "58ce598be2d1d7c4fd7bd4a764a1380d8359461e22aac25feba79a5bd93e006a",
-      "ed25519@0.1.0/src/crypto/bigendian.mo": "9d30a40111a50a21de5af3012a4dae0030a427a80960ee6a4a49aa8fcdaa1d87",
-      "ed25519@0.1.0/src/crypto/crypto.mo": "c7406f611d8b482c3ce31cb3e4481b811f7fa84ed6eda7f90a202cd3317bef77",
-      "ed25519@0.1.0/src/crypto/engine32.mo": "718300b43bcd510304f40f4d1a1c886cd6b9b6a71e3e00772d88311a2e478eaa",
-      "ed25519@0.1.0/src/crypto/engine64.mo": "23933fb64007788b7a5997445b73cbdce7a4151edfb718af0ab9a5e59845cbfa",
-      "ed25519@0.1.0/src/crypto/iterext.mo": "f8b1abf37d07883853fb9a87993c8e81acdc5ee85472de3c7c7ae8f260765b75",
-      "ed25519@0.1.0/src/ed25519.mo": "b6c4c8eb3c8215eb4f3ef4c6a1a33bf4e2718486d06665ac094e0dc032014880",
-      "ed25519@0.1.0/src/generator/blob.mo": "32fee3f7e483a62e2adfe96a33186bf8766dd4b666443cd24bebcd3250d60fca",
-      "ed25519@0.1.0/src/generator/nat8.mo": "59ca9597e6f9c7b7a635258450be377990c3523c9e7913db57e619dbb2f84bbe",
-      "ed25519@0.1.0/src/lib.mo": "f696f3629f844eb3adb21e401faa9a1351d32bf713c43f51b40f9db44af28327",
-      "ed25519@0.1.0/src/types.mo": "84a705e359d464513dbfc4aa103edfbf0900be077b08c3b8c6e103ec06303f5e",
-      "ed25519@0.1.0/src/utils.mo": "58af36f5d16508a93608e46e892397e25d46987f46b6533ab96bd27a94cf38e4"
     },
     "hmac@1.1.0": {
       "hmac@1.1.0/LICENSE": "4458503dd48e88c4e0b945fb252a08b93c40ec757309b8ffa7c594dfa1e35104",
