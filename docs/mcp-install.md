@@ -200,7 +200,7 @@ runs the same x402 charge flow against the connected canister's own paid endpoin
 (`suggestedDeposit`, `costPerCall`); `open_session` escrows a deposit once (ICRC-2 on ICP, or an
 EIP-3009 USDC deposit on EVM); then `session_query` streams as many calls as the deposit covers,
 each auto-signing an Ed25519 voucher off-chain. `close_session` settles the consumed amount and
-refunds the rest — two on-chain transactions for any number of calls. `get_session` /
+refunds the rest — a fixed few on-chain transactions, however many calls the deposit covers. `get_session` /
 `list_sessions` track state.
 
 **Buy gated content.** When a paid endpoint returns a `ContentDelivery` grant, `fetch_content`
@@ -227,8 +227,8 @@ and routed to its dedicated, gated tool.
 
 > **ic402 — payments for AI agents (x402 / ICP / 5 EVM chains).** Give your agent the ability to
 > pay: probe and settle x402-gated APIs with USDC on Base, Ethereum, Avalanche, Optimism, or
-> Arbitrum, open streaming micropayment sessions (deposit once, stream signed vouchers, settle in
-> 2 on-chain txns), buy encrypted gated content, transact on a paid-services marketplace, and
+> Arbitrum, open streaming micropayment sessions (deposit once, stream signed vouchers, settle on
+> close), buy encrypted gated content, transact on a paid-services marketplace, and
 > register an ERC-8004 agent identity on Base — all signed by an ICP canister's threshold-ECDSA
 > key, so there's no private key on the agent's machine. Injection-resistant by design: per-call
 > and cumulative spend caps, explicit confirm-gating on every value-moving tool, SSRF-guarded

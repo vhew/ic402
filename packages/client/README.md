@@ -55,7 +55,7 @@ console.log(session.consumed, session.remaining);
 const receipt = await session.close(); // settle consumed + refund remainder
 ```
 
-One escrow deposit on open, one settle on close — every call in between is an Ed25519 voucher the canister verifies in-canister for free.
+One escrow deposit on open, settle + refund on close — every call in between is an Ed25519 voucher the canister verifies in-canister, with no ledger call and no gas (the check costs the canister ~420M cycles; see [costs-and-rails.md](https://github.com/vhew/ic402/blob/master/docs/costs-and-rails.md)).
 
 ### EIP-3009 EVM payment
 

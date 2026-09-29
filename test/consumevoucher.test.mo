@@ -6,9 +6,9 @@
 /// The second suite pins EXTERNALLY-SIGNED golden fixtures: Ed25519 signatures produced by
 /// @icp-sdk/core@5.4.0 (the exact library + call path the production client uses —
 /// Ed25519KeyIdentity.sign over the raw CBOR voucher payload), cross-verified byte-identical and
-/// valid with @noble/ed25519@3.1.0 and independently with node:crypto (OpenSSL). Until these
-/// fixtures, every voucher-signature test signed with mo:ed25519 itself, so a shared RFC-8032
-/// deviation in mo:ed25519 would have passed hermetically.
+/// valid with @noble/ed25519@3.1.0 and independently with node:crypto (OpenSSL). Without them,
+/// every voucher-signature test would be signed by the canister-side library itself, and a
+/// shared RFC-8032 deviation would pass hermetically — which is what `mo:ed25519` 0.1.0 did.
 import Identity "../src/ic402/Identity";
 import Sessions "../src/ic402/Sessions";
 import Types "../src/ic402/Types";
@@ -19,14 +19,24 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
-import Ed25519 "mo:ed25519";
+import Ed25519 "../src/ic402/Ed25519";
 import { test; suite } "mo:test";
+
+// Test fixtures are signed with ic402's own vendored RFC 8032 signer (src/ic402/Ed25519.mo).
+// Before 2.16.1 they used `mo:ed25519` 0.1.0, whose `sign` and `getPublicKey` were wrong about
+// 1 time in 32. Argument order kept as the old (message, seed) so each call site is a one-token
+// swap; the externally-signed goldens below remain the independent cross-check.
+func pubOf(seed : [Nat8]) : [Nat8] = Blob.toArray(Ed25519.publicKey(Blob.fromArray(seed)));
+func signWith(message : [Nat8], seed : [Nat8]) : [Nat8] =
+  Blob.toArray(Ed25519.sign(Blob.fromArray(seed), Blob.fromArray(message)));
+func verifyBytes(sig : [Nat8], message : [Nat8], pub : [Nat8]) : Bool =
+  Ed25519.verify(Blob.fromArray(sig), Blob.fromArray(message), Blob.fromArray(pub));
 
 suite("Sessions.consumeVoucher", func() {
 
   let canisterP = Principal.fromText("aaaaa-aa");
   let privKey : [Nat8] = Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { Nat8.fromNat((i + 1) % 256) });
-  let pubKey = Ed25519.ED25519.getPublicKey(privKey);
+  let pubKey = pubOf(privKey);
 
   // Fresh manager + one open session per test (consumeVoucher mutates on #ok, so isolate).
   // deposited 10_000, already-consumed 1_000 at sequence 1.
@@ -80,7 +90,7 @@ suite("Sessions.consumeVoucher", func() {
       sessionId;
       cumulativeAmount = cumulative;
       sequence;
-      signature = Blob.fromArray(Ed25519.ED25519.sign(payloadFor(sessionId, cumulative, sequence), key));
+      signature = Blob.fromArray(signWith(payloadFor(sessionId, cumulative, sequence), key));
     };
   };
 
@@ -173,20 +183,20 @@ suite("externally-signed voucher goldens (@icp-sdk, cross-verified @noble + node
     };
   });
 
-  test("mo:ed25519 accepts the external @icp-sdk signature over the pinned payload", func() {
-    assert Ed25519.ED25519.verify(SIG_A, PINNED_PAYLOAD, GOLDEN_PUBKEY);
+  test("the vendored verifier accepts the external @icp-sdk signature over the pinned payload", func() {
+    assert verifyBytes(SIG_A, PINNED_PAYLOAD, GOLDEN_PUBKEY);
   });
 
-  test("mo:ed25519 rejects a valid signature by the WRONG key over the same payload", func() {
-    assert not Ed25519.ED25519.verify(SIG_B, PINNED_PAYLOAD, GOLDEN_PUBKEY);
+  test("the vendored verifier rejects a valid signature by the WRONG key over the same payload", func() {
+    assert not verifyBytes(SIG_B, PINNED_PAYLOAD, GOLDEN_PUBKEY);
   });
 
-  test("mo:ed25519 rejects the external signature over a different payload", func() {
+  test("the vendored verifier rejects the external signature over a different payload", func() {
     let different = switch (Sessions.encodeVoucherPayload("aaaaa-aa", "sess-1", 1001, 2)) {
       case (?p) { p };
       case (null) { assert false; [] };
     };
-    assert not Ed25519.ED25519.verify(SIG_A, different, GOLDEN_PUBKEY);
+    assert not verifyBytes(SIG_A, different, GOLDEN_PUBKEY);
   });
 
   // END-TO-END: session keyed to GOLDEN_PUBKEY, state chosen so cumulativeAmount 1000 / sequence 2

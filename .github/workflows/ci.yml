@@ -196,6 +196,13 @@ jobs:
       # subnet still satisfies IC402_REQUIRE_REPLICA).
       - name: Schnorr suite (replica-enforced)
         run: IC402_REQUIRE_SCHNORR=1 pnpm exec vitest run test/schnorr.test.ts
+      # Ed25519 verification, INSIDE the deployed canister: a differential against OpenSSL over
+      # 2,000 fresh key/message pairs (and a corruption of each), plus Wycheproof, speccheck, the
+      # policy vectors, the mo:ed25519 0.1.0 regressions, and a per-verify instruction and
+      # allocation budget. `mops test` runs those fixtures in the interpreter; this proves the
+      # compiled canister agrees. ~5 min locally (the local replica runs queries ~1 at a time).
+      - name: Ed25519 suite (replica-enforced)
+        run: IC402_REQUIRE_REPLICA=1 pnpm exec vitest run test/ed25519.test.ts
 
   # B3: gate the EVM-OUTBOUND rail (sign → broadcast → confirm / park / reconcile) HERMETICALLY —
   # no funded testnet, no HTTPS outcall. setup:local deploys the replica + example; predemo exports
@@ -242,3 +249,23 @@ jobs:
       - run: bash scripts/gen-did.sh
       - name: Fail if example.did is stale (run scripts/gen-did.sh and commit)
         run: git diff --exit-code example/example.did
+
+  # test/fixtures/ed25519/Vectors.mo is GENERATED from the JSON beside it. `mops test` reads the
+  # .mo and the replica suite reads the JSON, so a hand edit to either would let the two suites
+  # test different vectors. The two upstream files are also pinned to their upstream bytes (the
+  # hashes in the README there), so a reformat or an edit cannot pass as Wycheproof/speccheck.
+  ed25519-fixtures-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The vendored upstream vectors are byte-for-byte upstream
+        working-directory: test/fixtures/ed25519
+        run: |
+          echo "752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536  wycheproof_ed25519.json" | sha256sum -c
+          echo "08e47a36d9aead288664930505584f353fff113ab854f2800db1e4f5b3540450  speccheck_cases.json" | sha256sum -c
+      - run: node scripts/gen-ed25519-fixtures.mjs
+      - name: Fail if Vectors.mo is stale (run scripts/gen-ed25519-fixtures.mjs and commit)
+        run: git diff --exit-code test/fixtures/ed25519/Vectors.mo

@@ -91,7 +91,7 @@ console.log(results);
 
 ## 5. A streaming session
 
-Per-call settlement is wasteful for chatty clients. A session deposits escrow **once**, streams Ed25519-signed vouchers (each ≈ free), and settles **once** on close — 2 on-chain transactions for any number of calls:
+Per-call settlement is wasteful for chatty clients. A session deposits escrow **once**, streams Ed25519-signed vouchers (no ledger call or gas each), and settles **once** on close — a fixed few on-chain transactions (deposit, settle, refund), however many calls the deposit covers:
 
 ```ts
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
@@ -114,7 +114,7 @@ const receipt = await session.close(); // settles consumed, refunds the rest
 console.log('closed:', receipt); // PaymentReceipt — amount settled, `refunded` remainder
 ```
 
-**What's happening:** `openSession` fetches the canister's `SessionIntent`, ICRC-2-approves the deposit, and registers your Ed25519 public key; each `session.call` signs a cumulative voucher (bound to the session **and** the canister id, so it can't be replayed elsewhere) that the canister verifies in-canister with zero outcalls; `close()` settles the consumed amount and refunds the remainder on the session's rail. This is the "5,000× cheaper" lever quantified in [`costs-and-rails.md`](costs-and-rails.md) §3.
+**What's happening:** `openSession` fetches the canister's `SessionIntent`, ICRC-2-approves the deposit, and registers your Ed25519 public key; each `session.call` signs a cumulative voucher (bound to the session **and** the canister id, so it can't be replayed elsewhere) that the canister verifies in-canister with zero outcalls; `close()` settles the consumed amount and refunds the remainder on the session's rail. At 10,000 calls that is thousands of times fewer on-chain transactions; [`costs-and-rails.md`](costs-and-rails.md) §3 has the cycle numbers, including what each voucher costs the canister.
 
 ## 6. An EVM payment (EIP-3009)
 

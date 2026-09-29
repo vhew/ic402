@@ -6,3 +6,6 @@ node_modules/
 .pnpm-store/
 pnpm-lock.yaml
 contracts/lib/
+# Vendored byte-for-byte from upstream; the README beside them pins each file's sha256.
+test/fixtures/ed25519/wycheproof_ed25519.json
+test/fixtures/ed25519/speccheck_cases.json
