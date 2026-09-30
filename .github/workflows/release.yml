@@ -35,7 +35,7 @@ jobs:
     # job only; add protections (required reviewers, tag restriction to v*) on it in repo settings.
     environment: release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
