@@ -67,6 +67,11 @@ jobs:
       - run: pnpm build:client
       - run: pnpm build:demo
       - run: mops test
+      # Pack both npm packages with pnpm (it rewrites @ic402/mcp's "workspace:*" dependency to
+      # the exact version; `npm publish <dir>` did not, so every @ic402/mcp up to 2.17.0 was
+      # uninstallable), then prove the pair installs with npm. The publish steps ship these tarballs.
+      - name: Pack npm packages and prove they install
+        run: bash scripts/check-npm-pack.sh "$RUNNER_TEMP/npm-pkgs"
 
       # Create (or update, on re-run) the GitHub Release BEFORE publishing — mops pulls a version's
       # release notes from the GitHub Release, so it must exist first (deploy.sh ordered it the same
@@ -105,7 +110,8 @@ jobs:
           if npm view "@ic402/mcp@$V" version >/dev/null 2>&1; then
             echo "@ic402/mcp@$V already on npm - skipping"
           else
-            npm publish ./integrations/mcp --access public
+            # An absolute tarball path: npm would read a bare `a/b.tgz` as a GitHub shorthand.
+            npm publish "$RUNNER_TEMP/npm-pkgs/ic402-mcp-$V.tgz" --access public
           fi
 
       - name: Publish ic402 to mops

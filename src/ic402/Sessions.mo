@@ -63,9 +63,9 @@ module {
   // y (sign bit dropped) ∈ {0, 1, p − 1, ±y8} is small order; y ≥ p is non-canonical (refused too).
   func smallOrderKey(key : Blob) : Bool {
     let y = Array.foldRight<Nat8, Nat>(Blob.toArray(key), 0, func(b, acc) = acc * 256 + Nat8.toNat(b)) % (2 ** 255);
-    let p = (2 ** 255) - 19;
+    let p = 57896044618658097711785492504343953926634992332820282019728792003956564819949; // 2^255 − 19
     let y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022; // order 8
-    y <= 1 or y + 1 >= p or y == y8 or y == p - y8;
+    y <= 1 or y + 1 >= p or y == y8 or y + y8 == p; // y + y8 == p: y == −y8, without a Nat subtraction
   };
 
   /// Pure decision for reconcileSession (module-level → unit-testable without a Sessions instance).
