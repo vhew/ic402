@@ -85,7 +85,10 @@ export interface Ic402ClientConfig {
   ledgerActorFactory?: (ledgerCanisterId: string) => any;
   /** Custom EVM RPC URL. If omitted, uses a public RPC for the chain. */
   evmRpcUrl?: string;
-  /** Fee buffer added to ICRC-2 approval amount (default: 100_000). */
+  /**
+   * When set, used as the ledger fee instead of querying `icrc1_fee()` (approvals are exactly
+   * `amount + fee`, expiring after 5 minutes). A ledger actor without `icrc1_fee` uses 100_000.
+   */
   approvalFeeBuffer?: bigint;
 }
 
@@ -129,6 +132,24 @@ export class Ic402Client {
   }
 
   /**
+   * 2.17.0: approve exactly `amount` + the ledger fee (what `icrc2_transfer_from` deducts on top),
+   * expiring in 5 minutes (the canister's default nonce expiry), so no allowance stands afterwards
+   * — ICP settlement over HTTP is allowance-authenticated. Approvals REPLACE the allowance, so two
+   * overlapping payments from one identity may fail with InsufficientAllowance (never double-pay).
+   */
+  private async approvalFor(
+    ledgerActor: { icrc1_fee?: () => Promise<bigint | number> },
+    amount: bigint,
+  ): Promise<{ amount: bigint; expires_at: [bigint] }> {
+    const fee =
+      this.config.approvalFeeBuffer ??
+      (typeof ledgerActor.icrc1_fee === 'function'
+        ? BigInt(await ledgerActor.icrc1_fee())
+        : 100_000n);
+    return { amount: amount + fee, expires_at: [BigInt(Date.now() + 300_000) * 1_000_000n] };
+  }
+
+  /**
    * Call a canister method, auto-handling 402 payment if needed.
    *
    * Flow: call method → if #paymentRequired → icrc2_approve → create sig → retry
@@ -161,24 +182,26 @@ export class Ic402Client {
         throw new Error('Auto-approval requires ledger and ledgerActorFactory in config');
       }
 
-      // ICRC-2 approve: allow the target canister to spend amount + fee buffer
+      // ICRC-2 approve: allow the target canister to spend exactly amount + fee (approvalFor)
       const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
+      const approval = await this.approvalFor(ledgerActor, requirement.amount);
       const approveResult = await ledgerActor.icrc2_approve({
         spender: { owner: Principal.fromText(cid), subaccount: [] },
-        amount: requirement.amount + (this.config.approvalFeeBuffer ?? 100_000n),
+        amount: approval.amount,
         fee: [],
         memo: [],
         from_subaccount: [],
         created_at_time: [],
         expected_allowance: [],
-        expires_at: [],
+        expires_at: approval.expires_at,
       });
 
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
         throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
       }
 
-      // Construct PaymentSignature from the requirement's nonce and retry.
+      // Construct PaymentSignature from the requirement's nonce and retry. `sender` MUST be the
+      // principal the actor calls with: Candid paths refuse a mismatch (Gateway.settleFrom).
       const nonce = toByteArray(requirement.nonce ?? new Uint8Array(32));
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
       const sig = {
@@ -220,9 +243,15 @@ export class Ic402Client {
     signer?: VoucherSigner,
     canisterId?: string,
   ): Promise<SessionHandle> {
+    // 2.17.0: no signer used to register an all-zero key, a small-order key anyone can sign as
+    // (the IC's ingress check is cofactored); canisters now refuse one, so fail before approving.
+    if (!signer) throw new Error('openSession requires a VoucherSigner (the session key)');
     const cid = canisterId ?? this.config.canisterId;
     const config = sessionConfig;
     const actor = this.config.actorFactory(cid);
+    // 2.17.0: session calls go out AS the session key when the signer supplies a factory (the
+    // canister then skips the signature check); open/close stay on the payer's actor.
+    const sessionActor = signer.actorFactory ? signer.actorFactory(cid) : actor;
     let intent: SessionIntent = await actor.requestSession();
 
     // For EVM sessions, override the intent's network, token, and recipient
@@ -246,15 +275,19 @@ export class Ic402Client {
     // ICRC-2 approve deposit amount (ICP sessions only)
     if (!isEvm && this.config.autoPayment && this.config.ledger && this.config.ledgerActorFactory) {
       const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
+      // Approve what the canister pulls, min(suggestedDeposit, maxDeposit) (Sessions.openSession),
+      // not the cap: any excess would stand as an allowance an HTTP settle could spend.
+      const deposit = maxDeposit < intent.suggestedDeposit ? maxDeposit : intent.suggestedDeposit;
+      const approval = await this.approvalFor(ledgerActor, deposit);
       const approveResult = await ledgerActor.icrc2_approve({
         spender: { owner: Principal.fromText(cid), subaccount: [] },
-        amount: maxDeposit + (this.config.approvalFeeBuffer ?? 100_000n),
+        amount: approval.amount,
         fee: [],
         memo: [],
         from_subaccount: [],
         created_at_time: [],
         expected_allowance: [],
-        expires_at: [],
+        expires_at: approval.expires_at,
       });
 
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
@@ -272,10 +305,7 @@ export class Ic402Client {
     // publicKey: Ed25519 public key for voucher verification (both ICP and EVM).
     // signature: empty for ICP, EVM tx hash bytes for EVM.
     // sender: empty for ICP (filled by identity), payer's EVM address for EVM.
-    let pubKey: Uint8Array = new Uint8Array(32);
-    if (signer) {
-      pubKey = new Uint8Array(await signer.getPublicKey());
-    }
+    const pubKey = new Uint8Array(await signer.getPublicKey());
 
     const evmAuth = config?.authorization;
     const sig = {
@@ -365,7 +395,7 @@ export class Ic402Client {
           signature,
         };
 
-        const callResult = await actor[method](voucher, ...callArgs);
+        const callResult = await sessionActor[method](voucher, ...callArgs);
         if (callResult && typeof callResult === 'object' && 'error' in callResult) {
           throw new Error(callResult.error);
         }
@@ -402,7 +432,7 @@ export class Ic402Client {
           signature: sig,
         };
 
-        const callResult = await actor[method](v, ...callArgs);
+        const callResult = await sessionActor[method](v, ...callArgs);
         if (callResult && typeof callResult === 'object' && 'error' in callResult) {
           throw new Error(callResult.error as string);
         }
@@ -754,18 +784,18 @@ export class Ic402Client {
       const req0 = unwrapOpt<{ amount: bigint; nonce: unknown }>(result.paymentRequired);
       const amount = req0?.amount ?? 0n;
 
-      // Approve amount + fee buffer (ICRC-2 transfer_from deducts fee from allowance)
-      const approveAmount = amount + (this.config.approvalFeeBuffer ?? 100_000n);
+      // Approve exactly amount + fee (ICRC-2 transfer_from deducts the fee from the allowance)
       const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
+      const approval = await this.approvalFor(ledgerActor, amount);
       const approveResult = await ledgerActor.icrc2_approve({
         spender: { owner: Principal.fromText(this.config.canisterId), subaccount: [] },
-        amount: approveAmount,
+        amount: approval.amount,
         fee: [],
         memo: [],
         from_subaccount: [],
         created_at_time: [],
         expected_allowance: [],
-        expires_at: [],
+        expires_at: approval.expires_at,
       });
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
         throw new Ic402Error(

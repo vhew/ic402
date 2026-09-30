@@ -9,7 +9,7 @@
 
 - Cost is **bimodal**: everything is cheap *except* signing **and** broadcasting an EVM transaction.
 - A single **EVM settle nets ~17B cycles** (measured, local replica) — far below the `~100B` you'll see in code comments. That `~100B` / `MIN_BROADCAST_CYCLES = 120B` is a **safety reserve**, not consumption.
-- **Per‑call EVM settle is underwater below ~$0.05–0.10.** For micropayments, use the **ICP rail** (settle ≈ <$0.001 in canister cycles; the payer also pays the ledger fee, 0.01 ckUSDC per transfer and per approve) or **sessions** (one settle amortized over thousands of calls). A session call still costs the canister ~420M cycles (~$0.0006) to verify its voucher, so price session calls above that, plus the session's open and close legs spread over its calls.
+- **Per‑call EVM settle is underwater below ~$0.05–0.10.** For micropayments, use the **ICP rail** (settle ≈ <$0.001 in canister cycles; the payer also pays the ledger fee, 0.01 ckUSDC per transfer and per approve) or **sessions** (one settle amortized over thousands of calls). A session call costs the canister ~8M cycles when made as the session key (SDK/MCP ≥ 2.17.0), or ~420M (~$0.0006) on the legacy signed‑voucher path; price session calls above that, plus the session's open and close legs spread over its calls.
 - There is also a **fixed, per‑canister idle cost** that has nothing to do with payments — recurring timers. Since **2.11.0** ic402's expiry sweeps arm only while there is something to sweep; see §5, and read it before embedding ic402 in a many‑small‑canisters topology.
 
 ## 1. Measured cost per operation
@@ -20,7 +20,8 @@ Measured on a local replica (`dfx_test_key`, network‑launcher), **net of EVM�
 |-----------|-----------:|------:|----------------|
 | x402 `/verify`, 402 challenge, **content delivery** (query) | <1M – ~10M | ~$0 | keccak / `ecRecover` / HMAC+ChaCha; no outcall, no sign |
 | **ICP settle** (ICRC‑2 `transfer_from`) | ~10–500M | <$0.001 | 1–2 inter‑canister ledger calls |
-| **Session voucher** (per voucher reaching the signature check, accepted or not) | **~420M** | ~$0.0006 | the Ed25519 signature check (~200M instructions, ~96% of it); in‑canister, **zero outcalls**, no gas |
+| **Session voucher** — called as the session key (`consumeVoucherFrom`, SDK/MCP ≥ 2.17.0) | **~8M** | ~$0.00001 | the IC authenticates the caller; no in‑canister signature check, **zero outcalls**, no gas |
+| **Session voucher** — legacy signed path (per voucher reaching the signature check, accepted or not) | **~420M** | ~$0.0006 | the Ed25519 signature check (~200M instructions, ~96% of it); in‑canister, **zero outcalls**, no gas |
 | ZK Groth16 verify (inter‑canister) | ~1–5B | ~$0.005 | proof verification in the Rust canister |
 | **EVM settle** — content (sign + sendRawTx + confirm, 1 leg) | **~17.5B** | ~$0.023 | tECDSA sign + RPC outcalls |
 | **EVM session open** (1 leg) | **~17.1B** | ~$0.023 | same as a settle |
@@ -29,7 +30,7 @@ Measured on a local replica (`dfx_test_key`, network‑launcher), **net of EVM�
 
 *Method:* snapshot `health().cyclesBalance` (a `query`, so polling doesn't itself burn balance) at **quiet points** before and after each operation. Two independent single‑leg settles both netted ~17B.
 
-*Session voucher:* re‑measured for 2.16.1 (2026‑09‑29) with the same method: 40 vouchers through `@ic402/client`, median ~415M each (~420M mean, which includes the odd timer tick), on network‑launcher v16, a 13‑node subnet at normal pricing. Application subnets bill wasm64 execution — what Motoko's default enhanced orthogonal persistence compiles to — at **2 cycles per instruction**, and wasm32 at 1 (`WASM64_INSTRUCTION_COST_OVERHEAD` in the IC's `subnet_config.rs`), so this is the mainnet price on a 13‑node subnet too, scaling with subnet size. A voucher that fails the check costs the same; one rejected before it (sequence, deposit, session state) nets ~8M. The figure replaces an earlier `<1M`, which cannot have included the signature check: before 2.16.1 that check alone ran ~4.96B instructions, so a voucher cost ~10B cycles. The other rows date from 2026‑06 and were not re‑measured.
+*Session voucher:* re‑measured for 2.16.1 (2026‑09‑29) with the same method: 40 vouchers through `@ic402/client`, median ~415M each (~420M mean, which includes the odd timer tick), on network‑launcher v16, a 13‑node subnet at normal pricing. Application subnets bill wasm64 execution — what Motoko's default enhanced orthogonal persistence compiles to — at **2 cycles per instruction**, and wasm32 at 1 (`WASM64_INSTRUCTION_COST_OVERHEAD` in the IC's `subnet_config.rs`), so this is the mainnet price on a 13‑node subnet too, scaling with subnet size. A voucher that fails the check costs the same; one rejected before it (sequence, deposit, session state) nets ~8M. Since 2.17.0 a voucher submitted by the session key itself skips the check — the IC verified the call's signature before the canister ran — and nets ~8.3M (median of 40 through `@ic402/client`, same method, 2026‑09‑30); the ~420M applies only to the signed fallback, which the example turns off. The figure replaces an earlier `<1M`, which cannot have included the signature check: before 2.16.1 that check alone ran ~4.96B instructions, so a voucher cost ~10B cycles. The other rows date from 2026‑06 and were not re‑measured.
 
 ## 2. Net cost ≠ the balance you must hold (operators)
 
@@ -39,7 +40,7 @@ Consequences:
 
 - `EvmSender` refuses to broadcast below `MIN_BROADCAST_CYCLES = 120B`. That is a **floor**, not the cost.
 - **Keep the canister funded well above the in‑flight peak of your heaviest EVM op** (hundreds of billions of cycles), plus headroom — not just above the net cost.
-- Budget **top‑ups** against *net* consumption (~17–64B per EVM settle, ~420M per session voucher, plus ~11B/day idle burn for the example), but size the **minimum balance** against the *in‑flight peak*.
+- Budget **top‑ups** against *net* consumption (~17–64B per EVM settle, ~8M per session voucher as the session key or ~420M on the signed path, plus ~11B/day idle burn for the example), but size the **minimum balance** against the *in‑flight peak*.
 
 ## 3. Rail selection by payment size (integrators)
 
@@ -49,10 +50,10 @@ The choice that matters most:
 |---------|-----|-----|
 | **Micropayment (< ~$0.05)** | **ICP** ckUSDC, or EVM via **sessions** | A per‑call EVM settle (~$0.05+ in cycles + EVM gas) costs more than the charge. |
 | **One‑off ≥ ~$0.10, payer on EVM** | **EVM charge** (EIP‑3009) | Settle cost is a small fraction of the payment; self‑custodial, no bridge. |
-| **High‑frequency from one payer** | **Sessions** (either rail) | Deposit once, stream Ed25519 vouchers (no ledger call, no gas; ~420M cycles each to verify, §1), settle once on close → on‑chain transactions per call → ~0. Price calls above ~$0.0006, the voucher check's cost, plus the open and close legs spread over the session's calls. (The example's 500‑unit demo price, $0.0005, is below this; it is a demo value, not a template.) |
+| **High‑frequency from one payer** | **Sessions** (either rail) | Deposit once, stream vouchers (no ledger call, no gas; ~8M cycles each sent as the session key, ~420M on the signed fallback, §1), settle once on close → on‑chain transactions per call → ~0. Price calls above the voucher's cost (~$0.00001, or ~$0.0006 on the signed fallback), plus the open and close legs spread over the session's calls. (The example's 500‑unit demo price, $0.0005, covers the session‑key path only — the example turns the fallback off; it is a demo value, not a template.) |
 | **High‑value / reorg‑sensitive** | **ICP**, or EVM with caution | EVM finality is depth‑0 and RPC is 2‑of‑N — see [`security-model.md`](security-model.md) §3. |
 
-What sessions save, grounded in §1's local figures: 10,000 EVM per‑call settles ≈ 10,000 × ~17B = ~170T cycles (~$226) + 10,000 gas txns. The same traffic as **one session** is 3 legs (open ~17B + close ~64B, settle and refund) plus 10,000 vouchers × ~0.42B ≈ ~4.3T cycles (~$5.70) + 3 gas txns. That is **~3,300× fewer on‑chain transactions and ~40× fewer cycles** locally; on mainnet, where a settle leg is ~40–80B (§4), the cycle saving is larger. On the **ICP rail** the cycle comparison can invert: a voucher (~420M) can cost the canister more than a per‑call ICP settle (§1's older ~10–500M range; the session deposit's `transfer_from` update netted ~60–70M in the 2.16.1 run). There a session mainly saves the payer's per‑call ledger fees (0.01 ckUSDC, i.e. $0.01, per transfer and per approve) and the ledger transactions and round trips.
+What sessions save, grounded in §1's local figures: 10,000 EVM per‑call settles ≈ 10,000 × ~17B = ~170T cycles (~$226) + 10,000 gas txns. The same traffic as **one session** is 3 legs (open ~17B + close ~64B, settle and refund) plus 10,000 vouchers × ~8M ≈ ~0.08T cycles as the session key (~0.16T, ~$0.21, in all), or × ~0.42B ≈ ~4.2T on the signed fallback (~4.3T, ~$5.70, in all), + 3 gas txns. That is **~3,300× fewer on‑chain transactions and ~1,000× fewer cycles** locally (~40× on the fallback); on mainnet, where a settle leg is ~40–80B (§4), the cycle saving is larger. On the **ICP rail**, on the signed fallback, the cycle comparison can invert: a voucher (~420M) can cost the canister more than a per‑call ICP settle (§1's older ~10–500M range; the session deposit's `transfer_from` update netted ~60–70M in the 2.16.1 run). There a session mainly saves the payer's per‑call ledger fees (0.01 ckUSDC, i.e. $0.01, per transfer and per approve) and the ledger transactions and round trips.
 
 ## 4. Local vs mainnet
 
@@ -60,7 +61,7 @@ The figures above are **local**. On mainnet, expect **higher** per‑EVM‑settl
 
 - **tECDSA `key_1` signatures cost ~26B cycles each** (system‑priced). Local `dfx_test_key` signing is ~free, which is why a local settle nets only ~17B — that ~17B is mostly outcalls.
 - **HTTPS outcalls scale with subnet replication.** The EVM‑RPC canister runs on a 34‑node subnet, so each `sendRawTransaction` / confirm poll costs more than locally.
-- **Estimate: ~40–80B net per EVM settle leg on mainnet** (sign‑dominated), **plus the EVM gas the canister pays in ETH** (~80k–120k gas for an EIP‑3009 transfer). Sessions amortize the settle toward ~0 per call; what remains per call is the voucher check (§1).
+- **Estimate: ~40–80B net per EVM settle leg on mainnet** (sign‑dominated), **plus the EVM gas the canister pays in ETH** (~80k–120k gas for an EIP‑3009 transfer). Sessions amortize the settle toward ~0 per call; what remains per call is the voucher (~8M as the session key, ~420M on the signed fallback, §1).
 - **Re‑measure on your target subnet** before relying on a number — the method (`health().cyclesBalance` net at quiet points, §1) is reproducible against the interactive demo.
 
 ## 5. Fixed idle cost: recurring timers

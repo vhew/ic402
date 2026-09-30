@@ -113,38 +113,52 @@ module {
 
     // ── Rate limiting ──
 
-    func checkRateLimit(policy : SpendingPolicy, caller : Principal) : { #ok; #denied : Text } {
+    // I6: a READ-ONLY check plus a record. checkRateLimit runs both (authenticated callers); the
+    // settles run them apart (precheckCharge / recordRateHit). `caller`'s hits inside the window:
+    func rateWindow(caller : Principal) : [Int] {
+      let windowStart = Time.now() - 60_000_000_000; // 60 seconds in nanoseconds
+      switch (rateLimitLog.get(Principal.toText(caller))) {
+        case (null) { [] };
+        case (?timestamps) { Array.filter<Int>(timestamps, func(t) { t > windowStart }) };
+      };
+    };
+
+    func rateLimitCheck(policy : SpendingPolicy, caller : Principal) : { #ok; #denied : Text } {
       switch (policy.rateLimitPerMinute) {
         case (null) { #ok };
         case (?limit) {
-          let key = Principal.toText(caller);
-          let now = Time.now();
-          let windowStart = now - 60_000_000_000; // 60 seconds in nanoseconds
-
-          // Get existing timestamps, filter to window
-          let existing = switch (rateLimitLog.get(key)) {
-            case (null) { [] };
-            case (?timestamps) {
-              Array.filter<Int>(timestamps, func(t) { t > windowStart });
-            };
-          };
-
-          // S-11: the previous inline `if existing.size()==0 { delete(key) }` here was
-          // dead code — the unconditional `put` below re-inserts the same key in the same
-          // call, so the map never shrank. Stale principals are now reclaimed by
-          // gcRateLimit(), which the maintenance timer must call alongside gcDailySpend().
-
-          if (existing.size() >= limit) {
+          if (rateWindow(caller).size() >= limit) {
             return #denied("Rate limit exceeded: " # Nat.toText(limit) # "/min for this caller — transient; retry after the 60s window, or raise rateLimitPerMinute via setPolicy for this principal.");
           };
-
-          // Record this request
-          // NOTE: Array.append is O(n) per call. Acceptable for typical rate limits
-          // (≤120/min) but would need a ring buffer for very high throughput.
-          rateLimitLog.put(key, Array.append(existing, [now]));
           #ok;
         };
       };
+    };
+
+    func rateLimitRecord(policy : SpendingPolicy, caller : Principal) {
+      if (policy.rateLimitPerMinute == null) return; // no limit configured: nothing is tracked
+      // S-11: the previous inline `if existing.size()==0 { delete(key) }` here was
+      // dead code — the unconditional `put` below re-inserts the same key in the same
+      // call, so the map never shrank. Stale principals are now reclaimed by
+      // gcRateLimit(), which the maintenance timer must call alongside gcDailySpend().
+      // NOTE: Array.append is O(n) per call. Acceptable for typical rate limits
+      // (≤120/min) but would need a ring buffer for very high throughput.
+      rateLimitLog.put(Principal.toText(caller), Array.append(rateWindow(caller), [Time.now()]));
+    };
+
+    func checkRateLimit(policy : SpendingPolicy, caller : Principal) : { #ok; #denied : Text } {
+      switch (rateLimitCheck(policy, caller)) {
+        case (#denied(r)) { return #denied(r) };
+        case (#ok) {};
+      };
+      rateLimitRecord(policy, caller);
+      #ok;
+    };
+
+    /// I6: record one rate-limit hit for `caller` (a no-op when no rateLimitPerMinute applies).
+    /// The settle paths call this when a receipt is issued, after precheckCharge passed.
+    public func recordRateHit(caller : Principal) {
+      rateLimitRecord(getEffectivePolicy(caller), caller);
     };
 
     // ── Daily spend tracking ──
@@ -272,8 +286,22 @@ module {
 
     // ── Charge checks ──
 
-    /// Check whether a one-time charge is permitted (access, rate, tx limit, daily limit).
+    /// Check whether a one-time charge is permitted (access, rate, tx limit, daily limit),
+    /// and record the rate hit when it is.
     public func checkCharge(caller : Principal, amount : Nat) : { #ok; #denied : Text } {
+      chargeChecks(caller, amount, true);
+    };
+
+    /// I6: checkCharge's decision WITHOUT recording the rate hit — for a settle whose sender is
+    /// only claimed until the ledger/chain accepts the transfer; pair it with recordRateHit on
+    /// success, so a failed settle naming someone else never spends their rate slot (the settle's
+    /// daily reservation, recordSpend, is still held until the transfer fails). N settles for one
+    /// sender in flight can each pass and all record, so the limit can overshoot by N − 1.
+    public func precheckCharge(caller : Principal, amount : Nat) : { #ok; #denied : Text } {
+      chargeChecks(caller, amount, false);
+    };
+
+    func chargeChecks(caller : Principal, amount : Nat, record : Bool) : { #ok; #denied : Text } {
       let policy = getEffectivePolicy(caller);
 
       switch (checkAccess(policy, caller)) {
@@ -281,7 +309,7 @@ module {
         case (#ok) {};
       };
 
-      switch (checkRateLimit(policy, caller)) {
+      switch (if (record) { checkRateLimit(policy, caller) } else { rateLimitCheck(policy, caller) }) {
         case (#denied(r)) { return #denied(r) };
         case (#ok) {};
       };

@@ -16,7 +16,7 @@ The per-finding sections that follow are the **original v1.0.0 observations**, r
 | **C1–C5** (Critical) | ✅ Fixed in v2.0.0 | `c7e4307`; CHANGELOG v2.0.0 "Critical fixes" (C5 also re-hardened in `40e561f`) |
 | **H1–H14** (High) | ✅ Fixed in v2.0.0 | `c7e4307`; CHANGELOG v2.0.0 "High fixes" (H1 confirm-status + H4 day-bucket follow-ups in `40e561f`) |
 | **M1–M11** (Medium) | ✅ Fixed in v2.0.0 | CHANGELOG v2.0.0 "Medium fixes"; M3/M4 covered by the H8/H4 fixes; M2 re-hardened in `40e561f` |
-| **L1–L11 / I1–I6** (Low/Info) | ◻️ Deferred — not individually addressed | except **I1** (missing `authz.to` regression test), now covered by `test/gateway.test.mo` |
+| **L1–L11 / I1–I6** (Low/Info) | ◻️ Deferred — not individually addressed | except **I1** (missing `authz.to` regression test), now covered by `test/gateway.test.mo`, and **I6**, fixed in 2.17.0 |
 | **Uncertain** — Sessions EVM close double-transfer (below) | ⚠️ Partially addressed by S16/S3 (`c5cdea2`, `7a032f8`) | but see the v2.1.0 open item below |
 
 ### v2.0.0 re-audit + v2.1.0 hardening (not in the original v1.0.0 audit)
@@ -174,7 +174,7 @@ For EVM payments `receipt.sender` is a `0x…` address. `Principal.fromText("0x�
 | I3 | `blobToHex` is **dead code** in HttpHandler | `HttpHandler.mo:288-290` |
 | I4 | ✅ Positive: AEAD authentication + constant-time tag comparison correctly implemented | `ContentStore.mo:58-84` |
 | I5 | `ContentStore` itself exposes no auth — access control lives only in the example (integrator footgun) | `ContentStore.mo:196-228` |
-| I6 | `checkRateLimit` consumes a rate-limit slot during a pre-charge check that may later fail | `Policy.mo:116-148,210-237` |
+| I6 | `checkRateLimit` consumes a rate-limit slot during a pre-charge check that may later fail — ✅ 2.17.0 (`precheckCharge` + `recordRateHit` on `#Ok`/`#confirmed`) | `Policy.mo:116-148,210-237` |
 
 ---
 

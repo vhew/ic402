@@ -1322,8 +1322,8 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         section('What sessions are for');
         info("Sessions let a client pay for repeated access to THIS canister's services.");
         info('Instead of settling every call on-chain, the client deposits once and streams');
-        info('signed vouchers. The canister verifies each voucher itself — no ledger calls,');
-        info('no gas, no ledger round trip. Settlement happens once when the session closes.');
+        info('vouchers, calling as a per-session key the IC authenticates — no ledger calls,');
+        info('no gas, no in-canister signature check. Settlement happens once at close.');
         info('');
         info('Use case: an AI agent querying a knowledge base thousands of times per day.');
         info('Without sessions, every query is an on-chain transaction. With sessions,');
@@ -1344,15 +1344,15 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           'Per-call model',
           '10K calls/day = 10K on-chain settlements, a ledger fee or gas each',
         );
-        state('Session model', 'deposit + settle + refund, plus 10K in-canister voucher checks');
-        state('Voucher check', 'no ledger call, no gas; ~420M cycles (~$0.0006) each');
-        state('10K vouchers', '~4.2T cycles (~$5.60/day) paid by the canister');
+        state('Session model', 'deposit + settle + refund, plus 10K cheap voucher calls');
+        state('Voucher', 'no ledger call, no gas; ~8M cycles each, sent as the session key');
+        state('10K vouchers', '~0.08T cycles (~$0.11/day) paid by the canister');
         state('Savings', 'thousands of times fewer on-chain transactions, fees and gas');
 
         section('Protocol');
         state('1. Deposit', 'Client sends tokens to canister (ICP ckUSDC or EVM USDC)');
         state('2. Stream', 'Ed25519-signed vouchers per call (cumulative, monotonic)');
-        state('3. Verify', 'In-canister Ed25519 check, zero ledger calls per voucher');
+        state('3. Verify', 'The IC authenticates the session key; zero ledger calls per voucher');
         state('4. Close', 'Settle consumed → canister operator, refund remainder → client');
         state('Total txns', 'deposit, settle, refund — regardless of call count');
 
@@ -1741,7 +1741,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             const qWord = ran === 1 ? 'voucher' : 'vouchers';
             state('On-chain txns', `deposit + close, for ${ran} ${qWord}`);
             highlight(
-              `${ran} ${qWord}, no on-chain transaction per call (each voucher costs the canister ~420M cycles to verify).`,
+              `${ran} ${qWord}, no on-chain transaction per call (each voucher costs the canister ~8M cycles; the IC authenticated the session key).`,
             );
           } catch (e) {
             warn(`Close failed: ${e instanceof Error ? e.message : String(e)}`);
