@@ -239,12 +239,13 @@ export class Ic402Client {
    * Flow: requestSession → calculate deposit → icrc2_approve → openSession → SessionHandle
    */
   async openSession(
-    sessionConfig?: Partial<SessionPreferences>,
-    signer?: VoucherSigner,
+    sessionConfig: Partial<SessionPreferences> | undefined,
+    signer: VoucherSigner,
     canisterId?: string,
   ): Promise<SessionHandle> {
     // 2.17.0: no signer used to register an all-zero key, a small-order key anyone can sign as
     // (the IC's ingress check is cofactored); canisters now refuse one, so fail before approving.
+    // Typed required since 2.17.1; the guard stays for JavaScript callers.
     if (!signer) throw new Error('openSession requires a VoucherSigner (the session key)');
     const cid = canisterId ?? this.config.canisterId;
     const config = sessionConfig;

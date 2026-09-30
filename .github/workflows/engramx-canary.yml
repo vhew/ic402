@@ -1,12 +1,15 @@
 name: EngramX canary
 
-# Protects the flagship consumer: builds + Motoko-tests EngramX (which pins `ic402`) against THIS
-# repo's HEAD, so an ic402 change that breaks EngramX fails HERE — before it's released.
+# Protects the flagship consumer: type-checks EngramX (which pins `ic402`) against THIS repo's HEAD,
+# so an ic402 change that breaks EngramX's build fails HERE — before it's released.
 #
 # Mechanism (verified against the real repos): EngramX imports `mo:ic402/ic402/*`; mops resolves a
-# sibling local-path dep; `mops test` compiles EngramX's canister against the overridden ic402 and
-# runs its Motoko suites (~2s, no replica). This is the fast build-only tier — not EngramX's
-# replica-backed integration/EVM tests.
+# sibling local-path dep; `moc --check` compiles each EngramX actor (and everything it imports)
+# against the overridden ic402. It checks EngramX's default branch.
+#
+# Type-check, not `mops test`: EngramX's full suite got this runner killed mid-run (exit 143,
+# "runner has received a shutdown signal") on every run from 2026-08-14, whatever ic402 changed,
+# so the gate was dark. API and type breaks — what this canary exists for — surface at compile time.
 #
 # EngramX is currently PRIVATE, so the checkout uses ENGRAMX_READ_TOKEN (a read-only token/deploy
 # key, scoped to the `canary` environment — which must have NO branch restriction, or PR runs are
@@ -66,8 +69,15 @@ jobs:
           rm -f engramx/mops.lock
           echo "override: $(grep '^ic402' engramx/mops.toml)"
 
-      - name: Build + Motoko-test EngramX against ic402 HEAD
+      - name: Type-check EngramX's actors against ic402 HEAD
         working-directory: engramx
         run: |
           mops install
-          mops test
+          # EngramX's own pinned moc if it declares one, else ic402's.
+          MOC="$(mops toolchain bin moc 2>/dev/null || (cd ../ic402 && mops toolchain bin moc))"
+          ACTORS="$(git ls-files '*.mo' | grep -v -E '(^|/)test/' | xargs grep -l -E '^\s*((shared|persistent)[^=]*\s)?actor\b' || true)"
+          if [ -z "$ACTORS" ]; then echo "::error::no actor files found in EngramX"; exit 1; fi
+          for f in $ACTORS; do
+            echo "moc --check $f"
+            "$MOC" --check $(mops sources) "$f"
+          done

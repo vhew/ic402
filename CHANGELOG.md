@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.17.1 — 2026-09-30
+
+Patch — **`@ic402/mcp` installs from npm again.** No library behaviour change.
+
+### Fixed
+
+- **Every `@ic402/mcp` from 2.5.2 to 2.17.0 was uninstallable.** Each one declared
+  `"@ic402/client": "workspace:*"` (pnpm's workspace protocol), so `npm install -g @ic402/mcp` (as
+  `docs/mcp-install.md` says) failed with `EUNSUPPORTEDPROTOCOL`. `release.yml` published with
+  `npm publish <dir>`, which does not rewrite `workspace:`. It now packs both packages with pnpm,
+  which does, and publishes the mcp tarball. The new `scripts/check-npm-pack.sh` fails if a packed
+  manifest still names a `workspace:` version, then installs both tarballs together with npm. It
+  runs in CI (`build-integrations`) and again right before publishing. Reported by EngramX.
+- **`openSession`'s `signer` is typed required**, matching the runtime, which has thrown without one
+  since 2.17.0. TypeScript callers that omitted it now fail at compile time instead of at runtime.
+- **Two compiler warnings in `Sessions.mo`** from 2.17.0's small-order key check (a `Nat`
+  subtraction the compiler could not prove safe) are gone. Library code builds warning-free again.
+
+### Changed
+
+- **The EngramX canary type-checks instead of running EngramX's test suite.** Its full `mops test`
+  got the runner killed on every run since 2026-08-14, whatever ic402 changed, so the gate was dark.
+  It now runs `moc --check` on every EngramX actor against ic402 HEAD, which catches the API and
+  type breaks the canary exists for.
+
 ## v2.17.0 — 2026-09-30
 
 Additive — **session calls are authenticated by the IC, not by the canister.** The per-session
