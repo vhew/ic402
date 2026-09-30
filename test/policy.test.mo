@@ -386,6 +386,22 @@ suite("Policy.Engine", func() {
     assert(engine.rateLimitEntryCount() == 1);
   });
 
+  // I6 (2.17.0). P1 fails on precheckCharge recording (the second precheck is #denied); P2 on
+  // recordRateHit being a no-op, or on precheckCharge skipping the rate window.
+  test("precheckCharge records nothing", func() {
+    let engine = Policy.Engine();
+    engine.setGlobalPolicy({ engine.getGlobalPolicy() with rateLimitPerMinute = ?1 });
+    for (_ in [1, 2, 3].vals()) { assert engine.precheckCharge(caller1, 1_000) == #ok };
+    assert engine.checkCharge(caller1, 1_000) == #ok;
+  });
+
+  test("recordRateHit records one hit", func() {
+    let engine = Policy.Engine();
+    engine.setGlobalPolicy({ engine.getGlobalPolicy() with rateLimitPerMinute = ?1 });
+    engine.recordRateHit(caller1);
+    assert engine.precheckCharge(caller1, 1_000) != #ok;
+  });
+
   // getGlobalPolicy reads back exactly what setGlobalPolicy stored — this is what
   // the canister's getPolicyConfig query exposes for live policy display.
   test("getGlobalPolicy round-trips the configured policy", func() {

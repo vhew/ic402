@@ -19,6 +19,7 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
+import Debug "mo:base/Debug";
 import Ed25519 "../src/ic402/Ed25519";
 import { test; suite } "mo:test";
 
@@ -39,8 +40,10 @@ suite("Sessions.consumeVoucher", func() {
   let pubKey = pubOf(privKey);
 
   // Fresh manager + one open session per test (consumeVoucher mutates on #ok, so isolate).
-  // deposited 10_000, already-consumed 1_000 at sequence 1.
-  func freshMgr() : Sessions.Sessions {
+  // deposited 10_000, already-consumed 1_000 at sequence 1. `policy` lets a test set a rate limit.
+  func freshMgr() : Sessions.Sessions = freshMgrWith(Policy.Engine());
+  func freshMgrWith(policy : Policy.Engine) : Sessions.Sessions = freshMgrKeyed(policy, pubKey);
+  func freshMgrKeyed(policy : Policy.Engine, key : [Nat8]) : Sessions.Sessions {
     let config : Types.Config = {
       recipient = { owner = canisterP; subaccount = null };
       tokens = [];
@@ -50,13 +53,13 @@ suite("Sessions.consumeVoucher", func() {
       nonceExpirySeconds = null;
     };
     let mgr = Sessions.Sessions(
-      canisterP, config, Policy.Engine(), Escrow.EscrowManager(canisterP),
+      canisterP, config, policy, Escrow.EscrowManager(canisterP),
       EvmEscrow.EvmEscrowManager(), null, { get = func() : ?Text { null } },
     );
     mgr.loadStable([{
       id = "sess-1";
       payer = canisterP;
-      payerPublicKey = Blob.fromArray(pubKey);
+      payerPublicKey = Blob.fromArray(key);
       deposited = 10_000;
       consumed = 1_000;
       remaining = 9_000;
@@ -135,6 +138,80 @@ suite("Sessions.consumeVoucher", func() {
       case (#invalidSignature) {};
       case (_) { assert false };
     };
+  });
+
+  // 2.17.0. keyCaller is the session key's own principal (what the IC authenticates when a client
+  // calls AS the key); the anonymous principal, neither the key nor the payer (canisterP), stands in
+  // for any other caller. Each test names the mutation it must fail on.
+  suite("Sessions.consumeVoucherFrom (caller-authenticated)", func() {
+    let keyCaller = switch (Identity.selfAuthPrincipalOfEd25519(Blob.fromArray(pubKey))) {
+      case (?b) { Principal.fromBlob(b) };
+      case (null) { Debug.trap("fixture key is 32 bytes") };
+    };
+    let stranger = Principal.fromText("2vxsx-fae");
+    let wrongKey : [Nat8] = Array.tabulate<Nat8>(32, func(i : Nat) : Nat8 { Nat8.fromNat((i + 99) % 256) });
+    func zeroSig(cumulative : Nat, sequence : Nat) : Types.Voucher {
+      { sessionId = "sess-1"; cumulativeAmount = cumulative; sequence; signature = Blob.fromArray(Array.tabulate<Nat8>(64, func(_) { 0 })) };
+    };
+    func fallbackOff(policy : Policy.Engine) : Sessions.Sessions {
+      let m = freshMgrWith(policy);
+      m.setSignedVoucherFallback(false);
+      m;
+    };
+
+    // M1. Fails on: the signature check no longer skipped for the key (first assert); an early
+    // #ok right after the caller check (the ordering asserts).
+    test("session-key caller, garbage signature -> #ok; the fast path still orders", func() {
+      assert freshMgr().consumeVoucherFrom(keyCaller, zeroSig(2_000, 2)) == #ok(1_000);
+      assert freshMgr().consumeVoucherFrom(keyCaller, zeroSig(2_000, 1)) == #invalidSequence;
+      assert freshMgr().consumeVoucherFrom(keyCaller, zeroSig(20_000, 2)) == #insufficientDeposit;
+    });
+
+    // M3. Fails on: the default flipped to off (first); the fallback path skipping the verify (second).
+    test("fallback on (default): stranger + valid signature -> #ok; + wrong-key signature -> #invalidSignature", func() {
+      assert freshMgr().consumeVoucherFrom(stranger, voucher("sess-1", 2_000, 2, privKey)) == #ok(1_000);
+      assert freshMgr().consumeVoucherFrom(stranger, voucher("sess-1", 2_000, 2, wrongKey)) == #invalidSignature;
+    });
+
+    // M4. Fails on: setSignedVoucherFallback ignored; the refusal moved below the deposit check
+    // (the over-deposit voucher would then leak #insufficientDeposit).
+    test("fallback off: stranger + VALID signature -> #invalidSignature; session key + zero signature -> #ok", func() {
+      assert fallbackOff(Policy.Engine()).consumeVoucherFrom(stranger, voucher("sess-1", 2_000, 2, privKey)) == #invalidSignature;
+      assert fallbackOff(Policy.Engine()).consumeVoucherFrom(stranger, voucher("sess-1", 20_000, 2, privKey)) == #invalidSignature;
+      assert fallbackOff(Policy.Engine()).consumeVoucherFrom(keyCaller, zeroSig(2_000, 2)) == #ok(1_000);
+    });
+
+    // M5. Fails on: the refusal moved below policy.checkVoucher (the stranger's attempt records
+    // the payer's one hit, so the key's own voucher is #policyDenied).
+    test("fallback off: a stranger's attempt does not spend the payer's rate slot", func() {
+      let policy = Policy.Engine();
+      policy.setGlobalPolicy({ policy.getGlobalPolicy() with rateLimitPerMinute = ?1 });
+      let m = fallbackOff(policy);
+      assert m.consumeVoucherFrom(stranger, voucher("sess-1", 2_000, 2, privKey)) == #invalidSignature;
+      assert m.consumeVoucherFrom(keyCaller, zeroSig(2_000, 2)) == #ok(1_000);
+    });
+
+    // M6. Fails on: the bare path exempted from the knob. (Default-on bare path: the first test.)
+    test("fallback off governs the bare consumeVoucher too -> #invalidSignature", func() {
+      assert fallbackOff(Policy.Engine()).consumeVoucher(voucher("sess-1", 2_000, 2, privKey)) == #invalidSignature;
+    });
+
+    // M7. Fails on: a small-order key trusted as the caller, for any entry of the list (sign bit
+    // included); the sign bit not masked (a real key with it set is refused). The IC's cofactored
+    // ingress check lets anyone call as a small-order key (e.g. all zeros, what the SDK registered
+    // without a signer); the default signed path refuses it too.
+    test("small-order session key: its principal is not the key", func() {
+      func asKey(key : [Nat8]) : Types.VoucherResult {
+        let ?k = Identity.selfAuthPrincipalOfEd25519(Blob.fromArray(key)) else Debug.trap("32 bytes");
+        freshMgrKeyed(Policy.Engine(), key).consumeVoucherFrom(Principal.fromBlob(k), zeroSig(2_000, 2));
+      };
+      let p = (2 ** 255) - 19;
+      let y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022;
+      for (y in [0, 1, p - 1, p, p + 1, y8, p - y8, (2 ** 255) + 1].vals()) {
+        assert asKey(Array.tabulate<Nat8>(32, func(i) = Nat8.fromNat((y / (256 ** i)) % 256))) == #invalidSignature;
+      };
+      assert asKey(pubOf(Array.tabulate<Nat8>(32, func(_) = 2))) == #ok(1_000); // x odd: sign bit set
+    });
   });
 });
 

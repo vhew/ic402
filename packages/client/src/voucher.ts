@@ -24,6 +24,15 @@ function encodeVoucherPayload(
 export interface VoucherSigner {
   sign(payload: Uint8Array): Promise<Uint8Array>;
   getPublicKey(): Promise<Uint8Array>;
+  /**
+   * 2.17.0: an actor factory whose agent authenticates AS this key. When present, the SDK submits
+   * every session call through it, so the canister sees the session key as `msg.caller` and needs
+   * no in-canister signature check (`Gateway.consumeVoucherFrom`). When absent, calls go through
+   * the client's `actorFactory` and are authenticated by the voucher signature alone (legacy —
+   * needs the canister's signed-voucher fallback: on by default in the library, off in the example).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  actorFactory?: (canisterId: string) => any;
 }
 
 /**

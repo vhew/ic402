@@ -14,6 +14,7 @@ import Text "mo:base/Text";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
 import Array "mo:base/Array";
+import Nat8 "mo:base/Nat8";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Error "mo:base/Error";
@@ -55,6 +56,16 @@ module {
 
   func extractChainId(network : Text) : ?Nat {
     Utils.extractChainId(network);
+  };
+
+  // 2.17.0: a key ANYONE can sign as. The IC checks ingress signatures cofactored (ZIP-215), which
+  // accepts forgeries under a small-order key, so its self-authenticating principal proves nothing.
+  // y (sign bit dropped) ∈ {0, 1, p − 1, ±y8} is small order; y ≥ p is non-canonical (refused too).
+  func smallOrderKey(key : Blob) : Bool {
+    let y = Array.foldRight<Nat8, Nat>(Blob.toArray(key), 0, func(b, acc) = acc * 256 + Nat8.toNat(b)) % (2 ** 255);
+    let p = (2 ** 255) - 19;
+    let y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022; // order 8
+    y <= 1 or y + 1 >= p or y == y8 or y == p - y8;
   };
 
   /// Pure decision for reconcileSession (module-level → unit-testable without a Sessions instance).
@@ -159,6 +170,11 @@ module {
     /// different principals and would be rejected. ICP rail only — an EVM session's payer identity
     /// is the on-chain EVM address (authz.from), not msg.caller, so caller binding does not apply.
     public func setRequireCallerBoundSessions(on : Bool) { requireCallerBoundSessions := on };
+
+    /// 2.17.0 (default ON, for older clients): accept signed vouchers from callers other than the
+    /// session key, bare consumeVoucher included (see consumeVoucherFrom). Transient — re-apply at init.
+    var signedVoucherFallback : Bool = true;
+    public func setSignedVoucherFallback(on : Bool) { signedVoucherFallback := on };
 
     /// Whether a session's registered voucher key is the payer's OWN IC identity key (Ed25519
     /// self-authenticating principal check — Identity.selfAuthPrincipalOfEd25519). Derived from
@@ -332,9 +348,9 @@ module {
           return #err(#invalidSignature("Missing publicKey in PaymentSignature (required for sessions)"));
         };
       };
-      if (Blob.toArray(sessionPublicKey).size() != 32) {
+      if (Blob.toArray(sessionPublicKey).size() != 32 or smallOrderKey(sessionPublicKey)) {
         sessionOpenLocks.delete(caller);
-        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
+        return #err(#invalidSignature("Public key must be a 32-byte Ed25519 key, not a small-order point (anyone can sign as one)"));
       };
       // Opt-in caller binding (setRequireCallerBoundSessions): the voucher key must BE the
       // caller's own IC identity key. Checked here — before the deposit pull — so a rejection
@@ -587,9 +603,9 @@ module {
           return #err(#invalidSignature("Missing publicKey for session voucher signing"));
         };
       };
-      if (Blob.toArray(sessionPublicKey).size() != 32) {
+      if (Blob.toArray(sessionPublicKey).size() != 32 or smallOrderKey(sessionPublicKey)) {
         sessionOpenLocks.delete(caller);
-        return #err(#invalidSignature("Public key must be 32 bytes (Ed25519)"));
+        return #err(#invalidSignature("Public key must be a 32-byte Ed25519 key, not a small-order point (anyone can sign as one)"));
       };
 
       let verified = Eip712.verifyAuthorization(
@@ -743,11 +759,36 @@ module {
     /// [canisterId, sessionId, cumulativeAmount, sequence] (see encodeVoucherPayload — the
     /// canister principal is bound in, so vouchers are not replayable across canisters).
     /// Deltas are NOT counted against the daily limit (the full deposit was counted at open).
+    /// Deprecated (2.17.0): prefer consumeVoucherFrom; this path always runs the signature check
+    /// while the fallback is on, and refuses every voucher once setSignedVoucherFallback(false).
     public func consumeVoucher(voucher : Types.Voucher) : Types.VoucherResult {
+      consumeWith(null, voucher);
+    };
+
+    /// 2.17.0: consumeVoucher with the submitting principal (pass msg.caller). When `caller` is the
+    /// session key's self-authenticating principal (Identity.selfAuthPrincipalOfEd25519), the IC has
+    /// already verified the call, so the voucher is accepted on state, sequence, amount and policy
+    /// alone: no Ed25519 check, `voucher.signature` unread (never for a small-order key, which anyone
+    /// can sign as). Other callers take the signed path while setSignedVoucherFallback is on
+    /// (default); off, they get #invalidSignature right after the session lookup.
+    public func consumeVoucherFrom(caller : Principal, voucher : Types.Voucher) : Types.VoucherResult {
+      consumeWith(?caller, voucher);
+    };
+
+    func consumeWith(caller : ?Principal, voucher : Types.Voucher) : Types.VoucherResult {
       let session = switch (sessions.get(voucher.sessionId)) {
         case (null) { return #sessionNotOpen };
         case (?s) { s };
       };
+
+      // 2.17.0: refuse a non-key caller first when the fallback is off, so a stranger learns no
+      // session state and spends neither the payer's rate slot nor a signature check. A small-order
+      // key is never "the key" (open refuses one; this covers sessions opened before 2.17.0).
+      let callerIsKey = switch (caller) {
+        case (?c) { Identity.selfAuthPrincipalOfEd25519(session.payerPublicKey) == ?Principal.toBlob(c) and not smallOrderKey(session.payerPublicKey) };
+        case (null) { false };
+      };
+      if (not callerIsKey and not signedVoucherFallback) return #invalidSignature;
 
       // Check session is open
       if (session.status != #open) return #sessionNotOpen;
@@ -784,19 +825,21 @@ module {
         case (#ok) {};
       };
 
-      // Ed25519 signature verification
-      // H-2: Handle Nat64 overflow gracefully instead of trapping
-      // M-7: Bind the verifying canister's principal into the signed payload.
-      let payload = switch (encodeVoucherPayload(Principal.toText(canisterPrincipal), voucher.sessionId, voucher.cumulativeAmount, voucher.sequence)) {
-        case (?p) { p };
-        case (null) { return #payloadOverflow };
-      };
-      if (voucher.signature.size() != 64) { return #invalidSignature };
-      if (session.payerPublicKey.size() != 32) { return #invalidSignature };
+      // Ed25519 signature verification — only when the caller is not the session key itself
+      if (not callerIsKey) {
+        // H-2: Handle Nat64 overflow gracefully instead of trapping
+        // M-7: Bind the verifying canister's principal into the signed payload.
+        let payload = switch (encodeVoucherPayload(Principal.toText(canisterPrincipal), voucher.sessionId, voucher.cumulativeAmount, voucher.sequence)) {
+          case (?p) { p };
+          case (null) { return #payloadOverflow };
+        };
+        if (voucher.signature.size() != 64) { return #invalidSignature };
+        if (session.payerPublicKey.size() != 32) { return #invalidSignature };
 
-      // Total (never traps) and RFC 8032-strict — see src/ic402/Ed25519.mo.
-      if (not Ed25519.verify(voucher.signature, Blob.fromArray(payload), session.payerPublicKey)) {
-        return #invalidSignature;
+        // Total (never traps) and RFC 8032-strict — see src/ic402/Ed25519.mo.
+        if (not Ed25519.verify(voucher.signature, Blob.fromArray(payload), session.payerPublicKey)) {
+          return #invalidSignature;
+        };
       };
 
       // Update session state
@@ -883,14 +926,23 @@ module {
 
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
-      // Settle consumed amount to recipient
+      // 2.17.0: the escrow holds exactly `deposited` and icrc1_transfer takes the fee on top, so a
+      // session consumed to within one fee of it can settle at most deposited − fee (settling
+      // `consumed` failed on every expiry tick). The fee sizes the settle: queried first, never guessed.
+      let fee : Nat = try { await ledger.icrc1_fee() } catch (e) {
+        session.status := #open;
+        return #settlementFailed("Fee query failed (icrc1_fee): " # Error.message(e) # " — nothing moved; the session stays open and the close can be retried");
+      };
+      let settleAmount = Nat.min(session.consumed, Utils.satSub(session.deposited, fee));
+
+      // Settle consumed amount (less the fee when the remainder cannot cover it) to recipient
       var settleBlockIndex : ?Nat = null;
-      if (session.consumed > 0) {
+      if (settleAmount > 0) {
         let settleResult = await escrowManager.settle(
           ledger,
           session.subaccount,
           recipientAccount(),
-          session.consumed,
+          settleAmount,
         );
         switch (settleResult) {
           case (#err(msg)) {
@@ -903,11 +955,9 @@ module {
 
       // Refund remainder to payer.
       // The escrow balance after settlement is:
-      //   deposited - consumed - settleFee (if consumed > 0)
+      //   deposited - settleAmount - settleFee (if settleAmount > 0)
       // The refund transfer itself costs another fee.
       // So the max refundable amount is: escrowBalance - refundFee
-      // Query the actual ledger fee instead of hardcoding
-      let fee : Nat = try { await ledger.icrc1_fee() } catch (_) { 10_000 };
 
       // Guard: consumed must never exceed deposited
       if (session.consumed > session.deposited) {
@@ -915,8 +965,8 @@ module {
         return #settlementFailed("Invariant violation: consumed > deposited");
       };
 
-      let settleFees = if (session.consumed > 0) { fee } else { 0 };
-      let escrowBalance = Utils.satSub(session.deposited, session.consumed + settleFees);
+      let settleFees = if (settleAmount > 0) { fee } else { 0 };
+      let escrowBalance = Utils.satSub(session.deposited, settleAmount + settleFees);
       var refundBlockIndex : ?Nat = null;
       let refunded = Utils.satSub(escrowBalance, fee);
       if (refunded > 0) {
@@ -954,7 +1004,7 @@ module {
 
       #ok({
         id = "rcpt-close"; // Overwritten by Gateway.closeSession() / forceCloseSession()
-        amount = session.consumed;
+        amount = settleAmount; // what reached the recipient (consumed unless the fee ate into it)
         token = session.token;
         sender = Principal.toText(session.payer);
         // Stamp the account funds actually SETTLED into — recipientAccount(), in ICRC-1

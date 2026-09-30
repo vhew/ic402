@@ -94,15 +94,19 @@ console.log(results);
 Per-call settlement is wasteful for chatty clients. A session deposits escrow **once**, streams Ed25519-signed vouchers (no ledger call or gas each), and settles **once** on close — a fixed few on-chain transactions (deposit, settle, refund), however many calls the deposit covers:
 
 ```ts
+import { HttpAgent } from '@icp-sdk/core/agent';
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 
 const voucherKey = Ed25519KeyIdentity.generate(); // per-session signing key
+// Session calls go out AS the key (the example refuses vouchers from any other caller).
+const sessionAgent = await HttpAgent.create({ host: 'http://localhost:4944', identity: voucherKey, shouldFetchRootKey: true });
 
 const session = await client.openSession(
   {},
   {
     sign: (payload) => voucherKey.sign(payload),
     getPublicKey: async () => voucherKey.getPublicKey().toRaw(),
+    actorFactory: (id) => createExampleActor(sessionAgent, id),
   },
 );
 // Deposits the intent's suggestedDeposit (50,000 units = $0.05 in the example).
@@ -114,7 +118,7 @@ const receipt = await session.close(); // settles consumed, refunds the rest
 console.log('closed:', receipt); // PaymentReceipt — amount settled, `refunded` remainder
 ```
 
-**What's happening:** `openSession` fetches the canister's `SessionIntent`, ICRC-2-approves the deposit, and registers your Ed25519 public key; each `session.call` signs a cumulative voucher (bound to the session **and** the canister id, so it can't be replayed elsewhere) that the canister verifies in-canister with zero outcalls; `close()` settles the consumed amount and refunds the remainder on the session's rail. At 10,000 calls that is thousands of times fewer on-chain transactions; [`costs-and-rails.md`](costs-and-rails.md) §3 has the cycle numbers, including what each voucher costs the canister.
+**What's happening:** `openSession` fetches the canister's `SessionIntent`, ICRC-2-approves exactly the deposit + ledger fee (expiring in 5 minutes), and registers your Ed25519 public key; each `session.call` sends a cumulative voucher (still signed, and bound to the session **and** the canister id) as that key, so the IC authenticates the caller and the canister runs no signature check — zero outcalls; `close()` settles the consumed amount and refunds the remainder on the session's rail. At 10,000 calls that is thousands of times fewer on-chain transactions; [`costs-and-rails.md`](costs-and-rails.md) §3 has the cycle numbers, including what each voucher costs the canister.
 
 ## 6. An EVM payment (EIP-3009)
 

@@ -199,7 +199,7 @@ runs the same x402 charge flow against the connected canister's own paid endpoin
 **Stream micropayments instead of paying per call.** `request_session` quotes the pricing
 (`suggestedDeposit`, `costPerCall`); `open_session` escrows a deposit once (ICRC-2 on ICP, or an
 EIP-3009 USDC deposit on EVM); then `session_query` streams as many calls as the deposit covers,
-each auto-signing an Ed25519 voucher off-chain. `close_session` settles the consumed amount and
+each made as the session's own Ed25519 key (the IC verifies the caller; no in-canister signature check). `close_session` settles the consumed amount and
 refunds the rest — a fixed few on-chain transactions, however many calls the deposit covers. `get_session` /
 `list_sessions` track state.
 

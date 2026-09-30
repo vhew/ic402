@@ -95,6 +95,7 @@ export function createLedgerActor(agent: HttpAgent, canisterId: string) {
   const idlFactory = () =>
     IDL.Service({
       icrc1_balance_of: IDL.Func([Account], [IDL.Nat], ['query']),
+      icrc1_fee: IDL.Func([], [IDL.Nat], ['query']),
       icrc2_approve: IDL.Func(
         [
           IDL.Record({

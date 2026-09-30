@@ -1,5 +1,47 @@
 # Changelog
 
+## v2.17.0 — 2026-09-30
+
+Additive — **session calls are authenticated by the IC, not by the canister.** The per-session
+Ed25519 key becomes the caller: `consumeVoucherFrom(msg.caller, voucher)` accepts a voucher on
+session state, sequence, amount and policy when the caller is that key's self-authenticating
+principal, with no signature check — ~8.3M cycles a voucher instead of ~415M (40 vouchers through
+`@ic402/client`, the 2.16.1 method). Candid, `Voucher`, `Stable*` types, `example.did` and
+`STABLE_SCHEMA_VERSION` (1) are unchanged.
+
+### Added
+
+- `Gateway`/`Sessions.consumeVoucherFrom` and one knob, `setSignedVoucherFallback` (default on;
+  transient, re-apply at init). **With the fallback on the exposure is exactly today's**: older
+  clients keep the signed path, and anyone who knows an open session id can still make the
+  canister run the ~415M-cycle check and spend the payer's per-minute rate slot. Off, only the
+  session key can spend a session, and bare `consumeVoucher` (now deprecated) refuses every
+  voucher. **Consumers should turn it off once their clients call as the session key.** A
+  small-order session key is refused at open and never trusted as the caller (the IC's ingress
+  check is cofactored, so anyone can sign as one); the SDK's `openSession` now requires a signer
+  (without one it registered an all-zero key).
+- `Gateway.settleFrom`; `Policy.precheckCharge` / `recordRateHit`; SDK `VoucherSigner.actorFactory`
+  (vouchers stay signed, so new clients work against older canisters); the MCP calls as the key.
+- SDK approvals are exactly `amount + icrc1_fee()` (a session: the deposit the canister pulls,
+  `min(suggestedDeposit, maxDeposit)`), expiring in 5 minutes (+100_000 if the ledger actor lacks
+  `icrc1_fee`); `approvalFeeBuffer` now replaces the fee query (same amount). Two payments in
+  flight from one identity may fail with `InsufficientAllowance`, never double-pay. A clock over
+  5 minutes behind the ledger gets `Expired` on approve.
+- Example: fallback off, and its Candid session/settle paths use the caller-bound methods; older
+  SDK/MCP/demo builds get `#invalidSignature`, with a message naming the cause.
+
+### Fixed
+
+- **ICP allowance theft on Candid paths**: `signature.sender` was only claimed; `settleFrom`
+  requires the caller to be the sender. HTTP paths have no caller and stay allowance-authenticated,
+  so on a canister serving both, a standing allowance is still spendable: payers must not keep one.
+- **AUDIT I6, both rails**: a settle recorded a rate hit for a claimed sender before the transfer
+  confirmed; it now checks read-only and records only on `#Ok` / `#confirmed`. The rate slot
+  only: a claimed sender's daily reservation is still held while the transfer is in flight.
+- **A fully consumed ICP session could not close** (the settle needed `consumed + fee` from an
+  escrow holding `deposited`). The close queries the fee first — failing closed, no 10_000 guess —
+  and settles `min(consumed, deposited − fee)`; the receipt's `amount` is what was settled.
+
 ## v2.16.1 — 2026-09-29
 
 Patch — **Ed25519 verification agrees with RFC 8032.** `Identity.verifyCallerEd25519` and the

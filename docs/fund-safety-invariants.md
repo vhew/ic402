@@ -138,7 +138,7 @@ citation set for every partial.
 | pool-allocation-reserved-synchronously-before-onchain-pull | EVM | Synchronous allocate before EIP-3009 pull | `Sessions.mo:556-569`, `EvmEscrow.mo:40-57` | enforced |
 | pending-evm-deposits-tracked-and-refunded-only-if-mined | EVM | Unconfirmed inbound deposit tracked, refunded iff mined | `Sessions.mo:114-123,1065-1092` | **partial** |
 | drain-mode-empties-transient-tracker-before-upgrade | EVM | Transient trackers; drain rejects new deposits pre-fund | `Sessions.mo:106-126,391-396` | enforced |
-| icp-settle-exactly-consumed-with-revert-on-failure | ICP | Settles exactly `consumed`; revert to `#open` on fail | `Sessions.mo:817-833` | enforced |
+| icp-settle-exactly-consumed-with-revert-on-failure | ICP | Settles min(consumed, deposited − fee) (2.17.0; receipt.amount = settled; fee queried first, failure ⇒ `#open`, pinned by review); revert to `#open` on fail | `Sessions.mo` closeSessionInternal | enforced |
 | icp-refund-equals-deposit-minus-consumed-minus-fees | ICP | Refund = satSub(satSub(D,C+settleFee),refundFee) | `Sessions.mo:835-859` | enforced |
 | icp-refund-failure-leaves-funds-recoverable | ICP | Settle-ok/refund-fail keeps escrow recoverable via recoverEscrow | `Sessions.mo:860-865,1253-1290` | **partial** |
 | confirmed-settle-with-remainder-never-auto-finalizes | EVM | Confirmed settle + remainder ⇒ `#err`, stays `#closing` | `Sessions.mo:83-87,1033-1037` | enforced |
@@ -165,6 +165,7 @@ citation set for every partial.
 |---|---|---|---|---|
 | DAILY-RESERVE-BEFORE-AWAIT | both | checkCharge + recordSpend synchronously before value await | `Gateway.mo:592-594,676-677,761-772` | enforced |
 | CHARGE-POLICY-GATES | both | access/rate/maxPerTx/maxPerDay before any transfer | `Policy.mo:276-303`, `Gateway.mo:592,761` | enforced |
+| RATE-HIT-ONLY-ON-RECEIPT | both | settle: precheckCharge (read-only) before the await; recordRateHit only in ICP `#Ok` / EVM `#confirmed` (AUDIT I6). Rate slot only — the daily reservation is still held in flight. Tests pin the ICP half: no hit on failure (I3), a hit on success (I3b), P1/P2; the EVM half is pinned by review | `Gateway.mo` settleCore; `Policy.mo` precheckCharge | enforced |
 | voucher-cumulative-capped-by-deposit | both | `cumulativeAmount > deposited` rejected; close backstop | `Sessions.mo:704-705,843-847` | enforced |
 | daily-spend-reserved-once-at-open-not-per-voucher | both | Deposit recorded once at open; deltas never recorded | `Sessions.mo:366,660` | **partial** |
 | daily-release-targets-open-day-bucket | both | releaseDaily targets spendDay captured at open, clamps 0 | `Sessions.mo:872-876,1226-1229` | **partial** |
@@ -202,7 +203,8 @@ citation set for every partial.
 | EIP712-SIGNATURE-BINDS-ALL-FIELDS | EVM | Recovered signer == authz.from over full digest | `Eip712.mo:160-191` | enforced |
 | TWO-OF-N-RPC-CONSENSUS-FOR-TRUTH | EVM | Fund-relevant RPC needs ≥2 providers agree | `EvmSender.mo:111-119`; `EvmVerify.mo:104` | **partial** |
 | eip712-signature-verified-locally-before-broadcast (session) | EVM | Local ecRecover to authz.from before tECDSA sign | `Sessions.mo:475-542` | enforced |
-| voucher-ed25519-signature-binds-canister-session-amount-sequence | both | Ed25519 over CBOR[cid,sid,cum,seq] | `Sessions.mo:716-731` | enforced |
+| voucher-ed25519-signature-binds-canister-session-amount-sequence | both | Ed25519 over CBOR[cid,sid,cum,seq] OR caller == session key principal (IC-authenticated, 2.17.0; a small-order key is refused at open and never trusted); fallback off ⇒ any other caller refused before state/rate/crypto | `Sessions.mo` consumeWith | enforced |
+| SETTLE_CALLER_IS_SENDER (Candid) | ICP | settleFrom: caller == sig.sender before nonce lock/ledger; example Candid paths use it, HTTP paths keep settle | `Gateway.mo` settleFrom; `example/main.mo` search/getContent/submitServiceRequest | enforced |
 | voucher-sig-and-key-length-checks | both | 64-byte sig, 32-byte key before verify | `Sessions.mo:723-727` | enforced |
 | voucher-respects-access-and-rate-policy | both | checkVoucher for payer before accept | `Sessions.mo:710-714` | enforced |
 | close-authorized-to-payer-only | both | closeSession only if caller==payer; force = controller-only | `Sessions.mo:757-767` | enforced |
@@ -223,6 +225,7 @@ citation set for every partial.
 | DANGEROUS_PRIMITIVES_DEFAULT_DENIED | EVM | sign_typed_data/admin tools default denied | `guards.ts:130-155`, `index.ts:1636-1645` | enforced |
 | GENERIC_CALL_IS_READ_ONLY | both | `call` limited to read-only allowlist/prefixes (M16 exception) | `guards.ts:228-292`, `index.ts:1556-1559` | enforced |
 | VOUCHER_BINDS_VERIFYING_CANISTER (client) | both | Voucher CBOR binds resolved cid | `voucher.ts:6-22`, `client.ts:326-329` | enforced |
+| EXACT_EXPIRING_APPROVAL (client) | ICP | Approve exactly amount + icrc1_fee, expires_at now + 5 min (no fee query ⇒ legacy +100_000); a session approves the deposit pulled, min(suggested, maxDeposit) | `client.ts` approvalFor, openSession | enforced |
 | FRESH_VOUCHER_KEY_PER_SESSION | both | New Ed25519 keypair per session, never persisted | `index.ts:705-714` | enforced |
 | PAYMENT_HEADERS_ONLY_TO_VALIDATED_PUBLIC_TARGETS | EVM | Signed header/RPC only to SSRF-validated URLs | `index.ts:1095-1200,1279-1290` | **partial** |
 

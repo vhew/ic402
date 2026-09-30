@@ -33,6 +33,7 @@ import {
 let client: Ic402Client | null = null;
 let agent: HttpAgent | null = null;
 let defaultCanisterId: string | null = null;
+let agentHost: string | null = null; // 2.17.0: per-session agents (open_session) reuse it
 const activeSessions = new Map<string, SessionHandle>();
 
 // ---------------------------------------------------------------------------
@@ -217,6 +218,9 @@ import { IDL } from '@icp-sdk/core/candid';
 const icrc2LedgerIdl = () => {
   const Account = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
   return IDL.Service({
+    // 2.17.0: @ic402/client approves exactly amount + icrc1_fee() with an expiry, so the ledger
+    // actor must answer the fee query (without it the SDK falls back to the legacy +100_000).
+    icrc1_fee: IDL.Func([], [IDL.Nat], ['query']),
     icrc2_approve: IDL.Func(
       [
         IDL.Record({
@@ -428,6 +432,7 @@ server.tool(
     });
 
     defaultCanisterId = canisterId;
+    agentHost = host;
 
     // S8: Apply the security knobs ONLY if the operator allowed LLM-driven changes;
     // otherwise the request's localDev/autoPayment/caps are ignored and the
@@ -702,23 +707,33 @@ server.tool(
       };
     }
 
-    // Generate Ed25519 keypair for voucher signing
-    const voucherIdentity = Ed25519KeyIdentity.generate();
-    const voucherSigner: VoucherSigner = {
-      async sign(payload: Uint8Array): Promise<Uint8Array> {
-        return new Uint8Array(await voucherIdentity.sign(payload));
-      },
-      async getPublicKey(): Promise<Uint8Array> {
-        return new Uint8Array(voucherIdentity.getPublicKey().toRaw());
-      },
-    };
-
     // SEC-0: the deposit was reserved against the cumulative cap at confirm time
     // (requireConfirmation). Release the reservation if the deposit fails — but ONLY when funds did
     // not move: on #settlementPending the EVM deposit was broadcast and may still mine, so keeping it
     // reserved is correct (docs/decisions/settled-then-job-failed.md, S4). Return a structured
-    // errorResult rather than letting a raw string leak to the agent.
+    // errorResult rather than letting a raw string leak to the agent. The session key's agent is
+    // built in the try too: HttpAgent.create fetches the root key on a local host and may throw.
     try {
+      // Generate Ed25519 keypair for voucher signing
+      const voucherIdentity = Ed25519KeyIdentity.generate();
+      // 2.17.0: session calls go out AS this key (the IC authenticates it; the canister runs no
+      // signature check — Gateway.consumeVoucherFrom). The payer agent still opens and closes the
+      // session. agentHost is set: requireClient() above threw if configure never ran.
+      const voucherAgent = await HttpAgent.create({
+        host: agentHost!,
+        shouldFetchRootKey: agentHost!.includes('localhost'),
+        identity: voucherIdentity,
+      });
+      const voucherSigner: VoucherSigner = {
+        async sign(payload: Uint8Array): Promise<Uint8Array> {
+          return new Uint8Array(await voucherIdentity.sign(payload));
+        },
+        async getPublicKey(): Promise<Uint8Array> {
+          return new Uint8Array(voucherIdentity.getPublicKey().toRaw());
+        },
+        actorFactory: (id: string) =>
+          Actor.createActor(exampleIdlFactory, { agent: voucherAgent, canisterId: id }),
+      };
       const session = await c.openSession(
         prefs,
         voucherSigner,

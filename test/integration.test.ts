@@ -5,8 +5,10 @@ import {
   createLedgerActor,
   getCanisterId,
 } from './helpers.js';
-import type { HttpAgent } from '@icp-sdk/core/agent';
+import { HttpAgent } from '@icp-sdk/core/agent';
+import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import { Principal } from '@icp-sdk/core/principal';
+import { encodeVoucherPayload } from '../packages/client/src/voucher.js';
 // Wire-form type: annotating the hand-built payloads makes `tsc` flag a missing field (e.g. a
 // future opt like v2.5.0's `asset`) at compile time, instead of only at agent-js encode against
 // a live replica. The idl-encode-contract test keeps this type honest against the IDL.
@@ -169,6 +171,161 @@ describe('ic402 integration', () => {
     });
   });
 
+  // ── 2.17.0: caller-authenticated sessions, settleFrom, AUDIT I6 ──
+
+  // The example actor as `identity` (anonymous when omitted) — a caller that is not the payer.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actorAs = async (identity?: Ed25519KeyIdentity): Promise<any> => {
+    const a = await HttpAgent.create({
+      host: 'http://localhost:4944',
+      shouldFetchRootKey: true,
+      identity,
+    });
+    return createExampleActor(a, exampleId);
+  };
+
+  describe('2.17.0 caller authentication (replica)', () => {
+    const zeroSig = new Uint8Array(64);
+    // Exact, expiring approval from the test payer — what @ic402/client does since 2.17.0.
+    async function approveExact(amount: bigint): Promise<bigint> {
+      const fee: bigint = await ledger.icrc1_fee();
+      const r = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: amount + fee,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [BigInt(Date.now() + 300_000) * 1_000_000n],
+      });
+      expect(r).toHaveProperty('Ok');
+      return fee;
+    }
+    async function icpReqFor(query: string) {
+      const reqs = (await actor.search(query, [])).paymentRequired;
+      return reqs.find((r: { network: string }) => r.network === 'icp:1');
+    }
+    const icpSig = (req: { nonce: Uint8Array }, sender: string): PaymentSignatureArg => ({
+      scheme: 'exact',
+      network: 'icp:1',
+      signature: new Uint8Array(0),
+      publicKey: [],
+      asset: [],
+      sender,
+      nonce: req.nonce,
+      authorization: [],
+    });
+
+    // I1. Fails on: sessionQuery back to consumeVoucher (the zero-signature call errors); the
+    // example's fallback left on (the stranger's signed voucher succeeds); the close fix reverted
+    // (endSession returns settlementFailed — the escrow cannot pay consumed + fee); a small-order
+    // session key accepted at open.
+    it('I1: the session key streams with no signature, a signed voucher from anyone else is refused, and a fully consumed session closes', async () => {
+      if (skip) return;
+      const key = Ed25519KeyIdentity.generate();
+      const deposit = 50_000n;
+      const fee = await approveExact(deposit);
+      const open = (publicKey: Uint8Array) =>
+        actor.openSession(
+          { maxDeposit: deposit, autoClose: true, idleTimeout: [] },
+          { ...icpSig({ nonce: new Uint8Array(32) }, ''), publicKey: [publicKey] },
+        );
+      // All zeros is a small-order key anyone can call as: refused before the deposit moves.
+      expect(String((await open(new Uint8Array(32))).err)).toMatch(/small-order/);
+      const opened = await open(new Uint8Array(key.getPublicKey().toRaw()));
+      expect(opened).toHaveProperty('ok');
+      const id: string = opened.ok.id;
+      const v = (cumulativeAmount: bigint, sequence: bigint, signature = zeroSig) => ({
+        sessionId: id,
+        cumulativeAmount,
+        sequence,
+        signature,
+      });
+      const asKey = await actorAs(key);
+      try {
+        expect(await asKey.sessionQuery(v(1_000n, 1n), 'q')).toHaveProperty('ok');
+        const signed = new Uint8Array(
+          await key.sign(encodeVoucherPayload(exampleId, id, 2_000n, 2n)),
+        );
+        const refused = await (await actorAs()).sessionQuery(v(2_000n, 2n, signed), 'q');
+        expect(String(refused.error)).toMatch(/session key/);
+        expect(await asKey.sessionQuery(v(deposit, 3n), 'q')).toHaveProperty('ok');
+        const closed = await actor.endSession(id);
+        expect(closed).toHaveProperty('ok');
+        expect(closed.ok.amount).toBe(deposit - fee);
+        expect(closed.ok.refunded).toEqual([0n]);
+      } finally {
+        await actor.endSession(id); // no-op once closed; frees the payer's one session slot on failure
+      }
+    });
+
+    // I2. Fails on: search back to gate.settle (the stranger's settle spends the payer's allowance).
+    it("I2: a stranger naming the payer on a Candid path is refused before the ledger, even with the payer's allowance standing", async () => {
+      if (skip) return;
+      const payer = (await agent.getPrincipal()).toText();
+      const req = await icpReqFor('theft');
+      await approveExact(BigInt(req.amount));
+      const stranger = await (await actorAs()).search('theft', [icpSig(req, payer)]);
+      expect(String(stranger.error)).toMatch(/Not authorized/);
+      expect(await actor.search('theft', [icpSig(req, payer)])).toHaveProperty('ok');
+    });
+
+    // I3 (AUDIT I6). Fails on: the ICP settle back to checkCharge (the junk settles record P's
+    // hits, so its own settle is "Rate limit exceeded"). P is fresh (empty window) and unfunded.
+    it('I3: junk ICP settles naming a principal do not spend its rate budget', async () => {
+      if (skip) return;
+      const p = Ed25519KeyIdentity.generate();
+      const pText = p.getPrincipal().toText();
+      const policy = await actor.getPolicyConfig(); // restored below
+      await actor.setPolicy({ ...policy, rateLimitPerMinute: [2n] });
+      try {
+        for (let i = 0; i < 3; i++) {
+          const nonce = Buffer.from((await icpReqFor(`junk-${i}`)).nonce).toString('hex');
+          const header = JSON.stringify({
+            scheme: 'exact',
+            network: 'icp:1',
+            signature: '00',
+            sender: pText,
+            nonce,
+          });
+          const res = await fetch(`http://${exampleId}.raw.localhost:4944/search?q=junk`, {
+            headers: { 'x-payment': header },
+          });
+          expect(res.status).toBe(402); // no allowance: the ledger refuses; no hit recorded
+        }
+        const asP = await actorAs(p);
+        const own = await asP.search('mine', [icpSig(await icpReqFor('mine'), pText)]);
+        expect(own).toHaveProperty('paymentRequired'); // the ledger's refusal, not "Rate limit exceeded"
+      } finally {
+        await actor.setPolicy(policy);
+      }
+    });
+
+    // I3b (AUDIT I6, the other half). Fails if a SUCCESSFUL ICP settle stops recording its hit
+    // (the settle rate limit would silently vanish). At a limit of 3 the payer's own paid
+    // searches must be refused within 4 attempts, whatever its window already held.
+    it('I3b: successful ICP settles still count against the payer rate limit', async () => {
+      if (skip) return;
+      const payer = (await agent.getPrincipal()).toText();
+      const policy = await actor.getPolicyConfig(); // restored below
+      await actor.setPolicy({ ...policy, rateLimitPerMinute: [3n] });
+      try {
+        let refusal = '';
+        for (let i = 0; i < 4 && !refusal; i++) {
+          const req = await icpReqFor(`rl-${i}`);
+          await approveExact(BigInt(req.amount));
+          const r = await actor.search(`rl-${i}`, [icpSig(req, payer)]);
+          if ('error' in r) refusal = String(r.error);
+          else expect(r).toHaveProperty('ok');
+        }
+        expect(refusal).toMatch(/Rate limit exceeded/);
+      } finally {
+        await actor.setPolicy(policy);
+      }
+    });
+  });
+
   // ── Content ──
 
   describe('content', () => {
@@ -241,6 +398,9 @@ describe('ic402 integration', () => {
         nonce: icpReq.nonce,
         authorization: [],
       };
+      // SETTLE_CALLER_IS_SENDER: a stranger replaying the payer's signature is refused first.
+      const stolen = await (await actorAs()).getContent('int-test-doc', [paymentSig]);
+      expect(String(stolen.error)).toMatch(/Not authorized/);
       const paid = await actor.getContent('int-test-doc', [paymentSig]);
       expect(paid).toHaveProperty('ok');
 
@@ -439,6 +599,8 @@ describe('ic402 integration', () => {
         nonce: icpReq.nonce,
         authorization: [],
       };
+      const stolen = await (await actorAs()).submitServiceRequest(testSvcId, params, [paymentSig]);
+      expect(String(stolen.error)).toMatch(/Not authorized/); // a stranger cannot pay as the buyer
       const submitted = await actor.submitServiceRequest(testSvcId, params, [paymentSig]);
       expect(submitted).toHaveProperty('ok');
       const jobId = submitted.ok.jobId;

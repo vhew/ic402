@@ -659,9 +659,15 @@ module {
     ///
     /// Interleaving: this method awaits (EVM broadcast + confirmation poll / ICP ledger call).
     /// The nonce lock and the daily-spend reservation commit synchronously BEFORE the first
-    /// await and are rolled back on failure. EVM settles are metered by the GLOBAL facilitator
+    /// await and are rolled back on failure; the per-caller rate hit is checked read-only before
+    /// it and recorded only with a receipt (I6). EVM settles are metered by the GLOBAL facilitator
     /// token bucket and can return #policyDenied("Rate limited…") under load; ICP settles are not.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
+      await* settleCore(signature, expectedAmount);
+    };
+
+    // The body of `settle`, shared with settleFrom as `async*` so neither adds a self-send hop.
+    func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async* Types.PaymentResult {
       // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
       // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
       // bogus payloads on ANY paid path (/content, /search, /settle) cannot run unmetered ecRecover
@@ -732,7 +738,10 @@ module {
         let evmSenderHash = SHA256.fromArray(#sha256, evmSenderBytes);
         let hashArray = Blob.toArray(evmSenderHash);
         let evmSender = Principal.fromBlob(Blob.fromArray(Array.subArray(hashArray, 0, 29)));
-        switch (policy.checkCharge(evmSender, amount)) {
+        // I6: READ-ONLY here — a blocked/at-limit sender is still refused before the ecRecover
+        // below, but the rate hit is recorded only on #confirmed (`from` is only claimed until
+        // the signature verifies, so recording here let anyone spend a payer's budget).
+        switch (policy.precheckCharge(evmSender, amount)) {
           case (#denied(r)) { nonceManager.unlock(signature.nonce); return #policyDenied(r) };
           case (#ok) {};
         };
@@ -848,6 +857,7 @@ module {
         switch (await sender.confirmTransaction(chainId, txHash, 4)) {
           case (#confirmed) {
             nonceManager.consumeLocked(signature.nonce);
+            policy.recordRateHit(evmSender); // I6: the settle succeeded — now it counts
             let receipt : Types.PaymentReceipt = {
               id = nextReceiptId();
               amount;
@@ -905,7 +915,10 @@ module {
         return #invalidSignature("Invalid sender principal: " # signature.sender);
       };
 
-      switch (policy.checkCharge(senderPrincipal, amount)) {
+      // I6: `signature.sender` is only CLAIMED — the ledger's icrc2_transfer_from authenticates
+      // it. Check read-only here and record the rate hit only on #Ok, so a settle that merely
+      // names a principal (no allowance) never spends its per-minute budget (AUDIT I6).
+      switch (policy.precheckCharge(senderPrincipal, amount)) {
         case (#denied(r)) { nonceManager.unlock(signature.nonce); return #policyDenied(r) };
         case (#ok) {};
       };
@@ -932,6 +945,7 @@ module {
         switch (result) {
           case (#Ok(blockIndex)) {
             nonceManager.consumeLocked(signature.nonce);
+            policy.recordRateHit(senderPrincipal); // I6: the transfer succeeded — now it counts
             let receipt : Types.PaymentReceipt = {
               id = nextReceiptId();
               amount;
@@ -961,6 +975,18 @@ module {
         policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
         #settlementFailed("Ledger call failed: " # Error.message(e));
       };
+    };
+
+    /// 2.17.0: `settle` for Candid endpoints (pass msg.caller). On the ICP rail `signature.sender`
+    /// is only a claim — the payer's ICRC-2 allowance is the sole authentication — so the caller
+    /// must BE the named sender (canonical text), checked before the nonce lock or any ledger call
+    /// (#policyDenied otherwise). EVM: exactly `settle` (the EIP-3009 authorization is payer-signed).
+    /// HTTP endpoints have no caller and keep `settle` (allowance-authenticated).
+    public func settleFrom(caller : Principal, signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
+      if (not isEvmNetwork(signature.network) and signature.sender != Principal.toText(caller)) {
+        return #policyDenied("Not authorized: this payment names sender " # signature.sender # " but was submitted by " # Principal.toText(caller) # " — on the ICP rail the caller must be the paying principal");
+      };
+      await* settleCore(signature, expectedAmount);
     };
 
     // ── Session (delegates to Sessions module) ──
@@ -995,9 +1021,15 @@ module {
       await sessionsMgr.openSession(caller, intent, clientConfig, sig);
     };
 
-    /// Verify a cumulative voucher and return the delta.
+    /// Verify a cumulative voucher and return the delta. Deprecated (2.17.0): prefer
+    /// consumeVoucherFrom — see Sessions.consumeVoucher.
     public func consumeVoucher(voucher : Types.Voucher) : Types.VoucherResult {
       sessionsMgr.consumeVoucher(voucher);
+    };
+
+    /// 2.17.0: pass msg.caller; the session key's own principal skips the signature check (see Sessions).
+    public func consumeVoucherFrom(caller : Principal, voucher : Types.Voucher) : Types.VoucherResult {
+      sessionsMgr.consumeVoucherFrom(caller, voucher);
     };
 
     /// Get a session's public state.
@@ -1308,6 +1340,9 @@ module {
     public func setRequireCallerBoundSessions(on : Bool) {
       sessionsMgr.setRequireCallerBoundSessions(on);
     };
+
+    /// 2.17.0 (default ON): see Sessions.setSignedVoucherFallback. Transient: re-apply at init.
+    public func setSignedVoucherFallback(on : Bool) { sessionsMgr.setSignedVoucherFallback(on) };
 
     /// Whether a session's voucher key is the payer's own IC identity key (derived, works for
     /// pre-existing sessions). null = unknown session; false = "not identity-bound", never

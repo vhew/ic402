@@ -128,6 +128,11 @@ persistent actor KnowledgeBase {
       allowedCallers = null;
       blockedCallers = null;
     });
+    // 2.17.0: every shipped client (@ic402/client >= 2.17.0, the MCP, the demo) submits session
+    // calls AS the session key, which the IC authenticates before this canister runs — so no
+    // session call needs the ~415M-cycle Ed25519 check. Older SDKs get #invalidSignature from
+    // sessionQuery. Library default is ON (compatibility); transient — re-applied here on upgrade.
+    gate.setSignedVoucherFallback(false);
   };
 
   // Start background timers (session expiry, EVM address derivation)
@@ -225,10 +230,10 @@ persistent actor KnowledgeBase {
   // REQUIRED: Paid Endpoint (Candid RPC)
   //
   // The simplest payment pattern: charge per call via gate.requireAll()
-  // and gate.settle(). Works with both ICP and EVM payments.
+  // and gate.settleFrom(). Works with both ICP and EVM payments.
   // ═══════════════════════════════════════════════════════════════════════
 
-  public shared func search(
+  public shared(msg) func search(
     searchQuery : Text,
     paymentSig : ?Ic402.PaymentSignature,
   ) : async {
@@ -241,7 +246,10 @@ persistent actor KnowledgeBase {
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
-        switch (await gate.settle(sig, ?amount)) {
+        // 2.17.0: settleFrom — on the ICP rail the caller must BE sig.sender, so a stranger cannot
+        // spend another principal's allowance on THIS route. The HTTP routes below share the nonce
+        // pool and stay allowance-authenticated (see http_request_update). No Candid change.
+        switch (await gate.settleFrom(msg.caller, sig, ?amount)) {
           // settle(sig, ?amount) enforces the cross-resource amount internally (it rejects a nonce
           // whose bound amount != this resource's price), so #ok guarantees receipt.amount == amount.
           case (#ok(_)) {
@@ -392,6 +400,9 @@ persistent actor KnowledgeBase {
     };
   };
 
+  // 2.17.0: the HTTP settle paths below keep gate.settle — http_request_update has no caller (its
+  // msg.caller is anonymous), so ICP payment here stays allowance-authenticated; that is why the
+  // SDK approves exactly amount + fee with an expiry. Candid endpoints use gate.settleFrom.
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
     if (request.method == "OPTIONS") { return Http.httpOptions() };
@@ -591,8 +602,8 @@ persistent actor KnowledgeBase {
   //
   // Flow:
   //   1. Deposit: client signs EIP-3009 (EVM) or ICRC-2 approve (ICP)
-  //   2. Stream: client signs an Ed25519 voucher per call off-chain; the canister verifies
-  //      each one (no ledger call or gas; ~420M cycles on a 13-node subnet)
+  //   2. Stream: the client calls as its per-session Ed25519 key; the IC authenticates the caller
+  //      (no in-canister signature check, ~8M cycles per call; ~420M on the legacy signed path)
   //   3. Close: canister settles consumed amount + refunds remainder (ICRC-1 transfers on ICP,
   //      tECDSA-signed ERC-20 transfers on EVM)
   //
@@ -660,15 +671,15 @@ persistent actor KnowledgeBase {
     };
   };
 
-  public shared func sessionQuery(voucher : Ic402.Voucher, question : Text) : async { #ok : Text; #error : Text } {
+  public shared(msg) func sessionQuery(voucher : Ic402.Voucher, question : Text) : async { #ok : Text; #error : Text } {
     // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
     // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
-    switch (gate.consumeVoucher(voucher)) {
+    switch (gate.consumeVoucherFrom(msg.caller, voucher)) {
       case (#ok(_)) { #ok(doQuery(question)) };
       case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
       case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
-      case (#invalidSignature) { #error("Invalid voucher: Ed25519 signature does not verify against the session's registered public key") };
+      case (#invalidSignature) { #error("Invalid voucher: not submitted by the session key — this canister accepts session calls only from the Ed25519 key registered at openSession (the IC verifies that caller; no voucher signature is checked). @ic402/client >= 2.17.0 does this automatically.") };
       case (#sessionNotOpen) { #error("Invalid voucher: session not open (unknown id, closed, expired, or idle-timed-out)") };
       case (#payloadOverflow) { #error("Invalid voucher: cumulativeAmount or sequence exceeds the Nat64 maximum") };
     };
@@ -725,7 +736,7 @@ persistent actor KnowledgeBase {
           case (null) { return #error("Not found") };
           case (?_) {};
         };
-        switch (await gate.settle(sig, ?amount)) {
+        switch (await gate.settleFrom(msg.caller, sig, ?amount)) { // 2.17.0: caller must be sig.sender (ICP)
           case (#ok(receipt)) {
             // settle(sig, ?amount) enforces the cross-resource amount internally, so receipt.amount == amount here.
             let metadata = switch (store.getMetadata(contentId)) {
@@ -920,7 +931,7 @@ persistent actor KnowledgeBase {
         // Arm the job-expiry sweep BEFORE settling — see the /service/ handler for why the arm
         // belongs on this side of the fund move rather than next to createJobFromReceipt.
         registry.armExpiryTimer<system>();
-        switch (await gate.settle(sig, null)) {
+        switch (await gate.settleFrom(msg.caller, sig, null)) { // 2.17.0: caller must be sig.sender (ICP)
           case (#ok(receipt)) {
             // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
             // G2: record the ACTUAL payer as buyer. For an EVM payment the payer is the on-chain

@@ -35,14 +35,14 @@ persistent actor MyService {
   );
 
   // Charge for a service call
-  public shared func search(query : Text, sig : ?Ic402.PaymentSignature) : async {
+  public shared(msg) func search(query : Text, sig : ?Ic402.PaymentSignature) : async {
     #paymentRequired : [Ic402.PaymentRequirement];
     #ok : Text;
   } {
     switch (sig) {
       case (null) { #paymentRequired(gate.requireAll(1_000)) };
       case (?s) {
-        switch (await gate.settle(s)) {
+        switch (await gate.settleFrom(msg.caller, s, ?1_000)) { // the caller must be the payer (ICP)
           case (#ok(_)) { #ok("Results for: " # query) };
           case (_) { #paymentRequired(gate.requireAll(1_000)) };
         };
@@ -151,7 +151,7 @@ Costs are bimodal — everything is cheap except signing **and** broadcasting an
 |-----------|----------|
 | x402 verify / 402 / content delivery | trivial (query, no outcall) |
 | ICP settle (ICRC‑2) | ~10–500M cycles (≈ <$0.001) |
-| Session voucher | ~420M cycles on a 13‑node subnet (≈ $0.0006): the in‑canister Ed25519 check; no outcall, no gas |
+| Session voucher | ~8M cycles when the call is made as the session key (SDK/MCP ≥ 2.17.0); ~420M on the legacy signed‑voucher path (≈ $0.0006, the in‑canister Ed25519 check); no outcall, no gas |
 | EVM settle (sign + broadcast + confirm) | **~17B cycles** local / ~40–80B mainnet est. (≈ $0.02–0.10) + EVM gas |
 
 Per‑call EVM settle is **underwater below ~$0.05–0.10** — use the ICP rail or sessions for micropayments. Measured numbers, the cycle buffer to hold, and rail‑selection guidance: **[docs/costs-and-rails.md](docs/costs-and-rails.md)**.
@@ -208,11 +208,11 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | Method | Description |
 |--------|-------------|
 | `requireAll(amount)` | Generate ICP + all EVM payment requirements |
-| `settle(signature, expectedAmount?)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM); `expectedAmount` binds the on-chain amount on the facilitator path |
+| `settle(signature, expectedAmount?)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM); `expectedAmount` binds the on-chain amount on the facilitator path. Candid endpoints: use `settleFrom(msg.caller, …)`, which refuses an ICP payment the caller does not make |
 | `verifyPayment(signature, expectedAmount, payTo, asset)` | Off-chain x402 verify verdict (`{isValid, invalidReason?, payer?}`) — no nonce, no broadcast, EVM only |
 | `offerSession(intent)` | Create session offer |
 | `openSession(...)` | Deposit escrow, create session |
-| `consumeVoucher(voucher)` | Verify + consume session voucher |
+| `consumeVoucher(voucher)` | Verify + consume session voucher (deprecated: prefer `consumeVoucherFrom(msg.caller, voucher)`; refuses every voucher once `setSignedVoucherFallback(false)`) |
 | `closeSession(caller, id)` | Settle consumed, refund remainder |
 | `setPolicy(caller?, policy)` | Set spending policy |
 | `setEvmChains(chains)` / `getEvmChains()` | Swap the accepted EVM chain/token set at runtime (e.g. Base Sepolia ↔ Base mainnet) — no redeploy; open sessions drain on their original chains. Transient: persist your choice consumer-side and re-apply after upgrade |

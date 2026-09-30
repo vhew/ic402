@@ -15,6 +15,12 @@ function makeConfig(overrides?: Partial<Ic402ClientConfig>): Ic402ClientConfig {
   };
 }
 
+// openSession requires a signer (2.17.0); a real-looking, non-zero key.
+const testSigner = {
+  sign: async () => new Uint8Array(64),
+  getPublicKey: async () => new Uint8Array(32).fill(2),
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mockActorFactory(actor: Record<string, unknown>): (cid: string) => any {
   return () => actor;
@@ -103,9 +109,43 @@ describe('Ic402Client', () => {
       );
 
       const result = await client.call('paidMethod', [[]]);
-      expect(approvedAmount).toBe(5_000n + 100_000n); // amount + default fee buffer, no crash
+      // S3 (2.17.0): this ledger has no icrc1_fee → the legacy +100_000 is kept, no crash
+      expect(approvedAmount).toBe(5_000n + 100_000n);
       expect(retried).toBe(true);
       expect(result).toEqual({ value: 'delivered' });
+    });
+
+    // S2 (2.17.0). Fails on: `+ 100_000n` restored; `expires_at: []`.
+    it('approves exactly amount + icrc1_fee() with a 5-minute expires_at', async () => {
+      const seen: { amount: bigint; expires_at: bigint[] }[] = [];
+      const nonce = new Uint8Array(32).fill(7);
+      const cid = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: cid,
+          autoPayment: true,
+          ledger: cid,
+          actorFactory: mockActorFactory({
+            paidMethod: async (optSig: unknown[]) =>
+              optSig.length > 0
+                ? { ok: 'delivered' }
+                : { paymentRequired: [{ amount: 1_000n, nonce }] },
+          }),
+          ledgerActorFactory: mockActorFactory({
+            icrc1_fee: async () => 10_000n,
+            icrc2_approve: async (arg: { amount: bigint; expires_at: bigint[] }) => {
+              seen.push(arg);
+              return { Ok: 1n };
+            },
+          }),
+        }),
+      );
+      const now = BigInt(Date.now()) * 1_000_000n;
+      await client.call('paidMethod', [[]]);
+      expect(seen[0]!.amount).toBe(11_000n);
+      expect(seen[0]!.expires_at).toHaveLength(1);
+      expect(seen[0]!.expires_at[0]!).toBeGreaterThan(now);
+      expect(seen[0]!.expires_at[0]!).toBeLessThanOrEqual(now + 360_000_000_000n);
     });
 
     it('returns raw result when not { ok } or { paymentRequired }', async () => {
@@ -188,7 +228,7 @@ describe('Ic402Client', () => {
         },
       };
       const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
-      const handle = await client.openSession();
+      const handle = await client.openSession(undefined, testSigner);
       expect(handle.consumed).toBe(0n);
 
       await expect(handle.call('useService', [])).rejects.toThrow('transient RPC failure');
@@ -205,10 +245,40 @@ describe('Ic402Client', () => {
         useService: async () => ({ error: 'Budget exhausted' }),
       };
       const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
-      const handle = await client.openSession();
+      const handle = await client.openSession(undefined, testSigner);
 
       await expect(handle.call('useService', [])).rejects.toThrow('Budget exhausted');
       expect(handle.consumed).toBe(0n);
+    });
+
+    // S1 (2.17.0). Fails on: vouchers (call or callForContent) sent via the client's actor;
+    // close() via the session actor.
+    it('sends vouchers through signer.actorFactory and close() through the client actor', async () => {
+      const sessionActor = {
+        sessionQuery: vi.fn().mockResolvedValue({ ok: 'a' }),
+        sessionContent: vi.fn().mockResolvedValue({ ok: {} }),
+        endSession: vi.fn(),
+      };
+      const clientActor = {
+        ...sessionBoilerplate,
+        sessionQuery: vi.fn(),
+        endSession: vi.fn().mockResolvedValue({ ok: { amount: 500n } }),
+      };
+      const signer = {
+        sign: async () => new Uint8Array(64),
+        getPublicKey: async () => new Uint8Array(32),
+        actorFactory: () => sessionActor,
+      };
+      const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(clientActor) }));
+      const handle = await client.openSession(undefined, signer);
+      await handle.call('sessionQuery', ['q']);
+      await handle.callForContent('sessionContent', ['c']);
+      await handle.close();
+      expect(sessionActor.sessionQuery).toHaveBeenCalledOnce();
+      expect(sessionActor.sessionContent).toHaveBeenCalledOnce();
+      expect(clientActor.sessionQuery).not.toHaveBeenCalled();
+      expect(clientActor.endSession).toHaveBeenCalledOnce();
+      expect(sessionActor.endSession).not.toHaveBeenCalled();
     });
 
     it('DOES advance consumed after a successful call', async () => {
@@ -217,12 +287,34 @@ describe('Ic402Client', () => {
         useService: async () => ({ ok: 'served' }),
       };
       const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
-      const handle = await client.openSession();
+      const handle = await client.openSession(undefined, testSigner);
 
       const r = await handle.call('useService', []);
       expect(r).toBe('served');
       expect(handle.consumed).toBe(500n);
       expect(handle.remaining).toBe(9_500n);
+    });
+
+    // S4 (2.17.0). Fails on: a zero key sent without a signer; approving the cap (maxDeposit)
+    // rather than the deposit the canister pulls; approvalFeeBuffer ignored; no expiry.
+    it('openSession needs a signer and approves min(suggestedDeposit, maxDeposit) + fee, expiring', async () => {
+      const approve = vi.fn().mockResolvedValue({ Ok: 1n });
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: 'aaaaa-aa',
+          autoPayment: true,
+          ledger: 'aaaaa-aa',
+          approvalFeeBuffer: 7n,
+          sessions: { maxDeposit: 100_000n },
+          actorFactory: mockActorFactory(sessionBoilerplate),
+          ledgerActorFactory: () => ({ icrc1_fee: async () => 10_000n, icrc2_approve: approve }),
+        }),
+      );
+      await expect(client.openSession()).rejects.toThrow('VoucherSigner');
+      expect(approve).not.toHaveBeenCalled();
+      await client.openSession(undefined, testSigner);
+      expect(approve.mock.calls[0]![0].amount).toBe(10_007n); // the intent suggests 10_000
+      expect(approve.mock.calls[0]![0].expires_at).toHaveLength(1);
     });
   });
 
@@ -441,6 +533,7 @@ describe('Ic402Client', () => {
       const result = await client.submitServiceRequest('svc-1', new Uint8Array([1]));
       expect(result).toEqual({ jobId: 'job-1' });
       expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+      expect(ledgerActor.icrc2_approve.mock.calls[0]![0].expires_at).toHaveLength(1);
       expect(mockActor.submitServiceRequest).toHaveBeenCalledTimes(2);
     });
 
@@ -746,7 +839,7 @@ describe('Ic402Client', () => {
         }),
       };
       const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
-      const err = await client.openSession().catch((e) => e);
+      const err = await client.openSession(undefined, testSigner).catch((e) => e);
       expect(err).toBeInstanceOf(Ic402Error);
       expect(err.fundsMoved).toBe(true);
       expect(err.retryable).toBe(false);
@@ -758,7 +851,7 @@ describe('Ic402Client', () => {
         openSession: async () => ({ err: 'Policy: rate limit exceeded' }),
       };
       const client = new Ic402Client(makeConfig({ actorFactory: mockActorFactory(mockActor) }));
-      const err = await client.openSession().catch((e) => e);
+      const err = await client.openSession(undefined, testSigner).catch((e) => e);
       expect(err).toBeInstanceOf(Ic402Error);
       expect(err.fundsMoved).toBe(false);
     });

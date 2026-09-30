@@ -60,7 +60,9 @@ else
   echo "  WARNING: Failed to mint ckUSDC — $MINT_OUT"
 fi
 
-# 5. Set ICRC-2 approval
+# 5. Set ICRC-2 approval. NOTE (2.17.0): the SDK now SETS an exact, expiring allowance on every
+#    payment/open (ICRC-2 approvals replace, not add), so this standing allowance is gone after
+#    the first SDK-driven demo step; re-run predemo before repeating a manual-allowance flow.
 if icp canister call ckusdc_ledger icrc2_approve \
   "(record { spender = record { owner = principal \"$EXAMPLE_ID\"; subaccount = null }; amount = 100_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null; expected_allowance = null; expires_at = null })" \
   -e local --identity test-payer >/dev/null 2>&1; then

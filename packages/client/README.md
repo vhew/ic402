@@ -41,21 +41,23 @@ const results = await client.call('search', ['what is x402?', []]);
 import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 
 const voucherKey = Ed25519KeyIdentity.generate();
+const sessionAgent = await HttpAgent.create({ host: 'https://icp-api.io', identity: voucherKey });
 const session = await client.openSession(
   {},
   {
     sign: (payload) => voucherKey.sign(payload),
     getPublicKey: async () => voucherKey.getPublicKey().toRaw(),
+    actorFactory: (id) => Actor.createActor(exampleIdlFactory, { agent: sessionAgent, canisterId: id }),
   },
 );
 
-const answer = await session.call('sessionQuery', ['question']); // voucher-signed, no on-chain tx
+const answer = await session.call('sessionQuery', ['question']); // sent as the session key, no on-chain tx
 console.log(session.consumed, session.remaining);
 
 const receipt = await session.close(); // settle consumed + refund remainder
 ```
 
-One escrow deposit on open, settle + refund on close — every call in between is an Ed25519 voucher the canister verifies in-canister, with no ledger call and no gas (the check costs the canister ~420M cycles; see [costs-and-rails.md](https://github.com/vhew/ic402/blob/master/docs/costs-and-rails.md)).
+One escrow deposit on open, settle + refund on close — every call in between is a cumulative voucher, with no ledger call and no gas. Two modes (2.17.0): with `actorFactory` on the signer, each call is made **as the session key**, the IC authenticates it, and the canister (`consumeVoucherFrom`) runs no signature check (~8M cycles); without it, calls go through the client's actor and the canister verifies the voucher's Ed25519 signature (~420M cycles; see [costs-and-rails.md](https://github.com/vhew/ic402/blob/master/docs/costs-and-rails.md)) — only while its signed-voucher fallback is on (the library default; the example turns it off). Vouchers are signed either way, so a new client also works against older canisters. A session-paid endpoint that issues a content grant binds it to `msg.caller`, i.e. the session key: redeem it through the session agent (`fetchContent(delivery, { canisterId, actorFactory: (id) => Actor.createActor(exampleIdlFactory, { agent: sessionAgent, canisterId: id }) })`). `open`/`close` stay on the payer's actor.
 
 ### EIP-3009 EVM payment
 
@@ -99,14 +101,16 @@ Submit the signed authorization either in an x402 `X-PAYMENT` header (HTTP rail)
 | `ledger?` | `string` | Ledger canister id for ICRC-2 auto-approval. |
 | `ledgerActorFactory?` | `(ledgerCanisterId: string) => any` | Required for ICP auto-payment. |
 | `evmRpcUrl?` | `string` | Custom EVM RPC; defaults to a public RPC per chain. |
-| `approvalFeeBuffer?` | `bigint` | Added to ICRC-2 approvals (default `100_000n`). |
+| `approvalFeeBuffer?` | `bigint` | When set, used as the ledger fee instead of querying `icrc1_fee()`. ICRC-2 approvals are exactly `amount + fee` and expire after 5 minutes (a ledger actor without `icrc1_fee` uses `100_000n`). |
+
+Approvals replace the allowance, so two payments from one identity in flight at once may fail with `InsufficientAllowance` — never a double payment; retry the one that failed. The payment `sender` must be the principal the `actorFactory`'s agent calls with: Candid paths refuse a mismatch (`Gateway.settleFrom`).
 
 ### `Ic402Client` methods
 
 | Method | Description |
 |--------|-------------|
 | `call(method: string, args: unknown[], canisterId?: string): Promise<unknown>` | Call a paid method with auto-402 handling. The method's **last argument must be the `opt PaymentSignature`** — pass `[]` and the client retries with the signature in that slot. Unwraps `{ ok }` variants. |
-| `openSession(sessionConfig?: Partial<SessionPreferences>, signer?: VoucherSigner, canisterId?: string): Promise<SessionHandle>` | Open a streaming session: fetch `requestSession()` intent → ICRC-2 approve the deposit (ICP, when `autoPayment`) → `openSession` on the canister. EVM sessions: pass `evmNetwork`/`evmSender`/`authorization` (and optionally `evmTxHash`/`evmToken`/`evmRecipient`) in `sessionConfig`. |
+| `openSession(sessionConfig?: Partial<SessionPreferences>, signer?: VoucherSigner, canisterId?: string): Promise<SessionHandle>` | Open a streaming session (`signer` is required since 2.17.0; it throws without one): fetch `requestSession()` intent → ICRC-2 approve the deposit, `min(suggestedDeposit, maxDeposit)` + fee (ICP, when `autoPayment`) → `openSession` on the canister. EVM sessions: pass `evmNetwork`/`evmSender`/`authorization` (and optionally `evmTxHash`/`evmToken`/`evmRecipient`) in `sessionConfig`. |
 | `fetchContent(delivery: ContentDelivery, options?: { canisterId?: string; actorFactory?: (id: string) => any }): Promise<Uint8Array>` | Fetch paid content for any `DeliveryMethod`: `inline`, `httpUrl`, `assetCanister`, or chunked `canisterQuery` (needs `options`). |
 | `fetchX402(url: string, options?: { init?: RequestInit; chainId?: number }): Promise<FetchX402Result>` | Buy from an external x402 API: probe → the canister signs the EIP-3009 header (`signX402Payment`) → retry with `X-Payment`. Requires an `eip155:*` network or explicit `chainId`. |
 | `registerAgent(rpcUrl?: string, chainId?: number): Promise<{ tokenId: bigint \| null; txHash: string }>` | ERC-8004 registration: fetch nonce/fees → canister signs → broadcast → poll receipt (throws on revert). |
