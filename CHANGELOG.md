@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.17.3 — 2026-10-05
+
+Patch — **session-close fixes found by an adversarial review of 2.17.2.** No API, type,
+`PaymentResult` or `example.did` change; no new state; schema stays v1.
+
+### Fixed
+
+- **`recoverEscrow` could drain an escrow under an in-flight close.** It accepted `#closing` and
+  `#expired` as well as `#closed`, capped only per call. A payer racing it against their own ICP close
+  drained the escrow, so the settle failed and reopened the session, and repeating it recovered the
+  merchant's consumed share too. It now accepts **`#closed` only**.
+- **An expiry-sweep close that never ran stranded the deposit.** The sweep set `#expired` and called
+  the close with no `try/catch`. If that message was rejected or trapped before the close started,
+  the session stayed `#expired` with its full escrow until the 24 h GC deleted the record. The sweep
+  now reverts it to `#open` so the next tick retries, and one failed close no longer stops the sweep.
+- **A ledger reject on the settle left the session resting in `#closing`.** A reject on that
+  guaranteed-response call moved nothing, so it is now handled like a failed settle: the session
+  goes back to `#open` and the close is retried. A ledger outage therefore no longer parks sessions.
+- **`forceResolveSession` during a live ICP close double-credited the daily limit** once that close
+  succeeded. The close now finishes with `#closed` + its daily release only if it is still
+  `#closing`; its transfers still run.
+- **A `#closed` session still holding escrow gets the full 24 h to recover it.** A failed refund and
+  `forceResolveSession` now refresh `lastActivityAt`; GC used to measure from the last voucher, so a
+  long-idle session's record could be deleted on the next tick.
+
+### Visible changes
+
+- `recoverEscrow` on `#closing`/`#expired` returns `#err`. Close an `#expired` session with
+  `closeSession`; a session resting in `#closing` (a refund rejected by the ledger, a trap, or an
+  earlier version) needs the controller's `forceResolveSession` before the payer can recover it.
+- `closeSession`/`forceCloseSession` return `#settlementFailed("Settle: ledger call rejected: …")`
+  on a settle reject instead of throwing.
+
+### Not changed
+
+- A `forceResolveSession` during a live close whose settle then fails: the close reopens the session
+  (funds first, as before), so the daily limit can still be double-credited in that case. The EVM
+  half of the force-resolve race is unchanged too.
+- `recoverEscrow` still caps each call, not the total: after a controller forces a session whose
+  settle never ran, repeated calls can recover part of the merchant's share.
+- Sessions from before 2.17.2 that rest `#expired` after being settled: re-closing one still reopens
+  it, so leave them to the 24 h GC.
+- A rejected or trapped sweep self-call can't be induced in a test, so that revert is covered by
+  review only; the sweep carrying on past a close that fails mid-close is tested.
+
 ## v2.17.2 — 2026-10-04
 
 Patch — **a session the expiry sweep closed can no longer be reopened by closing it again.**

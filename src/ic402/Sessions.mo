@@ -937,12 +937,11 @@ module {
       // Settle consumed amount (less the fee when the remainder cannot cover it) to recipient
       var settleBlockIndex : ?Nat = null;
       if (settleAmount > 0) {
-        let settleResult = await escrowManager.settle(
-          ledger,
-          session.subaccount,
-          recipientAccount(),
-          settleAmount,
-        );
+        // 2.17.3: a ledger reject (a guaranteed-response call that throws) moved nothing, so treat it
+        // like the #Err arm below (retry) instead of leaving the session resting in #closing.
+        let settleResult = try { await escrowManager.settle(ledger, session.subaccount, recipientAccount(), settleAmount) } catch (e) {
+          #err("ledger call rejected: " # Error.message(e));
+        };
         switch (settleResult) {
           case (#err(msg)) {
             session.status := #open; // Revert on failure
@@ -977,8 +976,10 @@ module {
         );
         switch (refundResult) {
           case (#err(msg)) {
-            // Settlement succeeded but refund failed — mark closed anyway
+            // Settlement succeeded but refund failed — mark closed anyway. G1: the remainder is
+            // still in escrow, so measure GC retention from now (recoverEscrow needs the record).
             session.status := #closed;
+            session.lastActivityAt := Time.now();
             return #settlementFailed("Refund leg failed (settle succeeded; session marked #closed): " # msg # " — the remainder stays in the session's escrow subaccount and is recoverable by the payer via recoverEscrow(sessionId).");
           };
           case (#ok(blockIdx)) { refundBlockIndex := ?blockIdx };
@@ -989,12 +990,15 @@ module {
       // calling in, and ending in #expired again let a later re-close through the guard above; its
       // settle then failed on the drained escrow and reverted the session to #open, where the sweep
       // retried it forever. End in #closed so any re-close is refused.
-      session.status := #closed;
-
-      // M-9 (v2): Credit the unused deposit back against the daily limit (the full
-      // deposit was reserved at open; only `consumed` should count as spend).
-      if (session.deposited > session.consumed) {
-        policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
+      // 2.17.3: unless a forceResolveSession during the awaits already did both (it moves no funds,
+      // so the transfers above still ran) — releasing the daily reservation twice over-credited it.
+      if (session.status == #closing) {
+        session.status := #closed;
+        // M-9 (v2): Credit the unused deposit back against the daily limit (the full
+        // deposit was reserved at open; only `consumed` should count as spend).
+        if (session.deposited > session.consumed) {
+          policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
+        };
       };
 
       // Build txHash from ICRC-1 block indices
@@ -1182,7 +1186,22 @@ module {
           case (?session) {
             if (session.status == #open) {
               session.status := #expired;
-              resultBuf[i] := await closeSessionInternal(sessionId);
+              // 2.17.3: the close is a separate message. If it is rejected or traps before it commits
+              // #closing, nothing moved: revert #expired to #open so the next tick retries, instead of
+              // leaving the escrow in a status the sweep skips and the 24h GC deletes.
+              resultBuf[i] := try { await closeSessionInternal(sessionId) } catch (e) {
+                switch (sessions.get(sessionId)) {
+                  case (?s) {
+                    if (s.status == #expired) {
+                      s.status := #open;
+                      #settlementFailed("Expiry close not delivered — session left open for retry: " # Error.message(e));
+                    } else {
+                      #settlementFailed("Expiry close failed mid-close (session " # debug_show (s.status) # "; a #closing one needs forceResolveSession): " # Error.message(e));
+                    };
+                  };
+                  case (null) { #settlementFailed("Expiry close failed: " # Error.message(e)) };
+                };
+              };
             } else {
               resultBuf[i] := #settlementFailed("Session no longer open — skipped by expiry sweep (concurrently closed)");
             };
@@ -1227,6 +1246,7 @@ module {
     private func finalizeClosedSession(s : Types.InternalSessionState) {
       ignore evmEscrowManager.deallocate(s.id);
       s.status := #closed;
+      s.lastActivityAt := Time.now(); // G1: funds may still be owed — a full GC window to recover them
       closeParkedTxs.delete(s.id);
       if (s.deposited > s.consumed) { policy.releaseDaily(s.payer, s.spendDay, s.deposited - s.consumed) };
     };
@@ -1235,6 +1255,9 @@ module {
     /// broadcast but never confirmed). Moves NO funds; the operator reconciles the on-chain EVM
     /// pool out-of-band. Releases the session's canister-side reservations and forces it to #closed
     /// so GC can reclaim it. The consumer MUST gate this on Principal.isController.
+    /// 2.17.3: forcing a LIVE ICP close (between its awaits) no longer double-credits the daily
+    /// limit when that close then succeeds; its transfers still run. If its settle fails, the
+    /// close reopens the session as before.
     public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
       switch (sessions.get(sessionId)) {
         case (null) { #err("Session not found") };
@@ -1490,7 +1513,8 @@ module {
 
     /// M-8: Recover funds from an escrow subaccount.
     /// H-5: Hardened — always refunds to payer, caps at unconsumed amount,
-    /// and only allows recovery for sessions in #closed, #expired, or #closing status.
+    /// and only allows recovery for sessions in #closed status (2.17.3: a recovery landing during a
+    /// close in progress drained the escrow under its settle, which failed and reopened the session).
     public func recoverEscrow(
       caller : Principal,
       ledger : Types.LedgerActor,
@@ -1503,11 +1527,14 @@ module {
           if (not Principal.equal(caller, session.payer)) {
             return #err("Not authorized: only session payer can recover escrow");
           };
-          // H-5: Only allow recovery for terminal or stuck sessions
+          // H-5: Only allow recovery once the close has finished
           switch (session.status) {
-            case (#closed or #expired or #closing) {};
+            case (#closed) {};
             case (#open) {
               return #err("Cannot recover escrow from an open session — close it first");
+            };
+            case (#closing or #expired) {
+              return #err("Cannot recover escrow while a close is in progress (" # debug_show (session.status) # ") — close an #expired session with closeSession; a session resting in #closing needs forceResolveSession first");
             };
           };
           // H-5: Cap recovery amount to unconsumed portion

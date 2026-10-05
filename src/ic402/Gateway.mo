@@ -1072,7 +1072,8 @@ module {
     };
 
     /// M-8: Recover funds from an escrow subaccount.
-    /// H-5: Always refunds to payer, caps at unconsumed amount, rejects open sessions.
+    /// H-5: Always refunds to payer, caps at unconsumed amount. Accepts #closed only (2.17.3):
+    /// #closing/#expired are refused while a close is in progress (recovery race).
     /// ICP-ESCROW ONLY: refunds from the session's ICRC-1 escrow subaccount. EVM session
     /// deposits live in the canister's shared EVM pool and are NOT recoverable here — use
     /// reconcileSession / reconcileEvmDeposit (or an operator sweep) for EVM.

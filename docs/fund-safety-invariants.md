@@ -210,7 +210,10 @@ citation set for every partial.
 | voucher-respects-access-and-rate-policy | both | checkVoucher for payer before accept | `Sessions.mo:710-714` | enforced |
 | close-authorized-to-payer-only | both | closeSession only if caller==payer; force = controller-only | `Sessions.mo:757-767` | enforced |
 | evm-settle-and-refund-go-to-bound-addresses | EVM | Settle→session.recipient, refund→authz.from (bound at open) | `Sessions.mo:1142-1183` | enforced |
-| recover-escrow-payer-only-terminal-only-capped-to-payer | ICP | payer-only, terminal-only, capped, fixed payee | `Sessions.mo:1253-1290` | enforced |
+| recover-escrow-payer-only-terminal-only-capped-to-payer | ICP | payer-only, capped, fixed payee; **`#closed` only** (2.17.3: `#closing`/`#expired` refused so a recovery cannot drain the escrow under an in-flight close) | `Sessions.mo` recoverEscrow | enforced |
+| icp-close-no-double-credit-on-force-resolve | ICP | a close whose session was `forceResolveSession`'d during its awaits skips its own `#closed` + `releaseDaily` (the force already did both); its transfers still run, and a failed settle still reverts to `#open` as before | `Sessions.mo` closeSessionInternal | enforced (2.17.3) |
+| expiry-sweep-reverts-undelivered-expired-to-open | both | a sweep close-call rejected before committing `#closing` reverts `#expired`→`#open` for retry (no strand) | `Sessions.mo` closeExpiredSessions | enforced (2.17.3) |
+| closed-with-escrow-keeps-full-gc-window | both | the refund-failure arm and `finalizeClosedSession` refresh `lastActivityAt`, so GC retention runs 24 h from the close, not from the last voucher (G1) | `Sessions.mo` closeSessionInternal / finalizeClosedSession | enforced (2.17.3) |
 | sweep-and-recovery-hatches-controller-only | EVM | sweepEvm/force/reconcile controller-gated at consumer | `example/main.mo:1166-1174,1226-1228` | enforced |
 | claim-only-by-service-operator-on-pending | both | claimJob only caller==operatorId & `#Pending` | `ServiceRegistry.mo:437-453` | enforced |
 | submit-result-only-by-assigned-operator | both | status ∈ {Assigned,Computing} & operator==caller | `ServiceRegistry.mo:463-474` | enforced |
@@ -299,6 +302,7 @@ directions are scope-only.
 - **Violation path.** A long-maxDuration session idle >24h is expiry-closed, its refund leg fails → `#closed` with `lastActivityAt` already older than the retention window → the same (or next) timer tick GC-deletes the record → `recoverEscrow(sessionId)` returns "Session not found" → escrow remainder permanently stranded.
 - **Cite.** `Sessions.mo:862-864,1095-1109,1256-1290,739`, `Gateway.mo:960-964`.
 - **Fix direction.** Bump `lastActivityAt` (or set a distinct "needs-recovery" timestamp) at close-time so retention is measured from close, and/or exclude refund-failed sessions from GC until recovered.
+- **v2.17.3: the first half is done.** The refund-failure arm and `finalizeClosedSession` refresh `lastActivityAt`, so a `#closed` session that still holds escrow always keeps the full 24 h retention from the moment it closed. **Residual:** after those 24 h the record is still GC'd with the funds in the subaccount and no in-band method can move them — recover promptly (runbook §3).
 
 #### G2 — `job-buyer-identifies-actual-payer-and-rail-recorded` (pool insolvency + misdirected refund)
 - **Gap.** The Candid submit path stores `buyer = Principal.toText(msg.caller)` (`example/main.mo:905`) unconditionally, but the Candid 402 quote mints EVM-capable nonces (`requireAll`→`requireEvm`), so `gate.settle(sig,null)` can take the EVM branch and land funds on-chain while the stored buyer is a principal (never `0x`). `evmJobRail` is therefore never recorded (`ServiceRegistry.mo:402`), so settle/refund draw the ICP ckUSDC pool for an EVM-funded job and refund to `msg.caller` (not the payer).
@@ -414,9 +418,11 @@ directions are scope-only.
 
 #### G21 — `finalize-releases-pool-and-daily-reservations-exactly-once` (bounded daily over-credit)
 - **Gap.** `releaseDaily` is non-idempotent (`Policy.mo:182-187`), but the EVM close success path does not re-fetch/re-check status after its settle/refund awaits before releasing (unlike `reconcileSession`, which does at `Sessions.mo:1024-1026`). Deallocate is idempotent, so pool stays solvent.
-- **Violation path.** Payer closes an EVM session (`#closing`, suspends at settle await). Controller `forceResolveSession` runs during the await → finalizes (releaseDaily once, `#closed`). Close resumes and runs releaseDaily a second time (`Sessions.mo:1228`) on the same `D−C` → payer's daily bucket over-credited → over-spend past the daily cap. Requires a trusted controller + precise timing.
-- **Cite.** `Sessions.mo:988-993,1006,1024-1030,1144,1181,1228`, `Policy.mo:182-187`, `EvmEscrow.mo:60-62`.
-- **Fix direction.** Re-fetch + re-check `status == #closing` after the settle/refund awaits in `closeEvmSessionInternal` before deallocate/releaseDaily.
+- **ICP: the double credit is fixed in v2.17.3.** `closeSessionInternal` runs its final `#closed` + `releaseDaily` only if the session is still `#closing`, so a `forceResolveSession` during the close no longer double-credits when the close succeeds; its transfers still run. If its settle then fails, the close still reverts the session to `#open` (funds first, as before), so a double credit stays possible in that rare sub-case. `forceResolveSession` itself only gained the `lastActivityAt` refresh.
+- **EVM: still open.** The EVM violation path below is unchanged (out of scope for the 2.17.3 B1–B3 fixes).
+- **Violation path (EVM).** Payer closes an EVM session (`#closing`, suspends at settle await). Controller `forceResolveSession` runs during the await → finalizes (releaseDaily once, `#closed`). Close resumes and runs releaseDaily a second time (`Sessions.mo`) on the same `D−C` → payer's daily bucket over-credited → over-spend past the daily cap. Requires a trusted controller + precise timing.
+- **Cite.** `Sessions.mo` closeSessionInternal/closeEvmSessionInternal/forceResolveSession, `Policy.mo:182-187`, `EvmEscrow.mo:60-62`.
+- **Fix direction (EVM).** Re-fetch + re-check `status == #closing` after the settle/refund awaits in `closeEvmSessionInternal` before deallocate/releaseDaily.
 
 #### G22 — `FUNDS_MOVED_FLAG_FIDELITY` (marker missing on some post-settle arms)
 - **Gap.** The fund-safety half holds (refund guard relies only on the structured flag; guarded consumers emit the marker on their only moved-funds arm). But the *universal* claim is false: `getContent` has three post-`#ok`-settle arms omitting the marker (`example/main.mo:714,719,725`). Not consumed by any refund guard today (the generic call tool is read-only; `client.call` returns raw `#error` without setting fundsMoved).
