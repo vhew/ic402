@@ -2,15 +2,15 @@
 /// without a ledger at all (sessions are injected with loadStable, which arms no timer).
 ///
 ///   - B1: recoverEscrow accepts #closed only; #closing / #expired are refused up front.
-///   - Exit for B1: forceResolveSession takes any #closing (an ICP one interrupted by a ledger
-///     reject or a trap, or left by an earlier version, or an EVM one) to #closed and refreshes
+///   - Exit for B1: forceResolveSession takes any #closing (an ICP one interrupted by a trap, or
+///     left by an earlier version, or an EVM one) to #closed and refreshes
 ///     lastActivityAt (G1) so recoverEscrow has a full GC window afterwards.
 ///
 /// `dummyLedger` is never reached on a correct guard; a mutation that drops one makes the call
 /// hit it and throw, so the expected #err still goes red. The ledger legs themselves (a refund
-/// failure, a force landing mid-close) are in test/closeledger.test.mo. B2 (the sweep's
-/// self-call being rejected) cannot be induced in-process and is covered by review only; the
-/// sweep carrying on past a close that throws mid-close is tested in closeledger.
+/// failure, a force landing mid-close, the sweep past ledger rejects) are in
+/// test/closeledger.test.mo. The sweep's catch arm (a rejected self-call, or a trap mid-close)
+/// cannot be induced in-process and is covered by review only.
 import Sessions "../src/ic402/Sessions";
 import Types "../src/ic402/Types";
 import Policy "../src/ic402/Policy";

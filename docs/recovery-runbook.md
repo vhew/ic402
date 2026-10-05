@@ -41,7 +41,7 @@ incident.
 |---|---|---|
 | `settle()` / charge returned `#settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx …)")` | Payer's USDC may or may not have landed at the canister's EVM address; **no receipt issued** | §1 |
 | Session status `#closing` and not resolving (`sessions.closing` non-decreasing) | Deposit (or its remainder) parked mid-close in the shared EVM pool | §2 |
-| ICP close returned `#settlementFailed("Refund leg failed (settle succeeded; session marked #closed): …")` | Remainder sits in the session's **ICP escrow subaccount** | §3 |
+| ICP close returned `#settlementFailed("Refund leg failed (session marked #closed): …")` or `"Refund leg rejected (…)"` | Remainder sits in the session's **ICP escrow subaccount** | §3 |
 | `openSession` returned `#err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx …) — no session was created…"))` | Deposit may or may not have landed in the shared pool; **no session exists** | §4 |
 | You are about to upgrade the canister | Transient recovery state (parked txs, pending-deposit tracker) would be wiped | §5 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
@@ -134,8 +134,9 @@ or manually re-send a transfer for a leg whose parked tx is still `#pending` on-
 ## §3 ICP close: refund leg failed (`recoverEscrow`)
 
 **What happened:** an ICP session close settled `consumed` to the recipient, but the refund
-transfer back to the payer failed (transient ledger error). The session was still marked
-`#closed`; the remainder sits in the session's **per-session ICRC-1 escrow subaccount**
+transfer back to the payer failed (a transient ledger error) or, since v2.17.4, was rejected (the
+ledger unreachable, for example mid-upgrade). The session was still marked `#closed` and (since v2.17.4)
+the payer's daily reservation released; the remainder sits in the session's **per-session ICRC-1 escrow subaccount**
 (`sha256("ic402-escrow" ++ sessionId)` under the canister's principal). The error text says so
 explicitly.
 
@@ -147,8 +148,8 @@ caps `amount` at `deposited − consumed`).
 > refused: a close is in progress for them, and a recovery that lands mid-close drains the escrow
 > under the close's settle (which then fails and reopens the session; repeated, the merchant's
 > consumed share is recoverable too). Exits:
-> - **`#closing` at rest** (an ICP close interrupted by a ledger reject or a trap, or left by an
->   earlier version):
+> - **`#closing` at rest** (an ICP close interrupted by a trap, or left by an earlier version;
+>   since v2.17.4 a ledger reject no longer leaves one there):
 >   controller `forceResolveSession(sessionId)` → `#closed` (no funds move, `lastActivityAt`
 >   refreshed), then the payer's `recoverEscrow`. 2.17.2 let the payer recover a `#closing` session
 >   directly; a controller step is now required.
