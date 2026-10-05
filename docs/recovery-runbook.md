@@ -122,6 +122,11 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      any owed USDC must be returned with `sweepEvm` (above). Earlier versions DID leak the allocation
      permanently (`gcClosedSessions` only deletes the record); upgrade before relying on this hatch
      at scale.
+   - As of **v2.17.3**, forcing a **live ICP close** (one suspended between its ledger awaits) no
+     longer double-credits the daily limit when that close then succeeds: its transfers still run,
+     and it skips its own `#closed` + daily release. If its settle fails, it reopens the session as
+     before. Forcing also refreshes `lastActivityAt`, so the record keeps a full 24 h
+     before GC.
 
 **Do NOT:** call `closeSession`/`forceCloseSession` on a `#closing` session (rejected by design),
 or manually re-send a transfer for a leg whose parked tx is still `#pending` on-chain.
@@ -136,7 +141,22 @@ explicitly.
 
 **Do:** `recoverEscrow(ledger, sessionId, amount)` — refunds from the escrow subaccount **to the
 payer only** (the library hard-codes the destination and requires `caller == session.payer`; it
-accepts sessions in `#closed`/`#expired`/`#closing`, and caps `amount` at `deposited − consumed`).
+caps `amount` at `deposited − consumed`).
+
+> **Changed in v2.17.3:** `recoverEscrow` accepts **`#closed` only**. `#closing` and `#expired` are
+> refused: a close is in progress for them, and a recovery that lands mid-close drains the escrow
+> under the close's settle (which then fails and reopens the session; repeated, the merchant's
+> consumed share is recoverable too). Exits:
+> - **`#closing` at rest** (an ICP close interrupted by a ledger reject or a trap, or left by an
+>   earlier version):
+>   controller `forceResolveSession(sessionId)` → `#closed` (no funds move, `lastActivityAt`
+>   refreshed), then the payer's `recoverEscrow`. 2.17.2 let the payer recover a `#closing` session
+>   directly; a controller step is now required.
+> - **`#expired` at rest with its escrow intact** (a sweep close that never ran before 2.17.3, or
+>   one restored across an upgrade): the payer's `closeSession` or the controller's
+>   `forceCloseSession` closes it normally — the close guard refuses only `#closed`/`#closing`. Do
+>   NOT do this to an `#expired` an earlier version already settled: its settle fails on the drained
+>   escrow and reopens it into the sweep loop — leave those to GC.
 
 Practical notes, all code-derived:
 
@@ -156,8 +176,9 @@ Practical notes, all code-derived:
   Query `icrc1_balance_of({ owner = <canister>; subaccount = ?sha256("ic402-escrow" ++
   sessionId) })` and request `balance − fee`.
 - **Time window:** `recoverEscrow` needs the session record to authorize; `gcClosedSessions`
-  removes `#closed`/`#expired` records **24 h after `lastActivityAt`** (which is NOT refreshed at
-  close — the window can be shorter than 24 h from the failure). After GC, `recoverEscrow` returns
+  removes `#closed`/`#expired` records **24 h after `lastActivityAt`**. As of v2.17.3 the
+  refund-failure arm and `forceResolveSession` refresh it, so the window is a full 24 h from the
+  close (before, it ran from the last voucher and could already be over). After GC, `recoverEscrow` returns
   "Session not found" and the funds still sit in the (deterministically derivable) subaccount, but
   there is **no in-band method left to move them** — recovery would need a custom controller
   method added by the consumer. **Recover promptly.**
