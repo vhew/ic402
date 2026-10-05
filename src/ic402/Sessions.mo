@@ -908,7 +908,6 @@ module {
         return await closeEvmSessionInternal(session);
       };
 
-      let wasExpired = (session.status == #expired);
       // H-4: Setting #closing BEFORE any async operations freezes session.consumed —
       // consumeVoucher rejects vouchers when status != #open, preventing TOCTOU on arithmetic.
       session.status := #closing;
@@ -986,7 +985,11 @@ module {
         };
       };
 
-      session.status := if (wasExpired) { #expired } else { #closed };
+      // 2.17.2 (S-3 for ICP): a successful close is TERMINAL. The expiry sweep sets #expired before
+      // calling in, and ending in #expired again let a later re-close through the guard above; its
+      // settle then failed on the drained escrow and reverted the session to #open, where the sweep
+      // retried it forever. End in #closed so any re-close is refused.
+      session.status := #closed;
 
       // M-9 (v2): Credit the unused deposit back against the daily limit (the full
       // deposit was reserved at open; only `consumed` should count as spend).
@@ -1454,8 +1457,7 @@ module {
       // re-close guard (closeSessionInternal) does NOT reject — letting the payer trigger
       // a SECOND on-chain settle+refund from the canister's shared EVM balance and drain
       // other payers' pooled deposits. End in #closed so any re-close is rejected.
-      // (ICP sessions don't need this: the per-session subaccount is already drained, so a
-      // second settle/refund fails with InsufficientFunds.)
+      // (ICP closes end in #closed too since 2.17.2: their failed second settle reopened them.)
       session.status := #closed;
       closeParkedTxs.delete(session.id); // close fully succeeded — clear any prior park
 

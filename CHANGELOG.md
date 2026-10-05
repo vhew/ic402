@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.17.2 — 2026-10-04
+
+Patch — **a session the expiry sweep closed can no longer be reopened by closing it again.**
+Reported by EngramX. No API, type or `PaymentResult` change.
+
+### Fixed
+
+- **A re-close reopened a settled ICP session.** The expiry sweep marks an idle session `#expired`
+  and closes it (settle + refund), and a successful ICP close left it `#expired` again. The re-close
+  guard refuses only `#closed` and `#closing`, so a later `closeSession` by the payer or a
+  controller's `forceCloseSession` got through. Its settle then failed on the drained escrow and
+  reverted the session to `#open`. After that the sweep retried it every tick, it was never
+  garbage-collected, the expiry timer never disarmed, and it held the payer's session slot. No money
+  moved twice, because each ICP escrow is per-session.
+- **The fix is S-3 for ICP:** a successful ICP close now ends `#closed`, as a successful EVM close
+  already does, so the existing guard refuses any re-close ("Session already closed …") before any
+  ledger call. `#expired` now only means the sweep has marked a session and its close has not
+  finished, so a session left there (say, by a sweep close that never ran) still closes normally.
+- **Visible change:** sessions the sweep settled on the ICP rail now read `#closed`, not `#expired`
+  (in `getSession` and in the `health()` session counts), matching EVM.
+- **Not covered:** sessions settled by an earlier version stay `#expired` until the 24h GC removes
+  them. Re-closing one in that window still reopens it, and a reopened session (including any an
+  earlier version already reopened) loops in the sweep as before, with no library method to end
+  it. So after upgrading, do not re-close sessions settled before the upgrade. EngramX found the
+  bug on the interpreter; it has not been seen live.
+- **A separate, pre-existing path to the same loop** remains in consumers that expose
+  `recoverEscrow`: it accepts a session whose close is still in flight, and a recovery that lands
+  mid-close makes the settle fail and reopen the session. Not changed here.
+- Tested on a replica (I4): the sweep's close ends `#closed`, not `#expired`; the payer's and the
+  controller's re-close are then refused without reopening it, and the payer's balance is unchanged.
+
 ## v2.17.1 — 2026-09-30
 
 Patch — **`@ic402/mcp` installs from npm again.** No library behaviour change.

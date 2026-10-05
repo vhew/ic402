@@ -84,6 +84,7 @@ citation set for every partial.
 | voucher-cumulative-strictly-increasing | both | `cumulativeAmount > lastCumulativeAmount` | `Sessions.mo:701-702,738` | enforced |
 | consume-voucher-synchronous-atomicity | both | No awaits in consumeVoucher; checks + writes atomic | `Sessions.mo:666-747` | enforced |
 | no-reclose-of-closed-or-closing-sessions | both | close rejects `#closed`/`#closing` | `Sessions.mo:790-792` | enforced |
+| successful-close-is-terminal | both | every successful close ends `#closed`, never `#expired`, so the guard above refuses any re-close (EVM: S-3; ICP: 2.17.2, replica test I4). `#expired` means the sweep marked the session and its close has not finished | `Sessions.mo` closeSessionInternal / closeEvmSessionInternal | enforced |
 | closing-status-set-before-first-await | both | `#closing` set before any await, freezing `consumed` | `Sessions.mo:799-802,1115-1117` | enforced |
 | evm-close-finalizes-only-on-confirmed-transfers | EVM | Only `#confirmed` finalizes; `#reverted`/`#pending`/mempool-ack never | `Sessions.mo:1136-1211` | enforced |
 | pending-close-legs-park-and-are-never-rebroadcast | EVM | Unconfirmed leg parked; recovery is confirm-only | `Sessions.mo:1153-1198` | enforced |

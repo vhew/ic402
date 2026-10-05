@@ -324,6 +324,58 @@ describe('ic402 integration', () => {
         await actor.setPolicy(policy);
       }
     });
+
+    // I4 (2.17.2, reported by EngramX). Fails on: a successful ICP close ending #expired again
+    // (the re-close passes the guard, fails to settle the drained escrow and reopens the session).
+    // The expiry sweep runs on the example's 60 s timer, so this waits for its refund.
+    it('I4: a session the expiry sweep settled cannot be closed again', async () => {
+      if (skip) return;
+      const key = Ed25519KeyIdentity.generate();
+      const asKey = await actorAs(key); // built before the open, so the voucher beats the idle timeout
+      const deposit = 50_000n;
+      await approveExact(deposit);
+      const opened = await actor.openSession(
+        { maxDeposit: deposit, autoClose: true, idleTimeout: [5_000_000_000n] }, // 5 s idle
+        {
+          ...icpSig({ nonce: new Uint8Array(32) }, ''),
+          publicKey: [new Uint8Array(key.getPublicKey().toRaw())],
+        },
+      );
+      expect(opened).toHaveProperty('ok');
+      const id: string = opened.ok.id;
+      const payer = { owner: await agent.getPrincipal(), subaccount: [] };
+      try {
+        const voucher = {
+          sessionId: id,
+          cumulativeAmount: 1_000n,
+          sequence: 1n,
+          signature: zeroSig,
+        };
+        expect(await asKey.sessionQuery(voucher, 'q')).toHaveProperty('ok');
+        const counts = async () => (await actor.health()).sessions; // controller-only
+        const countsOpen = await counts();
+        const before: bigint = await ledger.icrc1_balance_of(payer);
+        let settled = false; // the sweep refunds the remainder to the payer
+        for (let i = 0; i < 45 && !settled; i++) {
+          await new Promise((r) => setTimeout(r, 2_000));
+          settled = (await ledger.icrc1_balance_of(payer)) > before;
+        }
+        expect(settled).toBe(true);
+        const after: bigint = await ledger.icrc1_balance_of(payer);
+        // The root cause: the sweep's successful close must end #closed, not #expired.
+        const countsBefore = await counts();
+        expect(countsBefore.closed).toBeGreaterThan(countsOpen.closed);
+        expect(countsBefore.expired).toBeLessThanOrEqual(countsOpen.expired);
+        for (const reclose of [actor.endSession, actor.forceCloseSession, actor.endSession]) {
+          expect(String((await reclose(id)).settlementFailed)).toMatch(/already closed/);
+        }
+        // Still terminal: a re-close that reopened the session would raise the open count.
+        expect((await counts()).open).toBeLessThanOrEqual(countsBefore.open);
+        expect(await ledger.icrc1_balance_of(payer)).toBe(after);
+      } finally {
+        await actor.endSession(id); // refused once settled; closes it if the test failed early
+      }
+    }, 150_000);
   });
 
   // ── Content ──
