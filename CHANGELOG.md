@@ -1,5 +1,39 @@
 # Changelog
 
+## v2.17.4 — 2026-10-05
+
+Patch — **a refund the ledger rejects no longer strands the remainder behind a controller.**
+Reported by EngramX. No API, type, `PaymentResult` or `example.did` change.
+
+### Fixed
+
+- **A rejected refund left an ICP session resting in `#closing`.** 2.17.3 handled a rejected settle
+  and a refund the ledger refused, but not a refund the ledger *rejected* (for example while it is
+  being upgraded): the close threw, the session rested in `#closing` with the remainder in escrow,
+  and since 2.17.3's `recoverEscrow` refuses `#closing`, only a controller's `forceResolveSession`
+  could free it. An ICRC ledger either answers or traps (rolling the transfer back), so a reject
+  means nothing moved: it is now handled like a refused refund. The session ends `#closed`,
+  `lastActivityAt` is refreshed, the payer can recover the remainder with `recoverEscrow` for the
+  full 24 h, and the close returns `#settlementFailed("Refund leg rejected (session marked #closed): …")`.
+- **A failed refund now releases the payer's daily reservation**, refused or rejected, like every
+  other terminal close. Before, a refused refund left the unspent remainder counted against the
+  payer's daily limit until the day rolled over (a rejected one released it only when a controller
+  ran `forceResolveSession`). A `forceResolveSession` landing during the refund still releases it
+  once, not twice.
+- The refused-refund message drops its "settle succeeded" clause, which was false when nothing had
+  been consumed: it is now `"Refund leg failed (session marked #closed): …"`.
+
+### Not changed
+
+- A trap after one of the close's awaits can still leave a session resting in `#closing`; its exit
+  is still the controller's `forceResolveSession`.
+- With no ICP ledger reject left that makes the close throw, the sweep's catch arm is now reached
+  only by a rejected self-call or a trap; it is covered by review only.
+- A refund that fails during the expiry sweep is still not reported: the timer discards the sweep's
+  results. A rejected one used to show as a session resting in `#closing` (the `sessions.closing`
+  count); it now ends `#closed` silently, as a refused one already did. Surfacing sweep failures is
+  a follow-up.
+
 ## v2.17.3 — 2026-10-05
 
 Patch — **session-close fixes found by an adversarial review of 2.17.2.** No API, type,

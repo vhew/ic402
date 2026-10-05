@@ -883,10 +883,11 @@ module {
     /// Rejects sessions already #closed or #closing (recovery goes through reconcileSession /
     /// forceResolveSession, never a re-close).
     ///
-    /// ICP: ledger fees come out of the refund (refunded = deposited − consumed − fees). If the
-    /// settle leg succeeds but the refund leg fails, the session is still marked #closed and
-    /// #settlementFailed("Refund: …") is returned — the remainder stays in the escrow
-    /// subaccount and is recoverable via recoverEscrow.
+    /// ICP: ledger fees come out of the refund (refunded = deposited − consumed − fees). A settle
+    /// that fails or is rejected reopens the session (#settlementFailed("Settle: …")). If the
+    /// refund leg then fails or is rejected, the session is still marked #closed and
+    /// #settlementFailed("Refund leg failed/rejected (session marked #closed): …") is returned —
+    /// the remainder stays in the escrow subaccount and is recoverable via recoverEscrow.
     ///
     /// EVM: finalizes ONLY on confirmed transfers. #settlementPending → the session is PARKED
     /// in #closing with the tx hash recorded; recover with reconcileSession (confirm-only —
@@ -937,8 +938,9 @@ module {
       // Settle consumed amount (less the fee when the remainder cannot cover it) to recipient
       var settleBlockIndex : ?Nat = null;
       if (settleAmount > 0) {
-        // 2.17.3: a ledger reject (a guaranteed-response call that throws) moved nothing, so treat it
-        // like the #Err arm below (retry) instead of leaving the session resting in #closing.
+        // 2.17.3: a ledger reject moved nothing (an ICRC ledger either answers or traps, rolling
+        // back), so treat it like the #Err arm below (retry) instead of leaving the session resting
+        // in #closing.
         let settleResult = try { await escrowManager.settle(ledger, session.subaccount, recipientAccount(), settleAmount) } catch (e) {
           #err("ledger call rejected: " # Error.message(e));
         };
@@ -968,19 +970,30 @@ module {
       var refundBlockIndex : ?Nat = null;
       let refunded = Utils.satSub(escrowBalance, fee);
       if (refunded > 0) {
-        let refundResult = await escrowManager.refund(
-          ledger,
-          session.subaccount,
-          { owner = session.payer; subaccount = null },
-          refunded,
-        );
+        // 2.17.4: a ledger reject on the refund is the same state as a refund the ledger refused (an
+        // ICRC ledger either answers #Err or traps, rolling back, so a reject moved nothing): handle
+        // both below, rather than leave the session resting in #closing, which recoverEscrow refuses.
+        var refundRejected = false;
+        let refundResult = try {
+          await escrowManager.refund(ledger, session.subaccount, { owner = session.payer; subaccount = null }, refunded);
+        } catch (e) {
+          refundRejected := true;
+          #err(Error.message(e));
+        };
         switch (refundResult) {
           case (#err(msg)) {
-            // Settlement succeeded but refund failed — mark closed anyway. G1: the remainder is
-            // still in escrow, so measure GC retention from now (recoverEscrow needs the record).
-            session.status := #closed;
+            // The refund failed — mark closed anyway, releasing the daily reservation like any
+            // terminal close (unless a forceResolveSession during the awaits already did both).
+            // G1: the remainder is still in escrow, so measure GC retention from now.
+            if (session.status == #closing) {
+              session.status := #closed;
+              if (session.deposited > session.consumed) {
+                policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
+              };
+            };
             session.lastActivityAt := Time.now();
-            return #settlementFailed("Refund leg failed (settle succeeded; session marked #closed): " # msg # " — the remainder stays in the session's escrow subaccount and is recoverable by the payer via recoverEscrow(sessionId).");
+            let leg = if (refundRejected) { "Refund leg rejected" } else { "Refund leg failed" };
+            return #settlementFailed(leg # " (session marked #closed): " # msg # " — the remainder stays in the session's escrow subaccount and is recoverable by the payer via recoverEscrow(sessionId).");
           };
           case (#ok(blockIdx)) { refundBlockIndex := ?blockIdx };
         };

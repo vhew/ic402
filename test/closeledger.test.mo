@@ -1,17 +1,21 @@
-/// 2.17.3 ICP session close against a scriptable fake ledger (`mops test`, interpreter mode:
-/// a `persistent actor` declared in a test file runs in-process, so the close's real ledger
-/// awaits execute here — only the sweep's self-call rejection (B2) has no in-process trigger).
+/// ICP session close (2.17.3, 2.17.4) against a scriptable fake ledger (`mops test`, interpreter
+/// mode: a `persistent actor` declared in a test file runs in-process, so the close's real ledger
+/// awaits execute here). The fake keeps no balances: these tests pin the state machine, the
+/// transfer count and the daily reservation, not the amounts moved.
 ///
 ///   - A normal close settles, refunds and releases the daily reservation exactly once.
 ///   - G1: a refund that fails after a successful settle ends #closed with lastActivityAt
-///     refreshed (the remainder is in escrow; recoverEscrow needs the record for a full 24 h).
+///     refreshed (the remainder is in escrow; recoverEscrow needs the record for a full 24 h) and,
+///     since 2.17.4, the daily reservation released.
 ///   - B3: forceResolveSession landing while the close is suspended at an await does not make
 ///     the close release the daily reservation a second time; the close's transfers still run.
 ///   - A ledger reject on the settle leaves the session #open for retry (nothing moved).
 ///   - B1: recoverEscrow does pay out once a session is #closed.
-///   - B2: the expiry sweep keeps going past a close that throws mid-close, and leaves that
-///     session #closing (it is not reopened). Only a rejected self-call before the close starts
-///     has no in-process trigger; that revert is covered by review only.
+///   - 2.17.4: a refund the ledger REJECTS ends #closed and recoverable, like a refused one; a
+///     force landing during a failing refund does not release the daily reservation twice.
+///   - B2: the expiry sweep handles ledger rejects without parking sessions. Since 2.17.4 no ICP
+///     ledger reject makes the close throw, so the sweep's catch arm is reached only by a rejected
+///     self-call or a trap, neither inducible in-process: that arm is covered by review only.
 ///
 /// Each test names the mutation that turns it red.
 import Sessions "../src/ic402/Sessions";
@@ -22,6 +26,7 @@ import EvmEscrow "../src/ic402/EvmEscrow";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Error "mo:base/Error";
+import Text "mo:base/Text";
 import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
@@ -107,10 +112,10 @@ func untilClosing(m : Sessions.Sessions) : async () {
   assert session(m).status == #closing;
 };
 
-/// Yield until the close is suspended inside its first icrc1_transfer.
-func untilTransferring() : async () {
-  var n = 0; while ((await ledger.transferCalls()) < 1 and n < 30) { await async {}; n += 1 };
-  assert (await ledger.transferCalls()) == 1;
+/// Yield until the close is suspended inside its `k`th icrc1_transfer.
+func untilTransferring(k : Nat) : async () {
+  var n = 0; while ((await ledger.transferCalls()) < k and n < 200) { await async {}; n += 1 };
+  assert (await ledger.transferCalls()) == k;
 };
 
 await suite("an ICP close against the ledger", func() : async () {
@@ -126,14 +131,16 @@ await suite("an ICP close against the ledger", func() : async () {
     assert policy.getDailySpendAmount(payerP) == 51_000;
   });
 
-  await test("a refund that fails after a successful settle → #closed, lastActivityAt refreshed", func() : async () {
-    // Mutation: drop the lastActivityAt refresh in the refund-failure arm (a sweep-closed session
-    // idle >24 h would be GC'd on the next tick, before recoverEscrow can run).
+  await test("a refund that fails after a successful settle → #closed, lastActivityAt refreshed, daily released", func() : async () {
+    // Mutations: drop the lastActivityAt refresh in the refund-failure arm (a sweep-closed session
+    // idle >24 h would be GC'd on the next tick, before recoverEscrow can run); drop its
+    // releaseDaily (daily stays 100_000 — the unspent remainder counted against the payer's limit).
     await ledger.script(0, 0, 2, 1_000); // transfer 1 (the settle) succeeds, transfer 2 (the refund) fails
-    let (m, _) = mk(1_000);
+    let (m, policy) = mk(1_000);
     switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
     assert session(m).status == #closed;
     assert session(m).lastActivityAt != STALE;
+    assert policy.getDailySpendAmount(payerP) == 51_000;
   });
 });
 
@@ -158,11 +165,24 @@ await suite("forceResolveSession landing on a LIVE ICP close (B3)", func() : asy
     await ledger.script(0, 40, 1_000, 1_000);
     let (m, policy) = mk(1_000);
     let f = m.closeSessionInternal("sess-1");
-    await untilTransferring();
+    await untilTransferring(1);
     force(m);
     switch (await f) { case (#ok(_)) {}; case (_) { assert false } };
     assert session(m).status == #closed;
     assert (await ledger.transferCalls()) == 2;
+    assert policy.getDailySpendAmount(payerP) == 51_000;
+  });
+
+  await test("during a refund that then fails: #closed, daily released exactly once (2.17.4)", func() : async () {
+    // Mutation: drop the `status == #closing` guard in the refund-failure arm — daily is released
+    // twice (2_000, not 51_000).
+    await ledger.script(0, 40, 2, 1_000); // the refund (transfer 2) is parked, then refused
+    let (m, policy) = mk(1_000);
+    let f = m.closeSessionInternal("sess-1");
+    await untilTransferring(2);
+    force(m);
+    switch (await f) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closed;
     assert policy.getDailySpendAmount(payerP) == 51_000;
   });
 });
@@ -187,16 +207,36 @@ await suite("ledger rejects and recovery", func() : async () {
     switch (await m.recoverEscrow(payerP, ledger, "sess-1", 1)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
   });
 
-  await test("the expiry sweep keeps going past a close that throws mid-close (B2)", func() : async () {
-    // The first session swept: settle #1 succeeds, its refund #2 is rejected → that close throws
-    // with #closing committed. The second: its settle #3 is rejected → caught → #open. (HashMap
-    // order decides which is first.) Mutations: revert ANY status in the sweep's catch (the
-    // #closing one is reopened); drop the sweep's try/catch (the sweep throws).
+  await test("a refund the ledger rejects → #closed, recoverable, and nothing re-closes it (2.17.4)", func() : async () {
+    // Mutation: drop the try/catch around escrowManager.refund — the close throws and the session
+    // rests in #closing, which recoverEscrow refuses.
+    await ledger.script(0, 0, 1_000, 2); // transfer 1 (the settle) succeeds, transfer 2 (the refund) is rejected
+    let (m, policy) = mk(1_000);
+    switch (await m.closeSessionInternal("sess-1")) {
+      case (#settlementFailed(msg)) { assert Text.startsWith(msg, #text "Refund leg rejected") };
+      case (_) { assert false };
+    };
+    assert session(m).status == #closed;
+    assert session(m).lastActivityAt != STALE;
+    assert policy.getDailySpendAmount(payerP) == 51_000;
+    await ledger.script(0, 0, 1_000, 1_000); // the ledger is back
+    switch (await m.recoverEscrow(payerP, ledger, "sess-1", 1)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    let moved = await ledger.transferCalls();
+    switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closed;
+    assert (await ledger.transferCalls()) == moved; // the refused re-close moved nothing
+    assert policy.getDailySpendAmount(payerP) == 51_000; // and released nothing again
+  });
+
+  await test("the expiry sweep handles ledger rejects without parking sessions (B2)", func() : async () {
+    // The first session swept: settle #1 succeeds, its refund #2 is rejected → #closed. The
+    // second: its settle #3 is rejected → #open for retry. (HashMap order decides which is first.)
+    // Mutation: drop the refund's try/catch — that close throws and the session rests #closing.
     await ledger.script(0, 0, 1_000, 2);
     let m = mkExpired();
     let results = await m.closeExpiredSessions();
     assert results.size() == 2;
     let (a, b) = (statusOf(m, "sess-1"), statusOf(m, "sess-2"));
-    assert (a == #closing and b == #open) or (a == #open and b == #closing);
+    assert (a == #closed and b == #open) or (a == #open and b == #closed);
   });
 });
