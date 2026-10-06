@@ -1077,12 +1077,17 @@ module {
     /// has stopped ticking (and, on a busy one, that expiry is actually scheduled).
     public func expiryTimerArmed() : Bool { expiryTimer != null };
 
-    /// Whether the expiry sweep has anything to act on: ANY session record at all. `#open`
-    /// sessions expire; `#closed`/`#expired` ones are still awaiting the 24h GC; `#closing`
-    /// (parked mid-settle) ones are deliberately included — the sweep can't advance them, but
-    /// keeping the timer armed on a parked deposit costs cycles while disarming on one risks
-    /// leaving real state unattended, and the disarm side is the dangerous side.
-    public func hasExpiryWork() : Bool { sessions.size() > 0 };
+    /// Whether the expiry sweep has anything to act on: any session not yet `#closed`. `#open`
+    /// sessions expire. `#closing` and `#expired` ones are counted too, though the sweep cannot
+    /// advance them: a failed close returns them to `#open` (a settle that fails, a payer's close
+    /// of an `#expired` session), and a session reopened outside a tick, after the timer had
+    /// stopped, would never expire. Only `#closed` is final. 2.17.5: a `#closed` record no longer
+    /// keeps the sweep ticking through its 24h retention; it is deleted by the first sweep after
+    /// that, so retention is at least 24h (the next session opened, or an upgrade, arms one).
+    public func hasExpiryWork() : Bool {
+      for ((_, s) in sessions.entries()) { if (s.status != #closed) return true };
+      false;
+    };
 
     func cancelExpiryTimer() {
       switch (expiryTimer) {
@@ -1099,7 +1104,9 @@ module {
       expiryTimer := ?Timer.recurringTimer<system>(
         #seconds seconds,
         func() : async () {
-          let _results = await closeExpiredSessions();
+          // `await*`, not `await closeExpiredSessions()`: a call to a local `async` function is a
+          // message the canister sends itself, and every message pays the base fee (2.17.5).
+          let _results = await* sweepExpiredSessions();
           // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
           gcClosedSessions();
           // ── ATOMIC TAIL — do NOT introduce an `await` below this line. ──
@@ -1154,7 +1161,11 @@ module {
     };
 
     /// Close all expired or idle sessions.
-    public func closeExpiredSessions() : async [Types.PaymentResult] {
+    public func closeExpiredSessions() : async [Types.PaymentResult] { await* sweepExpiredSessions() };
+
+    // The sweep's body, run inline by the timer (no self-call). Each session's close is still a
+    // separate message (`await closeSessionInternal`), so a trap in one close fails only that close.
+    func sweepExpiredSessions() : async* [Types.PaymentResult] {
       let now = Time.now();
       let buf = Iter.toArray(
         Iter.filter<(Text, Types.InternalSessionState)>(

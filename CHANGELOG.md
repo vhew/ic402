@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.17.5 — 2026-10-06
+
+Patch — **a closed session no longer keeps the 60-second expiry sweep running for a day.** Reported
+by EngramX. No API, type, `PaymentResult` or `example.did` change.
+
+### Fixed
+
+- **Retained `#closed` sessions kept the session sweep ticking.** The sweep stopped only when no
+  session record existed at all, and a closed session is kept for 24 h so the payer can still call
+  `recoverEscrow`. So every close kept the canister waking every 60 s for a day (~1,440 empty
+  ticks), measured by EngramX at ~3.4B cycles/hour against ~0.3B/hour once the record was gone.
+  The sweep now counts only sessions that are not yet `#closed`: `#open` ones, and `#closing` /
+  `#expired` ones, which a failed close can return to `#open`. Closed records are still kept, and
+  are deleted by the first sweep after their 24 h (the next session opened, or an upgrade, arms
+  one), so retention is now at least 24 h.
+- **The job sweep had the same pattern.** Terminal jobs (`#Settled`, `#Refunded`, `#Expired`) kept it
+  at its 60 s working cadence through their 24 h retention. It now drops to its hourly idle poll,
+  which still runs `gcTerminalJobs`. `armExpiryTimer` now also keeps the working cadence for the
+  next tick: `example/main.mo` arms just before the settle that creates the job (because
+  `createJobFromReceipt` is synchronous and cannot), and a tick landing during that settle used to
+  find no job and drop to the idle poll, leaving the new job's timeout unenforced for up to an hour
+  (or, with `setExpiryIdlePollSeconds(0)`, until the next arm). Found by adversarial review.
+- **Each tick is one message cheaper.** The timers ran the sweep with `await closeExpiredSessions()` /
+  `await expireJobs()`, and a call to a local `async` function is a message the canister sends
+  itself. They now run it inline with `await*`; the public functions are unchanged, and each
+  session's close is still its own message. Measured on a local replica with one open session:
+  39.8M → 28.2M cycles per tick (−29%).
+
+### Not changed
+
+- While a session is open the sweep still ticks every 60 s. `setSessionExpiryIntervalSeconds`
+  trades expiry latency for fewer ticks (a timed-out session then closes within the interval).
+- A settle that outlasts a whole sweep interval (60 s) between the arm and `createJobFromReceipt`
+  can still let the job sweep drop to its idle poll before the job exists. The job is then picked
+  up within the hour, or with `setExpiryIdlePollSeconds(0)` on the next arm.
+- Each tick's saving from running the sweep inline is measured, not guarded by a test: a test
+  cannot count a canister's own messages.
+
 ## v2.17.4 — 2026-10-05
 
 Patch — **a refund the ledger rejects no longer strands the remainder behind a controller.**

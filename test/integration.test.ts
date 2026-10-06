@@ -656,6 +656,10 @@ describe('ic402 integration', () => {
       const submitted = await actor.submitServiceRequest(testSvcId, params, [paymentSig]);
       expect(submitted).toHaveProperty('ok');
       const jobId = submitted.ok.jobId;
+      // The job is #Pending, so the job sweep must be at its working cadence: example/main.mo arms
+      // it right before gate.settle (createJobFromReceipt is synchronous and cannot). Armed but not
+      // active means that call site was dropped, and the job's expiry would wait for the hourly poll.
+      expect((await actor.health()).timers.jobExpiryActive).toBe(true);
 
       // 4. Operator claims and submits a result → AutoSettle runs settleJob → pays the operator.
       const claimed = await actor.claimJob(jobId);
@@ -678,18 +682,22 @@ describe('ic402 integration', () => {
   // sweep. This is the ONLY place that can prove it: `mops test` has no timer system API, so a
   // unit test cannot arm a timer, let alone observe a callback disarming one.
   describe('expiry timers', () => {
-    it('the session sweep DISARMS itself on a canister with no session state', async () => {
+    it('the session sweep DISARMS itself once no session is unfinished, while #closed ones are retained', async () => {
       if (skip) return;
       const h0 = await actor.health();
-      // Precondition: nothing to sweep. Session records are retained 24h after close, so if an
-      // earlier run left state on this replica the sweep is *correctly* still armed and this
-      // assertion doesn't apply.
-      if (h0.sessions.total > 0n) {
+      // Precondition: nothing to sweep. Only a session not yet #closed is work; an #open one left
+      // by an earlier run (or a failed test above) correctly keeps the sweep armed.
+      const unfinished = h0.sessions.open + h0.sessions.closing + h0.sessions.expired;
+      if (unfinished > 0n) {
         console.warn(
-          `[integration] ${h0.sessions.total} session record(s) present — sweep is correctly still armed; disarm assertion skipped.`,
+          `[integration] ${unfinished} unfinished session(s) present — sweep is correctly still armed; disarm assertion skipped.`,
         );
         return;
       }
+      // 2.17.5: the sessions suite above opened, spent and closed sessions (I1 by the payer, I4 by
+      // the sweep). Their #closed records are kept 24h for recoverEscrow, and must NOT hold the 60s
+      // sweep for that day (EngramX measured ~3.4B cycles/hour while one was retained).
+      if (process.env.IC402_REQUIRE_REPLICA === '1') expect(h0.sessions.closed).toBeGreaterThan(0n);
       // startTimers arms unconditionally at install/upgrade (the init body re-runs BEFORE
       // postupgrade restores stable sessions, so it cannot gate on "are there sessions?"), and the
       // FIRST tick — at most one interval later — is what disarms. Poll rather than assume how
@@ -701,20 +709,35 @@ describe('ic402 integration', () => {
         armed = (await actor.health()).timers.sessionExpiryArmed;
       }
       expect(armed).toBe(false);
+      expect((await actor.health()).sessions.closed).toBe(h0.sessions.closed); // still retained
     }, 120_000);
 
-    it('the job sweep is ARMED and at its working cadence while jobs exist', async () => {
+    it('the job sweep drops to its idle poll once every job is terminal, and stays armed', async () => {
       if (skip) return;
-      const h = await actor.health();
-      // The service suite above settled a job, so there is job state on this canister.
-      expect(h.jobs.total).toBeGreaterThan(0n);
-      // Armed at the working cadence because example/main.mo calls registry.armExpiryTimer right
-      // after createJobFromReceipt (which is synchronous and so cannot arm a timer itself). If
-      // this is armed-but-not-active, that call site was dropped and a new job's expiry would
-      // wait for the hourly idle poll instead.
-      expect(h.timers.jobExpiryArmed).toBe(true);
-      expect(h.timers.jobExpiryActive).toBe(true);
-    });
+      const h0 = await actor.health();
+      // The service suite above settled a job (its arm site is checked there, while the job was
+      // #Pending), so there is terminal job state on this canister, retained 24h for GC.
+      expect(h0.jobs.total).toBeGreaterThan(0n);
+      if (h0.jobs.active + h0.jobs.settling > 0n) {
+        console.warn(
+          '[integration] unfinished job(s) present — job sweep correctly at its working cadence; assertion skipped.',
+        );
+        return;
+      }
+      // 2.17.5: terminal jobs no longer hold the working cadence; the hourly idle poll (which still
+      // runs gcTerminalJobs) takes over. That can take two ticks: the settle test's armExpiryTimer
+      // counts as work for the tick after it, so a job created mid-settle is never missed.
+      const deadline = Date.now() + 150_000;
+      let active = h0.timers.jobExpiryActive;
+      while (active && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        active = (await actor.health()).timers.jobExpiryActive;
+      }
+      expect(active).toBe(false);
+      const h1 = await actor.health();
+      expect(h1.timers.jobExpiryArmed).toBe(true); // the idle poll, not a disarm
+      expect(h1.jobs.total).toBe(h0.jobs.total); // still retained
+    }, 180_000);
   });
 
   // ── EVM Signer ──
