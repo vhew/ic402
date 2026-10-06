@@ -28,6 +28,7 @@ import EvmEscrow "../src/ic402/EvmEscrow";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Blob "mo:base/Blob";
+import Array "mo:base/Array";
 import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
@@ -87,6 +88,40 @@ func mkReceipt(amount : Nat) : Types.PaymentReceipt = {
   txHash = null;
   sessionId = null;
   refunded = null;
+};
+
+/// A session record with the given id and status (loadStable arms no timer).
+func stableSession(id : Text, status : Types.SessionStatus) : Types.StableSession = {
+  id; payer = buyerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 1_000;
+  remaining = 49_000; voucherCount = 1; status; openedAt = 0; lastActivityAt = 0;
+  lastSequence = 1; lastCumulativeAmount = 1_000; subaccount = Blob.fromArray([]); network = "icp:1";
+  token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
+};
+
+func sessionsWith(statuses : [Types.SessionStatus]) : Sessions.Sessions {
+  let mgr = mkSessions();
+  var i = 0;
+  mgr.loadStable(Array.map<Types.SessionStatus, Types.StableSession>(statuses, func(st) { i += 1; stableSession("sess-" # debug_show (i), st) }));
+  mgr;
+};
+
+/// A job record with the given status (loadStable arms no timer).
+func stableJob(id : Text, status : Types.JobStatus) : (Text, Types.Job) {
+  (id, {
+    id; serviceId = "svc-1"; buyer = Principal.toText(buyerP); operator = null; params = Blob.fromArray([]);
+    paymentReceiptId = "rcpt-" # id; amount = 1_000; actualCost = null; status; result = null; proof = null;
+    createdAt = 0; expiresAt = 0; completedAt = ?0; deliveryCallback = null; parkedTx = null;
+  });
+};
+
+func registryWith(statuses : [Types.JobStatus]) : ServiceRegistry.ServiceRegistry {
+  let reg = mkRegistry();
+  var i = 0;
+  reg.loadStable({
+    services = []; serviceCounter = 0; jobCounter = statuses.size(); evmRails = null; operatorPayouts = null;
+    jobs = Array.map<Types.JobStatus, (Text, Types.Job)>(statuses, func(st) { i += 1; stableJob("job-" # debug_show (i), st) });
+  });
+  reg;
 };
 
 // ── The pure decision the tick takes in its atomic tail ──
@@ -162,6 +197,25 @@ await suite("Sessions expiry timer", func() : async () {
     switch (mgr.setExpiryIdlePollSeconds<system>(900)) { case (#ok) {}; case (#err(_)) { assert false } };
     assert Utils.expiryCadence(mgr.hasExpiryWork(), true, 900) == #switchToIdle;
   });
+
+  await test("retained #closed sessions are not work: the tick disarms (2.17.5)", func() : async () {
+    // Mutation: hasExpiryWork back to `sessions.size() > 0` — a closed session kept for its 24h
+    // recoverEscrow window would hold the 60s sweep for a day (~1,440 empty ticks).
+    let mgr = sessionsWith([#closed, #closed]);
+    assert mgr.sessionCounts().total == 2; // still retained for recoverEscrow / GC
+    assert not mgr.hasExpiryWork();
+    assert Utils.expiryCadence(mgr.hasExpiryWork(), true, 0) == #disarm;
+  });
+
+  await test("#open, #closing and #expired each keep the sweep armed (2.17.5)", func() : async () {
+    // Mutation: count only #open — a #closing or #expired session can fall back to #open (a failed
+    // settle, a payer's failed close) outside a tick, and with the timer gone it would never expire.
+    for (st in [#open, #closing, #expired].vals()) {
+      let mgr = sessionsWith([#closed, st, #closed]);
+      assert mgr.hasExpiryWork();
+      assert Utils.expiryCadence(mgr.hasExpiryWork(), true, 0) == #stay;
+    };
+  });
 });
 
 // ── ServiceRegistry: idle poll (its job-creating entry point is synchronous) ──
@@ -195,6 +249,24 @@ await suite("ServiceRegistry expiry timer", func() : async () {
     // call armExpiryTimer gets picked up.
     assert Utils.expiryCadence(reg.hasExpiryWork(), true, 3600) == #stay;
     assert Utils.expiryCadence(reg.hasExpiryWork(), false, 3600) == #switchToFast;
+  });
+
+  await test("terminal jobs are not work: the tick drops to the idle poll (2.17.5)", func() : async () {
+    // Mutation: hasExpiryWork back to `jobs.size() > 0` — terminal jobs kept 24h for GC would hold
+    // the 60s cadence for a day. The hourly idle poll still runs expireJobs → gcTerminalJobs.
+    let reg = registryWith([#Settled, #Refunded, #Expired]);
+    assert reg.jobCounts().total == 3;
+    assert not reg.hasExpiryWork();
+    assert Utils.expiryCadence(reg.hasExpiryWork(), true, 3600) == #switchToIdle;
+  });
+
+  await test("every non-terminal job keeps the working cadence (2.17.5)", func() : async () {
+    // Mutation: treat any of these as terminal — a timed-out job would wait for the hourly poll.
+    for (st in [#Pending, #Assigned, #Computing, #Submitted, #Verified, #Settling, #Disputed].vals()) {
+      let reg = registryWith([#Settled, st]);
+      assert reg.hasExpiryWork();
+      assert Utils.expiryCadence(reg.hasExpiryWork(), true, 3600) == #stay;
+    };
   });
 
   await test("with no jobs the tick drops to the idle poll rather than disarming", func() : async () {

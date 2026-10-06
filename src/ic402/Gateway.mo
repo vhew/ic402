@@ -1230,8 +1230,9 @@ module {
     /// not call this must schedule closeExpiredSessions()/GC itself, or sessions never expire
     /// and rate-limit logs grow unbounded.
     ///
-    /// CYCLES: the session sweep is SELF-ARMING (since 2.11.0) — it runs only while sessions
-    /// exist and disarms itself when the last one is GC'd, so an idle canister is left with just
+    /// CYCLES: the session sweep is SELF-ARMING (since 2.11.0) — it runs only while a session is
+    /// not yet #closed and disarms itself at the first tick after the last one closes (closed
+    /// records are kept 24h and deleted by a later sweep, 2.17.5), so an idle canister is left with just
     /// the hourly GC tick below. A recurring timer is billed per tick regardless of what the
     /// callback does, which made the old always-on 60s sweep the largest fixed cost of embedding
     /// ic402 in a many-small-canisters topology. Confirm with sessionExpiryTimerArmed().
@@ -1272,7 +1273,8 @@ module {
 
     /// Whether the session-expiry sweep is currently armed. `false` on an idle canister is the
     /// expected steady state (nothing to expire ⇒ nothing ticking ⇒ no per-tick cycle burn);
-    /// `true` while any session record exists. Pair it with sessionCounts() to explain a
+    /// `true` while any session is not yet #closed (retained #closed records do not count since
+    /// 2.17.5), and for up to one interval after that. Pair it with sessionCounts() to explain a
     /// canister's timer burn without guessing.
     public func sessionExpiryTimerArmed() : Bool { sessionsMgr.expiryTimerArmed() };
 

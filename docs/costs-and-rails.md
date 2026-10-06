@@ -81,7 +81,7 @@ by the fleet, and it is invisible to a consumer reading only their own source.
 
 **Since 2.11.0** the sweeps arm only while there is state to sweep:
 
-| Timer | Idle (no sessions / no jobs) | While work exists |
+| Timer | Idle (no unfinished sessions / jobs) | While work exists |
 | --- | --- | --- |
 | Session expiry (`Gateway.startTimers`) | **disarmed** — 0 ticks | 60s (`setSessionExpiryIntervalSeconds`) |
 | Job expiry (`ServiceRegistry.startTimers`) | **1 tick/hour** idle poll (`setExpiryIdlePollSeconds`) | 60s (`setExpiryIntervalSeconds`) |
@@ -91,11 +91,21 @@ That takes ic402's fixed cost on an idle canister from **~121 ticks/hour to 2** 
 ~$0.05/month). Verify on a live canister with `health().timers`: steady state is
 `sessionExpiryArmed = false`, `jobExpiryActive = false`.
 
+**Since 2.17.5** "idle" includes finished state. Before, a `#closed` session (kept 24 h so the payer
+can still `recoverEscrow`) or a terminal job (kept 24 h before GC) counted as work, so every close
+kept the 60s sweep ticking for a day: ~1,440 ticks, measured by a consumer at ~3.4B cycles/hour
+while one closed session was retained. Now only unfinished state counts (sessions not `#closed`;
+jobs not `#Settled`/`#Refunded`/`#Expired`). Closed sessions are deleted by the first sweep after
+their 24 h (the next session opened arms one), and terminal jobs by the hourly idle poll. Each tick
+is also one message cheaper: the timer runs the sweep inline (`async*`) instead of sending the
+canister a message to run it (measured on a local replica: 39.8M → 28.2M cycles per tick, −29%).
+
 Give it one interval before you read it. `startTimers()` arms **unconditionally** at install and at
 every upgrade — it has to, because a `persistent actor` re-runs its init body *before*
 `postupgrade` restores stable sessions, so an arm that asked "are there sessions?" would skip
 exactly the canisters that have them. The first tick is what disarms. So `sessionExpiryArmed = true`
-with `sessions.total = 0` is **expected for up to one interval** (60s by default) after a deploy;
+with no unfinished sessions (`sessions.open + closing + expired = 0`) is **expected for up to one
+interval** (60s by default) after a deploy or after the last session closes;
 if it is still true a few minutes later, that is a bug — please report it.
 
 **Why the job sweep polls instead of disarming.** Its only job‑creating entry point,
@@ -103,7 +113,10 @@ if it is still true a few minutes later, that is a bug — please report it.
 `system` capability, so it cannot arm a timer. The hourly poll is the safety net for a job created
 by a caller that did not arm the sweep itself. If your call sites do arm it — one
 `registry.armExpiryTimer<system>()` on the job-creating path, from the async context you are
-already in — you can set `setExpiryIdlePollSeconds(0)` and pay **nothing** when idle.
+already in — you can set `setExpiryIdlePollSeconds(0)` and pay **nothing** when idle. The arm
+keeps the working cadence for at least the next tick (2.17.5), so arming just before the settle
+that creates the job is enough unless that settle outlasts a whole interval; with the poll off,
+such a job then waits for the next arm.
 `example/main.mo` places that call **before** `gate.settle` rather than next to
 `createJobFromReceipt`, so the arm cannot trap in the window between the funds moving and the job
 existing; copy that ordering.
