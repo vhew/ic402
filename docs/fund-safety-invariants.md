@@ -222,6 +222,7 @@ citation set for every partial.
 | evm-buyer-actions-signature-bound-and-single-use | EVM | secp256k1 over action:job:canister recovers to buyer | `ServiceRegistry.mo:661-695` | enforced |
 | resolveDispute-resolvable-states-Settling-reservation-privileged | both | `#Submitted`/`#Disputed`; `#Settling` before await; MUST-gate | `ServiceRegistry.mo:728-765` | enforced |
 | resolveJob-controller-only-Settling-only-terminal-only-no-funds | both | Pure state assertion; controller-only | `ServiceRegistry.mo:997-1021` | enforced |
+| resolveJob-not-undone-by-a-failed-in-flight-transfer | both | resolveDispute's refund `#err` arm and settleJob's operator-payment `#err` arm revert only a job still `#Settling`; a terminal status set by resolveJob during their await stands (before, the pre-await snapshot brought it back: `#Submitted`/`#Disputed`, refundable or settleable a second time, or `#Verified`, stuck unfinished) | `ServiceRegistry.mo` resolveDispute / settleJob | enforced (2.17.6) |
 | marketplace-recovery-and-observability-controller-gated | both | reconcile/resolve/list/health controller-only | `example/main.mo:1131-1143,964-967` | enforced |
 | operator-evm-payout-addresses-self-keyed-format-checked-fail-closed-bounded | EVM | Self-keyed, 0x/42-char, capped 10k, missing⇒#err | `ServiceRegistry.mo:94-121,164` | enforced |
 | TWO_PHASE_CONFIRM_ON_ALL_VALUE_MOVERS | both | Value-movers default confirm:false; no side effect until confirm:true | `index.ts:129-165` | **partial** |

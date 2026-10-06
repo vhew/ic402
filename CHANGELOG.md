@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.17.6 — 2026-10-06
+
+Patch — **a failed in-flight transfer no longer undoes a controller's `resolveJob`.** Found by the
+adversarial review of 2.17.5. No API, type, `PaymentResult` or `example.did` change.
+
+### Fixed
+
+- **A resolved job could come back to life.** `resolveDispute` (refunding the buyer) and
+  `settleJob` (paying the operator) put the job in `#Settling`, await the ledger, and on failure
+  revert it for retry. `resolveJob` accepts any `#Settling` job, so a controller could make it
+  terminal during that await; the failure then restored the job from a copy taken before the
+  await, back to its pre-await status (`#Submitted` or `#Disputed`) or to `#Verified`. A
+  `#Submitted` or `#Disputed` job could then be refunded a second time (by the expiry sweep or
+  another `resolveDispute`), and a `#Submitted` one could be confirmed by the buyer and settled to
+  the operator, after the controller had already handled the funds out-of-band. A `#Verified` one
+  could not be moved by anything, so it stayed unfinished for good: never garbage-collected, and
+  since 2.17.5 holding the job sweep at its 60 s cadence. Those two failure arms now revert only a
+  job that is still `#Settling`.
+
+### Not changed
+
+- The success and parked (`#pending`) arms, and `settleJob`'s Upto-remainder arms once the
+  operator is paid (which mark `#Settled` even when that refund fails), still write their outcome
+  over a `resolveJob` that landed during the await: they record a transfer that did, or may have,
+  happened, which `reconcileJob` relies on.
+
 ## v2.17.5 — 2026-10-06
 
 Patch — **a closed session no longer keeps the 60-second expiry sweep running for a day.** Reported

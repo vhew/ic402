@@ -767,7 +767,11 @@ module {
             #err("Refund pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
           };
           case (#err(e)) {
-            jobs.put(jobId, job); // revert to its prior status (no funds moved)
+            // Revert to its prior status (no funds moved) — but only if the job is still ours. A
+            // controller's resolveJob during the await made it terminal; reverting from the
+            // pre-await snapshot would bring it back as #Submitted/#Disputed, to be refunded (or,
+            // from #Submitted, confirmed and settled) again (2.17.6).
+            switch (jobs.get(jobId)) { case (?j2) { if (j2.status == #Settling) jobs.put(jobId, job) }; case (null) {} };
             #err("Refund failed: " # e);
           };
         };
@@ -805,7 +809,10 @@ module {
       // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
       switch (await settleToOperator(jobId, job, cost)) {
         case (#err(e)) {
-          jobs.put(jobId, { job with status = #Verified }); // roll back for retry (no funds moved)
+          // Roll back for retry (no funds moved) — unless a controller's resolveJob made the job
+          // terminal during the await: back in #Verified it would be stuck unfinished for good, as
+          // nothing re-drives a #Verified job (2.17.6).
+          switch (jobs.get(jobId)) { case (?j2) { if (j2.status == #Settling) jobs.put(jobId, { job with status = #Verified }) }; case (null) {} };
           return #err("Settlement failed: " # e);
         };
         case (#pending(p)) {
