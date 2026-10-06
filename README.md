@@ -235,7 +235,7 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `submitResult(caller, jobId, result, proof?, actualCost?)` | Submit + auto-verify |
 | `confirmJob(buyer, jobId)` | Buyer confirms (BuyerConfirm) |
 | `disputeJob(buyer, jobId, reason)` | Buyer disputes |
-| `resolveDispute(jobId, refundBuyer)` | Admin: settle to operator or refund buyer (gate access) |
+| `resolveDispute(jobId, refundBuyer)` | Admin: settle to operator or refund buyer (gate access). Also retries a job left `#Verified` by a failed operator payment (2.17.6) |
 | `expireJobs()` | Timer: refund stale/disputed jobs |
 | `armExpiryTimer<system>()` | Call on the job-creating path (the example calls it just **before** `settle`, keeping it out of the money-moved ⇒ job-exists window) so expiry starts at the 60s cadence instead of waiting for the hourly idle poll — `createJobFromReceipt` is sync and cannot arm it itself |
 | `expiryTimerArmed()` / `expiryTimerActive()` | Whether the job sweep is armed at all / at its working cadence |
