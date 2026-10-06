@@ -736,13 +736,16 @@ module {
     /// gate access (e.g. controller-only). `refundBuyer = true` refunds the buyer;
     /// false settles to the operator. Without this, BuyerConfirm jobs the buyer
     /// neither confirms nor disputes (and disputed jobs) had no resolution path.
+    /// 2.17.6: also a #Verified job — where a failed operator payment leaves it ("Settlement
+    /// failed: …"), with nothing else able to move it. No funds have moved for a #Verified job
+    /// (settleJob reserves #Settling before any await), so retrying the settle or refunding is safe.
     public func resolveDispute(jobId : Text, refundBuyer : Bool) : async { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
         case (null) { return #err("Job not found") };
         case (?j) { j };
       };
       switch (job.status) {
-        case (#Submitted or #Disputed) {};
+        case (#Submitted or #Disputed or #Verified) {};
         case (_) { return #err("Job is not in a resolvable state (status: " # debug_show(job.status) # ")") };
       };
       if (refundBuyer) {
@@ -767,7 +770,11 @@ module {
             #err("Refund pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
           };
           case (#err(e)) {
-            jobs.put(jobId, job); // revert to its prior status (no funds moved)
+            // Revert to its prior status (no funds moved) — but only if the job is still ours. A
+            // controller's resolveJob during the await made it terminal; reverting from the
+            // pre-await snapshot would bring it back as #Submitted/#Disputed/#Verified, to be
+            // refunded or settled a second time (2.17.6).
+            switch (jobs.get(jobId)) { case (?j2) { if (j2.status == #Settling) jobs.put(jobId, job) }; case (null) {} };
             #err("Refund failed: " # e);
           };
         };
@@ -805,7 +812,10 @@ module {
       // to the operator's registered EVM payout address for EVM jobs (fixes the C3 settle half).
       switch (await settleToOperator(jobId, job, cost)) {
         case (#err(e)) {
-          jobs.put(jobId, { job with status = #Verified }); // roll back for retry (no funds moved)
+          // Roll back for retry (no funds moved) — unless a controller's resolveJob made the job
+          // terminal during the await: back in #Verified it would wait for a controller's
+          // resolveDispute to settle or refund it a second time (2.17.6).
+          switch (jobs.get(jobId)) { case (?j2) { if (j2.status == #Settling) jobs.put(jobId, { job with status = #Verified }) }; case (null) {} };
           return #err("Settlement failed: " # e);
         };
         case (#pending(p)) {
@@ -960,7 +970,12 @@ module {
       let now = Time.now();
       let expired = Buffer.Buffer<Text>(8);
 
-      for ((id, job) in jobs.entries()) {
+      label sweep for ((id, _) in jobs.entries()) {
+        // 2.17.6: judge the LIVE record, not the iterator's. entries() hands back a bucket as it was
+        // when the iterator entered it, so after the refund await below, a job confirmed or
+        // resolved meanwhile (now #Verified/#Settling or terminal) still showed its old #Submitted
+        // here, and was expired and refunded on top of the operator payment.
+        let job = switch (jobs.get(id)) { case (?j) { j }; case (null) { continue sweep } };
         // M-6 (v2): Also time out jobs stuck in #Submitted (buyer never confirmed)
         // or #Disputed, so escrow is never locked permanently with no resolution.
         let timedOut = switch (job.status) {

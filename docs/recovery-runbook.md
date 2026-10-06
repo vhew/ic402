@@ -44,6 +44,7 @@ incident.
 | ICP close returned `#settlementFailed("Refund leg failed (session marked #closed): …")` or `"Refund leg rejected (…)"` | Remainder sits in the session's **ICP escrow subaccount** | §3 |
 | `openSession` returned `#err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx …) — no session was created…"))` | Deposit may or may not have landed in the shared pool; **no session exists** | §4 |
 | You are about to upgrade the canister | Transient recovery state (parked txs, pending-deposit tracker) would be wiped | §5 |
+| A marketplace job returned `"Settlement failed: …"` and rests in `#Verified` | Nothing moved; the buyer's payment is still in the pool | §6 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
 | EVM charge returned `#settlementFailed("EIP-3009 transfer reverted on-chain …")` | Nothing moved, nonce unlocked | Not stuck — fix the cause (payer balance / reused authz nonce), client re-signs fresh |
 | EVM close returned `#settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry)")` | Nothing moved; session is `#open` again | Not stuck — retry `closeSession` |
@@ -246,6 +247,18 @@ If you upgraded **without** draining: pending deposits are recoverable only via 
 each client's `#settlementPending` error (§4 `#notFound` branch); `#closing` sessions via §2's
 no-parked-tx branch.
 
+## §6 Marketplace job stuck in `#Verified` (operator payment failed)
+
+**What happened:** `settleJob` reserved `#Settling`, the payment to the operator failed (an ICRC-1
+error such as a short pool, or an EVM job whose operator never called `setEvmPayout`), and the job
+was rolled back to `#Verified`. No funds moved. Before v2.17.6 nothing could move a `#Verified` job.
+
+**Do:** fix the cause, then the controller calls `resolveDispute(jobId, false)` to retry the
+settle, or `resolveDispute(jobId, true)` to refund the buyer instead (net of the ledger fee). Each
+path reserves `#Settling` before its transfer, so a concurrent call aborts rather than paying twice.
+`resolveDispute` is a library method: the reference example does not expose it, so wire it
+controller-gated, as the example does `resolveJob`.
+
 ## Method reference
 
 | Method | Gate | Broadcasts / moves funds? | Use for |
@@ -257,6 +270,7 @@ no-parked-tx branch.
 | `setEvmDrainMode(on)` / `getEvmDrainMode()` | controller | No | Pre-upgrade drain (§5) |
 | `confirmEvmTransaction(chainId, txHash)` | library method — consumer must expose (controller-gated) | **No** — read-only receipt poll | Re-polling a charge's `#settlementPending` tx (§1) |
 | `recoverEscrow(ledger, sessionId, amount)` | payer-only (library-enforced); consumer must expose (example does not) | Yes — ICP escrow subaccount → payer only | ICP refund-leg failure (§3). **ICP only** |
+| `resolveDispute(jobId, refundBuyer)` | controller; consumer must expose (example does not) | **Yes** — settles to the operator or refunds the buyer | Marketplace job stuck in `#Verified` (§6), or a `#Submitted`/`#Disputed` job needing a decision |
 | `forceCloseSession(sessionId)` | controller | **Yes** — runs the full close (settle + refund) | Admin-closing an `#open`/`#expired` session. **Rejected on `#closing`** — not a recovery tool |
 | `sweepEvm(chainId, token, to, amount)` | controller | **Yes** — arbitrary transfer from the shared pool | Last resort, manual amounts only, after on-chain verification (never sweep funds backing open sessions — [`security-model.md`](security-model.md) §6) |
 

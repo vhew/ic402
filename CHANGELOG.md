@@ -1,5 +1,45 @@
 # Changelog
 
+## v2.17.6 — 2026-10-06
+
+Patch — **three job-registry fixes: no job is paid twice or stranded by a race or a failed
+payment.** Found by the adversarial reviews of 2.17.5 and 2.17.6. No API, type, `PaymentResult` or
+`example.did` change; `resolveDispute` accepts one more status.
+
+### Fixed
+
+- **A resolved job could come back to life.** `resolveDispute` (refunding the buyer) and
+  `settleJob` (paying the operator) put the job in `#Settling`, await the ledger, and on failure
+  revert it for retry. `resolveJob` accepts any `#Settling` job, so a controller could make it
+  terminal during that await; the failure then restored the job from a copy taken before the
+  await, back to its pre-await status (`#Submitted` or `#Disputed`) or to `#Verified`. A
+  `#Submitted` or `#Disputed` job could then be refunded a second time (by the expiry sweep or
+  another `resolveDispute`), and a `#Submitted` one could be confirmed by the buyer and settled to
+  the operator, after the controller had already handled the funds out-of-band. A `#Verified` one
+  was stuck (see below), and with this release's `resolveDispute` change could have been settled or
+  refunded a second time. Those two failure arms now revert only a job that is still `#Settling`.
+- **The expiry sweep could refund a job whose operator had just been paid.** `expireJobs` awaits
+  each refund while walking the job map, and the map's iterator hands back the jobs of a bucket as
+  they were when it entered that bucket. A job a buyer confirmed (or a controller resolved) during
+  an earlier job's refund still looked `#Submitted` to the sweep, so it was marked `#Expired` and
+  its buyer refunded on top of the operator payment. A buyer with two timed-out jobs in the same
+  job-map bucket could set this up (ids are sequential and the hash is public, so such a pair turns
+  up within a few dozen jobs). The sweep now re-reads each job's live record before deciding.
+- **A failed operator payment stranded the job in `#Verified`.** `settleJob` rolls the job back to
+  `#Verified` for retry when paying the operator fails (an ICRC-1 error, or an EVM operator with no
+  payout address), but nothing could retry it: every public transition rejected `#Verified`, and
+  the record was never garbage-collected (and since 2.17.5 held the job sweep at its 60 s cadence).
+  `resolveDispute` now also accepts a `#Verified` job, so a controller can retry the settle
+  (`refundBuyer = false`) once the cause is fixed, or refund the buyer. No funds have moved for a
+  `#Verified` job, so either is safe; see the recovery runbook's §6.
+
+### Not changed
+
+- The success and parked (`#pending`) arms, and `settleJob`'s Upto-remainder arms once the
+  operator is paid (which mark `#Settled` even when that refund fails), still write their outcome
+  over a `resolveJob` that landed during the await: they record a transfer that did, or may have,
+  happened, which `reconcileJob` relies on.
+
 ## v2.17.5 — 2026-10-06
 
 Patch — **a closed session no longer keeps the 60-second expiry sweep running for a day.** Reported
