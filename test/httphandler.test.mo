@@ -211,8 +211,8 @@ suite("HttpHandler", func() {
   // OUTBOUND (402 emission): the exact PaymentRequired bytes HttpHandler emits for fixed
   // inputs. The live-challenge golden is stored byte-identically (compact form) in
   // test/fixtures/x402/payment-required.golden.json and validated against the OFFICIAL
-  // @x402/core@2.17.0 zod schemas (PaymentRequiredV2Schema / PaymentRequirementsV2Schema)
-  // by test/x402-conformance.test.ts — change either side and the other fails.
+  // @x402/core zod schemas (PaymentRequiredV2Schema / PaymentRequirementsV2Schema; version
+  // pinned in package.json) by test/x402-conformance.test.ts — change either side and the other fails.
   //
   // INBOUND (header parse): the REAL PAYMENT-SIGNATURE header produced by the official
   // Coinbase/x402-foundation CLIENT packages — @x402/core@2.17.0 x402Client.createPaymentPayload
@@ -252,7 +252,7 @@ suite("HttpHandler", func() {
     };
 
     // MUST MATCH test/fixtures/x402/payment-required.golden.json (compact form) — the file
-    // is schema-validated against the official @x402/core@2.17.0 PaymentRequiredV2Schema by
+    // is schema-validated against the official @x402/core PaymentRequiredV2Schema by
     // test/x402-conformance.test.ts.
     let GOLDEN_402_LIVE = "{\"x402Version\":2,\"error\":\"PAYMENT-SIGNATURE header is required\",\"resource\":{\"url\":\"https://example-canister.icp0.io/content/premium-1\"},\"accepts\":[{\"scheme\":\"exact\",\"network\":\"eip155:84532\",\"amount\":\"10000\",\"asset\":\"0x036CbD53842c5426634e7929541eC2318f3dCF7e\",\"payTo\":\"0x99C851eaa3c3976914D63b822C67e201EC0BFBb8\",\"maxTimeoutSeconds\":300,\"extra\":{\"name\":\"USDC\",\"version\":\"2\",\"assetTransferMethod\":\"eip3009\",\"ic402Nonce\":\"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90\",\"ic402Expiry\":300000000042}}]}";
 

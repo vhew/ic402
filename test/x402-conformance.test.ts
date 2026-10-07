@@ -10,7 +10,7 @@ import {
  * x402 v2 wire-conformance tests — pure schema validation, NO replica, NO network.
  *
  * Validates the golden wire fixtures in test/fixtures/x402/ against the OFFICIAL x402
- * v2 zod schemas from @x402/core@2.17.0 (github.com/x402-foundation/x402 — the current
+ * v2 zod schemas from @x402/core@2.28.0 (github.com/x402-foundation/x402 — the current
  * home of Coinbase's x402 project). The fixtures are pinned on the Motoko side too:
  * test/httphandler.test.mo suite "x402 v2 wire goldens" asserts HttpHandler emits
  * payment-required.golden.json byte-for-byte and parses payment-header.golden.txt
@@ -33,7 +33,7 @@ const fixture = (name: string): string =>
 const GOLDEN_402_COMPACT =
   '{"x402Version":2,"error":"PAYMENT-SIGNATURE header is required","resource":{"url":"https://example-canister.icp0.io/content/premium-1"},"accepts":[{"scheme":"exact","network":"eip155:84532","amount":"10000","asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e","payTo":"0x99C851eaa3c3976914D63b822C67e201EC0BFBb8","maxTimeoutSeconds":300,"extra":{"name":"USDC","version":"2","assetTransferMethod":"eip3009","ic402Nonce":"a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90","ic402Expiry":300000000042}}]}';
 
-describe('x402 v2 wire conformance (official @x402/core@2.17.0 schemas)', () => {
+describe('x402 v2 wire conformance (official @x402/core@2.28.0 schemas)', () => {
   const paymentRequired = JSON.parse(fixture('payment-required.golden.json'));
 
   it('402 PaymentRequired golden passes the official PaymentRequiredV2Schema', () => {

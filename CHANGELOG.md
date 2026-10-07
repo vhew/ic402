@@ -1,5 +1,52 @@
 # Changelog
 
+## v2.17.7 — 2026-10-06
+
+Patch — **dependency refresh**, from an audit of every dependency and toolchain pin. No library
+(Motoko) change, no API, type, `PaymentResult` or `example.did` change.
+
+### Security
+
+- `@modelcontextprotocol/sdk` 1.29.0 → 1.32.1 in `@ic402/mcp`. Clears the high advisory
+  GHSA-6qxp-vccf-f47h (the SDK's OAuth client), which `npm audit` reported against `@ic402/mcp` for
+  every consumer. ic402's MCP server is stdio-only and never used that client.
+- `vitest` 4.1.10 → 4.1.11 (dev only): GHSA-82fw-gwwq-j7x9.
+
+### Changed
+
+- **Published runtime dependencies:** `@icp-sdk/core` 6.0.0 → 6.1.0 (`@ic402/client`, `@ic402/mcp`),
+  `viem` 2.55.2 → 2.57.3, `cborg` 5.1.7 → 6.1.3, `zod` 4.4.3 → 4.6.5.
+  - `cborg` 6 changed how some CBOR map keys are ordered. Voucher payloads are arrays of text and
+    unsigned integers, so their bytes are unchanged. New golden vectors with 4- and 8-byte integers,
+    asserted on both the client and the canister side, now pin that.
+- **`@ic402/client` no longer declares `@icp-sdk/core` as a peer dependency.** The `>=5.1.0` peer
+  range had no effect alongside the exact runtime dependency: npm always installed 6.0.0 for the
+  client, and a nested second copy if the app used a different version. It is now a plain
+  dependency. Use the same version in your app (6.1.0) to get a single copy.
+- **`engines.node`:** `@ic402/client` `>=20.19.0` (was `>=19.0.0`; the real floor of
+  `@icp-sdk/core`'s `@noble/*` dependencies), `@ic402/mcp` `>=20.19.0` (was undeclared), and the
+  repo `>=22.22.1` (eslint 10 and lint-staged 17).
+- **Dev tooling:** `@x402/core` 2.28.0 (its v2 wire schemas are byte-identical, so the conformance
+  suite validates against the same schemas), `eslint` 10.12.0, `typescript-eslint` 8.71.1,
+  `prettier` 3.9.9, `tsx` 4.23.15, `lint-staged` 17.6.0, `@noble/curves` and `@noble/hashes` 2.4.0,
+  `@types/node` 26.6.4.
+
+### Fixed (tests)
+
+- **Nine assertions in `test/evmutils.test.mo` checked nothing.** Expected arrays written as
+  `[0xde : Nat8, 0xad]` type only the first element, so moc inferred `[Any]` and `==` was always
+  true. They covered hex decoding and RLP encoding, on the EVM transaction-signing path; the code
+  was correct. `[moc] args = ["-E", "M0074"]` now makes `mops test` reject the pattern.
+
+### CI
+
+- `actions/checkout` and `actions/setup-node` v7, `pnpm/action-setup` v5 (Node 24 runtimes).
+- `setup-mops` points at its new owner `caffeinelabs`, with the mops CLI pinned at 3.4.2. It used to
+  install `latest` on every run.
+- No package-manager cache in the publishing job.
+- Dependabot: `@icp-sdk/*` packages arrive as their own PR, and `@icp-sdk/icp-cli` is bumped by hand
+  together with its CI pin.
+
 ## v2.17.6 — 2026-10-06
 
 Patch — **three job-registry fixes: no job is paid twice or stranded by a race or a failed

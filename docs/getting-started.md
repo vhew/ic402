@@ -26,7 +26,7 @@ Then work through the three payment shapes below: a **one-shot x402 charge** (§
 | `icp` CLI | Runs the local replica, deploys canisters | [internetcomputer.org install guide](https://internetcomputer.org/docs/building-apps/getting-started/install) |
 | `pnpm` | Workspace package manager | `npm install -g pnpm` |
 | `mops` | Motoko package manager | [mops.one](https://mops.one) |
-| Node.js ≥ 22.12 | Runs the demo client and SDK | [nodejs.org](https://nodejs.org) |
+| Node.js ≥ 22.22.1 | Runs the demo client and SDK | [nodejs.org](https://nodejs.org) |
 
 ## 2. Deploy locally
 
