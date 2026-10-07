@@ -31,10 +31,10 @@ suite("EvmUtils", func() {
 
   suite("hexToBytes", func() {
     test("0xdead -> [0xde, 0xad]", func() {
-      assert(EvmUtils.hexToBytes("0xdead") == [0xde : Nat8, 0xad]);
+      assert(EvmUtils.hexToBytes("0xdead") == ([0xde, 0xad] : [Nat8]));
     });
     test("dead (no prefix) -> [0xde, 0xad]", func() {
-      assert(EvmUtils.hexToBytes("dead") == [0xde : Nat8, 0xad]);
+      assert(EvmUtils.hexToBytes("dead") == ([0xde, 0xad] : [Nat8]));
     });
     test("odd length -> empty", func() {
       assert(EvmUtils.hexToBytes("0xabc") == []);
@@ -57,16 +57,16 @@ suite("EvmUtils", func() {
       assert(EvmUtils.natToMinBytes(0) == []);
     });
     test("1 -> [0x01]", func() {
-      assert(EvmUtils.natToMinBytes(1) == [0x01 : Nat8]);
+      assert(EvmUtils.natToMinBytes(1) == ([0x01] : [Nat8]));
     });
     test("127 -> [0x7f]", func() {
-      assert(EvmUtils.natToMinBytes(127) == [0x7f : Nat8]);
+      assert(EvmUtils.natToMinBytes(127) == ([0x7f] : [Nat8]));
     });
     test("128 -> [0x80]", func() {
-      assert(EvmUtils.natToMinBytes(128) == [0x80 : Nat8]);
+      assert(EvmUtils.natToMinBytes(128) == ([0x80] : [Nat8]));
     });
     test("1024 -> [0x04, 0x00]", func() {
-      assert(EvmUtils.natToMinBytes(1024) == [0x04 : Nat8, 0x00]);
+      assert(EvmUtils.natToMinBytes(1024) == ([0x04, 0x00] : [Nat8]));
     });
   });
 
@@ -104,47 +104,47 @@ suite("EvmUtils", func() {
 
   suite("rlpEncodeBytes", func() {
     test("empty bytes -> [0x80]", func() {
-      assert(EvmUtils.rlpEncodeBytes([]) == [0x80 : Nat8]);
+      assert(EvmUtils.rlpEncodeBytes([]) == ([0x80] : [Nat8]));
     });
     test("single byte 0x00 -> [0x00]", func() {
-      assert(EvmUtils.rlpEncodeBytes([0x00]) == [0x00 : Nat8]);
+      assert(EvmUtils.rlpEncodeBytes([0x00]) == ([0x00] : [Nat8]));
     });
     test("single byte 0x7f -> [0x7f]", func() {
-      assert(EvmUtils.rlpEncodeBytes([0x7f]) == [0x7f : Nat8]);
+      assert(EvmUtils.rlpEncodeBytes([0x7f]) == ([0x7f] : [Nat8]));
     });
     test("single byte 0x80 -> [0x81, 0x80]", func() {
-      assert(EvmUtils.rlpEncodeBytes([0x80]) == [0x81 : Nat8, 0x80]);
+      assert(EvmUtils.rlpEncodeBytes([0x80]) == ([0x81, 0x80] : [Nat8]));
     });
     // "dog" = [0x64, 0x6f, 0x67]
     test("'dog' -> [0x83, 0x64, 0x6f, 0x67]", func() {
-      assert(EvmUtils.rlpEncodeBytes([0x64, 0x6f, 0x67]) == [0x83 : Nat8, 0x64, 0x6f, 0x67]);
+      assert(EvmUtils.rlpEncodeBytes([0x64, 0x6f, 0x67]) == ([0x83, 0x64, 0x6f, 0x67] : [Nat8]));
     });
   });
 
   suite("rlpEncodeNat", func() {
     test("0 -> [0x80] (empty string encoding)", func() {
-      assert(EvmUtils.rlpEncodeNat(0) == [0x80 : Nat8]);
+      assert(EvmUtils.rlpEncodeNat(0) == ([0x80] : [Nat8]));
     });
     test("1 -> [0x01]", func() {
-      assert(EvmUtils.rlpEncodeNat(1) == [0x01 : Nat8]);
+      assert(EvmUtils.rlpEncodeNat(1) == ([0x01] : [Nat8]));
     });
     test("15 -> [0x0f]", func() {
-      assert(EvmUtils.rlpEncodeNat(15) == [0x0f : Nat8]);
+      assert(EvmUtils.rlpEncodeNat(15) == ([0x0f] : [Nat8]));
     });
     test("127 -> [0x7f]", func() {
-      assert(EvmUtils.rlpEncodeNat(127) == [0x7f : Nat8]);
+      assert(EvmUtils.rlpEncodeNat(127) == ([0x7f] : [Nat8]));
     });
     test("128 -> [0x81, 0x80]", func() {
-      assert(EvmUtils.rlpEncodeNat(128) == [0x81 : Nat8, 0x80]);
+      assert(EvmUtils.rlpEncodeNat(128) == ([0x81, 0x80] : [Nat8]));
     });
     test("1024 -> [0x82, 0x04, 0x00]", func() {
-      assert(EvmUtils.rlpEncodeNat(1024) == [0x82 : Nat8, 0x04, 0x00]);
+      assert(EvmUtils.rlpEncodeNat(1024) == ([0x82, 0x04, 0x00] : [Nat8]));
     });
   });
 
   suite("rlpEncodeList", func() {
     test("empty list -> [0xc0]", func() {
-      assert(EvmUtils.rlpEncodeList([]) == [0xc0 : Nat8]);
+      assert(EvmUtils.rlpEncodeList([]) == ([0xc0] : [Nat8]));
     });
     // ["cat", "dog"] where cat=[0x63,0x61,0x74], dog=[0x64,0x6f,0x67]
     // rlp(cat) = [0x83, 0x63, 0x61, 0x74] (4 bytes)
@@ -154,7 +154,7 @@ suite("EvmUtils", func() {
       let cat = EvmUtils.rlpEncodeBytes([0x63, 0x61, 0x74]);
       let dog = EvmUtils.rlpEncodeBytes([0x64, 0x6f, 0x67]);
       let result = EvmUtils.rlpEncodeList([cat, dog]);
-      assert(result == [0xc8 : Nat8, 0x83, 0x63, 0x61, 0x74, 0x83, 0x64, 0x6f, 0x67]);
+      assert(result == ([0xc8, 0x83, 0x63, 0x61, 0x74, 0x83, 0x64, 0x6f, 0x67] : [Nat8]));
     });
     // Nested: set theoretical representation of 3 = [ [], [[]], [[], [[]]] ]
     test("nested lists: [ [], [[]], [[], [[]]] ]", func() {
@@ -163,7 +163,7 @@ suite("EvmUtils", func() {
       let nested2 = EvmUtils.rlpEncodeList([empty, nested1]); // 0xc3, 0xc0, 0xc1, 0xc0
       let result = EvmUtils.rlpEncodeList([empty, nested1, nested2]);
       // Expected: 0xc7 0xc0 0xc1c0 0xc3c0c1c0
-      assert(result == [0xc7 : Nat8, 0xc0, 0xc1, 0xc0, 0xc3, 0xc0, 0xc1, 0xc0]);
+      assert(result == ([0xc7, 0xc0, 0xc1, 0xc0, 0xc3, 0xc0, 0xc1, 0xc0] : [Nat8]));
     });
   });
 
