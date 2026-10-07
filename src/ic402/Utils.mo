@@ -314,7 +314,7 @@ module {
   /// Check value pinned in test/utils.test.mo: crc32("123456789") = 0xCBF43926.
   public func crc32(data : [Nat8]) : Nat32 {
     var crc : Nat32 = 0xFFFFFFFF;
-    for (b in data.vals()) {
+    for (b in data.values()) {
       crc := crc ^ Nat32.fromNat(Nat8.toNat(b));
       var i = 0;
       while (i < 8) {
@@ -351,14 +351,14 @@ module {
       Array.tabulate<Nat8>(32, func(i) { if (i < offset) { 0 } else { sub[i - offset] } });
     };
     var allZero = true;
-    for (b in padded.vals()) { if (b != 0) { allZero := false } };
+    for (b in padded.values()) { if (b != 0) { allZero := false } };
     // ICRC-1: the default (all-zero) subaccount's textual form IS the bare owner principal.
     if (allZero) { return ownerText };
 
     let pb = Blob.toArray(Principal.toBlob(owner));
     let data = Buffer.Buffer<Nat8>(pb.size() + padded.size());
-    for (b in pb.vals()) { data.add(b) };
-    for (b in padded.vals()) { data.add(b) };
+    for (b in pb.values()) { data.add(b) };
+    for (b in padded.values()) { data.add(b) };
     let c = crc32(Buffer.toArray(data));
 
     // RFC 4648 base32 (lowercase, unpadded) of the 4 big-endian checksum bytes: 32 bits << 3
@@ -378,7 +378,7 @@ module {
     let hexChars = Text.toArray("0123456789abcdef");
     var hex = "";
     var leading = true;
-    for (b in padded.vals()) {
+    for (b in padded.values()) {
       let hi = Nat8.toNat(b) / 16;
       let lo = Nat8.toNat(b) % 16;
       if (not (leading and hi == 0)) { leading := false; hex #= Text.fromChar(hexChars[hi]) };
@@ -393,7 +393,7 @@ module {
   /// For ICP networks, returns the first configured token since ICP
   /// canister configs typically have a single ledger.
   public func findLedger(tokens : [Types.TokenConfig], identifier : Text) : ?Types.TokenConfig {
-    for (t in tokens.vals()) {
+    for (t in tokens.values()) {
       if (Principal.toText(t.ledger) == identifier) return ?t;
     };
     // CAIP-2 network match: "icp:*" matches any configured ICP token
@@ -411,7 +411,7 @@ module {
   func hexNoPrefix(bytes : [Nat8]) : Text {
     let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
     var out = "";
-    for (b in bytes.vals()) {
+    for (b in bytes.values()) {
       let n = Nat8.toNat(b);
       out #= digits[n / 16] # digits[n % 16];
     };
@@ -436,7 +436,7 @@ module {
   /// should not rely on its callers' spelling.
   public func derivationCacheKey(prefix : Text, derivationPath : [Blob]) : Text {
     var key = Nat.toText(prefix.size()) # ":" # prefix;
-    for (element in derivationPath.vals()) {
+    for (element in derivationPath.values()) {
       key #= "/" # hexNoPrefix(Blob.toArray(element));
     };
     key;

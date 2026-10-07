@@ -232,7 +232,7 @@ module {
           while (i < entry.chunks.size()) {
             switch (decryptChunkData(masterKey, entry.salt, id, i, entry.chunks[i])) {
               case (?decrypted) {
-                for (byte in Blob.toArray(decrypted).vals()) {
+                for (byte in Blob.toArray(decrypted).values()) {
                   buf.add(byte);
                 };
               };
@@ -352,7 +352,7 @@ module {
       entries := HashMap.HashMap<Text, InternalEntry>(
         data.entries.size(), Text.equal, Text.hash,
       );
-      for (entry in data.entries.vals()) {
+      for (entry in data.entries.values()) {
         entries.put(entry.id, {
           id = entry.id;
           mimeType = entry.mimeType;

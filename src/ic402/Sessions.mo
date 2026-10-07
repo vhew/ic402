@@ -551,7 +551,7 @@ module {
         var found : ?Types.EvmChainConfig = null;
         // First match wins (same order as Gateway.findEvmChain; setEvmChains rejects duplicates
         // anyway, but the two rails must never resolve the same chainId differently).
-        for (c in liveEvmChains.vals()) { if (found == null and c.chainId == chainId) found := ?c };
+        for (c in liveEvmChains.values()) { if (found == null and c.chainId == chainId) found := ?c };
         switch (found) {
           case (?chain) { chain };
           case (null) {
@@ -567,7 +567,7 @@ module {
       // default VERIFIES, so a token removed via setEvmChains could otherwise still open new
       // sessions. First match wins, as in Gateway.resolveEvmDomain.
       var tokenConfigured = false;
-      for (tok in evmChain.tokens.vals()) {
+      for (tok in evmChain.tokens.values()) {
         if ((not tokenConfigured) and EvmUtils.addressesEqual(tok.address, tokenAddr)) {
           tokenName := tok.name;
           tokenVersion := tok.version;
@@ -1196,7 +1196,7 @@ module {
 
       let resultBuf = Array.init<Types.PaymentResult>(buf.size(), #expired("Session expired"));
       var i = 0;
-      for ((sessionId, _) in buf.vals()) {
+      for ((sessionId, _) in buf.values()) {
         // H1/S-3: `buf` is a pre-await snapshot. During an earlier iteration's multi-await
         // EVM settle, a session later in `buf` may have been concurrently finalized to
         // #closed (by the payer's own closeSession, or an overlapping expiry-timer run).
@@ -1389,7 +1389,7 @@ module {
           },
         )
       );
-      for ((id, _) in toRemove.vals()) {
+      for ((id, _) in toRemove.values()) {
         sessions.delete(id);
       };
     };
@@ -1618,7 +1618,7 @@ module {
       sessions := HashMap.HashMap<Text, Types.InternalSessionState>(
         data.size(), Text.equal, Text.hash,
       );
-      for (ss in data.vals()) {
+      for (ss in data.values()) {
         let session : Types.InternalSessionState = {
           id = ss.id;
           payer = ss.payer;

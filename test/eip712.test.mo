@@ -307,7 +307,7 @@ suite("field-driven: review-round pins (namespace, cap, message truth, mutations
   });
 
   test("atomic-shadowing struct names are rejected (viem InvalidStructTypeError parity)", func() {
-    for (bad in ["address", "bool", "string", "uint256", "bytes32", "bytes", "uint", "int256", "intent", "uintX"].vals()) {
+    for (bad in ["address", "bool", "string", "uint256", "bytes32", "bytes", "uint", "int256", "intent", "uintX"].values()) {
       assert(isErr(Eip712.typeHashOf(bad, [("a", "uint256")])));
     };
     // …but names merely CONTAINING those words (or capitalized) are fine.

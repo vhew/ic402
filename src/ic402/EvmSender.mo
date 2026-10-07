@@ -447,7 +447,7 @@ module {
             // robustBaseFee — a single outlier (hostile, or just at a far chain tip) can't drive the
             // gas reservation to an unpayable value and grief-park the close.
             let buf = Buffer.Buffer<Nat>(results.size());
-            for ((_, r) in results.vals()) {
+            for ((_, r) in results.values()) {
               switch (r) {
                 case (#Ok(history)) {
                   switch (latestBaseFee(history)) { case (?b) { buf.add(b) }; case null {} };

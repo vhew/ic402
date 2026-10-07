@@ -138,7 +138,7 @@ module {
           func((_, (expiry, _, _, _))) { now > expiry },
         )
       );
-      for ((nonce, _) in toRemove.vals()) {
+      for ((nonce, _) in toRemove.values()) {
         nonces.delete(nonce);
         locked.delete(nonce);
       };
@@ -168,7 +168,7 @@ module {
     /// Restore nonce state from stable storage.
     public func loadStable(data : Types.StableNonceState) {
       nonces := HashMap.fromIter<Blob, (Int, Nat, Text, Text)>(
-        data.nonces.vals(), data.nonces.size(), Blob.equal, Blob.hash,
+        data.nonces.values(), data.nonces.size(), Blob.equal, Blob.hash,
       );
       counter := data.counter;
       // M-5: Rebuild the (transient) insertion-order ring from restored nonces.
@@ -179,7 +179,7 @@ module {
       switch (data.lockedNonces) {
         case (?locks) {
           locked := HashMap.HashMap<Blob, Bool>(locks.size(), Blob.equal, Blob.hash);
-          for (nonce in locks.vals()) {
+          for (nonce in locks.values()) {
             locked.put(nonce, true);
           };
         };

@@ -391,7 +391,7 @@ suite("Policy.Engine", func() {
   test("precheckCharge records nothing", func() {
     let engine = Policy.Engine();
     engine.setGlobalPolicy({ engine.getGlobalPolicy() with rateLimitPerMinute = ?1 });
-    for (_ in [1, 2, 3].vals()) { assert engine.precheckCharge(caller1, 1_000) == #ok };
+    for (_ in [1, 2, 3].values()) { assert engine.precheckCharge(caller1, 1_000) == #ok };
     assert engine.checkCharge(caller1, 1_000) == #ok;
   });
 

@@ -89,7 +89,7 @@ module {
       // Check blocked
       switch (policy.blockedCallers) {
         case (?blocked) {
-          for (b in blocked.vals()) {
+          for (b in blocked.values()) {
             if (Principal.equal(b, caller)) return #denied("Caller is blocked");
           };
         };
@@ -100,7 +100,7 @@ module {
       switch (policy.allowedCallers) {
         case (?allowed) {
           var found = false;
-          for (a in allowed.vals()) {
+          for (a in allowed.values()) {
             if (Principal.equal(a, caller)) found := true;
           };
           if (not found) return #denied("Caller not in allowlist");
@@ -255,7 +255,7 @@ module {
           },
         )
       );
-      for ((key, _) in toRemove.vals()) {
+      for ((key, _) in toRemove.values()) {
         dailySpend.delete(key);
       };
     };
@@ -275,7 +275,7 @@ module {
           },
         )
       );
-      for ((key, _) in toRemove.vals()) {
+      for ((key, _) in toRemove.values()) {
         rateLimitLog.delete(key);
       };
     };
@@ -442,15 +442,15 @@ module {
     public func loadStable(data : Types.StablePolicyState) {
       globalPolicy := data.globalPolicy;
       callerPolicies := HashMap.fromIter<Principal, SpendingPolicy>(
-        data.callerPolicies.vals(), data.callerPolicies.size(),
+        data.callerPolicies.values(), data.callerPolicies.size(),
         Principal.equal, Principal.hash,
       );
       dailySpend := HashMap.fromIter<Text, Nat>(
-        data.dailySpendEntries.vals(), data.dailySpendEntries.size(),
+        data.dailySpendEntries.values(), data.dailySpendEntries.size(),
         Text.equal, Text.hash,
       );
       rateLimitLog := HashMap.fromIter<Text, [Int]>(
-        data.rateLimitEntries.vals(), data.rateLimitEntries.size(),
+        data.rateLimitEntries.values(), data.rateLimitEntries.size(),
         Text.equal, Text.hash,
       );
 

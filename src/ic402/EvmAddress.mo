@@ -24,7 +24,7 @@ module {
 
   func bytesToNat(bytes : [Nat8]) : Nat {
     var n : Nat = 0;
-    for (b in bytes.vals()) { n := n * 256 + Nat8.toNat(b) };
+    for (b in bytes.values()) { n := n * 256 + Nat8.toNat(b) };
     n;
   };
 
@@ -82,7 +82,7 @@ module {
     let isEven = vAdj == 0 or vAdj == 2;
 
     // Try preferred parity first, then the other
-    for (even in [isEven, not isEven].vals()) {
+    for (even in [isEven, not isEven].values()) {
       // Decompress R: try x=r, then x=r+n (rare overflow case)
       let rPoint = switch (curve.getYfromX(#fp(r), even)) {
         case (?y) { ?(r, y) };
@@ -153,7 +153,7 @@ module {
   public func toHex(bytes : [Nat8]) : Text {
     let chars = ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"];
     var hex = "0x";
-    for (b in bytes.vals()) {
+    for (b in bytes.values()) {
       hex #= chars[Nat8.toNat(b / 16)] # chars[Nat8.toNat(b % 16)];
     };
     hex;

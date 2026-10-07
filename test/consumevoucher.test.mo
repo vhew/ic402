@@ -207,7 +207,7 @@ suite("Sessions.consumeVoucher", func() {
       };
       let p = (2 ** 255) - 19;
       let y8 = 2707385501144840649318225287225658788936804267575313519463743609750303402022;
-      for (y in [0, 1, p - 1, p, p + 1, y8, p - y8, (2 ** 255) + 1].vals()) {
+      for (y in [0, 1, p - 1, p, p + 1, y8, p - y8, (2 ** 255) + 1].values()) {
         assert asKey(Array.tabulate<Nat8>(32, func(i) = Nat8.fromNat((y / (256 ** i)) % 256))) == #invalidSignature;
       };
       assert asKey(pubOf(Array.tabulate<Nat8>(32, func(_) = 2))) == #ok(1_000); // x odd: sign bit set

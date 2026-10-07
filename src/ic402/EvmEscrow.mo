@@ -102,7 +102,7 @@ module {
     /// Restore EVM escrow allocations from stable storage.
     public func loadStable(data : [Types.StableEvmAllocation]) {
       allocations := HashMap.HashMap<Text, Allocation>(data.size(), Text.equal, Text.hash);
-      for (entry in data.vals()) {
+      for (entry in data.values()) {
         allocations.put(entry.sessionId, {
           chainId = entry.chainId;
           token = entry.token;

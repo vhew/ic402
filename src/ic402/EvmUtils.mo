@@ -120,7 +120,7 @@ module {
   /// Big-endian byte array to Nat.
   public func bytesToNat(bytes : [Nat8]) : Nat {
     var n : Nat = 0;
-    for (b in bytes.vals()) {
+    for (b in bytes.values()) {
       n := n * 256 + Nat8.toNat(b);
     };
     n;
@@ -217,7 +217,7 @@ module {
     // Calculate offsets: first string starts at count * 32
     let offsets = Buffer.Buffer<[Nat8]>(count);
     var offset : Nat = count * 32;
-    for (encoded in encodedStrings.vals()) {
+    for (encoded in encodedStrings.values()) {
       offsets.add(abiEncodeUint256(offset));
       offset += encoded.size();
     };
@@ -225,7 +225,7 @@ module {
     // Assemble: count + offsets + string data
     var result = abiEncodeUint256(count);
     for (o in offsets.vals()) { result := Array.append(result, o) };
-    for (encoded in encodedStrings.vals()) { result := Array.append(result, encoded) };
+    for (encoded in encodedStrings.values()) { result := Array.append(result, encoded) };
     result;
   };
 
@@ -251,25 +251,25 @@ module {
 
     var tailOffset : Nat = headSize; // offset from start of params (after selector)
 
-    for (p in params.vals()) {
+    for (p in params.values()) {
       switch (p) {
         case (#static_(data)) {
           assert(data.size() == 32);
-          for (b in data.vals()) { head.add(b) };
+          for (b in data.values()) { head.add(b) };
         };
         case (#dynamic(data)) {
           // Head contains offset pointer
           let offsetBytes = abiEncodeUint256(tailOffset);
-          for (b in offsetBytes.vals()) { head.add(b) };
+          for (b in offsetBytes.values()) { head.add(b) };
           // Tail accumulates data
-          for (b in data.vals()) { tail.add(b) };
+          for (b in data.values()) { tail.add(b) };
           tailOffset += data.size();
         };
       };
     };
 
     let result = Buffer.Buffer<Nat8>(selector.size() + head.size() + tail.size());
-    for (b in selector.vals()) { result.add(b) };
+    for (b in selector.values()) { result.add(b) };
     for (b in head.vals()) { result.add(b) };
     for (b in tail.vals()) { result.add(b) };
     Buffer.toArray(result);
@@ -349,8 +349,8 @@ module {
   /// Concatenate an array of byte arrays.
   func concatArrays(arrays : [[Nat8]]) : [Nat8] {
     let buf = Buffer.Buffer<Nat8>(256);
-    for (arr in arrays.vals()) {
-      for (b in arr.vals()) { buf.add(b) };
+    for (arr in arrays.values()) {
+      for (b in arr.values()) { buf.add(b) };
     };
     Buffer.toArray(buf);
   };

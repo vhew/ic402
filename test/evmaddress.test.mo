@@ -161,13 +161,13 @@ suite("EvmAddress", func() {
       let msg : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
       // Use 32 random bytes for k derivation
       let rand : [Nat8] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32];
-      let #ok(sig) = sec.signHashed(msg.vals(), rand.vals()) else { assert(false); return };
+      let #ok(sig) = sec.signHashed(msg.values(), rand.values()) else { assert(false); return };
       let sigR = EvmUtils.natToBytes(sig.r, 32);
       let sigS = EvmUtils.natToBytes(sig.s, 32);
 
       // Try recovering
       var found2 = false;
-      for (vv in [0, 1].vals()) {
+      for (vv in [0, 1].values()) {
         switch (EvmAddress.ecRecover(msg, sigR, sigS, Nat8.fromNat(vv))) {
           case (?recovered) {
             switch (EvmAddress.fromCompressedPublicKey(recovered)) {
@@ -223,12 +223,12 @@ suite("EvmAddress", func() {
     let curve = EcdsaLib.secp256k1Curve();
     let sec = EcdsaLib.PrivateKey(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80, curve);
     let rand : [Nat8] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32];
-    let #ok(sig) = sec.signHashed(zero32.vals(), rand.vals()) else { assert(false); return };
+    let #ok(sig) = sec.signHashed(zero32.values(), rand.values()) else { assert(false); return };
     let rBytes = EvmUtils.natToBytes(sig.r, 32);
     let target = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 
     func recovers(sBytes : [Nat8]) : Bool {
-      for (vv in [0, 1].vals()) {
+      for (vv in [0, 1].values()) {
         switch (EvmAddress.ecRecover(zero32, rBytes, sBytes, Nat8.fromNat(vv))) {
           case (?rec) {
             switch (EvmAddress.fromCompressedPublicKey(rec)) {
@@ -326,7 +326,7 @@ suite("EvmAddress", func() {
       assert(EvmAddress.ecRecover(lsDigest, lsR, lsSHigh, 0) == ?lsPubkey);
       // … and at least one v in {0, 1} recovers it (parity search style used by callers).
       var found = false;
-      for (vv in [0, 1].vals()) {
+      for (vv in [0, 1].values()) {
         if (EvmAddress.ecRecover(lsDigest, lsR, lsSHigh, Nat8.fromNat(vv)) == ?lsPubkey) {
           found := true;
         };

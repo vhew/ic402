@@ -153,8 +153,8 @@ await suite("Utils.expiryCadence", func() : async () {
     // must be a cadence that keeps sweeping — never #disarm, never #switchToIdle. This is the
     // dangerous direction (a missed sweep leaves deposits escrowed past their deadline); the
     // opposite direction only wastes cycles.
-    for (fast in [true, false].vals()) {
-      for (idle in [0, 1, 60, 3600].vals()) {
+    for (fast in [true, false].values()) {
+      for (idle in [0, 1, 60, 3600].values()) {
         let d = Utils.expiryCadence(true, fast, idle);
         assert d == #stay or d == #switchToFast;
       };
@@ -210,7 +210,7 @@ await suite("Sessions expiry timer", func() : async () {
   await test("#open, #closing and #expired each keep the sweep armed (2.17.5)", func() : async () {
     // Mutation: count only #open — a #closing or #expired session can fall back to #open (a failed
     // settle, a payer's failed close) outside a tick, and with the timer gone it would never expire.
-    for (st in [#open, #closing, #expired].vals()) {
+    for (st in [#open, #closing, #expired].values()) {
       let mgr = sessionsWith([#closed, st, #closed]);
       assert mgr.hasExpiryWork();
       assert Utils.expiryCadence(mgr.hasExpiryWork(), true, 0) == #stay;
@@ -262,7 +262,7 @@ await suite("ServiceRegistry expiry timer", func() : async () {
 
   await test("every non-terminal job keeps the working cadence (2.17.5)", func() : async () {
     // Mutation: treat any of these as terminal — a timed-out job would wait for the hourly poll.
-    for (st in [#Pending, #Assigned, #Computing, #Submitted, #Verified, #Settling, #Disputed].vals()) {
+    for (st in [#Pending, #Assigned, #Computing, #Submitted, #Verified, #Settling, #Disputed].values()) {
       let reg = registryWith([#Settled, st]);
       assert reg.hasExpiryWork();
       assert Utils.expiryCadence(reg.hasExpiryWork(), true, 3600) == #stay;

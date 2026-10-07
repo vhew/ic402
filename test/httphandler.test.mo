@@ -195,7 +195,7 @@ suite("HttpHandler", func() {
       assert(resp.body == Text.encodeUtf8("{\"jobId\":\"job-1\"}"));
       var hasSettlement = false;
       var hasJsonType = false;
-      for ((k, v) in resp.headers.vals()) {
+      for ((k, v) in resp.headers.values()) {
         if (k == "PAYMENT-RESPONSE") { hasSettlement := true };
         if (k == "Content-Type" and v == "application/json") { hasJsonType := true };
       };
