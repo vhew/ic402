@@ -25,7 +25,7 @@ Patch — **dependency refresh**, from an audit of every dependency and toolchai
   dependency. Use the same version in your app (6.1.0) to get a single copy.
 - **`engines.node`:** `@ic402/client` `>=20.19.0` (was `>=19.0.0`; the real floor of
   `@icp-sdk/core`'s `@noble/*` dependencies), `@ic402/mcp` `>=20.19.0` (was undeclared), and the
-  repo `>=22.22.1` (eslint 10 and lint-staged 17).
+  repo `>=22.22.1` (lint-staged 17; eslint 10 needs 22.13+).
 - **Dev tooling:** `@x402/core` 2.28.0 (its v2 wire schemas are byte-identical, so the conformance
   suite validates against the same schemas), `eslint` 10.12.0, `typescript-eslint` 8.71.1,
   `prettier` 3.9.9, `tsx` 4.23.15, `lint-staged` 17.6.0, `@noble/curves` and `@noble/hashes` 2.4.0,

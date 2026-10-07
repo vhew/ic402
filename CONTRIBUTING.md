@@ -4,7 +4,7 @@
 
 - [ICP SDK](https://internetcomputer.org/docs/building-apps/getting-started/install) — `icp` CLI for building and deploying canisters
 - [mops](https://mops.one) — Motoko package manager (like npm for Motoko)
-- [Node.js](https://nodejs.org/) >= 22
+- [Node.js](https://nodejs.org/) >= 22.22.1
 - [pnpm](https://pnpm.io/) >= 9
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) — for Solidity contract development (optional)
 

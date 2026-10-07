@@ -38,7 +38,8 @@ jobs:
       - uses: actions/checkout@v7
       # PINNED mops CLI (setup-mops otherwise installs `latest` on every run, unreviewed — the icp-cli
       # @latest incident in reverse: a new mops release would run in every gate and in `mops publish`).
-      # 3.4.2 is the version CI ran green at v2.17.6. Bump deliberately; keep local `mops self update` in step.
+      # 3.4.2 is the version the pinned gates ran green on (PRs #32/#34, 2.17.7); v2.17.6 shipped on 3.4.1
+      # via `latest`. Bump deliberately; keep local `mops self update` in step.
       - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
         with:
           mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
