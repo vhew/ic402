@@ -43,21 +43,23 @@ jobs:
     environment: canary # scopes ENGRAMX_READ_TOKEN to this job
     steps:
       - name: Checkout ic402 (HEAD under test)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: ic402
 
       - name: Checkout EngramX (private, read-only)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: vhew/engramx # <-- confirm the real owner/name
           token: ${{ secrets.ENGRAMX_READ_TOKEN }}
           path: engramx
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.12.0
-      - uses: ZenVoich/setup-mops@v1
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
 
       # Repoint EngramX's ic402 dep from the pinned registry version to this checkout (siblings:
       # ./ic402 and ./engramx). Matches the verified local rehearsal.

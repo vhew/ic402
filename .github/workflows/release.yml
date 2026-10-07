@@ -35,20 +35,25 @@ jobs:
     # job only; add protections (required reviewers, tag restriction to v*) on it in repo settings.
     environment: release
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: pnpm
+          # No package-manager cache in the publishing job (setup-node v7 guidance: a poisoned
+          # cache could reach the published tarballs). The install is --frozen-lockfile anyway.
           registry-url: 'https://registry.npmjs.org'
-      - uses: ZenVoich/setup-mops@v1
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - run: pnpm install --frozen-lockfile
       - run: mops install
       # npm Trusted Publishing (OIDC) requires npm >= 11.5.1; node 22 ships npm 10.
-      # Pinned to the 11.x line: npm 12.0.0 (2026-07-08) ships a broken provenance publish —
-      # MODULE_NOT_FOUND 'sigstore' from libnpmpublish/provenance.js (broke the v2.9.0 run);
-      # 11.18.0 is the proven-green version from the v2.8.0 release. Revisit once npm 12 fixes it.
+      # Pinned to the 11.x line (floats: 11.21.0 at v2.17.6). npm 12.0.0 (2026-07-08) shipped a
+      # broken provenance publish (MODULE_NOT_FOUND 'sigstore'; broke the v2.9.0 run) — fixed in
+      # 12.0.1 — but npm 12 also turns unknown .npmrc keys into errors, and setup-node@v4 wrote
+      # `always-auth` (v7 no longer does). Move to npm 12 only after a tag release on setup-node@v7
+      # is green, and after check-npm-pack.sh passes locally under npm 12.
       - run: npm install -g npm@11
 
       # mops.toml is the single source of truth for the version; a tag must match it exactly.

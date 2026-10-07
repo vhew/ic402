@@ -10,9 +10,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -23,9 +23,9 @@ jobs:
   build-client:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -35,8 +35,13 @@ jobs:
   test-motoko:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ZenVoich/setup-mops@v1
+      - uses: actions/checkout@v7
+      # PINNED mops CLI (setup-mops otherwise installs `latest` on every run, unreviewed — the icp-cli
+      # @latest incident in reverse: a new mops release would run in every gate and in `mops publish`).
+      # 3.4.2 is the version CI ran green at v2.17.6. Bump deliberately; keep local `mops self update` in step.
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - run: mops install
       - run: mops test
 
@@ -47,8 +52,10 @@ jobs:
   stable-compat:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ZenVoich/setup-mops@v1
+      - uses: actions/checkout@v7
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - run: mops install
       - run: ./scripts/check-stable-compat.sh
       - run: ./scripts/check-stable-compat.sh --self-test
@@ -62,8 +69,10 @@ jobs:
   candid-mirrors:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ZenVoich/setup-mops@v1
+      - uses: actions/checkout@v7
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - run: mops install
       - run: ./scripts/check-candid-mirrors.sh
       - run: ./scripts/check-candid-mirrors.sh --self-test
@@ -71,9 +80,9 @@ jobs:
   test-client:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -87,9 +96,9 @@ jobs:
   test-ts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -102,9 +111,9 @@ jobs:
   build-integrations:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -120,7 +129,7 @@ jobs:
   verify-scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash scripts/check-patch-patterns.sh
       # The session-expiry sweep DISARMS itself when no session state remains, which is only safe
       # while every session-creating path arms it back. A missed arm site is silent (sessions
@@ -146,9 +155,11 @@ jobs:
   wasm-locals:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ZenVoich/setup-mops@v1
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: mops install
@@ -167,13 +178,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
-      - uses: ZenVoich/setup-mops@v1
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - name: Install icp CLI
         # PINNED: unpinned @latest broke CI when 1.1.0 (2026-07-15) made `root-key` required
         # for connected networks (icp.yaml carries it as hex so 1.0.x parses too). Bump
@@ -219,13 +232,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
-      - uses: ZenVoich/setup-mops@v1
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - name: Install icp CLI
         # PINNED: unpinned @latest broke CI when 1.1.0 (2026-07-15) made `root-key` required
         # for connected networks (icp.yaml carries it as hex so 1.0.x parses too). Bump
@@ -246,8 +261,10 @@ jobs:
   did-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ZenVoich/setup-mops@v1
+      - uses: actions/checkout@v7
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.4.2 # PINNED — see the note on ci.yml's first setup-mops step
       - run: mops install
       - run: bash scripts/gen-did.sh
       - name: Fail if example.did is stale (run scripts/gen-did.sh and commit)
@@ -260,8 +277,8 @@ jobs:
   ed25519-fixtures-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: The vendored upstream vectors are byte-for-byte upstream
