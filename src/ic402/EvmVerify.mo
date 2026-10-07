@@ -178,7 +178,7 @@ module {
   /// recipient (topics[2]) matches expectedRecipient.
   /// Returns (recipientAddress, amount) if found.
   public func findTransferLog(logs : [LogEntry], expectedToken : Text, expectedRecipient : Text) : ?(Text, Nat) {
-    for (log in logs.vals()) {
+    for (log in logs.values()) {
       // C-2: Only consider logs from the expected token contract
       if (toLower(log.address) != expectedToken) {
         // skip — this log is from a different contract

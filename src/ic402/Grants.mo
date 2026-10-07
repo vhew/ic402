@@ -41,7 +41,7 @@ module {
       if (hmacSeedInitialized) { return false };
       let bytes = Blob.toArray(randomBlob);
       var seed : Nat = 0;
-      for (b in bytes.vals()) {
+      for (b in bytes.values()) {
         seed := seed * 256 + Nat8.toNat(b);
       };
       hmacSeed := seed;
@@ -67,7 +67,7 @@ module {
     func computeGrantHmac(grantId : Text, contentRefId : Text, grantee : Principal, expiresAt : Int) : Blob {
       let message = grantId # "|" # contentRefId # "|" # Principal.toText(grantee) # "|" # Int.toText(expiresAt);
       let msgBytes = Blob.toArray(Text.encodeUtf8(message));
-      HMAC.generate(hmacSecret(), msgBytes.vals(), #sha256);
+      HMAC.generate(hmacSecret(), msgBytes.values(), #sha256);
     };
 
     /// Issue an access grant after successful payment.
@@ -146,7 +146,7 @@ module {
           func((_, timestamp)) { timestamp < cutoff },
         )
       );
-      for ((id, _) in stale.vals()) {
+      for ((id, _) in stale.values()) {
         revokedGrants.delete(id);
       };
     };
@@ -179,7 +179,7 @@ module {
           revokedGrants := HashMap.HashMap<Text, Int>(
             entries.size(), Text.equal, Text.hash,
           );
-          for ((id, ts) in entries.vals()) {
+          for ((id, ts) in entries.values()) {
             revokedGrants.put(id, ts);
           };
         };
@@ -188,7 +188,7 @@ module {
           revokedGrants := HashMap.HashMap<Text, Int>(
             data.revokedGrantIds.size(), Text.equal, Text.hash,
           );
-          for (id in data.revokedGrantIds.vals()) {
+          for (id in data.revokedGrantIds.values()) {
             revokedGrants.put(id, now);
           };
         };

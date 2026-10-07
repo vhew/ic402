@@ -31,7 +31,7 @@ suite("Utils", func() {
     test("zero produces 8 zero bytes", func() {
       let bytes = Utils.natToBytes8(0);
       assert(bytes.size() == 8);
-      for (b in bytes.vals()) { assert(b == 0) };
+      for (b in bytes.values()) { assert(b == 0) };
     });
 
     test("1 encodes correctly", func() {
@@ -67,7 +67,7 @@ suite("Utils", func() {
 
     test("max Nat64 (2^64 - 1)", func() {
       let bytes = Utils.natToBytes8(18_446_744_073_709_551_615);
-      for (b in bytes.vals()) { assert(b == 255) };
+      for (b in bytes.values()) { assert(b == 255) };
     });
   });
 
@@ -331,7 +331,7 @@ suite("Utils", func() {
     test("own padded encoder output always round-trips (len % 3 = 0, 1, 2)", func() {
       // The canister only ever emits padded standard-alphabet base64, so
       // base64Decode(base64Encode(bytes)) == bytes must hold for every tail shape.
-      for (len in [24, 25, 26].vals()) {
+      for (len in [24, 25, 26].values()) {
         let bytes = Array.tabulate<Nat8>(len, func(i : Nat) : Nat8 { Nat8.fromNat((i * 37 + 11) % 256) });
         assert(eqBytes(Utils.base64Decode(Utils.base64Encode(bytes)), bytes));
       };

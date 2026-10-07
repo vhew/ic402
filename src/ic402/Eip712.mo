@@ -256,7 +256,7 @@ module {
     if (chars.size() == 0 or chars.size() > 3) return null;
     if (chars[0] == '0') return null;
     var n = 0;
-    for (c in chars.vals()) {
+    for (c in chars.values()) {
       if (c < '0' or c > '9') return null;
       n := n * 10 + (Nat32.toNat(Char.toNat32(c)) - 48);
     };
@@ -318,7 +318,7 @@ module {
     let chars = Iter.toArray(t.chars());
     if (chars.size() == 0) return false;
     var i = 0;
-    for (c in chars.vals()) {
+    for (c in chars.values()) {
       let alpha = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_';
       let digit = c >= '0' and c <= '9';
       if (not (alpha or (i > 0 and digit))) return false;
@@ -352,7 +352,7 @@ module {
     // EMPTY iterator (not [""]), so without it the empty name would skip the segment loop
     // entirely and be accepted — caught by the injection suite's typeHashOf("") pin.
     if (parts.size() == 0 or parts.size() > 2) return false;
-    for (p in parts.vals()) { if (not isIdentifier(p)) return false }; // ":A" / "A:" stay out
+    for (p in parts.values()) { if (not isIdentifier(p)) return false }; // ":A" / "A:" stay out
     true;
   };
 
@@ -412,12 +412,12 @@ module {
     };
     let parsed = Buffer.Buffer<ParsedType>(fields.size());
     var i = 0;
-    for ((name, ty) in fields.vals()) {
+    for ((name, ty) in fields.values()) {
       if (not isIdentifier(name)) {
         return #err("field name '" # name # "' is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)");
       };
       var j = 0;
-      for ((other, _) in fields.vals()) {
+      for ((other, _) in fields.values()) {
         if (j < i and other == name) {
           return #err("duplicate field name '" # name # "' — an audit rendering could not distinguish the two");
         };
@@ -442,7 +442,7 @@ module {
     };
     var s = structName # "(";
     var first = true;
-    for ((name, ty) in fields.vals()) {
+    for ((name, ty) in fields.values()) {
       if (not first) { s #= "," };
       s #= ty # " " # name;
       first := false;
@@ -511,9 +511,9 @@ module {
     };
     let out = Buffer.Buffer<Nat8>(fields.size() * 32);
     var i = 0;
-    for ((name, _) in fields.vals()) {
+    for ((name, _) in fields.values()) {
       switch (encodeWord(name, parsed[i], values[i])) {
-        case (#ok(word)) { for (b in word.vals()) { out.add(b) } };
+        case (#ok(word)) { for (b in word.values()) { out.add(b) } };
         case (#err(e)) { return #err(e) };
       };
       i += 1;
@@ -541,7 +541,7 @@ module {
   // Concatenate 32-byte words into a single byte array.
   func abiEncodeWords(words : [[Nat8]]) : [Nat8] {
     var result : [Nat8] = [];
-    for (w in words.vals()) {
+    for (w in words.values()) {
       assert(w.size() == 32);
       result := Array.append(result, w);
     };

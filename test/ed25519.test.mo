@@ -36,7 +36,7 @@ func cat(x : Blob, y : Blob) : Blob = Blob.fromArray(Array.append(Blob.toArray(x
 func zeros(n : Nat) : Blob = Blob.fromArray(Array.tabulate<Nat8>(n, func(_) = 0));
 
 suite("RFC 8032 section 7.1", func() {
-  for (v in V.rfc8032.vals()) {
+  for (v in V.rfc8032.values()) {
     test(v.name # ": the signature verifies", func() {
       assert verify(v.sig, v.msg, v.pub);
     });
@@ -56,11 +56,11 @@ suite("Wycheproof ed25519_test.json — all 151 match the expected result", func
     ("TruncatedSignature", 3), ("SignatureWithGarbage", 5), ("CompressedSignature", 4),
     ("InvalidEncoding", 22), ("SignatureMalleability", 8), ("InvalidKtv", 1),
   ];
-  for ((flag, count) in expected.vals()) {
+  for ((flag, count) in expected.values()) {
     test(flag # " (" # debug_show(count) # " vectors)", func() {
       var seen = 0;
       var mismatches = 0;
-      for (v in V.wycheproof.vals()) {
+      for (v in V.wycheproof.values()) {
         if (v.flag == flag) {
           seen += 1;
           if (verify(v.sig, v.msg, v.pub) != v.valid) {
@@ -95,14 +95,14 @@ suite("ed25519-speccheck — the policy RFC 8032 leaves open, one case at a time
     (false, "11: negative-zero A, not reduced for hash — refused (OpenSSL accepts)"),
   ];
   assert V.speccheck.size() == policy.size();
-  for (c in V.speccheck.vals()) {
+  for (c in V.speccheck.values()) {
     let (want, why) = policy[c.index];
     test(why, func() { assert verify(c.sig, c.msg, c.pub) == want });
   };
 });
 
 suite("regressions from the mo:ed25519 0.1.0 defect", func() {
-  for (r in V.regressions.vals()) {
+  for (r in V.regressions.values()) {
     let what = if (r.valid) "accepted" else "REFUSED";
     test(r.name # " — " # what, func() { assert verify(r.sig, r.msg, r.pub) == r.valid });
   };
@@ -113,7 +113,7 @@ suite("policy vectors — each is refused by exactly one check", func() {
   // the y < p decode check, then the y half and the x half of the final comparison. The
   // speccheck and Wycheproof sets do not pin these on their own (an adversarial review found
   // each check could be deleted with every other test still green). Construction: policy.json.
-  for (v in V.policy.vals()) {
+  for (v in V.policy.values()) {
     test(v.name # " — REFUSED", func() { assert verify(v.sig, v.msg, v.pub) == v.valid });
   };
 });
@@ -151,12 +151,12 @@ suite("total: every malformed input returns false and nothing traps", func() {
   test("the unmodified vector verifies (control)", func() { assert verify(sig, msg, pub) });
 
   test("wrong signature lengths", func() {
-    for (n in [0, 1, 32, 63, 65, 96, 128].vals()) {
+    for (n in [0, 1, 32, 63, 65, 96, 128].values()) {
       assert not verify(Blob.fromArray(Array.tabulate<Nat8>(n, func(i) = if (i < 64) Blob.toArray(sig)[i] else 0)), msg, pub);
     };
   });
   test("wrong public-key lengths", func() {
-    for (n in [0, 1, 31, 33, 64].vals()) {
+    for (n in [0, 1, 31, 33, 64].values()) {
       assert not verify(sig, msg, Blob.fromArray(Array.tabulate<Nat8>(n, func(i) = if (i < 32) Blob.toArray(pub)[i] else 0)));
     };
   });
@@ -172,10 +172,10 @@ suite("total: every malformed input returns false and nothing traps", func() {
     assert not verify(cat(b(rOf(sig)), sMax), msg, pub);
   });
   test("bad A: off-curve, negative zero, y = p, y = 2^255 - 1", func() {
-    for (a in [offCurve, negZero, yEqP, yMax].vals()) { assert not verify(sig, msg, a) };
+    for (a in [offCurve, negZero, yEqP, yMax].values()) { assert not verify(sig, msg, a) };
   });
   test("bad R: off-curve, negative zero, y = p, y = 2^255 - 1", func() {
-    for (r in [offCurve, negZero, yEqP, yMax].vals()) { assert not verify(cat(r, b(sOf(sig))), msg, pub) };
+    for (r in [offCurve, negZero, yEqP, yMax].values()) { assert not verify(cat(r, b(sOf(sig))), msg, pub) };
   });
   test("flipping one bit in every 8th signature byte is refused", func() {
     let bytes = Blob.toArray(sig);

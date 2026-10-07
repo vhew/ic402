@@ -998,10 +998,10 @@ suite("ServiceRegistry", func() {
     func signAction(reg : ServiceRegistry.ServiceRegistry, priv : Nat, action : Text, jobId : Text) : [Nat8] {
       let digest = EvmAddress.keccak256Text(reg.buyerActionMessage(action, jobId));
       let sec = EcdsaLib.PrivateKey(priv, EcdsaLib.secp256k1Curve());
-      let #ok(sig) = sec.signHashed(digest.vals(), rand.vals()) else { assert false; return [] };
+      let #ok(sig) = sec.signHashed(digest.values(), rand.values()) else { assert false; return [] };
       let rs = Array.append<Nat8>(EvmUtils.natToBytes(sig.r, 32), EvmUtils.natToBytes(sig.s, 32));
       let want = addrOf(priv);
-      for (vv in [0, 1].vals()) {
+      for (vv in [0, 1].values()) {
         let candidate = Array.append<Nat8>(rs, [Nat8.fromNat(vv)]);
         switch (reg.recoverBuyerActionSigner(action, jobId, candidate)) {
           case (?a) { if (a == want) return candidate };

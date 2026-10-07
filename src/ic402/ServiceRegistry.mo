@@ -1233,17 +1233,17 @@ module {
 
     /// Restore from canister upgrades.
     public func loadStable(data : Types.StableServiceRegistryState) {
-      services := HashMap.fromIter(data.services.vals(), data.services.size(), Text.equal, Text.hash);
-      jobs := HashMap.fromIter(data.jobs.vals(), data.jobs.size(), Text.equal, Text.hash);
+      services := HashMap.fromIter(data.services.values(), data.services.size(), Text.equal, Text.hash);
+      jobs := HashMap.fromIter(data.jobs.values(), data.jobs.size(), Text.equal, Text.hash);
       serviceCounter := data.serviceCounter;
       jobCounter := data.jobCounter;
       // Optional for upgrade compatibility: pre-1a stable records have no evmRails.
       evmJobRail := switch (data.evmRails) {
-        case (?rails) { HashMap.fromIter(rails.vals(), rails.size(), Text.equal, Text.hash) };
+        case (?rails) { HashMap.fromIter(rails.values(), rails.size(), Text.equal, Text.hash) };
         case (null) { HashMap.HashMap<Text, Types.EvmRail>(16, Text.equal, Text.hash) };
       };
       operatorEvmPayout := switch (data.operatorPayouts) {
-        case (?p) { HashMap.fromIter(p.vals(), p.size(), Principal.equal, Principal.hash) };
+        case (?p) { HashMap.fromIter(p.values(), p.size(), Principal.equal, Principal.hash) };
         case (null) { HashMap.HashMap<Principal, Text>(8, Principal.equal, Principal.hash) };
       };
     };

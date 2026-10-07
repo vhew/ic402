@@ -74,7 +74,7 @@ suite("EvmUtils", func() {
     test("0 in 32 bytes -> 32 zeros", func() {
       let bytes = EvmUtils.natToBytes(0, 32);
       assert(bytes.size() == 32);
-      for (b in bytes.vals()) { assert(b == 0) };
+      for (b in bytes.values()) { assert(b == 0) };
     });
     test("1 in 32 bytes -> 31 zeros + 0x01", func() {
       let bytes = EvmUtils.natToBytes(1, 32);
@@ -175,7 +175,7 @@ suite("EvmUtils", func() {
     test("0 -> 32 zero bytes", func() {
       let result = EvmUtils.abiEncodeUint256(0);
       assert(result.size() == 32);
-      for (b in result.vals()) { assert(b == 0) };
+      for (b in result.values()) { assert(b == 0) };
     });
     test("1 -> 31 zeros + 0x01", func() {
       let result = EvmUtils.abiEncodeUint256(1);
@@ -495,7 +495,7 @@ suite("EvmUtils", func() {
         Array.tabulate<Nat8>(20, func(i : Nat) : Nat8 { Nat8.fromNat(i + 1) }),
         Array.tabulate<Nat8>(32, func(_ : Nat) : Nat8 { 0xff }),
       ];
-      for (v in vectors.vals()) {
+      for (v in vectors.values()) {
         assert(EvmUtils.hexToBytes(EvmUtils.bytesToHex(v)) == v);
       };
     });

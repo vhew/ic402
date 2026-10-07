@@ -65,7 +65,7 @@ module {
   /// against its OWN domain. Returns null when `tokenAddr` is not a configured token on the chain.
   /// Shared by verifyPayment / settle / (mirrored in) Sessions.openEvmSession.
   public func resolveEvmDomain(chain : Types.EvmChainConfig, tokenAddr : Text) : ?{ name : ?Text; version : ?Text } {
-    for (tok in chain.tokens.vals()) {
+    for (tok in chain.tokens.values()) {
       if (EvmUtils.addressesEqual(tok.address, tokenAddr)) return ?{ name = tok.name; version = tok.version };
     };
     null;
@@ -414,7 +414,7 @@ module {
 
     /// Look up an EVM chain config by chain ID (in the LIVE set — see setEvmChains).
     func findEvmChain(chainId : Nat) : ?Types.EvmChainConfig {
-      for (chain in liveEvmChains.vals()) {
+      for (chain in liveEvmChains.values()) {
         if (chain.chainId == chainId) return ?chain;
       };
       null;
@@ -438,7 +438,7 @@ module {
     public func requireEvm(amount : Nat) : [Types.PaymentRequirement] {
       if (amount == 0) { Debug.trap("ic402: requireEvm() called with amount = 0; payment amount must be positive") };
       let buf = Buffer.Buffer<Types.PaymentRequirement>(liveEvmChains.size());
-      for (chain in liveEvmChains.vals()) {
+      for (chain in liveEvmChains.values()) {
         // Skip chains with no tokens configured
         if (chain.tokens.size() == 0) { /* skip */ } else {
         let expiry = Time.now() + nonceExpiryNanos();
@@ -487,7 +487,7 @@ module {
         };
         case (null) {};
       };
-      for (chain in liveEvmChains.vals()) {
+      for (chain in liveEvmChains.values()) {
         if (chain.tokens.size() == 0) { /* skip */ } else {
           let tok = chain.tokens[0];
           buf.add({
@@ -532,7 +532,7 @@ module {
     public func supportedJson() : Text {
       var kinds = "";
       var first = true;
-      for (chain in liveEvmChains.vals()) {
+      for (chain in liveEvmChains.values()) {
         if (chain.tokens.size() == 0) { /* skip */ } else {
           if (not first) { kinds #= "," };
           kinds #= "{\"x402Version\":2,\"scheme\":\"exact\",\"network\":\"eip155:" # Nat.toText(chain.chainId) # "\"}";
@@ -1168,7 +1168,7 @@ module {
       // brokenly; an empty list turns the EVM rail off, and zero-token chains are tolerated
       // and skipped by the advertising helpers, as at construction.
       var i = 0;
-      for (chain in chains.vals()) {
+      for (chain in chains.values()) {
         if (chain.chainId == 0) {
           return #err("chainId must be nonzero (eip155:0 is not a network)");
         };
@@ -1179,7 +1179,7 @@ module {
           return #err("chainId " # Nat.toText(chain.chainId) # " has no EVM-RPC provider mapping (see EvmRpc.rpcServices) — it would advertise 402 challenges that can never settle");
         };
         var j = 0;
-        for (other in chains.vals()) {
+        for (other in chains.values()) {
           if (j < i and other.chainId == chain.chainId) {
             return #err("duplicate chainId " # Nat.toText(chain.chainId) # " — chain lookups resolve the FIRST match, so later duplicates would be dead config");
           };
@@ -1189,12 +1189,12 @@ module {
           return #err("chain " # Nat.toText(chain.chainId) # ": recipient must be a 0x-prefixed 20-byte hex address (advertised verbatim in 402 challenges): " # chain.recipient);
         };
         var t = 0;
-        for (tok in chain.tokens.vals()) {
+        for (tok in chain.tokens.values()) {
           if (not isCanonicalEvmAddress(tok.address)) {
             return #err("chain " # Nat.toText(chain.chainId) # ": token address must be a 0x-prefixed 20-byte hex address (advertised verbatim in 402 challenges): " # tok.address);
           };
           var u = 0;
-          for (other in chain.tokens.vals()) {
+          for (other in chain.tokens.values()) {
             if (u < t and EvmUtils.addressesEqual(other.address, tok.address)) {
               return #err("chain " # Nat.toText(chain.chainId) # ": duplicate token address " # tok.address # " — domain lookups resolve the first match, so the duplicate's EIP-712 domain would be dead config");
             };

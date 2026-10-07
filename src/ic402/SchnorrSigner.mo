@@ -150,7 +150,7 @@ module {
       );
     };
     var total : Nat = 0;
-    for (element in derivationPath.vals()) { total += element.size() };
+    for (element in derivationPath.values()) { total += element.size() };
     if (total > MAX_DERIVATION_PATH_BYTES) {
       return #err(
         "Derivation path too large: " # Nat.toText(total)
@@ -211,7 +211,7 @@ module {
   func hexNoPrefix(bytes : [Nat8]) : Text {
     let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
     var out = "";
-    for (b in bytes.vals()) {
+    for (b in bytes.values()) {
       let n = Nat8.toNat(b);
       out #= digits[n / 16] # digits[n % 16];
     };

@@ -356,14 +356,14 @@ persistent actor KnowledgeBase {
         "http",
         Http.acceptsArrayJson(gate.describeAll(1_000)),
       );
-      for (entry in store.list().vals()) {
+      for (entry in store.list().values()) {
         items #= "," # Http.discoveryItemJson(
           Http.buildResourceUrl(request.headers, "/content/" # entry.id),
           "http",
           Http.acceptsArrayJson(gate.describeAll(5_000)),
         );
       };
-      for (svc in registry.listServices(true).vals()) {
+      for (svc in registry.listServices(true).values()) {
         let amt = switch (svc.pricing) {
           case (#Exact(p)) { p + CKUSDC_FEE };
           case (#Upto(p)) { p + CKUSDC_FEE };

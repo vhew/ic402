@@ -371,7 +371,7 @@ module {
   /// Get a header value (case-insensitive).
   public func getHeader(headers : [(Text, Text)], name : Text) : ?Text {
     let lower = Utils.toLower(name);
-    for ((k, v) in headers.vals()) {
+    for ((k, v) in headers.values()) {
       if (Utils.toLower(k) == lower) return ?v;
     };
     null;
@@ -516,7 +516,7 @@ module {
   let HEX_DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"];
   func blobToHex(b : Blob) : Text {
     var out = "";
-    for (byte in b.vals()) {
+    for (byte in b.values()) {
       let n = Nat8.toNat(byte);
       out #= HEX_DIGITS[n / 16] # HEX_DIGITS[n % 16];
     };

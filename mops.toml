@@ -30,8 +30,8 @@ chacha = "1.0.1"
 test = "2.1.2"
 
 [toolchain]
-moc = "1.11.0"
-wasmtime = "44.0.0"
+moc = "1.16.1"
+wasmtime = "48.0.5"
 
 [moc]
 args = ["-E", "M0074"]
