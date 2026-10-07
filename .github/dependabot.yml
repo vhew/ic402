@@ -13,9 +13,17 @@ updates:
     commit-message:
       prefix: 'chore(deps)'
     groups:
+      # ICP packages arrive as their own PR (a dependency is placed in the FIRST group it matches),
+      # so an @icp-sdk bump is reviewed on its own rather than riding with eslint/prettier.
+      icp-sdk:
+        patterns: ['@icp-sdk/*']
       # Batch minor+patch into one PR to cut noise; majors get their own PR to review deliberately.
       npm-minor-patch:
         update-types: ['minor', 'patch']
+    ignore:
+      # The icp CLI is also installed globally in ci.yml at a PINNED version (see the note there);
+      # a devDependency-only bump would split the two. Bump both deliberately, by hand.
+      - dependency-name: '@icp-sdk/icp-cli'
 
   # GitHub Actions pinned in the CI + release workflows (actions/checkout, setup-node, setup-mops, ...).
   - package-ecosystem: github-actions
@@ -27,3 +35,7 @@ updates:
     groups:
       github-actions:
         update-types: ['minor', 'patch']
+    ignore:
+      # v6+ bootstraps pnpm 11 and was red on our pnpm 9 (PR #5). Revisit with the pnpm 10/11 move.
+      - dependency-name: 'pnpm/action-setup'
+        versions: ['>= 6']
