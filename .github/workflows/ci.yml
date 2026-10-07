@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -21,7 +21,7 @@ jobs:
       - run: pnpm format:check
 
   build-client:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -33,7 +33,7 @@ jobs:
       - run: pnpm build:client
 
   test-motoko:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       # PINNED mops CLI (setup-mops otherwise installs `latest` on every run, unreviewed — the icp-cli
@@ -50,7 +50,7 @@ jobs:
   # The self-test proves the gate still discriminates (a future moc/flag change can't silently
   # neuter it into a green no-op).
   stable-compat:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
@@ -67,7 +67,7 @@ jobs:
   # The self-test proves the gate still discriminates (a didc upgrade or argument-order
   # regression can't silently neuter it into a green no-op).
   candid-mirrors:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
@@ -78,7 +78,7 @@ jobs:
       - run: ./scripts/check-candid-mirrors.sh --self-test
 
   test-client:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -94,7 +94,7 @@ jobs:
   # The MCP tests import the source modules directly; integration tests skip (pass)
   # without a local replica.
   test-ts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -109,7 +109,7 @@ jobs:
   # Type-check the MCP server and the demo client (catches wiring regressions in the
   # extracted security/guards modules and the demo's MCP integration).
   build-integrations:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -127,7 +127,7 @@ jobs:
   # scripts/patch-local.sh rewrites (a drifted pattern silently no-ops, shipping a
   # local build with mainnet values).
   verify-scripts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - run: bash scripts/check-patch-patterns.sh
@@ -153,7 +153,7 @@ jobs:
   # optimizes the example and fails if any function exceeds the locals budget — catching an
   # un-installable wasm here instead of at a mainnet deploy, without needing a replica.
   wasm-locals:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
@@ -175,7 +175,7 @@ jobs:
   # broadcast). No Rust toolchain needed — the zk-verifier prebuilt is committed (setup only
   # builds it when missing); binaryen for wasm-opt is fetched (SHA-pinned, Linux/x86_64).
   test-integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -229,7 +229,7 @@ jobs:
   # mocked). IC402_REQUIRE_EVM_OUTBOUND=1 turns a missing fixture into a HARD failure (it is its own
   # flag, not IC402_REQUIRE_REPLICA, because the example must be re-pointed at the mock first).
   test-evm-outbound:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -259,7 +259,7 @@ jobs:
   # Keep example/example.did in sync with example/main.mo — a drifted .did ships a stale Candid
   # interface (and the @ic402/client + MCP IDL are mirrored from it). Regenerate and fail on a diff.
   did-sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
@@ -275,7 +275,7 @@ jobs:
   # test different vectors. The two upstream files are also pinned to their upstream bytes (the
   # hashes in the README there), so a reformat or an edit cannot pass as Wycheproof/speccheck.
   ed25519-fixtures-sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
