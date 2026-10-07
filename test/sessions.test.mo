@@ -81,6 +81,21 @@ suite("Sessions", func() {
         case (null) { assert(false) };
       };
     });
+
+    test("matches the cross-boundary golden vectors for 4- and 8-byte integers", func() {
+      // Mirrors packages/client/test/voucher.test.ts: real USDC cumulative amounts pass 2^32.
+      let prefix : [Nat8] = [132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49];
+      let u32 : [Nat8] = Array.append<Nat8>(prefix, [27, 0, 0, 0, 1, 42, 5, 242, 0, 26, 0, 1, 17, 112]);
+      let u64 : [Nat8] = Array.append<Nat8>(prefix, [27, 255, 255, 255, 255, 255, 255, 255, 255, 27, 0, 0, 0, 1, 0, 0, 0, 0]);
+      switch (Sessions.encodeVoucherPayload("aaaaa-aa", "sess-1", 5_000_000_000, 70_000)) {
+        case (?bytes) { assert Array.equal<Nat8>(bytes, u32, Nat8.equal) };
+        case (null) { assert(false) };
+      };
+      switch (Sessions.encodeVoucherPayload("aaaaa-aa", "sess-1", 18_446_744_073_709_551_615, 4_294_967_296)) {
+        case (?bytes) { assert Array.equal<Nat8>(bytes, u64, Nat8.equal) };
+        case (null) { assert(false) };
+      };
+    });
   });
 
   // ── sessionReconcileDecision (v2.1.1 recovery — two-phase close) ──

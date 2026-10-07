@@ -39,6 +39,22 @@ describe('encodeVoucherPayload', () => {
       132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49, 25, 3, 232, 2,
     ]);
   });
+
+  // The vector above only reaches 2-byte integers; real USDC cumulative amounts pass 2^32 (4,295
+  // USDC at 6 decimals). These pin the 4- and 8-byte encodings on both sides (mirrored in
+  // test/sessions.test.mo), so a cborg major (6.0 changed some map encodings) is checked here.
+  it('matches the canister golden vectors for 4- and 8-byte integers', () => {
+    // prettier-ignore
+    expect(Array.from(encodeVoucherPayload('aaaaa-aa', 'sess-1', 5_000_000_000n, 70_000n))).toEqual([
+      132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49,
+      27, 0, 0, 0, 1, 42, 5, 242, 0, 26, 0, 1, 17, 112,
+    ]);
+    // prettier-ignore
+    expect(Array.from(encodeVoucherPayload('aaaaa-aa', 'sess-1', 18_446_744_073_709_551_615n, 4_294_967_296n))).toEqual([
+      132, 104, 97, 97, 97, 97, 97, 45, 97, 97, 102, 115, 101, 115, 115, 45, 49,
+      27, 255, 255, 255, 255, 255, 255, 255, 255, 27, 0, 0, 0, 1, 0, 0, 0, 0,
+    ]);
+  });
 });
 
 describe('signVoucher', () => {

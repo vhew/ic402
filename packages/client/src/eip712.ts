@@ -41,7 +41,7 @@ export function randomNonce(): string {
   if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
     throw new Error(
       'ic402: Web Crypto API required for secure nonce generation. ' +
-        'Ensure globalThis.crypto.getRandomValues is available (Node.js >= 19, modern browsers, or polyfill).',
+        'Ensure globalThis.crypto.getRandomValues is available (Node.js >= 20.19, modern browsers, or polyfill).',
     );
   }
   const bytes = new Uint8Array(32);

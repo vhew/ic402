@@ -8,7 +8,7 @@ TypeScript client SDK for [ic402](https://github.com/vhew/ic402)-enabled ICP can
 npm install @ic402/client
 ```
 
-Requires Node.js ≥ 19 (Web Crypto API) and the peer dependency `@icp-sdk/core` ≥ 5.1.0. Runtime dependencies (`viem`, `cborg`) install automatically.
+Requires Node.js ≥ 20.19 (Web Crypto API; the floor of `@icp-sdk/core`'s `@noble/*` dependencies). Runtime dependencies (`@icp-sdk/core`, `viem`, `cborg`) install automatically; if your app also uses `@icp-sdk/core` directly, use the same version (6.1.0) so npm installs a single copy.
 
 ## Quick start
 
@@ -189,8 +189,8 @@ For building custom flows, the pieces behind `fetchX402`/`registerAgent` are exp
 
 ## Requirements
 
-- Node.js ≥ 19 (Web Crypto API required)
-- `@icp-sdk/core` ≥ 5.1.0 (peer dependency)
+- Node.js ≥ 20.19 (Web Crypto API; the floor of `@icp-sdk/core`'s `@noble/*` dependencies)
+- `@icp-sdk/core` 6.1.0 (a regular dependency; match it in your app to avoid a second copy)
 
 ## License
 
