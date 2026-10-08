@@ -7,8 +7,9 @@
 /// (test/stable-anchor.most) with moc's own `--stable-compatible` oracle.
 ///
 /// Why a dedicated anchor (not example/main.mo):
-///   - It persists EXACTLY the four library `Stable*State` types and nothing else, so the signature
-///     is the library's stable contract — no application state (e.g. an example's ledger config)
+///   - It persists EXACTLY the four library `Stable*State` types plus `RefundOwed` (2.18.0: owed
+///     refunds, which consumers persist in their own variable) and nothing else, so the signature is
+///     the library's stable contract — no application state (e.g. an example's ledger config)
 ///     leaking in as false-positive surface.
 ///   - All four types are ALWAYS present, so coverage can't silently shrink if an example/consumer
 ///     drops a component.
@@ -23,4 +24,5 @@ persistent actor StableAnchor {
   var content : ?Ic402.StableContentStoreState = null;
   var identity : ?Ic402.StableIdentityState = null;
   var services : ?Ic402.StableServiceRegistryState = null;
+  var refundOwed : ?[Ic402.RefundOwed] = null; // 2.18.0 — the shape example/main.mo persists
 };

@@ -141,8 +141,9 @@ the payer's daily reservation released; the remainder sits in the session's **pe
 (`sha256("ic402-escrow" ++ sessionId)` under the canister's principal). The error text says so
 explicitly. When the expiry sweep made the close, nobody sees that text: since v2.18.0 the session is
 counted in `sessionCounts().refundOwed` (in the example, `health().sessions.refundOwed`), and
-`refundOwedToStable()` lists the session ids with the escrow balance the close left. Contact those
-payers.
+`refundOwedToStable()` lists the session ids with the escrow balance the close left. It is a library
+method; the reference example does not expose it, so wire a controller-gated query returning
+`gate.refundOwedToStable()` if you need the ids in-band. Contact those payers.
 
 **Do:** `recoverEscrow(ledger, sessionId, amount)` — refunds from the escrow subaccount **to the
 payer only** (the library hard-codes the destination and requires `caller == session.payer`; it
@@ -182,13 +183,19 @@ Practical notes, all code-derived:
   sessionId) })` and request `balance − fee`.
 - **Time window:** `recoverEscrow` needs the session record to authorize; `gcClosedSessions`
   removes `#closed`/`#expired` records **24 h after `lastActivityAt`**. **Since v2.18.0 a session
-  still owed a refund is never removed:** its record stays until `recoverEscrow` has left less than
-  one fee in the escrow (a partial recovery keeps it). That protection survives an upgrade only if the
-  canister persists `refundOwedToStable()` and restores it with `loadRefundOwed` (the reference example
-  does; see [`upgrade-safety.md`](upgrade-safety.md)). Before v2.18.0, or without that wiring across an
-  upgrade, the 24 h window applies: after GC, `recoverEscrow` returns "Session not found" and the funds
-  still sit in the (deterministically derivable) subaccount with **no in-band method left to move
-  them**.
+  whose close reported a failed refund leg (refused or rejected) is never removed:** its record stays
+  until `recoverEscrow` has left one fee or less in the escrow (a partial recovery keeps it). That
+  protection survives an upgrade only if the canister persists `refundOwedToStable()` and restores it
+  with `loadRefundOwed` (the reference example does; see [`upgrade-safety.md`](upgrade-safety.md)).
+  The 24 h window still applies — after which `recoverEscrow` returns "Session not found" and the funds
+  sit in the (deterministically derivable) subaccount with **no in-band method left to move them** — to:
+  - a `#closing`-at-rest ICP session resolved with `forceResolveSession` (the exit above), and a close
+    a force landed on: the library cannot know whether that refund ran, so it does not record one. The
+    operator is hands-on here: have the payer `recoverEscrow` (balance − fee) within 24 h of the force;
+  - a refund that failed before the canister ran 2.18.0 (not retroactive), and any owed refund across
+    an upgrade on a canister that does not persist `refundOwedToStable()`.
+- **Fee changes:** the owed figure uses the ledger fee at the close. If the ledger's fee has changed
+  since, recover the full `balance − current fee` in one call; that clears the entry.
 
 ## §4 Inbound EVM deposit broadcast-but-unconfirmed at `openSession` (no session)
 

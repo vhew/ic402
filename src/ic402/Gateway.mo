@@ -80,6 +80,8 @@ module {
   ///   yourself.
   /// - Persist `toStable()` in preupgrade and restore with `loadStable()` in postupgrade;
   ///   check `Ic402.checkSchemaVersion` against your persisted version BEFORE loadStable.
+  /// - 2.18.0: persist `refundOwedToStable()` in its own stable variable and restore it with
+  ///   `loadRefundOwed()` after loadStable (owed ICP refunds; not part of toStable()).
   /// - EVM rails are unavailable until the async tECDSA address derivation completes —
   ///   poll `isEvmReady()`.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {

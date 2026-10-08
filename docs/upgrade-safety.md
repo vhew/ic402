@@ -111,7 +111,8 @@ stableRefundOwed := gate.refundOwedToStable();
 Adding this variable to an existing persistent actor is upgrade-compatible (checked with
 `moc --stable-compatible` against the 2.17.7 example). If you do not persist it, the count restarts at
 0 after an upgrade and those records become GC-eligible again — the behaviour before 2.18.0. The
-`Ic402.RefundOwed` record's shape is part of the stable contract from 2.18.0 on.
+`Ic402.RefundOwed` record's shape is part of the stable contract from 2.18.0 on (the stable-compat
+gate covers it). Not retroactive: a refund that failed before the canister ran 2.18.0 is not tracked.
 
 ## Transient in-flight state — drain before upgrading
 

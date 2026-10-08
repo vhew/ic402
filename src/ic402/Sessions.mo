@@ -995,11 +995,13 @@ module {
               if (session.deposited > session.consumed) {
                 policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
               };
+              // 2.18.0: record the owed remainder (the computed escrow balance, never a ledger query) so
+              // it is reported and its record outlives the 24h GC until the payer recovers it. Not when a
+              // forceResolveSession landed during the awaits: the operator owns that session, and the
+              // payer may already have recovered the escrow this figure describes.
+              refundOwed.put(session.id, { escrow = escrowBalance; fee });
             };
             session.lastActivityAt := Time.now();
-            // 2.18.0: record the owed remainder (the computed escrow balance, never a ledger query) so
-            // it is reported and its record outlives the 24h GC until the payer recovers it.
-            refundOwed.put(session.id, { escrow = escrowBalance; fee });
             let leg = if (refundRejected) { "Refund leg rejected" } else { "Refund leg failed" };
             return #settlementFailed(leg # " (session marked #closed): " # msg # " — the remainder stays in the session's escrow subaccount and is recoverable by the payer via recoverEscrow(sessionId).");
           };
@@ -1587,7 +1589,9 @@ module {
           let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
           let subaccount = escrowManager.deriveSubaccount(sessionId);
           let result = await escrowManager.refund(ledger, subaccount, payerAccount, cappedAmount);
-          // 2.18.0: an owed refund is settled once less than one fee is left (nothing more can move).
+          // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
+          // `owed.fee` is the fee at the close; if the ledger fee has changed since, the figure is off
+          // by the difference (documented in Types.RefundOwed).
           switch (result, refundOwed.get(sessionId)) {
             case (#ok(_), ?owed) {
               let left = Utils.satSub(owed.escrow, cappedAmount + owed.fee);

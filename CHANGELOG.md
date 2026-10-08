@@ -12,8 +12,8 @@ recovers it.** Requested by EngramX. No `PaymentResult` tag change; no stored ty
   ledger), the session ends `#closed` with the payer's remainder in its escrow subaccount. When the
   payer closed, `closeSession` returned `#settlementFailed("Refund leg …")`; when the **expiry sweep**
   closed, the timer dropped that result and `sessionCounts()` counted the session `closed` like a clean
-  close, so nobody knew. `refundOwed` now counts these sessions until `recoverEscrow` leaves less than
-  one fee in the escrow (a partial recovery keeps it counted). The escrow balance is computed from the
+  close, so nobody knew. `refundOwed` now counts these sessions until `recoverEscrow` leaves one fee
+  or less in the escrow (a partial recovery keeps it counted). The escrow balance is computed from the
   close, not queried: an escrow subaccount is derivable and anyone can top it up. The example's
   `health().sessions` gains the field, so `example.did` and the client IDL gain `refundOwed : nat`
   (additive; existing decoders ignore it).
@@ -28,7 +28,18 @@ recovers it.** Requested by EngramX. No `PaymentResult` tag change; no stored ty
 - **An owed refund could be stranded for good.** `gcClosedSessions` deleted a `#closed` record 24 h
   after its last activity even when its refund had failed, and the record is what authorizes
   `recoverEscrow`: after that, the remainder sat in the escrow with no way left to move it. A session
-  still owed a refund now keeps its record until the payer has recovered it.
+  whose close reported a failed refund leg (from either close path) now keeps its record until the
+  payer has recovered it.
+
+### Not changed
+
+- A session forced out of `#closing` with `forceResolveSession`, or a close a force landed on, is not
+  recorded: the library cannot know whether its refund ran, and a wrong entry could never clear. It
+  keeps the usual 24 h window from the force (runbook §3).
+- Not retroactive: a refund that failed before the canister ran 2.18.0 is not tracked (the stored
+  session record does not say whether its refund succeeded, and escrow balances are never queried).
+- The owed figure uses the ledger fee at the close; if the fee changes before recovery, recover the
+  full `balance − current fee` in one call.
 
 ### Changed (toolchain, merged since 2.17.7)
 
