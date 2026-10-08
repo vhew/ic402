@@ -92,6 +92,28 @@ be finer but change the public contract; the single `Nat` keeps the consumer che
 2. If it **did** change, write a migration from your persisted version to the new layout (or accept a
    documented state-dropping fresh deploy), wire it into the `#migrate` branch, and upgrade.
 
+## Owed refunds — persist them separately (2.18.0)
+
+When an ICP close's refund leg fails, the payer's remainder stays in the session's escrow subaccount
+until the payer calls `recoverEscrow`. ic402 tracks these owed refunds (`sessionCounts().refundOwed`)
+and keeps their session records past the 24 h GC, because the record is what authorizes the recovery.
+They are deliberately **not** part of `StableGatewayState` (no stored type changed, no schema bump):
+persist them in their own stable variable.
+
+```motoko
+var stableRefundOwed : [Ic402.RefundOwed] = [];
+// in the post-upgrade load block, AFTER gate.loadStable(...):
+gate.loadRefundOwed(stableRefundOwed);
+// in preupgrade:
+stableRefundOwed := gate.refundOwedToStable();
+```
+
+Adding this variable to an existing persistent actor is upgrade-compatible (checked with
+`moc --stable-compatible` against the 2.17.7 example). If you do not persist it, the count restarts at
+0 after an upgrade and those records become GC-eligible again — the behaviour before 2.18.0. The
+`Ic402.RefundOwed` record's shape is part of the stable contract from 2.18.0 on (the stable-compat
+gate covers it). Not retroactive: a refund that failed before the canister ran 2.18.0 is not tracked.
+
 ## Transient in-flight state — drain before upgrading
 
 Not all ic402 state is in the four stable snapshots. Some short-lived, in-flight recovery state is

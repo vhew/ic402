@@ -471,6 +471,7 @@ service : {
          closing: nat;
          expired: nat;
          open: nat;
+         refundOwed: nat;
          total: nat;
        };
       timers:

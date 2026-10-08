@@ -116,6 +116,11 @@ module {
 
     var sessions = HashMap.HashMap<Text, Types.InternalSessionState>(16, Text.equal, Text.hash);
     var sessionCounter : Nat = 0;
+    // 2.18.0: ICP sessions whose close failed its refund leg — the payer's remainder is still in escrow
+    // (Types.RefundOwed). Reported by sessionCounts().refundOwed, and gcClosedSessions keeps their record
+    // (it is what authorizes recoverEscrow) until the payer has recovered. Kept outside StableSession so
+    // no stored type changes: persisted through refundOwedToStable / loadRefundOwed.
+    var refundOwed = HashMap.HashMap<Text, { escrow : Nat; fee : Nat }>(8, Text.equal, Text.hash);
     // Recovery: a session whose EVM close settle/refund parked (#pending) records the parked leg
     // + tx hash here so reconcileSession can re-poll it confirm-only. Transient (not in
     // StableSession; a parked session mid-upgrade falls under the B1 fresh-deploy waiver).
@@ -990,6 +995,11 @@ module {
               if (session.deposited > session.consumed) {
                 policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
               };
+              // 2.18.0: record the owed remainder (the computed escrow balance, never a ledger query) so
+              // it is reported and its record outlives the 24h GC until the payer recovers it. Not when a
+              // forceResolveSession landed during the awaits: the operator owns that session, and the
+              // payer may already have recovered the escrow this figure describes.
+              refundOwed.put(session.id, { escrow = escrowBalance; fee });
             };
             session.lastActivityAt := Time.now();
             let leg = if (refundRejected) { "Refund leg rejected" } else { "Refund leg failed" };
@@ -1243,10 +1253,15 @@ module {
     /// Observability (NEW-4): counts of sessions by status. `closing` is the parked count —
     /// an EVM session close that broadcast a settle/refund but hasn't confirmed; a non-zero,
     /// non-decreasing `closing` means a client deposit is parked mid-close and needs attention.
+    /// `refundOwed` (2.18.0): closed ICP sessions whose refund leg failed and that the payer has not yet
+    /// emptied with recoverEscrow — counted in `closed` too. A non-zero, non-decreasing value is a payer
+    /// to contact; the records behind it are refundOwedToStable().
     public func sessionCounts() : {
-      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat;
+      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat;
     } {
       var total = 0; var nOpen = 0; var nClosing = 0; var nClosed = 0; var nExpired = 0;
+      var nOwed = 0;
+      for (id in refundOwed.keys()) { switch (sessions.get(id)) { case (?_) { nOwed += 1 }; case (null) {} } };
       for ((_, s) in sessions.entries()) {
         total += 1;
         switch (s.status) {
@@ -1256,7 +1271,7 @@ module {
           case (#expired) { nExpired += 1 };
         };
       };
-      { total; open = nOpen; closing = nClosing; closed = nClosed; expired = nExpired };
+      { total; open = nOpen; closing = nClosing; closed = nClosed; expired = nExpired; refundOwed = nOwed };
     };
 
     /// Finalize a #closing session to terminal #closed, releasing BOTH canister-side reservations
@@ -1384,8 +1399,11 @@ module {
       let toRemove = Iter.toArray(
         Iter.filter<(Text, Types.InternalSessionState)>(
           sessions.entries(),
-          func((_, s)) {
-            (s.status == #closed or s.status == #expired) and (now - s.lastActivityAt > retentionNanos);
+          func((id, s)) {
+            // 2.18.0: a session still owed a refund keeps its record — deleting it would leave the
+            // remainder in escrow with no way left to recover it.
+            (s.status == #closed or s.status == #expired) and (now - s.lastActivityAt > retentionNanos)
+            and refundOwed.get(id) == null;
           },
         )
       );
@@ -1570,7 +1588,20 @@ module {
           // H-5: Always refund to the payer's own account (no arbitrary recipient)
           let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
           let subaccount = escrowManager.deriveSubaccount(sessionId);
-          await escrowManager.refund(ledger, subaccount, payerAccount, cappedAmount);
+          let result = await escrowManager.refund(ledger, subaccount, payerAccount, cappedAmount);
+          // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
+          // `owed.fee` is the fee at the close; if the ledger fee has changed since, the figure is off
+          // by the difference (documented in Types.RefundOwed).
+          switch (result, refundOwed.get(sessionId)) {
+            case (#ok(_), ?owed) {
+              let left = Utils.satSub(owed.escrow, cappedAmount + owed.fee);
+              if (left <= owed.fee) { refundOwed.delete(sessionId) } else {
+                refundOwed.put(sessionId, { owed with escrow = left });
+              };
+            };
+            case (_, _) {};
+          };
+          result;
         };
         case (null) {
           return #err("Session not found: cannot authorize escrow recovery without session record");
@@ -1579,6 +1610,26 @@ module {
     };
 
     // ── Stable state ──
+
+    /// 2.18.0: the owed refunds (see sessionCounts().refundOwed), for persistence across upgrades and as
+    /// the list behind the count. They are deliberately not in toStable(), so no stored type changed:
+    /// keep them in their own stable variable and pass them back to loadRefundOwed after loadStable.
+    /// If you do not persist them, the count restarts at 0 after an upgrade and those records become
+    /// GC-eligible again (the behaviour before 2.18.0).
+    public func refundOwedToStable() : [Types.RefundOwed] {
+      Iter.toArray(
+        Iter.map<(Text, { escrow : Nat; fee : Nat }), Types.RefundOwed>(
+          refundOwed.entries(),
+          func((sessionId, o)) { { sessionId; escrow = o.escrow; fee = o.fee } },
+        )
+      );
+    };
+
+    /// Restore the owed refunds saved by refundOwedToStable (replaces the current set).
+    public func loadRefundOwed(data : [Types.RefundOwed]) {
+      refundOwed := HashMap.HashMap<Text, { escrow : Nat; fee : Nat }>(8, Text.equal, Text.hash);
+      for (r in data.values()) { refundOwed.put(r.sessionId, { escrow = r.escrow; fee = r.fee }) };
+    };
 
     /// Serialize all active sessions for stable storage.
     public func toStable() : [Types.StableSession] {

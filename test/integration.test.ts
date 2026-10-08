@@ -698,6 +698,8 @@ describe('ic402 integration', () => {
       // the sweep). Their #closed records are kept 24h for recoverEscrow, and must NOT hold the 60s
       // sweep for that day (EngramX measured ~3.4B cycles/hour while one was retained).
       if (process.env.IC402_REQUIRE_REPLICA === '1') expect(h0.sessions.closed).toBeGreaterThan(0n);
+      // 2.18.0: those closes all refunded cleanly, so nothing is owed (a failed refund leg would show here).
+      expect(h0.sessions.refundOwed).toBe(0n);
       // startTimers arms unconditionally at install/upgrade (the init body re-runs BEFORE
       // postupgrade restores stable sessions, so it cannot gate on "are there sessions?"), and the
       // FIRST tick — at most one interval later — is what disarms. Poll rather than assume how

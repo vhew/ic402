@@ -47,6 +47,8 @@ type ParkedTx__1046621889 =
     txHash : Text
   };
 type PricingScheme__508895677 = {#Exact : Nat; #Session; #Upto : Nat};
+type RefundOwed__1031923468 = RefundOwed__283371391;
+type RefundOwed__283371391 = {escrow : Nat; fee : Nat; sessionId : Text};
 type ServiceDefinition__110976641 =
   {
     createdAt : Int;
@@ -180,5 +182,6 @@ actor {
   stable var content : ?StableContentStoreState__131454730;
   stable var gateway : ?StableGatewayState__785519254;
   stable var identity : ?StableIdentityState__346602069;
+  stable var refundOwed : ?[RefundOwed__1031923468];
   stable var services : ?StableServiceRegistryState__134286952
 };

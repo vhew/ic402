@@ -37,6 +37,10 @@ persistent actor KnowledgeBase {
   var stableContent : ?Ic402.StableContentStoreState = null;  // OPTIONAL
   var stableIdentity : ?Ic402.StableIdentityState = null;     // OPTIONAL
   var stableServices : ?Ic402.StableServiceRegistryState = null; // OPTIONAL
+  // 2.18.0: owed ICP refunds (a close whose refund leg failed). Their own variable on purpose:
+  // StableGatewayState is unchanged. Without it the refundOwed count restarts at 0 on upgrade and
+  // those session records become GC-eligible again, stranding the payer's remainder after 24h.
+  var stableRefundOwed : ?[Ic402.RefundOwed] = null;
   // Persisted ic402 stable-schema version — checked before loadStable (see the `do` block below)
   // so an upgrade across a breaking ic402 stable-layout change fails with a clear, actionable error
   // (or a migration branch) instead of a cryptic Candid decode trap. See docs/upgrade-safety.md.
@@ -206,6 +210,7 @@ persistent actor KnowledgeBase {
       };
     };
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
+    switch (stableRefundOwed) { case (?d) { gate.loadRefundOwed(d) }; case (null) {} };
     switch (stableContent) { case (?d) { store.loadStable(d) }; case (null) {} };
     switch (stableIdentity) { case (?d) { identity.loadStable(d) }; case (null) {} };
     switch (stableServices) { case (?d) { registry.loadStable(d) }; case (null) {} };
@@ -214,6 +219,7 @@ persistent actor KnowledgeBase {
 
   system func preupgrade() {
     stableGateway := ?gate.toStable();
+    stableRefundOwed := ?gate.refundOwedToStable();
     stableContent := ?store.toStable();
     stableIdentity := ?identity.toStable();
     stableServices := ?registry.toStable();
@@ -221,6 +227,7 @@ persistent actor KnowledgeBase {
 
   system func postupgrade() {
     stableGateway := null;
+    stableRefundOwed := null;
     stableContent := null;
     stableIdentity := null;
     stableServices := null;
@@ -1358,7 +1365,7 @@ persistent actor KnowledgeBase {
   public shared query (msg) func health() : async {
     cyclesBalance : Nat;
     jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat };
-    sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat };
+    sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat };
     timers : { sessionExpiryArmed : Bool; jobExpiryArmed : Bool; jobExpiryActive : Bool };
   } {
     requireController(msg.caller);

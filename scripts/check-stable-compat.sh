@@ -122,9 +122,9 @@ cur="$TMPD/cur.most"
 
 # Coverage guard: every library Stable*State MUST stay in the anchor's signature, so trimming a var
 # out of test/stable-anchor.mo can't silently shrink what the gate protects.
-for _t in StableGatewayState StableContentStoreState StableIdentityState StableServiceRegistryState; do
+for _t in StableGatewayState StableContentStoreState StableIdentityState StableServiceRegistryState RefundOwed; do
   grep -q "$_t" "$cur" || {
-    echo "✗ the anchor signature no longer covers $_t — keep all four library Stable*State types" >&2
+    echo "✗ the anchor signature no longer covers $_t — keep all four library Stable*State types and RefundOwed" >&2
     echo "  persisted in $ANCHOR (coverage must not shrink)." >&2
     exit 1
   }
