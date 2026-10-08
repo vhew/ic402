@@ -104,6 +104,9 @@ module {
 
   /// Serializable gateway state for canister upgrades.
   public type StableGatewayState = Types.StableGatewayState;
+  /// 2.18.0: an owed ICP refund (a close whose refund leg failed). Persist the list from
+  /// Gateway.refundOwedToStable in its own stable variable; restore it with loadRefundOwed.
+  public type RefundOwed = Types.RefundOwed;
   /// Serializable content store state for canister upgrades.
   public type StableContentStoreState = Types.StableContentStoreState;
   /// Serializable identity state for canister upgrades.

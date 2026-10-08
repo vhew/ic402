@@ -1,5 +1,45 @@
 # Changelog
 
+## v2.18.0 — 2026-10-08
+
+Minor — **a refund the close could not make is reported, and its record is kept until the payer
+recovers it.** Requested by EngramX. No `PaymentResult` tag change; no stored type changed
+(`StableSession`, `StableGatewayState` and `STABLE_SCHEMA_VERSION` are unchanged).
+
+### Added
+
+- **`sessionCounts().refundOwed`.** When an ICP close's refund leg fails (refused or rejected by the
+  ledger), the session ends `#closed` with the payer's remainder in its escrow subaccount. When the
+  payer closed, `closeSession` returned `#settlementFailed("Refund leg …")`; when the **expiry sweep**
+  closed, the timer dropped that result and `sessionCounts()` counted the session `closed` like a clean
+  close, so nobody knew. `refundOwed` now counts these sessions until `recoverEscrow` leaves less than
+  one fee in the escrow (a partial recovery keeps it counted). The escrow balance is computed from the
+  close, not queried: an escrow subaccount is derivable and anyone can top it up. The example's
+  `health().sessions` gains the field, so `example.did` and the client IDL gain `refundOwed : nat`
+  (additive; existing decoders ignore it).
+- **`refundOwedToStable()` / `loadRefundOwed(data)`** on the Gateway, and the `Ic402.RefundOwed` type.
+  The owed refunds are kept outside `StableSession`, so persist them in **their own** stable variable
+  and restore them after `loadStable` (README, `docs/upgrade-safety.md`; the example does). The new
+  variable is upgrade-compatible for an existing persistent actor. Unpersisted, the count restarts at 0
+  on upgrade, as before 2.18.0.
+
+### Fixed
+
+- **An owed refund could be stranded for good.** `gcClosedSessions` deleted a `#closed` record 24 h
+  after its last activity even when its refund had failed, and the record is what authorizes
+  `recoverEscrow`: after that, the remainder sat in the escrow with no way left to move it. A session
+  still owed a refund now keeps its record until the payer has recovered it.
+
+### Changed (toolchain, merged since 2.17.7)
+
+- pnpm 9.15.0 → 10.34.6, with `@icp-sdk/icp-cli` and `esbuild` install scripts ignored explicitly
+  (they only validate an optional platform binary; both work without them).
+- icp CLI 1.6.0 everywhere (it was 1.0.2 locally and 1.1.0 in CI).
+- moc 1.11.0 → 1.16.1 and wasmtime 44.0.0 → 48.0.5. The 108 `.vals()` calls moc 1.16 flags (M0269)
+  are now `.values()` (available since moc 0.14, so consumers on moc 1.x are unaffected). An in-place
+  upgrade of a 1.11.0-built example holding state to the 1.16.1 build was rehearsed: state preserved,
+  the replica suite green afterwards.
+
 ## v2.17.7 — 2026-10-06
 
 Patch — **dependency refresh**, from an audit of every dependency and toolchain pin. No library

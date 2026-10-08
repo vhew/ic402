@@ -419,6 +419,7 @@ export const exampleIdlFactory = () =>
             closing: IDL.Nat,
             closed: IDL.Nat,
             expired: IDL.Nat,
+            refundOwed: IDL.Nat, // 2.18.0: closed ICP sessions still owed a refund
           }),
           timers: IDL.Record({
             sessionExpiryArmed: IDL.Bool,

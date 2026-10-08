@@ -1328,11 +1328,22 @@ module {
 
     /// Observability (NEW-4): session status counts (parked #closing sessions are the watch
     /// metric — a deposit whose close broadcast but hasn't confirmed).
+    /// `refundOwed` (2.18.0) counts closed ICP sessions whose refund leg failed and that the payer has
+    /// not yet emptied with recoverEscrow; their records are kept past the 24h GC until then.
     public func sessionCounts() : {
-      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat;
+      total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat;
     } {
       sessionsMgr.sessionCounts();
     };
+
+    /// 2.18.0: the owed refunds behind sessionCounts().refundOwed. Persist them in their OWN stable
+    /// variable (they are not in toStable(), so StableGatewayState is unchanged) and restore them with
+    /// loadRefundOwed after loadStable. Unpersisted, the count restarts at 0 on upgrade and the records
+    /// become GC-eligible again (the pre-2.18 behaviour).
+    public func refundOwedToStable() : [Types.RefundOwed] { sessionsMgr.refundOwedToStable() };
+
+    /// Restore the owed refunds saved by refundOwedToStable (call after loadStable).
+    public func loadRefundOwed(data : [Types.RefundOwed]) { sessionsMgr.loadRefundOwed(data) };
 
     /// Opt-in (default OFF): require an ICP-rail session's Ed25519 voucher key to BE the caller's
     /// own IC identity key (self-authenticating principal check), so the session opener and its

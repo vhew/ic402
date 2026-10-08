@@ -41,7 +41,7 @@ incident.
 |---|---|---|
 | `settle()` / charge returned `#settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx …)")` | Payer's USDC may or may not have landed at the canister's EVM address; **no receipt issued** | §1 |
 | Session status `#closing` and not resolving (`sessions.closing` non-decreasing) | Deposit (or its remainder) parked mid-close in the shared EVM pool | §2 |
-| ICP close returned `#settlementFailed("Refund leg failed (session marked #closed): …")` or `"Refund leg rejected (…)"` | Remainder sits in the session's **ICP escrow subaccount** | §3 |
+| ICP close returned `#settlementFailed("Refund leg failed (session marked #closed): …")` or `"Refund leg rejected (…)"`, or `sessionCounts().refundOwed` / `health().sessions.refundOwed` > 0 | Remainder sits in the session's **ICP escrow subaccount** | §3 |
 | `openSession` returned `#err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx …) — no session was created…"))` | Deposit may or may not have landed in the shared pool; **no session exists** | §4 |
 | You are about to upgrade the canister | Transient recovery state (parked txs, pending-deposit tracker) would be wiped | §5 |
 | A marketplace job returned `"Settlement failed: …"` and rests in `#Verified` | Nothing moved; the buyer's payment is still in the pool | §6 |
@@ -139,7 +139,10 @@ transfer back to the payer failed (a transient ledger error) or, since v2.17.4, 
 ledger unreachable, for example mid-upgrade). The session was still marked `#closed` and (since v2.17.4)
 the payer's daily reservation released; the remainder sits in the session's **per-session ICRC-1 escrow subaccount**
 (`sha256("ic402-escrow" ++ sessionId)` under the canister's principal). The error text says so
-explicitly.
+explicitly. When the expiry sweep made the close, nobody sees that text: since v2.18.0 the session is
+counted in `sessionCounts().refundOwed` (in the example, `health().sessions.refundOwed`), and
+`refundOwedToStable()` lists the session ids with the escrow balance the close left. Contact those
+payers.
 
 **Do:** `recoverEscrow(ledger, sessionId, amount)` — refunds from the escrow subaccount **to the
 payer only** (the library hard-codes the destination and requires `caller == session.payer`; it
@@ -178,12 +181,14 @@ Practical notes, all code-derived:
   Query `icrc1_balance_of({ owner = <canister>; subaccount = ?sha256("ic402-escrow" ++
   sessionId) })` and request `balance − fee`.
 - **Time window:** `recoverEscrow` needs the session record to authorize; `gcClosedSessions`
-  removes `#closed`/`#expired` records **24 h after `lastActivityAt`**. As of v2.17.3 the
-  refund-failure arm and `forceResolveSession` refresh it, so the window is a full 24 h from the
-  close (before, it ran from the last voucher and could already be over). After GC, `recoverEscrow` returns
-  "Session not found" and the funds still sit in the (deterministically derivable) subaccount, but
-  there is **no in-band method left to move them** — recovery would need a custom controller
-  method added by the consumer. **Recover promptly.**
+  removes `#closed`/`#expired` records **24 h after `lastActivityAt`**. **Since v2.18.0 a session
+  still owed a refund is never removed:** its record stays until `recoverEscrow` has left less than
+  one fee in the escrow (a partial recovery keeps it). That protection survives an upgrade only if the
+  canister persists `refundOwedToStable()` and restores it with `loadRefundOwed` (the reference example
+  does; see [`upgrade-safety.md`](upgrade-safety.md)). Before v2.18.0, or without that wiring across an
+  upgrade, the 24 h window applies: after GC, `recoverEscrow` returns "Session not found" and the funds
+  still sit in the (deterministically derivable) subaccount with **no in-band method left to move
+  them**.
 
 ## §4 Inbound EVM deposit broadcast-but-unconfirmed at `openSession` (no session)
 
