@@ -275,7 +275,7 @@ function serialize(value: unknown): unknown {
 const server = new McpServer(
   {
     name: 'ic402',
-    version: '2.17.7',
+    version: '2.18.0',
   },
   {
     instructions:
