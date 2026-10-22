@@ -31,12 +31,12 @@
   },
   "dependencies": {
     "@ic402/client": "workspace:*",
-    "@icp-sdk/core": "6.1.0",
+    "@icp-sdk/core": "6.1.1",
     "@modelcontextprotocol/sdk": "1.32.1",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/node": "26.6.4",
+    "@types/node": "26.6.5",
     "typescript": "6.0.3"
   }
 }
