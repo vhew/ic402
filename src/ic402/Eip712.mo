@@ -329,19 +329,21 @@ module {
 
   // Struct names admit ONE colon-namespaced segment pair — the venue convention for
   // user-signed action types (e.g. Hyperliquid's "HyperliquidTransaction:Withdraw"), which
-  // ethers v5/v6, viem, alloy, and Turnkey all accept (consumer-verified across all five).
+  // ethers v5/v6, alloy, Turnkey, and viem <= 2.57.11 all accept (consumer-verified at 2.13.1);
+  // viem >= 2.57.12 (wevm/viem#5308) refuses colon names outright with InvalidStructTypeError.
   // The colon is safe to admit in OUR emitter because it is not structural in the canonical
   // type-string grammar — only '(' ')' ',' and space are — so encodeTypeString stays
   // injective: the struct name is everything before the first '('.
   //
-  // INTEROP CAVEAT (pinned by test/eip712-colon-interop.test.ts): viem does NOT hash colon
-  // names context-free. Its dependency lookup truncates the primaryType at the first
+  // INTEROP CAVEAT (historical, viem <= 2.57.11; current viem's refusal is the drift alarm in
+  // packages/client/test/eip712-colon-interop.test.ts): older viem did NOT hash colon names
+  // context-free. Its dependency lookup truncates the primaryType at the first
   // non-\w character (`/^\w*/u`), so if the VERIFIER'S types map also contains a struct named
   // exactly the first segment ("Order" beside "Order:V2"), viem silently appends that struct
   // to its type string and the digests diverge — fail-closed (the signature just never
   // verifies; our single-group string cannot equal viem's two-group one), but a confusing
-  // outage. With a singleton types map — the motivating venue's real shape — viem, ethers,
-  // and this encoder agree byte-for-byte. A policy layer SHOULD refuse to register a
+  // outage. With a singleton types map — the motivating venue's real shape — ethers, viem
+  // <= 2.57.11 and this encoder agree byte-for-byte; viem >= 2.57.12 cannot hash it at all. A policy layer SHOULD refuse to register a
   // namespaced type whose first segment equals another registered type's name.
   //
   // FIELD names stay strict single identifiers; nothing in the ecosystem namespaces field
@@ -389,7 +391,7 @@ module {
     // truncating lookup, still can, so the rejection stays (fail-closed). The drift alarm is
     // packages/client/test/eip712-colon-interop.test.ts.
     if (Text.startsWith(structName, #text "EIP712Domain:")) {
-      return #err("struct name '" # structName # "' has the reserved first segment 'EIP712Domain' — viem's dependency lookup truncates the primaryType at the colon and always finds its injected EIP712Domain entry, so viem and ethers permanently disagree on this name's digest; choose a different namespace");
+      return #err("struct name '" # structName # "' has the reserved first segment 'EIP712Domain' — viem <= 2.57.11's dependency lookup truncates the primaryType at the colon and always finds its injected EIP712Domain entry, so that viem and ethers disagree on this name's digest (current viem refuses colon names outright); choose a different namespace");
     };
     // Atomic-shadowing names — NON-COLON names only. In an EIP-712 `types` map a struct named
     // "address"/"uint256"/… SHADOWS the atomic type, and viem refuses such names

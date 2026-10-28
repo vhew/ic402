@@ -235,7 +235,8 @@ module {
       // Derives under the gateway's CURRENT path, which defaults to [] — so a consumer that
       // never calls setEvmDerivationPath gets byte-identical pre-2.16.0 behaviour, and one
       // that does cannot accidentally derive the recipient off the sender's path.
-      // 2.18.1: inline (`await*`) — no self-call hop before the management-canister call.
+      // 2.18.1: inline (`await*`) — no inner self-call hop (deriveRecipient) before the management
+      // call; this function's own `async` hop remains (its signature is public).
       ignore await* deriveRecipientCore(ecdsaKeyName, evmDerivationPath);
     };
 

@@ -292,7 +292,8 @@ module {
     // every settle/refund failed with InsufficientFunds and funds were stranded.
     // All settlement/refund transfers therefore source from config.recipient.
     // 2.18.1: `async*` — runs inline in refundOnRail's / settleToOperator's own message (no self-call, one
-    // outstanding call fewer). Its body cannot trap. refundOnRail itself stays a separate message: it parses
+    // outstanding call fewer). Its only trap source is Candid-decoding a non-ICRC-1 ledger reply, and both
+    // callers are separate messages themselves, so their callers see a reject either way. refundOnRail itself stays a separate message: it parses
     // the buyer principal before its first await, and that isolation keeps one malformed job from wedging
     // the job sweep.
     func payFromMainAccount(to : Types.Account, amount : Nat) : async* { #ok : Nat; #err : Text } {

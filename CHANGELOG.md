@@ -10,7 +10,8 @@ with moc 1.x, so consumers move to moc 2 on their own schedule.
 
 - **Toolchain:**
   - moc 1.16.1 → **2.1.0**, wasmtime 48.0.5 → **50.0.0**, and the mops CLI pinned in CI 3.4.2 →
-    **3.5.1** (it closes smol-toml GHSA-r4xh-jqrq-34v2 and fixes `mops publish` on moc 2).
+    **3.5.1**. 3.5.1 closes smol-toml GHSA-r4xh-jqrq-34v2; 3.5.0 had already fixed `mops publish` on
+    moc 2, which our release job avoids anyway with `--no-bench`.
   - Under moc 2.1.0 every module compiles with zero errors, and the full test suite passed
     unchanged.
   - `[moc] args = ["-E", "M0074"]` is gone: moc 2 makes M0074 an error by default.
@@ -30,20 +31,27 @@ with moc 1.x, so consumers move to moc 2 on their own schedule.
     memory/CPU-exhaustion DoS (#1393, #1391), and reuses the signed call on v4 fallback (#1405).
   - `@modelcontextprotocol/sdk` 1.32.2, `viem` 2.57.13, `cborg` 6.1.6, `zod` 4.6.7.
 - **Dev tooling:**
-  - **vitest 4.1.11 → 5.0.5.** A major, but its breaking changes are in browser mode, benchmarks,
-    coverage and nested `vi.mock`, none of which these tests use.
+  - **vitest 4.1.11 → 5.0.5.** A major. Two of its breaking changes touch this repo:
+    - Config files are no longer found in parent directories. `packages/client` now has its own
+      `vitest.config.ts`, so `pnpm test:client` keeps the root config's 120 s timeout.
+    - `clearMocks` is now on by default. That's a no-op here, since every mock is created inside its
+      test.
+    - Browser mode, benchmarks, coverage and nested `vi.mock` aren't used.
   - eslint 10.13.0, typescript-eslint 8.72.1, prettier 3.9.10, `@types/node` 26.6.5.
   - icp CLI 1.7.0, as both the devDependency and the CI pin. It only adds commands, none of which
     change the ones ic402 runs; checked locally as the pin note requires.
   - pnpm 10.34.9.
 - **Fewer outstanding calls on timer and install paths.** A local `async` function called with
   `await` is a self-call, and on a 13-node subnet each one holds about 82B cycles of reply
-  reservation until it answers. These now run inline with `await*`. Their bodies can't trap, so
-  behaviour is identical.
+  reservation until it answers. These now run inline with `await*`. Behaviour is identical for any
+  ICRC-1-conformant ledger. The only difference: a ledger reply that fails Candid decoding now rests an
+  ICP close in `#closing` for `forceResolveSession`, as a malformed `icrc1_fee` reply already did,
+  instead of reopening the session or recording an owed refund.
 
   | Path | Self-calls saved |
   |---|---|
-  | Install-time EVM recipient derivation (the `startTimers` one-shot and `deriveEvmRecipient`) | 2 → 0 |
+  | Install-time EVM recipient derivation (the `startTimers` one-shot) | 2 → 0 |
+  | `deriveEvmRecipient`, when a consumer calls it (its own `async` hop remains) | 2 → 1 |
   | Escrow settle and refund inside an ICP close, from the sweep or the payer | 2 per close |
   | `recoverEscrow`, and `openSession`'s concurrent-limit refund | 1 each |
   | `ServiceRegistry`'s payment from the main account, for job payouts and the job sweep's refunds | 1 each |
