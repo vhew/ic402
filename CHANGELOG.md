@@ -24,7 +24,13 @@ with moc 1.x, so consumers move to moc 2 on their own schedule.
   - `sha2` 0.2.5 → 0.3.2. 0.3 removed `Digest.fold`/`combineLeaves`/`combineNodes` and changed the
     stored `Sha256.Digest` type. ic402 only uses the one-shot `fromArray`/`fromBlob`, so its hashes are
     byte-identical and every golden vector (escrow subaccounts, Ed25519, vouchers) passes.
-  - `ecdsa` 8.0.1 → 8.0.2 (moc 2 migration; it requires moc ≥ 1.4.0).
+  - **`ecdsa` stays at 8.0.1, on purpose.** 8.0.2 only migrates it to moc 2 and moves it to `sha2`
+    0.3, but it declares that as `sha2@0`. mops resolves one version per 0.x major, so 8.0.2 drags
+    *every* package in a consumer's build that asks for any 0.x `sha2` onto 0.3. Packages written
+    against 0.1/0.2 then fail to compile: the EngramX canary caught it on `ic-certification` 1.1.0,
+    whose `MerkleTree.mo` calls the `SHA256.Digest(#sha256)` constructor that 0.3 removed. ic402's
+    own `sha2 = "0.3.2"` has no such effect, since it uses the unversioned package name. 8.0.1
+    compiles and passes under moc 2.1.0.
   - `core` 2.6.2 comes in transitively. `base` stays at 0.16.0, its final release.
 - **Published npm dependencies:**
   - `@icp-sdk/core` 6.1.1. It bounds Candid decode allocation and LEB128 parsing against
