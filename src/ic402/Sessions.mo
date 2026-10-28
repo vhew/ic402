@@ -390,7 +390,7 @@ module {
             // Best-effort: if this transfer itself fails (transient ledger error) the funds need
             // manual controller recovery, since no session record exists yet.
             let fee : Nat = try { await ledger.icrc1_fee() } catch (_) { 10_000 };
-            let _refundResult = await escrowManager.refund(
+            let _refundResult = await* escrowManager.refundCore(
               ledger, subaccount,
               { owner = caller; subaccount = null },
               Utils.satSub(deposit, fee),
@@ -946,7 +946,9 @@ module {
         // 2.17.3: a ledger reject moved nothing (an ICRC ledger either answers or traps, rolling
         // back), so treat it like the #Err arm below (retry) instead of leaving the session resting
         // in #closing.
-        let settleResult = try { await escrowManager.settle(ledger, session.subaccount, recipientAccount(), settleAmount) } catch (e) {
+        // 2.18.1: inline (`await*`): no self-call, so one outstanding call fewer; a ledger reject still
+        // throws into this catch.
+        let settleResult = try { await* escrowManager.settleCore(ledger, session.subaccount, recipientAccount(), settleAmount) } catch (e) {
           #err("ledger call rejected: " # Error.message(e));
         };
         switch (settleResult) {
@@ -980,7 +982,7 @@ module {
         // both below, rather than leave the session resting in #closing, which recoverEscrow refuses.
         var refundRejected = false;
         let refundResult = try {
-          await escrowManager.refund(ledger, session.subaccount, { owner = session.payer; subaccount = null }, refunded);
+          await* escrowManager.refundCore(ledger, session.subaccount, { owner = session.payer; subaccount = null }, refunded);
         } catch (e) {
           refundRejected := true;
           #err(Error.message(e));
@@ -1588,7 +1590,7 @@ module {
           // H-5: Always refund to the payer's own account (no arbitrary recipient)
           let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
           let subaccount = escrowManager.deriveSubaccount(sessionId);
-          let result = await escrowManager.refund(ledger, subaccount, payerAccount, cappedAmount);
+          let result = await* escrowManager.refundCore(ledger, subaccount, payerAccount, cappedAmount);
           // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
           // `owed.fee` is the fee at the close; if the ledger fee has changed since, the figure is off
           // by the difference (documented in Types.RefundOwed).

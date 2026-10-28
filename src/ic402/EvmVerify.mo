@@ -76,11 +76,6 @@ module {
 
   let RPC_CYCLES : Nat = EvmRpc.RPC_CYCLES;
 
-  // Map a chain ID to the appropriate RpcServices variant.
-  func rpcServices(chainId : Nat) : ?RpcServices {
-    EvmRpc.rpcServices(chainId);
-  };
-
   /// Verify an EVM transaction receipt via the EVM RPC Canister.
   /// Checks: tx succeeded, sent to correct token contract,
   /// Transfer event log shows correct recipient and sufficient amount.

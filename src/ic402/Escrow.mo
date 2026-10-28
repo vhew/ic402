@@ -57,6 +57,18 @@ module {
       recipient : Types.Account,
       amount : Nat,
     ) : async { #ok : Nat; #err : Text } {
+      await* settleCore(ledger, subaccount, recipient, amount);
+    };
+
+    /// 2.18.1: `settle` run inline (`await*`) — no self-call message, so no extra outstanding call
+    /// (and its reserved cycles) while the ledger transfer is in flight. Same result, same errors: a
+    /// ledger reject still throws to the caller. The body cannot trap, so inlining changes nothing else.
+    public func settleCore(
+      ledger : Types.LedgerActor,
+      subaccount : Blob,
+      recipient : Types.Account,
+      amount : Nat,
+    ) : async* { #ok : Nat; #err : Text } {
       if (amount == 0) return #ok(0);
 
       let result = await ledger.icrc1_transfer({
@@ -80,6 +92,16 @@ module {
       payer : Types.Account,
       amount : Nat,
     ) : async { #ok : Nat; #err : Text } {
+      await* refundCore(ledger, subaccount, payer, amount);
+    };
+
+    /// 2.18.1: `refund` run inline (`await*`), as `settleCore`.
+    public func refundCore(
+      ledger : Types.LedgerActor,
+      subaccount : Blob,
+      payer : Types.Account,
+      amount : Nat,
+    ) : async* { #ok : Nat; #err : Text } {
       if (amount == 0) return #ok(0);
 
       let result = await ledger.icrc1_transfer({

@@ -15,7 +15,6 @@ import HashMap "mo:base/HashMap";
 import Buffer "mo:base/Buffer";
 import Iter "mo:base/Iter";
 import Nat "mo:base/Nat";
-import Int "mo:base/Int";
 import Utils "Utils";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
@@ -168,7 +167,7 @@ module {
         case (null) {
           switch (job.operator) {
             case (?op) {
-              switch (await payFromMainAccount({ owner = op; subaccount = null }, cost)) {
+              switch (await* payFromMainAccount({ owner = op; subaccount = null }, cost)) {
                 case (#ok(_)) { #ok };
                 case (#err(e)) { #err(e) };
               };
@@ -202,7 +201,7 @@ module {
         case (null) {
           switch (buyerIcpAccount(job.buyer)) {
             case (?acct) {
-              switch (await payFromMainAccount(acct, amount)) {
+              switch (await* payFromMainAccount(acct, amount)) {
                 case (#ok(_)) { #ok };
                 case (#err(e)) { #err(e) };
               };
@@ -292,7 +291,11 @@ module {
     // subaccount. The previous code transferred from an unfunded subaccount, so
     // every settle/refund failed with InsufficientFunds and funds were stranded.
     // All settlement/refund transfers therefore source from config.recipient.
-    func payFromMainAccount(to : Types.Account, amount : Nat) : async { #ok : Nat; #err : Text } {
+    // 2.18.1: `async*` — runs inline in refundOnRail's / settleToOperator's own message (no self-call, one
+    // outstanding call fewer). Its body cannot trap. refundOnRail itself stays a separate message: it parses
+    // the buyer principal before its first await, and that isolation keeps one malformed job from wedging
+    // the job sweep.
+    func payFromMainAccount(to : Types.Account, amount : Nat) : async* { #ok : Nat; #err : Text } {
       if (amount == 0) return #ok(0);
       if (config.tokens.size() == 0) return #err("No token configured");
       let ledger : Types.LedgerActor = actor (Principal.toText(config.tokens[0].ledger));

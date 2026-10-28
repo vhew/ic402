@@ -9,15 +9,12 @@ import Time "mo:base/Time";
 import Nat "mo:base/Nat";
 import Int "mo:base/Int";
 import Text "mo:base/Text";
-import Iter "mo:base/Iter";
 import Buffer "mo:base/Buffer";
 import Principal "mo:base/Principal";
 import Timer "mo:base/Timer";
 import Error "mo:base/Error";
-import Nat32 "mo:base/Nat32";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
-import HashMap "mo:base/HashMap";
 import SHA256 "mo:sha2/Sha256";
 import Utils "Utils";
 import EvmAddress "EvmAddress";
@@ -238,7 +235,8 @@ module {
       // Derives under the gateway's CURRENT path, which defaults to [] — so a consumer that
       // never calls setEvmDerivationPath gets byte-identical pre-2.16.0 behaviour, and one
       // that does cannot accidentally derive the recipient off the sender's path.
-      ignore await deriveRecipient(ecdsaKeyName, evmDerivationPath);
+      // 2.18.1: inline (`await*`) — no self-call hop before the management-canister call.
+      ignore await* deriveRecipientCore(ecdsaKeyName, evmDerivationPath);
     };
 
     /// Derive the inbound EVM recipient under an explicit derivation path, validated.
@@ -275,7 +273,17 @@ module {
 
     // Shared body. Returns early when already derived — the slot is persisted and a
     // gateway's recipient must never move once payers have it.
+    // deriveEvmRecipientAt keeps this separate message (its try/catch turns any failure, a trap
+    // included, into #err); the install timer and deriveEvmRecipient run the body inline.
     func deriveRecipient(ecdsaKeyName : Text, derivationPath : [Blob]) : async {
+      #ok;
+      #err : Text;
+    } {
+      await* deriveRecipientCore(ecdsaKeyName, derivationPath);
+    };
+
+    // 2.18.1: the body, as `async*`. Nothing before its first await can trap.
+    func deriveRecipientCore(ecdsaKeyName : Text, derivationPath : [Blob]) : async* {
       #ok;
       #err : Text;
     } {
@@ -1266,7 +1274,9 @@ module {
       switch (config.ecdsaKeyName) {
         case (?keyName) {
           ignore Timer.setTimer<system>(#seconds 0, func() : async () {
-            await deriveEvmRecipient(keyName);
+            // 2.18.1: inline — was two self-calls (deriveEvmRecipient, deriveRecipient) before the
+            // management call, each holding a reply reservation during install/upgrade.
+            ignore await* deriveRecipientCore(keyName, evmDerivationPath);
           });
         };
         case (null) {};

@@ -379,11 +379,15 @@ module {
     if (structName == "EIP712Domain") {
       return #err("struct name 'EIP712Domain' is reserved by EIP-712 — standard implementations sign the DOMAIN ONLY for this primaryType, so a digest built from it is unverifiable everywhere; name your struct something else");
     };
-    // A FIRST SEGMENT of "EIP712Domain" diverges UNCONDITIONALLY under viem (empirically
-    // verified against 2.55.2): viem injects an EIP712Domain entry into every types map and
-    // its dependency lookup truncates the primaryType at the colon, so "EIP712Domain:X" pulls
-    // the domain struct into viem's type string while ethers (and we) hash the name
-    // context-free — the two ecosystems disagree on the digest, permanently.
+    // A FIRST SEGMENT of "EIP712Domain" diverges UNCONDITIONALLY under viem <= 2.57.11
+    // (empirically verified against 2.55.2): viem injects an EIP712Domain entry into every types
+    // map and its dependency lookup truncates the primaryType at the colon, so "EIP712Domain:X"
+    // pulls the domain struct into viem's type string while ethers (and we) hash the name
+    // context-free — the two ecosystems disagree on the digest, permanently. Re-derived for
+    // 2.18.1: viem >= 2.57.12 (wevm/viem#5308) refuses every colon struct name outright, so it can
+    // no longer produce that wrong digest — but verifiers on older viem, or with the same
+    // truncating lookup, still can, so the rejection stays (fail-closed). The drift alarm is
+    // packages/client/test/eip712-colon-interop.test.ts.
     if (Text.startsWith(structName, #text "EIP712Domain:")) {
       return #err("struct name '" # structName # "' has the reserved first segment 'EIP712Domain' — viem's dependency lookup truncates the primaryType at the colon and always finds its injected EIP712Domain entry, so viem and ethers permanently disagree on this name's digest; choose a different namespace");
     };
