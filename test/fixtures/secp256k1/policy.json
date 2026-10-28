@@ -1,16 +1,27 @@
 {
-  "description": "secp256k1 ECDSA vectors for ic402 behaviour that Wycheproof does not pin. Built for test/secp256k1.test.mo; how each was made and checked is in the README beside this file.",
+  "description": "secp256k1 ECDSA vectors for ic402 behaviour that Wycheproof does not pin. Built for test/secp256k1.test.mo; how each was made and checked is in the README beside this file. recover_v0 / recover_v1 are what EvmAddress.ecRecover must return for v = 0 / v = 1 (null = no key).",
   "vectors": [
     {
       "name": "r + n fallback: x = r is not on the curve, R.x = r + n",
       "hash": "3bd3fd6c96e5140d335067742188f248f1878babe35c9e461514ef79ed423466",
       "r": "0000000000000000000000000000000000000000000000000000000000000007",
       "s": "3162c86538d7bad11de424102c2759fe4459532bba1be983e290526a0dfe45eb",
-      "v": 0,
-      "pub": "021376e71d6cd2c7e2b7e0a944e8fcc8010d6cc96a131be3adb277a4266a26c66f",
-      "ic402": "ecRecover(hash, r, s, 0) recovers pub through its r + n fallback; v = 1 recovers a different key",
-      "ethereum": "ecrecover cannot recover it: v is 27 or 28 only, so x = r, which is not on the curve",
-      "noble_curves_2_4_0": "verify(prehash: false) accepts; recovery bits 0 and 1 throw (x = r not on the curve); recovery bit 2 recovers pub"
+      "signer": "021376e71d6cd2c7e2b7e0a944e8fcc8010d6cc96a131be3adb277a4266a26c66f",
+      "recover_v0": "021376e71d6cd2c7e2b7e0a944e8fcc8010d6cc96a131be3adb277a4266a26c66f",
+      "recover_v1": "022808822be07463378686621deb9d49cc13cb23f808c708ef727c6cb0f88a76de",
+      "ethereum": "ecrecover recovers nothing for either v: it only tries x = r, which is not on the curve",
+      "noble_curves_2_4_0": "verify accepts for signer; recovery bits 0 and 1 throw (x = r not on the curve); bit 2 recovers recover_v0 (the signer) and bit 3 recovers recover_v1"
+    },
+    {
+      "name": "parity fallthrough: under R's own parity the recovered point is infinity",
+      "hash": "22b73197281a096ab2880d7405a407862c3b4fa83fd655c4dc769985961e5bd3",
+      "r": "8f541f789737069b6a0fabdf59e8834b86beb9f9904daff68049bf671b586e2a",
+      "s": "2b438c7aaa023d1d039adc168d1c69976fe92c94e35162fd1b39afc04b15b1c2",
+      "signer": "0233b4ae21b7408a96aad115004aae5a0b835392b1b2481fcd62e2426b01055c77",
+      "recover_v0": "0233b4ae21b7408a96aad115004aae5a0b835392b1b2481fcd62e2426b01055c77",
+      "recover_v1": "0233b4ae21b7408a96aad115004aae5a0b835392b1b2481fcd62e2426b01055c77",
+      "ethereum": "ecrecover recovers the signer for v = 27 and nothing for v = 28 (infinity)",
+      "noble_curves_2_4_0": "verify accepts for signer; recovery bit 0 recovers the signer; bit 1 throws (point at infinity)"
     }
   ]
 }

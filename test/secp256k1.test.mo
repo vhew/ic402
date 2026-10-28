@@ -1,32 +1,42 @@
 // @testmode wasi
-/// Conformance suite for ic402's secp256k1 signer recovery (EvmAddress.ecRecover), which every
-/// EIP-3009 payment check rests on (Eip712.recoverAuthorizationSigner).
+/// Conformance suite for ic402's secp256k1 signer recovery, EvmAddress.ecRecover. Two callers
+/// rest on it: Eip712.recoverAuthorizationSigner (every EIP-3009 payment check) and
+/// ServiceRegistry.recoverBuyerActionSigner (EVM buyer confirm/dispute, final with no on-chain
+/// step behind it).
 ///
-/// Every expectation comes from OUTSIDE ic402: Wycheproof's 252 secp256k1 ECDSA vectors, plus
-/// one constructed vector cross-checked with @noble/curves. Provenance: test/fixtures/secp256k1/
-/// README.md. Runs compiled (wasi): ~500 recoveries take ~40 s in the interpreter, ~2 s here.
+/// Every expectation comes from OUTSIDE ic402: Wycheproof's 252 secp256k1 ECDSA vectors, with
+/// each verifying signature's recovery id found by plain ECDSA verification in the generator,
+/// plus two constructed vectors cross-checked with @noble/curves. Provenance:
+/// test/fixtures/secp256k1/README.md. Runs compiled (wasi): ~500 recoveries take ~40 s in the
+/// interpreter, ~2 s here.
 ///
 /// HOW A VECTOR IS JUDGED. Wycheproof gives (public key, message, r || s) and asks "does this
 /// verify?". ecRecover instead takes a digest, r, s and a recovery id v, and returns a key. ic402
 /// "accepts" a vector when r and s are 32 bytes each (as Eip712.verifyAuthorization requires) and
 /// ecRecover with v = 0 or v = 1 returns the vector's key. Trying both v is the generous reading:
-/// a forgery that recovers the key under either v would be a forgery.
+/// a forgery that recovers the key under either v would be a forgery. Which v does it is pinned
+/// separately, against the generator's recovery id.
 ///
-/// POLICY (where ic402 knowingly differs from a plain ECDSA verifier):
+/// POLICY (where ic402 knowingly differs from a plain ECDSA verifier or Ethereum's ecrecover):
 ///   - High s is accepted. ecRecover normalizes s to n - s and flips the parity, so a signature
 ///     and its malleation recover the same key. Wycheproof's plain file treats high s as valid
-///     too. (USDC rejects high s on chain; a payer who sends one gets #settlementFailed and no
-///     value — see Gateway.mo.)
-///   - Recovery ids 2 and 3 are not supported, exactly like Ethereum's ecrecover (v is 27/28).
-///     When the nonce point R has x >= n, the signature's r is R.x - n; if x = r is ALSO on the
-///     curve, ecRecover decompresses that point and returns a different key. Wycheproof tcId 115
-///     and 247 are such signatures: valid ECDSA, refused by ic402 and by Ethereum alike. An
-///     honest signer produces one about once in 2^128 signatures.
+///     too; USDC rejects it on chain.
+///   - v is read only as a parity bit. ic402 never derives R.x = r + n from v, so like Ethereum
+///     (v = 27/28) it cannot recover signatures that need recovery id 2 or 3: when the nonce
+///     point R has x >= n and x = r is ALSO on the curve, ecRecover returns a different key.
+///     Wycheproof tcId 115 and 247 are such signatures. An honest signer produces one about once
+///     in 2^128 signatures. (Other v values are folded onto a parity, not refused.)
 ///   - The r + n FALLBACK, which Ethereum lacks: when x = r is NOT on the curve, ecRecover
-///     retries with x = r + n. So ic402 recovers a signer for the policy vector below, where
-///     Ethereum's ecrecover fails. Kept deliberately (2.18.x): building such a signature for a
-///     chosen key needs a nonce with R.x >= n (~2^128 work), and if one ever arrived the on-chain
-///     transfer would revert and the payer gets #settlementFailed, the same as any other reject.
+///     retries with x = r + n (if that is below p), and recovers a signer Ethereum cannot.
+///   - The parity FALLTHROUGH, which Ethereum lacks: when the given v's point yields the point
+///     at infinity, ecRecover tries the other parity, so both v return the same key where
+///     Ethereum's ecrecover fails for one of them.
+///   The last two are kept deliberately (2.18.x) and pinned below. Neither is a forgery path:
+///   the key either one recovers is one the signature genuinely verifies under, and steering it
+///   onto a chosen address means solving a discrete log. For a payment, the on-chain transfer
+///   with such a signature reverts, and settle returns #settlementFailed with no value moved.
+///   POST /verify (Gateway.verifyPayment) checks only the recovery, so it reports isValid for
+///   such a signature, and for a high-s one. Do not deliver on /verify alone.
 import EvmAddress "../src/ic402/EvmAddress";
 import EvmUtils "../src/ic402/EvmUtils";
 import V "fixtures/secp256k1/Vectors";
@@ -40,25 +50,30 @@ let secpN : Nat = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD036
 // The two Wycheproof-valid signatures ic402 refuses by policy (recovery id 2/3; see above).
 let refusedByPolicy : [Nat] = [115, 247];
 
-type Outcome = { tcId : Nat; flags : [Text]; valid : Bool; accepted : Bool; parityMatches : Nat };
+type Outcome = {
+  tcId : Nat;
+  flags : [Text];
+  valid : Bool;
+  recId : ?Nat8;
+  byV0 : Bool; // ecRecover(.., 0) returned the vector's key
+  byV1 : Bool;
+  accepted : Bool;
+};
 
 // Recover once per vector and parity (~500 recoveries), then let the tests inspect the results.
 func judge(v : V.Wycheproof) : Outcome {
   let sig = Blob.toArray(v.sig);
   let pub = Blob.toArray(v.pub);
-  var matches = 0;
+  var byV0 = false;
+  var byV1 = false;
   if (sig.size() == 64) {
     let h = Blob.toArray(v.hash);
     let r = Array.subArray(sig, 0, 32);
     let s = Array.subArray(sig, 32, 32);
-    for (rec in ([0, 1] : [Nat8]).values()) {
-      switch (EvmAddress.ecRecover(h, r, s, rec)) {
-        case (?q) { if (q == pub) matches += 1 };
-        case (null) {};
-      };
-    };
+    byV0 := EvmAddress.ecRecover(h, r, s, 0) == ?pub;
+    byV1 := EvmAddress.ecRecover(h, r, s, 1) == ?pub;
   };
-  { tcId = v.tcId; flags = v.flags; valid = v.valid; accepted = matches > 0; parityMatches = matches };
+  { tcId = v.tcId; flags = v.flags; valid = v.valid; recId = v.recId; byV0; byV1; accepted = byV0 or byV1 };
 };
 
 let outcomes : [Outcome] = Array.map<V.Wycheproof, Outcome>(V.wycheproof, judge);
@@ -112,14 +127,38 @@ suite("Wycheproof ecdsa_secp256k1_sha256_p1363_test.json — all 252", func() {
     });
   };
 
-  test("the only Wycheproof-valid signatures refused are tcId 115 and 247 (recovery id 2/3)", func() {
+  test("the only Wycheproof-valid signatures refused are tcId 115 and 247, recovery id 3 and 2", func() {
     // Pins the policy both ways: if ecRecover learns recovery ids 2/3 (diverging from Ethereum's
     // ecrecover), or starts refusing anything else, this fails and the policy above needs a look.
     var refused : [Nat] = [];
     for (o in outcomes.values()) {
-      if (o.valid and not o.accepted) refused := Array.append(refused, [o.tcId]);
+      if (o.valid and not o.accepted) {
+        refused := Array.append(refused, [o.tcId]);
+        assert o.recId == ?2 or o.recId == ?3;
+      };
     };
     assert refused == refusedByPolicy;
+  });
+
+  test("each accepted signature recovers its key under its own recovery id only (165 vectors)", func() {
+    // The id comes from the generator's plain ECDSA verification, not from ic402. This pins the
+    // v -> parity mapping and, through Wycheproof's high-s vectors, the parity flip that goes
+    // with normalizing s. For these vectors the other v recovers a different key (or none).
+    var checked = 0;
+    for (o in outcomes.values()) {
+      if (o.accepted) {
+        checked += 1;
+        switch (o.recId) {
+          case (?0) { assert o.byV0 and not o.byV1 };
+          case (?1) { assert o.byV1 and not o.byV0 };
+          case (_) {
+            Debug.print("  tcId " # debug_show(o.tcId) # " accepted with recId " # debug_show(o.recId));
+            assert false;
+          };
+        };
+      };
+    };
+    assert checked == 165;
   });
 
   test("r or s of 0 or >= n returns null under both v (50 vectors), not merely a wrong key", func() {
@@ -151,31 +190,44 @@ suite("Wycheproof ecdsa_secp256k1_sha256_p1363_test.json — all 252", func() {
     assert r0 == 7 and rn == 31 and s0 == 8 and sn == 29;
   });
 
-  test("every accepted signature recovers the key under exactly one v", func() {
-    // A wrong v must not recover the signer: it yields a different key (or none), which the
-    // EIP-712 check then rejects as a signer mismatch.
-    for (o in outcomes.values()) {
-      if (o.accepted) assert o.parityMatches == 1;
+  test("x = r off the curve with r + n >= p returns null under both v (tcId 33, 35, 204)", func() {
+    // Pins the `r + n < p` bound on the fallback. Without it, x = r + n would be reduced mod p,
+    // and for these three that is a valid x-coordinate, so a (wrong) key would come back.
+    for (id in [33, 35, 204].values()) {
+      let ?v = Array.find<V.Wycheproof>(V.wycheproof, func(w) = w.tcId == id) else {
+        assert false;
+        return;
+      };
+      let sig = Blob.toArray(v.sig);
+      assert sig.size() == 64;
+      let h = Blob.toArray(v.hash);
+      let r = Array.subArray(sig, 0, 32);
+      let s = Array.subArray(sig, 32, 32);
+      assert EvmUtils.bytesToNat(r) + secpN >= 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
+      assert EvmAddress.ecRecover(h, r, s, 0) == null;
+      assert EvmAddress.ecRecover(h, r, s, 1) == null;
     };
   });
 });
 
-suite("Policy: the r + n fallback (constructed; Ethereum's ecrecover cannot recover it)", func() {
-  assert V.policy.size() == 1;
-  let p = V.policy[0];
-  let h = Blob.toArray(p.hash);
-  let r = Blob.toArray(p.r);
-  let s = Blob.toArray(p.s);
-
-  test("ic402 recovers the signer: x = r is off the curve, so it retries x = r + n", func() {
-    assert EvmAddress.ecRecover(h, r, s, p.v) == ?Blob.toArray(p.pub);
-  });
-
-  test("the other v recovers a different key", func() {
-    let other : Nat8 = if (p.v == 0) 1 else 0;
-    switch (EvmAddress.ecRecover(h, r, s, other)) {
-      case (?q) { assert q != Blob.toArray(p.pub) };
-      case (null) {};
+suite("Policy vectors (constructed; Ethereum's ecrecover disagrees on each)", func() {
+  assert V.policy.size() == 2;
+  for (p in V.policy.values()) {
+    let h = Blob.toArray(p.hash);
+    let r = Blob.toArray(p.r);
+    let s = Blob.toArray(p.s);
+    let want = func(k : ?Blob) : ?[Nat8] = switch (k) {
+      case (?b) { ?Blob.toArray(b) };
+      case (null) { null };
     };
-  });
+    test(p.name # ": v = 0 recovers what policy.json records", func() {
+      assert EvmAddress.ecRecover(h, r, s, 0) == want(p.v0);
+    });
+    test(p.name # ": v = 1 recovers what policy.json records", func() {
+      assert EvmAddress.ecRecover(h, r, s, 1) == want(p.v1);
+    });
+    test(p.name # ": the signer is recovered under some v", func() {
+      assert want(p.v0) == ?Blob.toArray(p.signer) or want(p.v1) == ?Blob.toArray(p.signer);
+    });
+  };
 });

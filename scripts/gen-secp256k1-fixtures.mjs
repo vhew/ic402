@@ -9,6 +9,10 @@
 // SHA-256 (the file's hash), and each public key is emitted in the compressed SEC1 form
 // ecRecover returns.
 //
+// For each signature that verifies, the generator also emits its recovery id, found by
+// standard ECDSA VERIFICATION (R = s⁻¹(zG + rQ); id = parity of R.y, + 2 if R.x >= n). That
+// is independent of ic402's recovery code, so the test can pin which v recovers the signer.
+//
 //   node scripts/gen-secp256k1-fixtures.mjs
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -35,6 +39,52 @@ const compress = (uncompressed) => {
   return (yOdd ? '03' : '02') + x;
 };
 
+// ── Minimal secp256k1 arithmetic (affine, BigInt) — only to find each signature's recovery id ──
+const P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const G = [
+  0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n,
+  0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n,
+];
+const mod = (a, m) => ((a % m) + m) % m;
+const inv = (a, m) => {
+  let [r0, r1, t0, t1] = [mod(a, m), m, 1n, 0n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1, t0, t1] = [r1, r0 - q * r1, t1, t0 - q * t1];
+  }
+  if (r0 !== 1n) throw new Error('not invertible');
+  return mod(t0, m);
+};
+const add = (A, B) => {
+  if (A === null) return B;
+  if (B === null) return A;
+  if (A[0] === B[0] && mod(A[1] + B[1], P) === 0n) return null;
+  const l =
+    A[0] === B[0]
+      ? mod(3n * A[0] * A[0] * inv(2n * A[1], P), P)
+      : mod((B[1] - A[1]) * inv(B[0] - A[0], P), P);
+  const x = mod(l * l - A[0] - B[0], P);
+  return [x, mod(l * (A[0] - x) - A[1], P)];
+};
+const mul = (k, A) => {
+  let R = null;
+  for (; k > 0n; k >>= 1n, A = add(A, A)) if (k & 1n) R = add(R, A);
+  return R;
+};
+// The recovery id (0-3) of (r, s) over digest z for key Q, or null if it does not verify.
+const recoveryId = (zHex, sigHex, uncompressed) => {
+  if (sigHex.length !== 128) return null;
+  const r = BigInt('0x' + sigHex.slice(0, 64));
+  const s = BigInt('0x' + sigHex.slice(64));
+  if (r === 0n || r >= N || s === 0n || s >= N) return null;
+  const Q = [BigInt('0x' + uncompressed.slice(2, 66)), BigInt('0x' + uncompressed.slice(66))];
+  const w = inv(s, N);
+  const R = add(mul(mod(BigInt('0x' + zHex) * w, N), G), mul(mod(r * w, N), Q));
+  if (R === null || mod(R[0], N) !== r) return null;
+  return Number(R[1] & 1n) + (R[0] >= N ? 2 : 0);
+};
+
 const lines = [];
 const out = (s) => lines.push(s);
 
@@ -44,10 +94,10 @@ out(
 out('// CI regenerates this file and fails on any diff. Provenance and licences: README.md here.');
 out('module {');
 out(
-  '  public type Wycheproof = { tcId : Nat; flags : [Text]; valid : Bool; pub : Blob; hash : Blob; sig : Blob };',
+  '  public type Wycheproof = { tcId : Nat; flags : [Text]; valid : Bool; pub : Blob; hash : Blob; sig : Blob; recId : ?Nat8 };',
 );
 out(
-  '  public type Policy = { name : Text; pub : Blob; hash : Blob; r : Blob; s : Blob; v : Nat8 };',
+  '  public type Policy = { name : Text; signer : Blob; hash : Blob; r : Blob; s : Blob; v0 : ?Blob; v1 : ?Blob };',
 );
 out('');
 
@@ -56,7 +106,8 @@ const wpFile = 'ecdsa_secp256k1_sha256_p1363_test.json';
 const wp = read(wpFile);
 let wpCount = 0;
 out(`  /// C2SP/wycheproof testvectors_v1/${wpFile} — every test, in file order.`);
-out('  /// `hash` is SHA-256(msg); `pub` is the group key, compressed; `sig` is r || s as given.');
+out('  /// `hash` is SHA-256(msg); `pub` is the group key, compressed; `sig` is r || s as given;');
+out('  /// `recId` is the recovery id (0-3) when the signature verifies, found by verification.');
 out('  public let wycheproof : [Wycheproof] = [');
 for (const g of wp.testGroups) {
   if (g.type !== 'EcdsaP1363Verify' || g.sha !== 'SHA-256' || g.publicKey.curve !== 'secp256k1')
@@ -67,8 +118,13 @@ for (const g of wp.testGroups) {
       throw new Error(`tcId ${t.tcId}: result ${t.result}`);
     if (t.flags.length === 0) throw new Error(`tcId ${t.tcId}: no flags`);
     const flags = '[' + t.flags.map(text).join(', ') + ']';
+    const hash = sha256(t.msg);
+    const rec = recoveryId(hash, t.sig, g.publicKey.uncompressed);
+    // Our verification must agree with Wycheproof's verdict, or the recovery ids are not trustworthy.
+    if ((rec !== null) !== (t.result === 'valid'))
+      throw new Error(`tcId ${t.tcId}: verification disagrees with Wycheproof (${t.result})`);
     out(
-      `    { tcId = ${t.tcId}; flags = ${flags}; valid = ${t.result === 'valid'}; pub = ${blob(pub)}; hash = ${blob(sha256(t.msg))}; sig = ${blob(t.sig)} },`,
+      `    { tcId = ${t.tcId}; flags = ${flags}; valid = ${t.result === 'valid'}; pub = ${blob(pub)}; hash = ${blob(hash)}; sig = ${blob(t.sig)}; recId = ${rec === null ? 'null' : '?' + rec} },`,
     );
     wpCount++;
   }
@@ -81,13 +137,16 @@ out('');
 const pol = read('policy.json').vectors;
 out('  /// Vectors for behaviour Wycheproof does not pin (see policy.json for how each is built).');
 out('  public let policy : [Policy] = [');
+const optKey = (name, k) => {
+  if (k === null) return 'null';
+  if (k.length !== 66) throw new Error(`${name}: key is not 33 bytes`);
+  return '?' + blob(k);
+};
 for (const v of pol) {
-  if (!Number.isInteger(v.v) || v.v < 0 || v.v > 1) throw new Error(`${v.name}: v ${v.v}`);
   for (const k of ['hash', 'r', 's'])
     if (v[k].length !== 64) throw new Error(`${v.name}: ${k} is not 32 bytes`);
-  if (v.pub.length !== 66) throw new Error(`${v.name}: pub is not 33 bytes`);
   out(
-    `    { name = ${text(v.name)}; pub = ${blob(v.pub)}; hash = ${blob(v.hash)}; r = ${blob(v.r)}; s = ${blob(v.s)}; v = ${v.v} },`,
+    `    { name = ${text(v.name)}; signer = ${blob(v.signer)}; hash = ${blob(v.hash)}; r = ${blob(v.r)}; s = ${blob(v.s)}; v0 = ${optKey(v.name, v.recover_v0)}; v1 = ${optKey(v.name, v.recover_v1)} },`,
   );
 }
 out('  ];');

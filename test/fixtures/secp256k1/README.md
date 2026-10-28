@@ -31,25 +31,42 @@ vectors on DER parsing, which ic402 never does.
   - It matches all 167 valid vectors except tcId 115 and 247. Both are signatures whose nonce
     point R has x >= n, which need recovery id 2 or 3. Ethereum's `ecrecover` (v = 27/28) cannot
     recover them either. The test pins this refusal.
-- **Policy** (1 vector): the r + n fallback. When x = r is not on the curve, `ecRecover` retries
-  with x = r + n, which Ethereum's `ecrecover` does not. The test pins that ic402 recovers the
-  signer here, so the behaviour is recorded rather than accidental. Why it is kept is written at
-  the top of `test/secp256k1.test.mo`.
+  - Each accepted signature recovers its key under its own recovery id and not the other. The
+    generator finds each id by plain ECDSA verification (R = s⁻¹(zG + rQ)), independently of
+    ic402's recovery code, and checks that its verification agrees with Wycheproof on all 252.
+  - Out-of-range r or s returns no key at all, and so does x = r off the curve with r + n >= p
+    (tcId 33, 35, 204).
+- **Policy** (2 vectors): two ways `ecRecover` recovers a key where Ethereum's `ecrecover` does
+  not. The test pins both v results for each, so the behaviour is recorded rather than
+  accidental. Why both are kept is written at the top of `test/secp256k1.test.mo`.
+  - **r + n fallback.** When x = r is not on the curve, `ecRecover` retries with x = r + n.
+  - **Parity fallthrough.** When the point for the given v yields the point at infinity,
+    `ecRecover` tries the other parity, so both v return the same key.
 
-### How the policy vector was built
+### How the policy vectors were built
 
-Pure-stdlib Python, deterministic:
+Both use pure-stdlib Python and are deterministic. Each was self-checked with standard ECDSA
+verification and cross-checked with `@noble/curves` 2.4.0, whose `verify` accepts both.
 
-1. Take the smallest t >= 1 with n + t a valid x-coordinate and t not one (t = 7).
-2. Let R be the point with x = n + t and even y, so r = t and the recovery parity is 0.
+**r + n fallback:**
+
+1. Take the smallest t >= 1 such that n + t is a valid x-coordinate and t itself is not (t = 7).
+   n + 2, n + 4 and n + 6 are valid too, but so are 2, 4 and 6, so the fallback would never run.
+2. Let R be the point with x = n + t and even y, so r = t.
 3. Take z = SHA-256(`"ic402 r+n recovery fallback"`), and s = SHA-256(`"ic402 r+n recovery fallback / s"`) mod n, reduced to low s.
-4. Compute Q = r⁻¹(sR − zG), and self-check that standard ECDSA verification gives R back.
+4. Compute the signer Q = r⁻¹(sR − zG).
 
-It was cross-checked with `@noble/curves` 2.4.0:
+noble: recovery bits 0 and 1 throw (x = r is not on the curve), which is Ethereum's situation.
+Bit 2 recovers the signer (ic402's v = 0), and bit 3 recovers the key ic402 returns for v = 1.
 
-- `verify` accepts it, with and without the low-s rule.
-- Recovery bits 0 and 1 throw (x = r is not on the curve), which is Ethereum's situation.
-- Recovery bit 2 recovers Q.
+**Parity fallthrough:**
+
+1. Take z = SHA-256(`"ic402 recovery parity fallthrough"`), and k = SHA-256(`"ic402 recovery parity fallthrough / k"`) mod n, incremented until R = kG has R.x < n and s is low.
+2. Set r = R.x and s = z / k mod n. Under R's own parity, recovery gives r⁻¹(sR − zG), the point
+   at infinity. Under the other parity it gives the signer K = (−2z / r)G.
+
+noble: recovery bit 1 (R's parity) throws "point at infinity", which is Ethereum's situation.
+Bit 0 recovers K. ic402 returns K for both v.
 
 ## Regenerating
 
