@@ -294,3 +294,18 @@ jobs:
       - run: node scripts/gen-ed25519-fixtures.mjs
       - name: Fail if Vectors.mo is stale (run scripts/gen-ed25519-fixtures.mjs and commit)
         run: git diff --exit-code test/fixtures/ed25519/Vectors.mo
+
+  # Same arrangement for test/fixtures/secp256k1 (test/secp256k1.test.mo, signer recovery).
+  secp256k1-fixtures-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: The vendored Wycheproof vectors are byte-for-byte upstream
+        working-directory: test/fixtures/secp256k1
+        run: echo "7a339efc7134fb2495cd32afdbd692e0f86427d3c24e9073f6a7d858bb8788d2  ecdsa_secp256k1_sha256_p1363_test.json" | sha256sum -c
+      - run: node scripts/gen-secp256k1-fixtures.mjs
+      - name: Fail if Vectors.mo is stale (run scripts/gen-secp256k1-fixtures.mjs and commit)
+        run: git diff --exit-code test/fixtures/secp256k1/Vectors.mo

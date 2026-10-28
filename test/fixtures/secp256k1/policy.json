@@ -1,0 +1,16 @@
+{
+  "description": "secp256k1 ECDSA vectors for ic402 behaviour that Wycheproof does not pin. Built for test/secp256k1.test.mo; how each was made and checked is in the README beside this file.",
+  "vectors": [
+    {
+      "name": "r + n fallback: x = r is not on the curve, R.x = r + n",
+      "hash": "3bd3fd6c96e5140d335067742188f248f1878babe35c9e461514ef79ed423466",
+      "r": "0000000000000000000000000000000000000000000000000000000000000007",
+      "s": "3162c86538d7bad11de424102c2759fe4459532bba1be983e290526a0dfe45eb",
+      "v": 0,
+      "pub": "021376e71d6cd2c7e2b7e0a944e8fcc8010d6cc96a131be3adb277a4266a26c66f",
+      "ic402": "ecRecover(hash, r, s, 0) recovers pub through its r + n fallback; v = 1 recovers a different key",
+      "ethereum": "ecrecover cannot recover it: v is 27 or 28 only, so x = r, which is not on the curve",
+      "noble_curves_2_4_0": "verify(prehash: false) accepts; recovery bits 0 and 1 throw (x = r not on the curve); recovery bit 2 recovers pub"
+    }
+  ]
+}
