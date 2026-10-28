@@ -1,5 +1,94 @@
 # Changelog
 
+## v2.18.1 — 2026-10-28
+
+Patch — **ic402 now builds with moc 2.1.0, with every dependency refreshed.** Requested by EngramX. No
+API, type, `PaymentResult`, stored-state or `example.did` change. The library source still compiles
+with moc 1.x, so consumers move to moc 2 on their own schedule.
+
+### Changed
+
+- **Toolchain:**
+  - moc 1.16.1 → **2.1.0**, wasmtime 48.0.5 → **50.0.0**, and the mops CLI pinned in CI 3.4.2 →
+    **3.5.1**. 3.5.1 closes smol-toml GHSA-r4xh-jqrq-34v2; 3.5.0 had already fixed `mops publish` on
+    moc 2, which our release job avoids anyway with `--no-bench`.
+  - Under moc 2.1.0 every module compiles with zero errors, and the full test suite passed
+    unchanged.
+  - `[moc] args = ["-E", "M0074"]` is gone: moc 2 makes M0074 an error by default.
+  - **Timers (moc 2.1.0, #6440).** A timer dispatch rejected for lack of cycles no longer stops timers
+    for good. ic402's recurring sweeps are unaffected, since an overdue run is still skipped. Its
+    one-shot install timers (HMAC seed, EVM recipient derivation, content-store seed) are now retried
+    instead of dropped. ic402 never cancels a one-shot, so the new limit that a retried one-shot can't
+    be cancelled doesn't apply.
+- **Motoko dependencies:**
+  - `sha2` 0.2.5 → 0.3.2. 0.3 removed `Digest.fold`/`combineLeaves`/`combineNodes` and changed the
+    stored `Sha256.Digest` type. ic402 only uses the one-shot `fromArray`/`fromBlob`, so its hashes are
+    byte-identical and every golden vector (escrow subaccounts, Ed25519, vouchers) passes.
+  - **`ecdsa` stays at 8.0.1, on purpose.** 8.0.2 only migrates it to moc 2 and moves it to `sha2`
+    0.3, but it declares that as `sha2@0`. mops resolves one version per 0.x major, so 8.0.2 drags
+    *every* package in a consumer's build that asks for any 0.x `sha2` onto 0.3. Packages written
+    against 0.1/0.2 then fail to compile: the EngramX canary caught it on `ic-certification` 1.1.0,
+    whose `MerkleTree.mo` calls the `SHA256.Digest(#sha256)` constructor that 0.3 removed. ic402's
+    own `sha2 = "0.3.2"` has no such effect, since it uses the unversioned package name. 8.0.1
+    compiles and passes under moc 2.1.0.
+  - `core` 2.6.2 comes in transitively. `base` stays at 0.16.0, its final release.
+- **Published npm dependencies:**
+  - `@icp-sdk/core` 6.1.1. It bounds Candid decode allocation and LEB128 parsing against
+    memory/CPU-exhaustion DoS (#1393, #1391), and reuses the signed call on v4 fallback (#1405).
+  - `@modelcontextprotocol/sdk` 1.32.2, `viem` 2.57.13, `cborg` 6.1.6, `zod` 4.6.7.
+- **Dev tooling:**
+  - **vitest 4.1.11 → 5.0.5.** A major. Two of its breaking changes touch this repo:
+    - Config files are no longer found in parent directories. `packages/client` now has its own
+      `vitest.config.ts`, so `pnpm test:client` keeps the root config's 120 s timeout.
+    - `clearMocks` is now on by default. That's a no-op here, since every mock is created inside its
+      test.
+    - Browser mode, benchmarks, coverage and nested `vi.mock` aren't used.
+  - eslint 10.13.0, typescript-eslint 8.72.1, prettier 3.9.10, `@types/node` 26.6.5.
+  - icp CLI 1.7.0, as both the devDependency and the CI pin. It only adds commands, none of which
+    change the ones ic402 runs; checked locally as the pin note requires.
+  - pnpm 10.34.9.
+- **Fewer outstanding calls on timer and install paths.** A local `async` function called with
+  `await` is a self-call, and on a 13-node subnet each one holds about 82B cycles of reply
+  reservation until it answers. These now run inline with `await*`. Behaviour is identical for any
+  ICRC-1-conformant ledger. The only difference: a ledger reply that fails Candid decoding now rests an
+  ICP close in `#closing` for `forceResolveSession`, as a malformed `icrc1_fee` reply already did,
+  instead of reopening the session or recording an owed refund.
+
+  | Path | Self-calls saved |
+  |---|---|
+  | Install-time EVM recipient derivation (the `startTimers` one-shot) | 2 → 0 |
+  | `deriveEvmRecipient`, when a consumer calls it (its own `async` hop remains) | 2 → 1 |
+  | Escrow settle and refund inside an ICP close, from the sweep or the payer | 2 per close |
+  | `recoverEscrow`, and `openSession`'s concurrent-limit refund | 1 each |
+  | `ServiceRegistry`'s payment from the main account, for job payouts and the job sweep's refunds | 1 each |
+
+  - `Escrow.settle`/`refund` keep their `async` signatures and gain inline `settleCore`/`refundCore`.
+  - Deliberately still separate messages: the sweep's per-session close (2.17.3: a trap fails only
+    that close) and `refundOnRail` (it parses the buyer principal before its first await, so one
+    malformed job can't wedge the job sweep).
+- Removed 6 unused identifiers in the library (moc 2 warns M0194).
+
+### Interop note: viem now refuses colon-namespaced EIP-712 names
+
+- **What changed:** viem ≥ 2.57.12 (wevm/viem#5308) rejects struct names such as Hyperliquid's
+  `HyperliquidTransaction:Withdraw` with `InvalidStructTypeError`. viem ≤ 2.57.11 accepted them.
+- **Effect:** ic402's encoder is unchanged and still signs them, as 2.13.1 intends. A verifier on
+  current viem can't hash that typed data; ethers, and viem ≤ 2.57.11 on the venue's single-struct map,
+  still agree with ic402. `@ic402/client` never hashes typed data with viem, so it isn't affected.
+- **Test:** `packages/client/test/eip712-colon-interop.test.ts` is re-derived. It now checks the Motoko
+  golden digest against an independent EIP-712 computation (keccak + ABI encoding). A control shows
+  that computation equals viem's on a plain name, and the drift alarm pins viem's refusal.
+- **Unchanged:** the `EIP712Domain:` first-segment rejection stays (fail-closed).
+
+### Not changed
+
+- **TypeScript stays at 6.0.3.** typescript-eslint 8.72.1, the latest, still requires TypeScript
+  < 6.1.0, so TypeScript 7 is blocked by that dependency.
+- **pnpm 11/12 stay deferred**, as they're package-manager majors. The move from `base` to `core`
+  belongs to 3.0.0.
+- **The example keeps `persistent actor` and `preupgrade`/`postupgrade`,** so it still compiles under
+  moc 1.x. moc 2 only warns (M0217, M0270).
+
 ## v2.18.0 — 2026-10-08
 
 Minor — **a refund the close could not make is reported, and its record is kept until the payer

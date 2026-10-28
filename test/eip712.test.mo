@@ -362,8 +362,10 @@ suite("field-driven: review-round pins (namespace, cap, message truth, mutations
 suite("field-driven: colon-namespaced struct names (2.13.1, venue convention)", func() {
   // GOLDEN VECTORS from viem 2.55.2 over the venue's REAL type — Hyperliquid's user-signed
   // withdraw (primaryType "HyperliquidTransaction:Withdraw", domain HyperliquidSignTransaction/
-  // "1"/42161/zero address). The consumer that reported the refusal verified ethers v5/v6, viem,
-  // alloy, and Turnkey all accept and hash the colon literally; 2.13.0's identifier rule was
+  // "1"/42161/zero address). The consumer that reported the refusal verified (at 2.13.1) ethers
+  // v5/v6, viem 2.55.2, alloy, and Turnkey all accept and hash the colon literally (viem >= 2.57.12
+  // refuses colon names; see packages/client/test/eip712-colon-interop.test.ts, which now checks
+  // this digest against an independent keccak/ABI computation); 2.13.0's identifier rule was
   // stricter than the ecosystem it cited, and a name this encoder refuses is a digest no one
   // can produce through it.
   let hlFields : [(Text, Text)] = [
@@ -424,7 +426,7 @@ suite("field-driven: colon-namespaced struct names (2.13.1, venue convention)", 
     assert(isErr(Eip712.typeHashOf(":", [("a", "uint256")])));
     // Field names carry no namespacing anywhere in the ecosystem — strict rule unchanged.
     assert(isErr(Eip712.typeHashOf("T", [("a:b", "uint256")])));
-    // Reserved rule unchanged; a FIRST SEGMENT of EIP712Domain is also refused — viem injects
+    // Reserved rule unchanged; a FIRST SEGMENT of EIP712Domain is also refused — viem <= 2.57.11 injects
     // an EIP712Domain entry into every types map and truncates the primaryType at the colon
     // for dependency lookup, so "EIP712Domain:X" diverges between viem and ethers PERMANENTLY
     // (empirically verified against viem 2.55.2).
