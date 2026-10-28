@@ -1,5 +1,49 @@
 # Changelog
 
+## v2.18.2 — 2026-10-28
+
+Patch — **`POST /verify` now accepts an EIP-3009 signature only if USDC will accept it on chain.**
+Before, it could call a signature valid that the transfer then reverted on. Settle never moved
+value on one (the transfer reverted and settle returned `#settlementFailed`), but a seller who
+delivered on a `/verify` verdict alone could be left unpaid. No API, type, `PaymentResult`,
+stored-state or `example.did` change.
+
+### Fixed
+
+- **Payment signatures are checked the way the chain checks them.** `Eip712.recoverAuthorizationSigner`
+  (behind `verifyPayment`, `settle`/`settleFrom` and `openEvmSession`) now applies USDC's
+  `ECRecover` rules, which OpenZeppelin's ECDSA shares for other EIP-3009 tokens:
+  - **Low s only** (s ≤ n/2). A high-s signature recovers the same signer, so ic402 used to pass it;
+    USDC reverts on it. Wallets produce low s, so honest payers are unaffected.
+  - **v must be 27 or 28**, or the recovery id 0/1 that ic402 converts back to 27/28 on chain. Other
+    values used to be folded onto a parity: v = 29 verified as 27 did, then went on chain as 29 and
+    reverted.
+  - **Recovery as Ethereum's `ecrecover` does it**, through the new `EvmAddress.ecRecoverEvm`: x = r
+    only, v's parity only, and no key for the point at infinity. The lenient `ecRecover` also tries
+    x = r + n and falls through to the other parity. Neither difference is reachable for a payment
+    signed by a real key, but the payment path no longer depends on that argument.
+  - Settle and session-open fail early with `#invalidSignature` instead of broadcasting a transfer
+    that reverts. The message now names the signature form as a cause.
+- **Fixed a wrong comment** in `Eip712.mo`, which said `ecRecover` tried both parities and handled high
+  s "via its parity loop".
+
+### Unchanged
+
+- `EvmAddress.ecRecover` keeps its lenient behaviour, which `test/secp256k1.test.mo` pins. It still
+  serves EVM buyer confirm/dispute (`ServiceRegistry`), which never reaches a chain, and
+  `recoverYParity`.
+- Contract-wallet (ERC-1271) payers remain unsupported.
+
+### Tests
+
+- `ecRecoverEvm` must return exactly the key Ethereum's `ecrecover` gives for both v of all 252
+  Wycheproof vectors. The fixture generator computes those keys with its own model, which matches
+  `@noble/curves` 2.4.0 on all 504.
+- `verifyPayment` with a real wallet signature: the low-s original passes as v = 27 and as 0; its
+  high-s twin and v = 2/29/255 are refused.
+- A parity-fallthrough signature over a real EIP-712 digest recovers no signer, as on chain.
+- `isLowS` is pinned at USDC's exact bound.
+
 ## v2.18.1 — 2026-10-28
 
 Patch — **ic402 now builds with moc 2.1.0, with every dependency refreshed.** Requested by EngramX. No

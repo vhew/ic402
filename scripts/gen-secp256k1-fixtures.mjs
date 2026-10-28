@@ -13,6 +13,11 @@
 // standard ECDSA VERIFICATION (R = s⁻¹(zG + rQ); id = parity of R.y, + 2 if R.x >= n). That
 // is independent of ic402's recovery code, so the test can pin which v recovers the signer.
 //
+// And for every vector it emits what Ethereum's `ecrecover` precompile returns for v = 27 and
+// v = 28 (recovery id 0 and 1): x = r only, that parity only, nothing for the point at infinity.
+// EvmAddress.ecRecoverEvm must return exactly that. Cross-checked once against @noble/curves
+// (see the README).
+//
 //   node scripts/gen-secp256k1-fixtures.mjs
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -72,6 +77,30 @@ const mul = (k, A) => {
   for (; k > 0n; k >>= 1n, A = add(A, A)) if (k & 1n) R = add(R, A);
   return R;
 };
+const pow = (b, e, m) => {
+  let x = 1n;
+  for (b = mod(b, m); e > 0n; e >>= 1n, b = (b * b) % m) if (e & 1n) x = (x * b) % m;
+  return x;
+};
+const hex32 = (n) => n.toString(16).padStart(64, '0');
+const compressPoint = (Q) => ((Q[1] & 1n) === 1n ? '03' : '02') + hex32(Q[0]);
+// Ethereum's ecrecover of digest z with recovery id v (0 = even y = v 27, 1 = odd y = v 28):
+// the compressed key, or null where the precompile returns nothing.
+const ecrecover = (zHex, sigHex, v) => {
+  if (sigHex.length !== 128) return null;
+  const r = BigInt('0x' + sigHex.slice(0, 64));
+  const s = BigInt('0x' + sigHex.slice(64));
+  if (r === 0n || r >= N || s === 0n || s >= N) return null;
+  const y2 = mod(r * r * r + 7n, P);
+  let y = pow(y2, (P + 1n) / 4n, P);
+  if ((y * y) % P !== y2) return null; // x = r is not on the curve
+  if (Number(y & 1n) !== v) y = P - y;
+  const rInv = inv(r, N);
+  const Q = add(mul(mod(s * rInv, N), [r, y]), mul(mod(-BigInt('0x' + zHex) * rInv, N), G));
+  return Q === null ? null : compressPoint(Q);
+};
+const optBlob = (k) => (k === null ? 'null' : '?' + blob(k));
+
 // The recovery id (0-3) of (r, s) over digest z for key Q, or null if it does not verify.
 const recoveryId = (zHex, sigHex, uncompressed) => {
   if (sigHex.length !== 128) return null;
@@ -94,10 +123,10 @@ out(
 out('// CI regenerates this file and fails on any diff. Provenance and licences: README.md here.');
 out('module {');
 out(
-  '  public type Wycheproof = { tcId : Nat; flags : [Text]; valid : Bool; pub : Blob; hash : Blob; sig : Blob; recId : ?Nat8 };',
+  '  public type Wycheproof = { tcId : Nat; flags : [Text]; valid : Bool; pub : Blob; hash : Blob; sig : Blob; recId : ?Nat8; evm0 : ?Blob; evm1 : ?Blob };',
 );
 out(
-  '  public type Policy = { name : Text; signer : Blob; hash : Blob; r : Blob; s : Blob; v0 : ?Blob; v1 : ?Blob };',
+  '  public type Policy = { name : Text; signer : Blob; hash : Blob; r : Blob; s : Blob; v0 : ?Blob; v1 : ?Blob; evm0 : ?Blob; evm1 : ?Blob };',
 );
 out('');
 
@@ -107,7 +136,8 @@ const wp = read(wpFile);
 let wpCount = 0;
 out(`  /// C2SP/wycheproof testvectors_v1/${wpFile} — every test, in file order.`);
 out('  /// `hash` is SHA-256(msg); `pub` is the group key, compressed; `sig` is r || s as given;');
-out('  /// `recId` is the recovery id (0-3) when the signature verifies, found by verification.');
+out('  /// `recId` is the recovery id (0-3) when the signature verifies, found by verification;');
+out("  /// `evm0` / `evm1` are what Ethereum's ecrecover returns for v = 27 / 28.");
 out('  public let wycheproof : [Wycheproof] = [');
 for (const g of wp.testGroups) {
   if (g.type !== 'EcdsaP1363Verify' || g.sha !== 'SHA-256' || g.publicKey.curve !== 'secp256k1')
@@ -124,7 +154,7 @@ for (const g of wp.testGroups) {
     if ((rec !== null) !== (t.result === 'valid'))
       throw new Error(`tcId ${t.tcId}: verification disagrees with Wycheproof (${t.result})`);
     out(
-      `    { tcId = ${t.tcId}; flags = ${flags}; valid = ${t.result === 'valid'}; pub = ${blob(pub)}; hash = ${blob(hash)}; sig = ${blob(t.sig)}; recId = ${rec === null ? 'null' : '?' + rec} },`,
+      `    { tcId = ${t.tcId}; flags = ${flags}; valid = ${t.result === 'valid'}; pub = ${blob(pub)}; hash = ${blob(hash)}; sig = ${blob(t.sig)}; recId = ${rec === null ? 'null' : '?' + rec}; evm0 = ${optBlob(ecrecover(hash, t.sig, 0))}; evm1 = ${optBlob(ecrecover(hash, t.sig, 1))} },`,
     );
     wpCount++;
   }
@@ -145,8 +175,15 @@ const optKey = (name, k) => {
 for (const v of pol) {
   for (const k of ['hash', 'r', 's'])
     if (v[k].length !== 64) throw new Error(`${v.name}: ${k} is not 32 bytes`);
+  // policy.json records noble's ecrecover results; this file's model must agree with them.
+  for (const [k, id] of [
+    ['ecrecover_v27', 0],
+    ['ecrecover_v28', 1],
+  ])
+    if (ecrecover(v.hash, v.r + v.s, id) !== v[k])
+      throw new Error(`${v.name}: ${k} disagrees with this generator's ecrecover`);
   out(
-    `    { name = ${text(v.name)}; signer = ${blob(v.signer)}; hash = ${blob(v.hash)}; r = ${blob(v.r)}; s = ${blob(v.s)}; v0 = ${optKey(v.name, v.recover_v0)}; v1 = ${optKey(v.name, v.recover_v1)} },`,
+    `    { name = ${text(v.name)}; signer = ${blob(v.signer)}; hash = ${blob(v.hash)}; r = ${blob(v.r)}; s = ${blob(v.s)}; v0 = ${optKey(v.name, v.recover_v0)}; v1 = ${optKey(v.name, v.recover_v1)}; evm0 = ${optKey(v.name, v.ecrecover_v27)}; evm1 = ${optKey(v.name, v.ecrecover_v28)} },`,
   );
 }
 out('  ];');

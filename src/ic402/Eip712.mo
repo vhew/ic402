@@ -125,7 +125,8 @@ module {
 
   /// Recover the signer of a TransferWithAuthorization EIP-712 signature.
   /// Uses custom token name/version for the domain separator (handles testnet USDC).
-  /// Returns the recovered signer address (20 bytes) or null if verification fails.
+  /// Returns the recovered signer address (20 bytes), or null if verification fails or the
+  /// signature is not in a form USDC accepts on chain (see below).
   public func recoverAuthorizationSigner(
     chainId : Nat,
     tokenAddress : [Nat8],
@@ -141,17 +142,27 @@ module {
     tokenName : ?Text,
     tokenVersion : ?Text,
   ) : ?[Nat8] {
+    // Accept only what USDC's transferWithAuthorization accepts on chain, so /verify, settle and
+    // session-open never pass a signature the transfer then reverts on. FiatToken's ECRecover
+    // (and OpenZeppelin's ECDSA, for other EIP-3009 tokens) requires s <= n/2 and v = 27/28, then
+    // calls Ethereum's ecrecover. ic402 receives v as the recovery id 0/1 (HttpHandler converts
+    // 27/28) and EvmSender writes 27/28 back into the calldata, so 0, 1, 27 and 28 are exactly
+    // the values that reach the chain as 27/28. ecRecoverEvm then recovers as ecrecover does:
+    // x = r only, v's parity only. Contract wallets (ERC-1271) are not supported.
+    let recoveryId : Nat8 = switch (v) {
+      case (0 or 27) { 0 };
+      case (1 or 28) { 1 };
+      case (_) { return null };
+    };
+    if (not EvmAddress.isLowS(s)) return null;
+
     let name = switch (tokenName) { case (?n) { n }; case (null) { "USD Coin" } };
     let version = switch (tokenVersion) { case (?v) { v }; case (null) { "2" } };
     let domSep = domainSeparator(name, version, chainId, tokenAddress);
     let structHash = hashTransferWithAuthorization(from, to, value, validAfter, validBefore, nonce);
     let msgHash = digest(domSep, structHash);
 
-    // ecRecover tries both y-parities internally, so we just normalize v
-    // to 0/1 range and pass the original s (ecRecover handles high-S via
-    // its parity loop).
-    let recoveryBit : Nat8 = if (v >= 27) { v - 27 } else { v };
-    let recoveredPubKey = switch (EvmAddress.ecRecover(msgHash, r, s, recoveryBit)) {
+    let recoveredPubKey = switch (EvmAddress.ecRecoverEvm(msgHash, r, s, recoveryId)) {
       case (?pk) { pk };
       case (null) { return null };
     };

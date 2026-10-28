@@ -301,6 +301,13 @@ suite("EvmAddress", func() {
       assert(flipped);
     });
 
+    test("isLowS: true up to floor(n/2) inclusive, false from floor(n/2)+1 — USDC's exact bound", func() {
+      // USDC's ECRecover reverts when s > 0x7FFF…5D576E7357A4501DDFE92F46681B20A0 = floor(n/2).
+      assert(EvmAddress.isLowS(EvmUtils.natToBytes(secpN / 2, 32)));
+      assert(not EvmAddress.isLowS(EvmUtils.natToBytes(secpN / 2 + 1, 32)));
+      assert(EvmAddress.isLowS(lsSLow) and not EvmAddress.isLowS(lsSHigh));
+    });
+
     test("boundary: s == 1 -> unchanged, no flip", func() {
       let one32 = EvmUtils.natToBytes(1, 32);
       let (sOut, flipped) = EvmAddress.normalizeS(one32);

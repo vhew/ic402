@@ -1,7 +1,12 @@
 # secp256k1 conformance fixtures
 
-The expectations behind `test/secp256k1.test.mo`, which pins `EvmAddress.ecRecover`: the signer
-recovery every EIP-3009 payment check rests on. Every one comes from outside ic402.
+The expectations behind `test/secp256k1.test.mo`, which pins ic402's two secp256k1 signer
+recoveries:
+
+- `EvmAddress.ecRecoverEvm`, Ethereum's `ecrecover` exactly. Every EIP-3009 payment check uses it.
+- `EvmAddress.ecRecover`, the lenient one, used for EVM buyer confirm/dispute.
+
+Every expectation comes from outside ic402.
 
 `Vectors.mo` is generated from the JSON here by `scripts/gen-secp256k1-fixtures.mjs`. The JSON is
 the source of truth, and CI regenerates `Vectors.mo` and fails on any diff.
@@ -36,9 +41,16 @@ vectors on DER parsing, which ic402 never does.
     ic402's recovery code, and checks that its verification agrees with Wycheproof on all 252.
   - Out-of-range r or s returns no key at all, and so does x = r off the curve with r + n >= p
     (tcId 33, 35, 204).
+  - **`ecrecover` results.** For every vector, the generator also computes what Ethereum's
+    `ecrecover` returns for v = 27 and v = 28: x = r only, that parity only, and no key for the
+    point at infinity. `ecRecoverEvm` must return exactly that key, or no key, all 504 times.
+    The generator's model was checked once against `@noble/curves` 2.4.0 `recoverPublicKey`
+    (recovery ids 0 and 1), and agreed on all 504 (360 keys, 144 none).
 - **Policy** (2 vectors): two ways `ecRecover` recovers a key where Ethereum's `ecrecover` does
   not. The test pins both v results for each, so the behaviour is recorded rather than
-  accidental. Why both are kept is written at the top of `test/secp256k1.test.mo`.
+  accidental. Why both are kept is written at the top of `test/secp256k1.test.mo`. Each vector
+  also records noble's `ecrecover` result (`ecrecover_v27` / `ecrecover_v28`). The generator
+  refuses to run if its own model disagrees, and `ecRecoverEvm` must match it.
   - **r + n fallback.** When x = r is not on the curve, `ecRecover` retries with x = r + n.
   - **Parity fallthrough.** When the point for the given v yields the point at infinity,
     `ecRecover` tries the other parity, so both v return the same key.
