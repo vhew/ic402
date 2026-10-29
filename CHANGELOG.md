@@ -47,6 +47,10 @@ stored-state or `example.did` change.
   0/1. A high-s twin and v = 2/29/255 are refused. `recoveryIdFromV` leaves 54/55 unconverted.
 - A parity-fallthrough signature over a real EIP-712 digest recovers no signer, as on chain.
 - `isLowS` is pinned at USDC's exact bound.
+- The secp256k1 suites now run in the interpreter, in two files (`secp256k1.test.mo` for `ecRecover`,
+  `secp256k1evm.test.mo` for `ecRecoverEvm` and the payment path). Compiled to wasi, the file peaked
+  at 7 GB of memory, and once the new suite was added the CI runner was killed twice. Interpreted,
+  each takes about 50 s and stays under 300 MB.
 
 ## v2.18.1 — 2026-10-28
 

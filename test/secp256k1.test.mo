@@ -1,4 +1,3 @@
-// @testmode wasi
 /// Conformance suite for ic402's two secp256k1 signer recoveries:
 ///   - EvmAddress.ecRecoverEvm, Ethereum's ecrecover exactly. Eip712.recoverAuthorizationSigner
 ///     uses it for every EIP-3009 payment check (/verify, settle, EVM session-open), so ic402
@@ -9,13 +8,14 @@
 /// Every expectation comes from OUTSIDE ic402: Wycheproof's 252 secp256k1 ECDSA vectors, with
 /// each verifying signature's recovery id found by plain ECDSA verification in the generator,
 /// what Ethereum's ecrecover returns for every vector and both v (the generator's own model,
-/// which test/secp256k1-fixtures.test.ts checks against @noble/curves on every CI run), plus two constructed vectors cross-checked with
-/// @noble/curves. Provenance:
-/// test/fixtures/secp256k1/README.md. Runs compiled (wasi): ~500 recoveries take ~40 s in the
-/// interpreter, ~2 s here.
+/// which test/secp256k1-fixtures.test.ts checks against @noble/curves on every CI run), plus two
+/// constructed vectors cross-checked with @noble/curves. Provenance:
+/// test/fixtures/secp256k1/README.md.
 ///
-/// ecRecoverEvm is held to the exact key ecrecover returns, for both v of every vector. The rest
-/// of this header is about ecRecover.
+/// This file pins ecRecover. ecRecoverEvm and the payment path are pinned in
+/// test/secp256k1evm.test.mo. Both run in the INTERPRETER on purpose (~50 s each, under 300 MB).
+/// Compiled to wasi this file ran in ~5 s but peaked at 7 GB of memory, and with the strict
+/// suite added the CI runner was killed twice (2.18.2). Keep the recoveries out of wasi.
 ///
 /// HOW A VECTOR IS JUDGED. Wycheproof gives (public key, message, r || s) and asks "does this
 /// verify?". ecRecover instead takes a digest, r, s and a recovery id v, and returns a key. ic402
@@ -44,8 +44,6 @@
 ///   2.18.2 they recover with ecRecoverEvm, which has neither (pinned in the last suite).
 import EvmAddress "../src/ic402/EvmAddress";
 import EvmUtils "../src/ic402/EvmUtils";
-import Eip712 "../src/ic402/Eip712";
-import EcdsaCurve "mo:ecdsa/Curve";
 import V "fixtures/secp256k1/Vectors";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
@@ -237,118 +235,4 @@ suite("Policy vectors (constructed; Ethereum's ecrecover disagrees with ecRecove
       assert want(p.v0) == ?Blob.toArray(p.signer) or want(p.v1) == ?Blob.toArray(p.signer);
     });
   };
-});
-
-suite("ecRecoverEvm — Ethereum's ecrecover, for every signature the chain checks", func() {
-  let opt = func(k : ?Blob) : ?[Nat8] = switch (k) {
-    case (?b) { ?Blob.toArray(b) };
-    case (null) { null };
-  };
-
-  test("returns exactly ecrecover's key, or none, for both v of all 252 Wycheproof vectors", func() {
-    // The strongest pin: not "is it the signer?" but the exact key, including for the wrong v,
-    // high s (which ecrecover accepts) and every edge case Wycheproof carries.
-    var mismatches = 0;
-    var keys = 0;
-    for (v in V.wycheproof.values()) {
-      let sig = Blob.toArray(v.sig);
-      let (r, s) = if (sig.size() == 64) (Array.subArray(sig, 0, 32), Array.subArray(sig, 32, 32)) else ([], []);
-      let h = Blob.toArray(v.hash);
-      for ((id, want) in [(0 : Nat8, v.evm0), (1 : Nat8, v.evm1)].values()) {
-        let got = if (sig.size() == 64) EvmAddress.ecRecoverEvm(h, r, s, id) else null;
-        if (got != null) keys += 1;
-        if (got != opt(want)) {
-          Debug.print("  MISMATCH tcId " # debug_show(v.tcId) # " v " # debug_show(id));
-          mismatches += 1;
-        };
-      };
-    };
-    assert mismatches == 0;
-    assert keys == 360; // the count ecrecover gives; catches a fixture that went all-null
-  });
-
-  test("accepts the same Wycheproof signatures as ecRecover: 165, none invalid, not 115/247", func() {
-    var accepted = 0;
-    for (v in V.wycheproof.values()) {
-      let sig = Blob.toArray(v.sig);
-      if (sig.size() == 64) {
-        let h = Blob.toArray(v.hash);
-        let r = Array.subArray(sig, 0, 32);
-        let s = Array.subArray(sig, 32, 32);
-        let pub = ?Blob.toArray(v.pub);
-        if (EvmAddress.ecRecoverEvm(h, r, s, 0) == pub or EvmAddress.ecRecoverEvm(h, r, s, 1) == pub) {
-          accepted += 1;
-          assert v.valid and not contains(refusedByPolicy, v.tcId);
-        };
-      };
-    };
-    assert accepted == 165;
-  });
-
-  test("v other than 0 and 1 returns null, even where that parity would recover the key", func() {
-    // ecRecover reads v = 2 as even and v = 27 as odd; ecrecover's 27/28 arrive here as 0/1.
-    // A low-s one, so ecRecover's high-s flip does not change what v = 2 means.
-    let ?v = Array.find<V.Wycheproof>(
-      V.wycheproof,
-      func(w) = w.recId == ?0 and EvmAddress.isLowS(Array.subArray(Blob.toArray(w.sig), 32, 32)),
-    ) else {
-      assert false;
-      return;
-    };
-    let sig = Blob.toArray(v.sig);
-    let h = Blob.toArray(v.hash);
-    let r = Array.subArray(sig, 0, 32);
-    let s = Array.subArray(sig, 32, 32);
-    assert EvmAddress.ecRecoverEvm(h, r, s, 0) == ?Blob.toArray(v.pub);
-    assert EvmAddress.ecRecover(h, r, s, 2) == ?Blob.toArray(v.pub);
-    for (bad in ([2, 3, 27, 28, 255] : [Nat8]).values()) {
-      assert EvmAddress.ecRecoverEvm(h, r, s, bad) == null;
-    };
-  });
-
-  for (p in V.policy.values()) {
-    let h = Blob.toArray(p.hash);
-    let r = Blob.toArray(p.r);
-    let s = Blob.toArray(p.s);
-    test(p.name # ": v = 0 and v = 1 return what ecrecover does", func() {
-      assert EvmAddress.ecRecoverEvm(h, r, s, 0) == opt(p.evm0);
-      assert EvmAddress.ecRecoverEvm(h, r, s, 1) == opt(p.evm1);
-    });
-  };
-});
-
-suite("Eip712.recoverAuthorizationSigner recovers as ecrecover does", func() {
-  test("no signer where only ecRecover's parity fallthrough would find one", func() {
-    // Pins the payment path to ecRecoverEvm. Builds a fallthrough signature over a real EIP-712
-    // digest: R = kG and s = z/k, so under R's own parity r^-1 (sR - zG) is the point at
-    // infinity. ecrecover returns nothing there; ecRecover would return the other parity's key.
-    let curve = EcdsaCurve.Curve(#secp256k1);
-    let from = Array.tabulate<Nat8>(20, func(_) = 0xab);
-    let token = Array.tabulate<Nat8>(20, func(_) = 0xcc);
-    let nonce = Array.tabulate<Nat8>(32, func(_) = 0x01);
-    let digest = Eip712.digest(
-      Eip712.domainSeparator("USD Coin", "2", 8453, token),
-      Eip712.hashTransferWithAuthorization(from, from, 1, 0, 1, nonce),
-    );
-    let k = 7;
-    let #affine(#fp(rx), #fp(ry)) = curve.fromJacobi(curve.mul_base(#fr(k))) else {
-      assert false;
-      return;
-    };
-    assert rx < secpN;
-    var s = curve.Fr.toNat(curve.Fr.mul(curve.Fr.fromNat(EvmUtils.bytesToNat(digest)), curve.Fr.inv(#fr(k))));
-    var v : Nat8 = if (ry % 2 == 0) 0 else 1;
-    if (s > secpN / 2) { s := secpN - s; v := 1 - v }; // k -> n - k: R flips, so its parity does
-    let r = EvmUtils.natToBytes(rx, 32);
-    let sb = EvmUtils.natToBytes(s, 32);
-    let recover = func(v : Nat8) : ?[Nat8] = Eip712.recoverAuthorizationSigner(
-      8453, token, from, from, 1, 0, 1, nonce, v, r, sb, ?"USD Coin", ?"2",
-    );
-
-    assert EvmAddress.ecRecoverEvm(digest, r, sb, v) == null;
-    assert EvmAddress.ecRecover(digest, r, sb, v) != null; // the fallthrough
-    assert recover(v) == null;
-    assert recover(v + 27) == null;
-    assert recover(1 - v) != null; // the other parity is a real recovery, on chain too
-  });
 });
