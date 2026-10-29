@@ -15,8 +15,8 @@
 //
 // And for every vector it emits what Ethereum's `ecrecover` precompile returns for v = 27 and
 // v = 28 (recovery id 0 and 1): x = r only, that parity only, nothing for the point at infinity.
-// EvmAddress.ecRecoverEvm must return exactly that. Cross-checked once against @noble/curves
-// (see the README).
+// EvmAddress.ecRecoverEvm must return exactly that. test/secp256k1-fixtures.test.ts checks it against
+// @noble/curves on every CI run.
 //
 //   node scripts/gen-secp256k1-fixtures.mjs
 import { createHash } from 'node:crypto';

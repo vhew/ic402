@@ -9,7 +9,7 @@
 /// Every expectation comes from OUTSIDE ic402: Wycheproof's 252 secp256k1 ECDSA vectors, with
 /// each verifying signature's recovery id found by plain ECDSA verification in the generator,
 /// what Ethereum's ecrecover returns for every vector and both v (the generator's own model,
-/// matched against @noble/curves on all 504), plus two constructed vectors cross-checked with
+/// which test/secp256k1-fixtures.test.ts checks against @noble/curves on every CI run), plus two constructed vectors cross-checked with
 /// @noble/curves. Provenance:
 /// test/fixtures/secp256k1/README.md. Runs compiled (wasi): ~500 recoveries take ~40 s in the
 /// interpreter, ~2 s here.

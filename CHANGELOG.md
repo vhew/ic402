@@ -3,9 +3,10 @@
 ## v2.18.2 — 2026-10-28
 
 Patch — **`POST /verify` now accepts an EIP-3009 signature only if USDC will accept it on chain.**
-Before, it could call a signature valid that the transfer then reverted on. Settle never moved
-value on one (the transfer reverted and settle returned `#settlementFailed`), but a seller who
-delivered on a `/verify` verdict alone could be left unpaid. No API, type, `PaymentResult`,
+Before, it could call a signature valid that the transfer then reverted on. A seller who delivered
+on a `/verify` verdict alone could be left unpaid. Settle never moved USDC on one: the transfer
+reverted and settle returned `#settlementFailed`. But the canister paid gas for each reverting
+broadcast, bounded only by the facilitator rate bucket. No API, type, `PaymentResult`,
 stored-state or `example.did` change.
 
 ### Fixed
@@ -17,13 +18,15 @@ stored-state or `example.did` change.
     USDC reverts on it. Wallets produce low s, so honest payers are unaffected.
   - **v must be 27 or 28**, or the recovery id 0/1 that ic402 converts back to 27/28 on chain. Other
     values used to be folded onto a parity: v = 29 verified as 27 did, then went on chain as 29 and
-    reverted.
+    reverted. `EvmUtils.recoveryIdFromV` now converts only 27/28, so an HTTP signature byte of
+    54/55 is refused instead of passing as 27/28.
   - **Recovery as Ethereum's `ecrecover` does it**, through the new `EvmAddress.ecRecoverEvm`: x = r
     only, v's parity only, and no key for the point at infinity. The lenient `ecRecover` also tries
     x = r + n and falls through to the other parity. Neither difference is reachable for a payment
     signed by a real key, but the payment path no longer depends on that argument.
   - Settle and session-open fail early with `#invalidSignature` instead of broadcasting a transfer
-    that reverts. The message now names the signature form as a cause.
+    that reverts, so the canister no longer pays gas for one. The message now names the signature
+    form as a cause.
 - **Fixed a wrong comment** in `Eip712.mo`, which said `ecRecover` tried both parities and handled high
   s "via its parity loop".
 
@@ -37,10 +40,11 @@ stored-state or `example.did` change.
 ### Tests
 
 - `ecRecoverEvm` must return exactly the key Ethereum's `ecrecover` gives for both v of all 252
-  Wycheproof vectors. The fixture generator computes those keys with its own model, which matches
-  `@noble/curves` 2.4.0 on all 504.
-- `verifyPayment` with a real wallet signature: the low-s original passes as v = 27 and as 0; its
-  high-s twin and v = 2/29/255 are refused.
+  Wycheproof vectors. The fixture generator computes those keys with its own model, and a new
+  vitest (`test/secp256k1-fixtures.test.ts`) checks that model against `@noble/curves` on all 504,
+  every CI run.
+- `verifyPayment` with real wallet signatures: low-s originals pass as v = 27 and v = 28, and as
+  0/1. A high-s twin and v = 2/29/255 are refused. `recoveryIdFromV` leaves 54/55 unconverted.
 - A parity-fallthrough signature over a real EIP-712 digest recovers no signer, as on chain.
 - `isLowS` is pinned at USDC's exact bound.
 

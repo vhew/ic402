@@ -187,7 +187,9 @@ module {
   // recovers the wrong signer (0/1 in on-chain calldata reverts every EIP-3009 transfer).
 
   /// As-signed v (27/28) → recovery id (0/1) for ic402's internal ecRecover. Idempotent.
-  public func recoveryIdFromV(v : Nat8) : Nat8 { if (v >= 27) { v - 27 : Nat8 } else { v } };
+  /// Any other value passes through unchanged, so signature checks refuse it (2.18.2). It used to
+  /// fold every v >= 27, which let a signature byte of 54/55 through as 27/28.
+  public func recoveryIdFromV(v : Nat8) : Nat8 { if (v == 27 or v == 28) { v - 27 : Nat8 } else { v } };
 
   /// Recovery id (0/1) → on-chain signature v (27/28) that ecrecover requires. Idempotent.
   public func chainVFromRecoveryId(v : Nat8) : Nat8 { if (v < 27) { v + 27 : Nat8 } else { v } };

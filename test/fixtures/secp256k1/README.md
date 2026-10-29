@@ -44,8 +44,9 @@ vectors on DER parsing, which ic402 never does.
   - **`ecrecover` results.** For every vector, the generator also computes what Ethereum's
     `ecrecover` returns for v = 27 and v = 28: x = r only, that parity only, and no key for the
     point at infinity. `ecRecoverEvm` must return exactly that key, or no key, all 504 times.
-    The generator's model was checked once against `@noble/curves` 2.4.0 `recoverPublicKey`
-    (recovery ids 0 and 1), and agreed on all 504 (360 keys, 144 none).
+    `test/secp256k1-fixtures.test.ts` checks the generator's model against `@noble/curves`
+    `recoverPublicKey` (recovery ids 0 and 1) on every CI run: all 504 agree (360 keys, 144
+    none). The generator itself stays dependency-free.
 - **Policy** (2 vectors): two ways `ecRecover` recovers a key where Ethereum's `ecrecover` does
   not. The test pins both v results for each, so the behaviour is recorded rather than
   accidental. Why both are kept is written at the top of `test/secp256k1.test.mo`. Each vector

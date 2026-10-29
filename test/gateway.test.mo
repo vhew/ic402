@@ -142,7 +142,8 @@ suite("Gateway.verifyPayment", func() {
   });
 
   test("v other than 0, 1, 27, 28 is refused: it would reach the chain as neither 27 nor 28", func() {
-    // 2 and 29 both read as the even parity in the lenient ecRecover, and recover the signer there.
+    // Before 2.18.2 all three were folded onto a parity: 29 became 2 via the old v - 27 fold in
+    // recoverAuthorizationSigner, and 2 reached ecRecover as the even parity, recovering the signer.
     for (v in ([2, 29, 255] : [Nat8]).values()) {
       assert not verify(v, realS).isValid;
     };
