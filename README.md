@@ -223,6 +223,9 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `getGlobalPolicy()` | Read back the live global spending policy (example exposes it as the `getPolicyConfig` query) |
 | `issueGrant(...)` / `verifyGrant(caller, grant)` | HMAC access grants (non-transferable — `caller` must equal `grant.grantee`) |
 | `startTimers<system>()` | Start background timers (session expiry is **self-arming**: it runs only while a session is not yet `#closed` and disarms itself, so an idle canister burns no per-tick cycles — see [costs §5](docs/costs-and-rails.md#5-fixed-idle-cost-recurring-timers)) |
+| `startTimersWith<system>({ hourlyGc })` | 2.19.0: `startTimers` with the hourly policy/grant clean-up optional. With `hourlyGc = false` the host **must** call `runMaintenance()` at least daily |
+| `runMaintenance()` | 2.19.0: the hourly clean-up, run by the host — synchronous, at most 10,000 removals per map per call, `more = true` to call again |
+| `maintenanceTimerArmed()` | 2.19.0: whether the hourly clean-up timer is armed |
 | `sessionExpiryTimerArmed()` | Whether the session sweep is ticking (`false` on an idle canister is the expected steady state) |
 | `setSessionExpiryIntervalSeconds<system>(n)` | Sweep cadence, default 60s — bounds expiry latency and how long a stale session holds pool/concurrency capacity |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |

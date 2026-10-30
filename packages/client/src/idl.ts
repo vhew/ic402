@@ -425,6 +425,7 @@ export const exampleIdlFactory = () =>
             sessionExpiryArmed: IDL.Bool,
             jobExpiryArmed: IDL.Bool,
             jobExpiryActive: IDL.Bool,
+            maintenanceArmed: IDL.Bool, // 2.19.0: the gateway's hourly clean-up
           }),
         }),
       ],
