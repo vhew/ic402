@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.18.2 — 2026-10-28
+## v2.18.2 — 2026-10-30
 
 Patch — **`POST /verify` now accepts an EIP-3009 signature only if USDC will accept it on chain.**
 Before, it could call a signature valid that the transfer then reverted on. A seller who delivered
