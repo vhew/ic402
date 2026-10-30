@@ -60,11 +60,60 @@ module {
 
   // ── EC Recovery (using herumi's ecdsa library) ──
 
-  /// Recover the public key from an ECDSA signature.
-  /// Returns compressed SEC1 public key (33 bytes) or null.
+  /// True when s is in the lower half of the curve order (s <= n/2), the form USDC's
+  /// ECRecover and OpenZeppelin's ECDSA require (EIP-2). Says nothing about s == 0.
+  public func isLowS(sBytes : [Nat8]) : Bool = bytesToNat(sBytes) <= SECP256K1_N / 2;
+
+  // Q = r^(-1) * (s*R - z*G) for the decompressed nonce point R = (rx, ry), as a compressed
+  // SEC1 key. null when Q is the point at infinity.
+  func recoverFromR(curve : EcdsaCurve.Curve, z : Nat, r : Nat, s : Nat, rx : Nat, ry : EcdsaCurve.FpElt) : ?[Nat8] {
+    let rJac = curve.toJacobi(#affine(#fp(rx), ry));
+
+    // u1 = -z * r^(-1) mod n, u2 = s * r^(-1) mod n
+    let rInv = curve.Fr.inv(curve.Fr.fromNat(r));
+    let u1 = curve.Fr.mul(curve.Fr.neg(curve.Fr.fromNat(z)), rInv);
+    let u2 = curve.Fr.mul(curve.Fr.fromNat(s), rInv);
+
+    // Q = u1*G + u2*R
+    switch (curve.fromJacobi(curve.add(curve.mul_base(u1), curve.mul(rJac, u2)))) {
+      case (#zero) { null };
+      case (#affine(#fp(qx), #fp(qy))) {
+        let prefix : Nat8 = if (qy % 2 == 0) 0x02 else 0x03;
+        ?Array.append([prefix], natToBytes(qx, 32));
+      };
+    };
+  };
+
+  /// Recover the public key from an ECDSA signature, exactly as Ethereum's `ecrecover`
+  /// precompile does. Use this for any signature the chain will check, so ic402 accepts what
+  /// the chain accepts. It differs from ecRecover in the three places the chain does:
+  ///   - v is the recovery id 0 or 1 (27/28 on chain); any other value returns null.
+  ///   - R.x = r only: no r + n fallback.
+  ///   - R takes the parity v gives and no other; the point at infinity returns null.
+  /// s is used as given, and high s is accepted, as the precompile does. USDC's low-s rule
+  /// belongs to the caller (Eip712.recoverAuthorizationSigner).
+  /// Returns the compressed SEC1 public key (33 bytes) or null.
+  public func ecRecoverEvm(msgHash : [Nat8], rBytes : [Nat8], sBytes : [Nat8], v : Nat8) : ?[Nat8] {
+    if (v > 1) return null;
+    let r = bytesToNat(rBytes);
+    let s = bytesToNat(sBytes);
+    if (r == 0 or r >= SECP256K1_N or s == 0 or s >= SECP256K1_N) return null;
+    let curve = EcdsaCurve.Curve(#secp256k1);
+    switch (curve.getYfromX(#fp(r), v == 0)) {
+      case (null) { null };
+      case (?ry) { recoverFromR(curve, bytesToNat(msgHash), r, s, r, ry) };
+    };
+  };
+
+  /// Recover the public key from an ECDSA signature, more leniently than Ethereum's
+  /// `ecrecover` (see ecRecoverEvm for the strict form). Returns the compressed SEC1 public
+  /// key (33 bytes) or null.
   ///
-  /// Algorithm: Q = r^(-1) * (s*R - z*G)
-  /// Tries both y-parities for R and handles high-S normalization.
+  /// Algorithm: Q = r^(-1) * (s*R - z*G). Normalizes high s (flipping the parity), then
+  /// tries R with v's parity and then the other one, each with x = r and, if that is not on
+  /// the curve, x = r + n. test/secp256k1.test.mo pins where this differs from Ethereum.
+  /// For signatures checked off chain only (ServiceRegistry buyer actions) and for finding
+  /// the parity of the canister's own signatures (recoverYParity).
   public func ecRecover(msgHash : [Nat8], rBytes : [Nat8], sBytes : [Nat8], v : Nat8) : ?[Nat8] {
     let z = bytesToNat(msgHash);
     let r = bytesToNat(rBytes);
@@ -100,22 +149,10 @@ module {
       switch (rPoint) {
         case (null) {};
         case (?(rx, ry)) {
-          let rJac = curve.toJacobi(#affine(#fp(rx), ry));
-
-          // u1 = -z * r^(-1) mod n, u2 = s * r^(-1) mod n
-          let rInv = curve.Fr.inv(curve.Fr.fromNat(r));
-          let u1 = curve.Fr.mul(curve.Fr.neg(curve.Fr.fromNat(z)), rInv);
-          let u2 = curve.Fr.mul(curve.Fr.fromNat(s), rInv);
-
-          // Q = u1*G + u2*R
-          let qJac = curve.add(curve.mul_base(u1), curve.mul(rJac, u2));
-
-          switch (curve.fromJacobi(qJac)) {
-            case (#zero) {};
-            case (#affine(#fp(qx), #fp(qy))) {
-              let prefix : Nat8 = if (qy % 2 == 0) 0x02 else 0x03;
-              return ?Array.append([prefix], natToBytes(qx, 32));
-            };
+          // The point at infinity falls through to the other parity.
+          switch (recoverFromR(curve, z, r, s, rx, ry)) {
+            case (?q) { return ?q };
+            case (null) {};
           };
         };
       };

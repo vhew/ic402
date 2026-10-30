@@ -52,6 +52,17 @@ suite(
     );
 
     test(
+      "recoveryIdFromV folds only 27/28; any other byte passes through for the signature check to refuse",
+      func() {
+        assert EvmUtils.recoveryIdFromV(27) == 0 and EvmUtils.recoveryIdFromV(28) == 1;
+        assert EvmUtils.recoveryIdFromV(0) == 0 and EvmUtils.recoveryIdFromV(1) == 1;
+        // 54/55 used to fold to 27/28 and pass as a valid v (2.18.2 review).
+        assert EvmUtils.recoveryIdFromV(54) == 54 and EvmUtils.recoveryIdFromV(55) == 55;
+        assert EvmUtils.recoveryIdFromV(29) == 29;
+      },
+    );
+
+    test(
       "idempotent — an already-27/28 v passes through unchanged",
       func() {
         assert encodedV(27) == 27;

@@ -3,6 +3,7 @@
 /// (name/version) from chain.tokens[0] instead of the token matching the paid
 /// `asset` — which on a multi-token chain made a valid signature fail to verify.
 import Gateway "../src/ic402/Gateway";
+import EvmUtils "../src/ic402/EvmUtils";
 import Types "../src/ic402/Types";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
@@ -96,6 +97,56 @@ suite("Gateway.verifyPayment", func() {
     let v = gate.verifyPayment(sig(), 9999, payTo, token1.address);
     assert(not v.isValid);
     assert(v.invalidReason == ?"invalid_exact_evm_payload_authorization_value_mismatch");
+  });
+
+  // ── /verify accepts exactly what USDC's transferWithAuthorization accepts on chain (2.18.2) ──
+  // A real signature: Hardhat's public test key #0 signed this authorization (viem
+  // signTypedData) over token1's domain (Token A / 1, chain 84532, verifyingContract 0xaaaa…).
+  let signer = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+  let realR = Blob.fromArray(EvmUtils.hexToBytes("a5c642f694f8c9a6401f3f5a343eb3e108096cdc509a745a0e5afd8a90bc17da"));
+  let realS = Blob.fromArray(EvmUtils.hexToBytes("3d4668f36cee6112718e6d84883a841dd1bc4601d1007b00c35a05addcb65ef0"));
+  // Its malleation n - s: the same signer under the other parity, which USDC rejects (high s).
+  let highS = Blob.fromArray(EvmUtils.hexToBytes("c2b9970c93119eed8e71927b77c57be0e8f296e4de48253afc7858def37fe251"));
+  // The same authorization with nonce 0x0303…03: this one signed with v = 28.
+  let nonce3 = Blob.fromArray(Array.tabulate<Nat8>(32, func(_ : Nat) : Nat8 { 3 }));
+  let r28 = Blob.fromArray(EvmUtils.hexToBytes("ecf8ff54cf45b88d74f0fa97092ab4363a456e32830f49893146637bff1f5ce4"));
+  let s28 = Blob.fromArray(EvmUtils.hexToBytes("4199739ae161e880103cbe0daad7bc0d3846fa94fa47b84060be658c19fe218a"));
+  func signedWith(nonce : Blob, v : Nat8, r : Blob, s : Blob) : Types.PaymentSignature {
+    let base = sig();
+    let ?a = base.authorization else { assert false; return base };
+    { base with sender = signer; authorization = ?{ a with from = signer; nonce; v; r; s } };
+  };
+  func verifyWith(nonce : Blob, v : Nat8, r : Blob, s : Blob) : { isValid : Bool; invalidReason : ?Text } {
+    let res = Gateway.Gateway(config, owner).verifyPayment(signedWith(nonce, v, r, s), 5000, payTo, token1.address);
+    { isValid = res.isValid; invalidReason = res.invalidReason };
+  };
+  func verify(v : Nat8, s : Blob) : { isValid : Bool; invalidReason : ?Text } = verifyWith(b32, v, realR, s);
+
+  test("a real low-s signature is valid, with v as signed (27) or as the recovery id (0)", func() {
+    assert verify(27, realS).isValid;
+    assert verify(0, realS).isValid; // the form HttpHandler passes after recoveryIdFromV
+  });
+
+  test("a real low-s signature signed with v = 28 is valid, as 28 or as the recovery id 1", func() {
+    assert verifyWith(nonce3, 28, r28, s28).isValid;
+    assert verifyWith(nonce3, 1, r28, s28).isValid;
+    assert not verifyWith(nonce3, 27, r28, s28).isValid; // the other parity is someone else
+  });
+
+  test("its high-s twin (n - s, other v) is refused: it recovers the signer, but USDC reverts", func() {
+    for (v in ([28, 1] : [Nat8]).values()) {
+      let res = verify(v, highS);
+      assert not res.isValid;
+      assert res.invalidReason == ?"invalid_exact_evm_payload_authorization_signature";
+    };
+  });
+
+  test("v other than 0, 1, 27, 28 is refused: it would reach the chain as neither 27 nor 28", func() {
+    // Before 2.18.2 all three were folded onto a parity: 29 became 2 via the old v - 27 fold in
+    // recoverAuthorizationSigner, and 2 reached ecRecover as the even parity, recovering the signer.
+    for (v in ([2, 29, 255] : [Nat8]).values()) {
+      assert not verify(v, realS).isValid;
+    };
   });
 });
 

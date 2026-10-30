@@ -1,14 +1,21 @@
-// @testmode wasi
-/// Conformance suite for ic402's secp256k1 signer recovery, EvmAddress.ecRecover. Two callers
-/// rest on it: Eip712.recoverAuthorizationSigner (every EIP-3009 payment check) and
-/// ServiceRegistry.recoverBuyerActionSigner (EVM buyer confirm/dispute, final with no on-chain
-/// step behind it).
+/// Conformance suite for ic402's two secp256k1 signer recoveries:
+///   - EvmAddress.ecRecoverEvm, Ethereum's ecrecover exactly. Eip712.recoverAuthorizationSigner
+///     uses it for every EIP-3009 payment check (/verify, settle, EVM session-open), so ic402
+///     accepts a payment signature only if the chain will.
+///   - EvmAddress.ecRecover, more lenient. ServiceRegistry.recoverBuyerActionSigner uses it (EVM
+///     buyer confirm/dispute, final with no on-chain step behind it), and recoverYParity.
 ///
 /// Every expectation comes from OUTSIDE ic402: Wycheproof's 252 secp256k1 ECDSA vectors, with
 /// each verifying signature's recovery id found by plain ECDSA verification in the generator,
-/// plus two constructed vectors cross-checked with @noble/curves. Provenance:
-/// test/fixtures/secp256k1/README.md. Runs compiled (wasi): ~500 recoveries take ~40 s in the
-/// interpreter, ~2 s here.
+/// what Ethereum's ecrecover returns for every vector and both v (the generator's own model,
+/// which test/secp256k1-fixtures.test.ts checks against @noble/curves on every CI run), plus two
+/// constructed vectors cross-checked with @noble/curves. Provenance:
+/// test/fixtures/secp256k1/README.md.
+///
+/// This file pins ecRecover. ecRecoverEvm and the payment path are pinned in
+/// test/secp256k1evm.test.mo. Both run in the INTERPRETER on purpose (~50 s each, under 300 MB).
+/// Compiled to wasi this file ran in ~5 s but peaked at 7 GB of memory, and with the strict
+/// suite added the CI runner was killed twice (2.18.2). Keep the recoveries out of wasi.
 ///
 /// HOW A VECTOR IS JUDGED. Wycheproof gives (public key, message, r || s) and asks "does this
 /// verify?". ecRecover instead takes a digest, r, s and a recovery id v, and returns a key. ic402
@@ -19,8 +26,8 @@
 ///
 /// POLICY (where ic402 knowingly differs from a plain ECDSA verifier or Ethereum's ecrecover):
 ///   - High s is accepted. ecRecover normalizes s to n - s and flips the parity, so a signature
-///     and its malleation recover the same key. Wycheproof's plain file treats high s as valid
-///     too; USDC rejects it on chain.
+///     and its malleation recover the same key. Wycheproof's plain file and the ecrecover
+///     precompile accept high s too. (USDC rejects it: recoverAuthorizationSigner checks low s.)
 ///   - v is read only as a parity bit. ic402 never derives R.x = r + n from v, so like Ethereum
 ///     (v = 27/28) it cannot recover signatures that need recovery id 2 or 3: when the nonce
 ///     point R has x >= n and x = r is ALSO on the curve, ecRecover returns a different key.
@@ -33,10 +40,8 @@
 ///     Ethereum's ecrecover fails for one of them.
 ///   The last two are kept deliberately (2.18.x) and pinned below. Neither is a forgery path:
 ///   the key either one recovers is one the signature genuinely verifies under, and steering it
-///   onto a chosen address means solving a discrete log. For a payment, the on-chain transfer
-///   with such a signature reverts, and settle returns #settlementFailed with no value moved.
-///   POST /verify (Gateway.verifyPayment) checks only the recovery, so it reports isValid for
-///   such a signature, and for a high-s one. Do not deliver on /verify alone.
+///   onto a chosen address means solving a discrete log. Payment checks do not see them: since
+///   2.18.2 they recover with ecRecoverEvm, which has neither (pinned in the last suite).
 import EvmAddress "../src/ic402/EvmAddress";
 import EvmUtils "../src/ic402/EvmUtils";
 import V "fixtures/secp256k1/Vectors";
@@ -210,7 +215,7 @@ suite("Wycheproof ecdsa_secp256k1_sha256_p1363_test.json — all 252", func() {
   });
 });
 
-suite("Policy vectors (constructed; Ethereum's ecrecover disagrees on each)", func() {
+suite("Policy vectors (constructed; Ethereum's ecrecover disagrees with ecRecover on each)", func() {
   assert V.policy.size() == 2;
   for (p in V.policy.values()) {
     let h = Blob.toArray(p.hash);

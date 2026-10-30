@@ -822,7 +822,7 @@ module {
         );
         if (not verified) {
           nonceManager.unlock(signature.nonce);
-          return #invalidSignature("EIP-3009 authorization signature verification failed — the recovered signer does not match authorization.from. Check the EIP-712 domain matches this canister's config (token name/version, chainId, verifyingContract = the paid asset) and that the signer key controls the from address. Not retryable without re-signing.");
+          return #invalidSignature("EIP-3009 authorization signature verification failed — the signature is not in the form USDC accepts on chain (low s, v of 27/28), or the recovered signer does not match authorization.from. Check the EIP-712 domain matches this canister's config (token name/version, chainId, verifyingContract = the paid asset) and that the signer key controls the from address. Not retryable without re-signing.");
         };
 
         // Execute transferWithAuthorization on-chain (canister acts as facilitator)

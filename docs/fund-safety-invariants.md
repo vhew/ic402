@@ -287,6 +287,7 @@ citation set for every partial.
 | EIP3009-TIME-WINDOW | EVM | now ∈ [validAfter, validBefore] before processing | `Gateway.mo:580-582` | enforced |
 | EVM-PAYER-PRINCIPAL-IS-POLICY-ONLY | EVM | evm-derived principal for policy buckets only, not auth | `Gateway.mo:584-591` | enforced |
 | VERIFY-IS-READONLY-AND-MATCHES-SETTLE | EVM | verifyPayment mutates no state; same checks as settle | `Gateway.mo:403-472` | enforced |
+| EIP3009-SIG-MATCHES-CHAIN | EVM | A payment signature passes only in a form USDC accepts: low s, v 27/28 (or 0/1), Ethereum's ecrecover (2.18.2) | `Eip712.recoverAuthorizationSigner`, `EvmAddress.ecRecoverEvm` | enforced |
 | RECEIPT-ID-UNIQUENESS | both | Monotonic `rcpt-N`, persisted across upgrades | `Gateway.mo:189-192,1112,1131` | **partial** |
 | session-intent-expiry-enforced | both | openSession rejects now > intent.expiry pre-fund | `Sessions.mo:220-223` | enforced |
 | disputed-or-ignored-jobs-default-to-buyer-refund | both | Ignored/disputed job auto-refunds buyer at expiry | `ServiceRegistry.mo:955-958,732-771` | enforced |
