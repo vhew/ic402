@@ -1366,7 +1366,7 @@ persistent actor KnowledgeBase {
     cyclesBalance : Nat;
     jobs : { total : Nat; settling : Nat; settled : Nat; refunded : Nat; expired : Nat; active : Nat; parked : Nat };
     sessions : { total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat };
-    timers : { sessionExpiryArmed : Bool; jobExpiryArmed : Bool; jobExpiryActive : Bool };
+    timers : { sessionExpiryArmed : Bool; jobExpiryArmed : Bool; jobExpiryActive : Bool; maintenanceArmed : Bool };
   } {
     requireController(msg.caller);
     {
@@ -1383,10 +1383,14 @@ persistent actor KnowledgeBase {
       // re-runs BEFORE postupgrade restores stable state) and the first tick is what disarms;
       // staying true past that is a bug. jobExpiryArmed, by contrast, stays true on an idle
       // canister by design: that is the hourly idle poll, not the working cadence.
+      // maintenanceArmed is the gateway's hourly clean-up (2.19.0): true here, since this example
+      // calls startTimers; false on a host that starts with startTimersWith({ hourlyGc = false })
+      // and runs gate.runMaintenance() itself.
       timers = {
         sessionExpiryArmed = gate.sessionExpiryTimerArmed();
         jobExpiryArmed = registry.expiryTimerArmed();
         jobExpiryActive = registry.expiryTimerActive();
+        maintenanceArmed = gate.maintenanceTimerArmed();
       };
     };
   };

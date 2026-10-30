@@ -1,5 +1,56 @@
 # Changelog
 
+## v2.19.0 — 2026-10-30
+
+Minor — **a host can run the gateway's hourly clean-up on its own schedule.** Requested by EngramX,
+which is moving each engram to one check-in every 6–24 hours. That leaves the gateway's hourly timer
+as 80–95% of a quiet engram's remaining upkeep: 24 wakes and ~0.68B cycles a day, measured on PocketIC.
+`startTimers` behaves exactly as before. No type, `PaymentResult` or stored-state change. Includes
+2.18.2.
+
+### Added
+
+- **`Gateway.runMaintenance()`** runs the hourly clean-up on demand and returns
+  `{ dailySpendRemoved; rateLimitRemoved; revokedGrantsRemoved; more }`. It drops daily-spend entries
+  from earlier days, rate-limit entries with no hit in the last 60 s, and grants revoked more than 7
+  days ago. It is synchronous, needs no `<system>` and never traps.
+  - It removes at most `Gateway.maintenanceCapPerMap` (10,000) entries per map per call. `more = true`
+    means the cap stopped it, so call again in a later message.
+  - The cap counts entries removed, not entries examined. The maps keep no position between calls,
+    so a cap on entries examined would rescan the same live entries every time and never reach the
+    stale ones. Each call scans at most each whole map.
+- **`Gateway.startTimersWith<system>({ hourlyGc : Bool })`.** `startTimers()` is now
+  `startTimersWith({ hourlyGc = true })`. With `hourlyGc = false` it arms the session sweep and the
+  HMAC-seed and EVM-derivation one-shots, but not the hourly timer.
+  - **A host that turns it off MUST call `runMaintenance()` at least once a day**, and more often
+    while payments flow. The rate-limit log is keyed on the payer principal, which on the
+    unauthenticated settle path is attacker-chosen, so it grows with attacker-chosen keys until a
+    clean-up runs (SEC-1).
+  - Timers do not survive an upgrade and the init body re-runs, so a host switches at its next
+    upgrade. There is no `stopTimers`.
+- **`Gateway.maintenanceTimerArmed()`** reports whether the hourly clean-up is armed. The example
+  shows it as `health().timers.maintenanceArmed` (`example.did` gains that field; old clients ignore it).
+- `Policy.gcDailySpendUpTo` / `gcRateLimitUpTo` and `Grants.gcRevokedGrantsUpTo` are the bounded forms
+  behind `runMaintenance`. The unbounded `gcDailySpend` / `gcRateLimit` / `gcRevokedGrants`, which the
+  hourly timer runs, behave as before.
+
+### Not done: cleaning at use
+
+EngramX also offered an alternative: trim a payer's stale entries when that payer next pays, with no
+timer and no host call. It would not bound the maps. An entry written once is never revisited, and
+that covers every one-time payer and every attacker-chosen principal in the rate-limit log, which is
+the case the clean-up exists for.
+
+### Tests
+
+- `test/maintenance.test.mo` plants stale and live entries through `loadStable`, since the test clock
+  is fixed. It checks that `runMaintenance` cleans all three maps and keeps live entries, holds its
+  cap (10,001 entries → 10,000 + `more`, then 1), and reports exactly 10,000 without `more`. It also
+  checks the bounded and unbounded clean-ups in Policy and Grants.
+- The replica suite checks that `startTimers` still arms the hourly clean-up.
+- No unit test covers the `hourlyGc = false` branch: `mops test` has no timer API. Hosts can assert
+  `maintenanceTimerArmed() == false` in their own replica tests.
+
 ## v2.18.2 — 2026-10-28
 
 Patch — **`POST /verify` now accepts an EIP-3009 signature only if USDC will accept it on chain.**

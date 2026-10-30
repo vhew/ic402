@@ -478,6 +478,7 @@ service : {
        record {
          jobExpiryActive: bool;
          jobExpiryArmed: bool;
+         maintenanceArmed: bool;
          sessionExpiryArmed: bool;
        };
     }) query;

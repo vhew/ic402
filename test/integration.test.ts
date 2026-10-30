@@ -714,6 +714,13 @@ describe('ic402 integration', () => {
       expect((await actor.health()).sessions.closed).toBe(h0.sessions.closed); // still retained
     }, 120_000);
 
+    it("startTimers still arms the gateway's hourly clean-up (2.19.0 leaves the default alone)", async () => {
+      if (skip) return;
+      // The example calls startTimers, i.e. startTimersWith({ hourlyGc = true }). A host that
+      // passes false sees this false, and must call runMaintenance itself.
+      expect((await actor.health()).timers.maintenanceArmed).toBe(true);
+    });
+
     it('the job sweep drops to its idle poll once every job is terminal, and stays armed', async () => {
       if (skip) return;
       const h0 = await actor.health();

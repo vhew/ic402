@@ -85,11 +85,19 @@ by the fleet, and it is invisible to a consumer reading only their own source.
 | --- | --- | --- |
 | Session expiry (`Gateway.startTimers`) | **disarmed** — 0 ticks | 60s (`setSessionExpiryIntervalSeconds`) |
 | Job expiry (`ServiceRegistry.startTimers`) | **1 tick/hour** idle poll (`setExpiryIdlePollSeconds`) | 60s (`setExpiryIntervalSeconds`) |
-| Policy/grant GC (`Gateway.startTimers`) | 1 tick/hour — real work, unchanged | — |
+| Policy/grant GC (`Gateway.startTimers`) | 1 tick/hour — real work, unchanged; **off** with `startTimersWith({ hourlyGc = false })` (2.19.0) | — |
 
 That takes ic402's fixed cost on an idle canister from **~121 ticks/hour to 2** (~47M cycles/hour,
 ~$0.05/month). Verify on a live canister with `health().timers`: steady state is
 `sessionExpiryArmed = false`, `jobExpiryActive = false`.
+
+**Since 2.19.0** a host with its own schedule can drop the hourly GC tick too. It starts the gateway
+with `startTimersWith<system>({ hourlyGc = false })` and calls `gate.runMaintenance()` from its own
+check-in, at least once a day and more often while payments flow. The rate-limit log is keyed on
+payer principals, which an attacker chooses on the unauthenticated settle path, so it only shrinks
+when a clean-up runs (SEC-1). `runMaintenance` is synchronous and removes at most 10,000 entries per
+map per call; `more = true` means call again. `maintenanceTimerArmed()` reports which mode a gateway
+is in. An EngramX measurement put the hourly tick at 24 wakes and ~0.68B cycles a day per canister.
 
 **Since 2.17.5** "idle" includes finished state. Before, a `#closed` session (kept 24 h so the payer
 can still `recoverEscrow`) or a terminal job (kept 24 h before GC) counted as work, so every close

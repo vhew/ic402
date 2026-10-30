@@ -2,6 +2,7 @@
 import Types "Types";
 import Time "mo:base/Time";
 import HashMap "mo:base/HashMap";
+import Buffer "mo:base/Buffer";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";
@@ -240,24 +241,23 @@ module {
     };
 
     /// Clean up old daily entries (keep only today's data).
-    public func gcDailySpend() {
+    public func gcDailySpend() { ignore gcDailySpendUpTo(dailySpend.size()) };
+
+    /// gcDailySpend, removing at most `limit` stale entries. `more` is true when stale entries
+    /// remain because the limit stopped it. Never traps (2.19.0, for Gateway.runMaintenance).
+    public func gcDailySpendUpTo(limit : Nat) : { removed : Nat; more : Bool } {
       let today = dayNumber(Time.now());
-      let toRemove = Iter.toArray(
-        Iter.filter<(Text, Nat)>(
-          dailySpend.entries(),
-          func((key, _)) {
-            // key format: "dayNumber:principalText"
-            let dayText = extractDayPrefix(key);
-            switch (textToInt(dayText)) {
-              case (?d) { d < today };
-              case (null) { true }; // malformed, remove
-            };
-          },
-        )
+      removeUpTo<Nat>(
+        dailySpend,
+        func(key, _) {
+          // key format: "dayNumber:principalText"
+          switch (textToInt(extractDayPrefix(key))) {
+            case (?d) { d < today };
+            case (null) { true }; // malformed, remove
+          };
+        },
+        limit,
       );
-      for ((key, _) in toRemove.values()) {
-        dailySpend.delete(key);
-      };
     };
 
     /// S-11: Reclaim rate-limit entries whose timestamps have all aged out of the
@@ -265,19 +265,16 @@ module {
     /// entry per distinct (attacker-controllable) principal — an unbounded state DoS
     /// reachable through unauthenticated settle attempts. Call from the maintenance
     /// timer alongside gcDailySpend().
-    public func gcRateLimit() {
+    public func gcRateLimit() { ignore gcRateLimitUpTo(rateLimitLog.size()) };
+
+    /// gcRateLimit, removing at most `limit` stale entries; `more` as in gcDailySpendUpTo.
+    public func gcRateLimitUpTo(limit : Nat) : { removed : Nat; more : Bool } {
       let windowStart = Time.now() - 60_000_000_000;
-      let toRemove = Iter.toArray(
-        Iter.filter<(Text, [Int])>(
-          rateLimitLog.entries(),
-          func((_, timestamps)) {
-            Array.filter<Int>(timestamps, func(t) { t > windowStart }).size() == 0;
-          },
-        )
+      removeUpTo<[Int]>(
+        rateLimitLog,
+        func(_, timestamps) { Array.find<Int>(timestamps, func(t) { t > windowStart }) == null },
+        limit,
       );
-      for ((key, _) in toRemove.values()) {
-        rateLimitLog.delete(key);
-      };
     };
 
     /// Number of distinct principals currently tracked by the rate limiter.
@@ -487,6 +484,24 @@ module {
   // ── Helpers ──
 
   // Extract the day number prefix from a key like "12345:principalText".
+  // Delete up to `limit` entries of `map` matching `stale`; `more` when a further one matched.
+  // Collects first, then deletes: a HashMap must not change while it is being iterated.
+  func removeUpTo<V>(map : HashMap.HashMap<Text, V>, stale : (Text, V) -> Bool, limit : Nat) : {
+    removed : Nat;
+    more : Bool;
+  } {
+    let keys = Buffer.Buffer<Text>(0);
+    var more = false;
+    label scan for ((k, v) in map.entries()) {
+      if (stale(k, v)) {
+        if (keys.size() == limit) { more := true; break scan };
+        keys.add(k);
+      };
+    };
+    for (k in keys.vals()) { map.delete(k) };
+    { removed = keys.size(); more };
+  };
+
   func extractDayPrefix(key : Text) : Text {
     var result = "";
     for (c in key.chars()) {

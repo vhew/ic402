@@ -68,6 +68,9 @@ module {
     null;
   };
 
+  /// Entries runMaintenance removes from each map per call, at most.
+  public let maintenanceCapPerMap : Nat = 10_000;
+
   /// Main payment gateway. Orchestrates charges, sessions, grants, escrow, and policy.
   ///
   /// Consumer obligations:
@@ -75,6 +78,12 @@ module {
   ///   payloads and escrow subaccount derivation).
   /// - Call `startTimers<system>()` once from actor context, or schedule session expiry/GC
   ///   yourself.
+  /// - 2.19.0: a host that runs its own schedule can call `startTimersWith<system>({ hourlyGc =
+  ///   false })` instead, which arms everything startTimers does except the hourly clean-up. It
+  ///   MUST then call `runMaintenance()` at least once a day, and more often while payments flow.
+  ///   SEC-1: the rate-limit log is keyed on the payer principal, which on the unauthenticated
+  ///   settle path is attacker-chosen, so it grows with attacker-chosen keys until a clean-up
+  ///   runs. The daily-spend and revoked-grant maps also grow until then.
   /// - Persist `toStable()` in preupgrade and restore with `loadStable()` in postupgrade;
   ///   check `Ic402.checkSchemaVersion` against your persisted version BEFORE loadStable.
   /// - 2.18.0: persist `refundOwedToStable()` in its own stable variable and restore it with
@@ -88,6 +97,8 @@ module {
     let escrowManager = Escrow.EscrowManager(selfPrincipal);
     let grants = GrantsMod.Grants(selfPrincipal);
     let evmEscrowMgr = EvmEscrow.EvmEscrowManager();
+    // The hourly clean-up's timer, when startTimers armed it (2.19.0: maintenanceTimerArmed).
+    var maintenanceTimer : ?Timer.TimerId = null;
     // The path every EVM key in this gateway derives under: the inbound recipient AND the
     // outbound sender. Transient by necessity — a consumer may not add a field to
     // Types.Config (its Stable*State types are structurally inlined into the consumer's own
@@ -1247,7 +1258,16 @@ module {
     /// the hourly GC tick below. A recurring timer is billed per tick regardless of what the
     /// callback does, which made the old always-on 60s sweep the largest fixed cost of embedding
     /// ic402 in a many-small-canisters topology. Confirm with sessionExpiryTimerArmed().
-    public func startTimers<system>() {
+    ///
+    /// Same as `startTimersWith({ hourlyGc = true })`.
+    public func startTimers<system>() { startTimersWith<system>({ hourlyGc = true }) };
+
+    /// startTimers, with the hourly clean-up optional (2.19.0). With `hourlyGc = false` it arms
+    /// the session sweep and the two install one-shots (HMAC seed, EVM address derivation) but not
+    /// the hourly recurring timer, which costs a wake (~28M cycles) every hour whatever it finds.
+    /// The host then MUST call runMaintenance() itself: see the Gateway header for why and how
+    /// often.
+    public func startTimersWith<system>(opts : { hourlyGc : Bool }) {
       // Close expired sessions every 60 seconds, then GC stale entries. Armed unconditionally:
       // on upgrade a `persistent actor` re-runs its init body (where this call lives) BEFORE
       // postupgrade restores stable sessions, so gating the arm on "are there sessions?" would
@@ -1255,14 +1275,16 @@ module {
       // if there is nothing to do — at most one wasted tick per install/upgrade.
       sessionsMgr.armExpiryTimer<system>();
       // Garbage-collect stale policy data and revoked grants every hour
-      ignore Timer.recurringTimer<system>(#seconds 3600, func() : async () {
-        policy.gcDailySpend();
-        // SEC-1: rateLimitLog is keyed on the (attacker-influenceable) payer principal on the
-        // unauthenticated /settle path, so it can grow unbounded without this GC. gcRateLimit
-        // was written for exactly this attack but was never wired to a timer — wire it here.
-        policy.gcRateLimit();
-        grants.gcRevokedGrants();
-      });
+      if (opts.hourlyGc) {
+        maintenanceTimer := ?Timer.recurringTimer<system>(#seconds 3600, func() : async () {
+          policy.gcDailySpend();
+          // SEC-1: rateLimitLog is keyed on the (attacker-influenceable) payer principal on the
+          // unauthenticated /settle path, so it can grow unbounded without this GC. gcRateLimit
+          // was written for exactly this attack but was never wired to a timer — wire it here.
+          policy.gcRateLimit();
+          grants.gcRevokedGrants();
+        });
+      };
 
       // Auto-init HMAC seed from randomness on first deployment
       ignore Timer.setTimer<system>(#seconds 0, func() : async () {
@@ -1281,6 +1303,33 @@ module {
           });
         };
         case (null) {};
+      };
+    };
+
+    /// Whether startTimers armed the hourly clean-up (false after startTimersWith({ hourlyGc =
+    /// false }), and before any start). Timers do not survive an upgrade; the init body re-arms.
+    public func maintenanceTimerArmed() : Bool { maintenanceTimer != null };
+
+    /// The hourly clean-up, run by the host instead (2.19.0): drops daily-spend entries from
+    /// earlier days, rate-limit entries with no hit in the last 60 s, and revoked grants older
+    /// than 7 days. Synchronous; never traps. Removes at most 10,000 entries per map per call;
+    /// `more` is true when that cap stopped it, so call again (in a later message, to stay well
+    /// inside one message's instruction limit). Each call scans at most each whole map.
+    /// Required at least daily after startTimersWith({ hourlyGc = false }): see the Gateway header.
+    public func runMaintenance() : {
+      dailySpendRemoved : Nat;
+      rateLimitRemoved : Nat;
+      revokedGrantsRemoved : Nat;
+      more : Bool;
+    } {
+      let d = policy.gcDailySpendUpTo(maintenanceCapPerMap);
+      let r = policy.gcRateLimitUpTo(maintenanceCapPerMap);
+      let g = grants.gcRevokedGrantsUpTo(maintenanceCapPerMap);
+      {
+        dailySpendRemoved = d.removed;
+        rateLimitRemoved = r.removed;
+        revokedGrantsRemoved = g.removed;
+        more = d.more or r.more or g.more;
       };
     };
 

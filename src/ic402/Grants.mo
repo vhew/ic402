@@ -8,6 +8,7 @@ import Text "mo:base/Text";
 import Array "mo:base/Array";
 import Blob "mo:base/Blob";
 import HashMap "mo:base/HashMap";
+import Buffer "mo:base/Buffer";
 import Iter "mo:base/Iter";
 import Principal "mo:base/Principal";
 import SHA256 "mo:sha2/Sha256";
@@ -138,17 +139,23 @@ module {
 
     /// M-1: Remove revoked grants older than 7 days to prevent unbounded growth.
     /// Call from a recurring timer (e.g., hourly via Gateway.startTimers).
-    public func gcRevokedGrants() {
+    public func gcRevokedGrants() { ignore gcRevokedGrantsUpTo(revokedGrants.size()) };
+
+    /// gcRevokedGrants, removing at most `limit` stale entries. `more` is true when stale entries
+    /// remain because the limit stopped it. Never traps (2.19.0, for Gateway.runMaintenance).
+    public func gcRevokedGrantsUpTo(limit : Nat) : { removed : Nat; more : Bool } {
       let cutoff = Time.now() - 7 * 24 * 60 * 60 * 1_000_000_000; // 7 days in nanoseconds
-      let stale = Iter.toArray(
-        Iter.filter<(Text, Int)>(
-          revokedGrants.entries(),
-          func((_, timestamp)) { timestamp < cutoff },
-        )
-      );
-      for ((id, _) in stale.values()) {
-        revokedGrants.delete(id);
+      // Collect first, then delete: a HashMap must not change while it is being iterated.
+      let ids = Buffer.Buffer<Text>(0);
+      var more = false;
+      label scan for ((id, timestamp) in revokedGrants.entries()) {
+        if (timestamp < cutoff) {
+          if (ids.size() == limit) { more := true; break scan };
+          ids.add(id);
+        };
       };
+      for (id in ids.vals()) { revokedGrants.delete(id) };
+      { removed = ids.size(); more };
     };
 
     // ── Stable state ──
