@@ -174,6 +174,8 @@ module {
 
   /// Main payment gateway: charges, sessions, grants, escrow, and policy.
   public let Gateway = GatewayModule.Gateway;
+  /// Entries Gateway.runMaintenance removes from each map per call, at most (2.19.0).
+  public let maintenanceCapPerMap = GatewayModule.maintenanceCapPerMap;
   /// Encrypted content store with chunked upload.
   public let ContentStore = ContentStoreMod.ContentStore;
   /// ERC-8004 agent identity: metadata and key derivation.

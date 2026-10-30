@@ -80,10 +80,12 @@ module {
   ///   yourself.
   /// - 2.19.0: a host that runs its own schedule can call `startTimersWith<system>({ hourlyGc =
   ///   false })` instead, which arms everything startTimers does except the hourly clean-up. It
-  ///   MUST then call `runMaintenance()` at least once a day, and more often while payments flow.
-  ///   SEC-1: the rate-limit log is keyed on the payer principal, which on the unauthenticated
-  ///   settle path is attacker-chosen, so it grows with attacker-chosen keys until a clean-up
-  ///   runs. The daily-spend and revoked-grant maps also grow until then.
+  ///   MUST then call `runMaintenance()` at least once a day, and more often under heavy inbound
+  ///   traffic. SEC-1: while `rateLimitPerMinute` is set, the rate-limit log gains an entry per
+  ///   caller principal on every session-open attempt (before any other check, and principals
+  ///   cost nothing to mint) and on every successful settle, so it grows with attacker-chosen
+  ///   keys until a clean-up runs. The daily-spend and revoked-grant maps also grow until then.
+  ///   Each runMaintenance call scans the maps whole, so a longer cadence means a bigger scan.
   /// - Persist `toStable()` in preupgrade and restore with `loadStable()` in postupgrade;
   ///   check `Ic402.checkSchemaVersion` against your persisted version BEFORE loadStable.
   /// - 2.18.0: persist `refundOwedToStable()` in its own stable variable and restore it with
@@ -1278,9 +1280,9 @@ module {
       if (opts.hourlyGc) {
         maintenanceTimer := ?Timer.recurringTimer<system>(#seconds 3600, func() : async () {
           policy.gcDailySpend();
-          // SEC-1: rateLimitLog is keyed on the (attacker-influenceable) payer principal on the
-          // unauthenticated /settle path, so it can grow unbounded without this GC. gcRateLimit
-          // was written for exactly this attack but was never wired to a timer — wire it here.
+          // SEC-1: rateLimitLog is keyed on attacker-chosen principals (every session-open
+          // attempt records the caller; settles record only on success, I6), so it can grow
+          // unbounded without this GC. gcRateLimit was written for exactly this attack.
           policy.gcRateLimit();
           grants.gcRevokedGrants();
         });
@@ -1312,9 +1314,10 @@ module {
 
     /// The hourly clean-up, run by the host instead (2.19.0): drops daily-spend entries from
     /// earlier days, rate-limit entries with no hit in the last 60 s, and revoked grants older
-    /// than 7 days. Synchronous; never traps. Removes at most 10,000 entries per map per call;
-    /// `more` is true when that cap stopped it, so call again (in a later message, to stay well
-    /// inside one message's instruction limit). Each call scans at most each whole map.
+    /// than 7 days. Synchronous, with no trap path. Removes at most 10,000 entries per map per
+    /// call; `more` is true when that cap stopped it, so call again in a later message. The cap
+    /// bounds removals, not the scan: a call can walk each whole map, so its instruction cost
+    /// grows with the maps, like the hourly timer's. Run it often enough to keep them small.
     /// Required at least daily after startTimersWith({ hourlyGc = false }): see the Gateway header.
     public func runMaintenance() : {
       dailySpendRemoved : Nat;

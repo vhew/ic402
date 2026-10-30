@@ -93,10 +93,11 @@ That takes ic402's fixed cost on an idle canister from **~121 ticks/hour to 2** 
 
 **Since 2.19.0** a host with its own schedule can drop the hourly GC tick too. It starts the gateway
 with `startTimersWith<system>({ hourlyGc = false })` and calls `gate.runMaintenance()` from its own
-check-in, at least once a day and more often while payments flow. The rate-limit log is keyed on
-payer principals, which an attacker chooses on the unauthenticated settle path, so it only shrinks
-when a clean-up runs (SEC-1). `runMaintenance` is synchronous and removes at most 10,000 entries per
-map per call; `more = true` means call again. `maintenanceTimerArmed()` reports which mode a gateway
+check-in, at least once a day and more often under heavy inbound traffic. While
+`rateLimitPerMinute` is set, every session-open attempt records its caller (principals cost nothing
+to mint), so the rate-limit log only shrinks when a clean-up runs (SEC-1). `runMaintenance` is
+synchronous and removes at most 10,000 entries per map per call; `more = true` means call again.
+Each call can scan each whole map, so a longer cadence means a bigger scan. `maintenanceTimerArmed()` reports which mode a gateway
 is in. An EngramX measurement put the hourly tick at 24 wakes and ~0.68B cycles a day per canister.
 
 **Since 2.17.5** "idle" includes finished state. Before, a `#closed` session (kept 24 h so the payer

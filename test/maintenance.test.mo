@@ -15,6 +15,7 @@ import Types "../src/ic402/Types";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array";
 import Nat "mo:base/Nat";
+import Int "mo:base/Int";
 import Time "mo:base/Time";
 import { test; suite } "mo:test";
 
@@ -34,7 +35,8 @@ let DAY : Int = 86_400 * SEC;
 let today : Int = now / DAY;
 
 func tabulate<T>(n : Nat, f : Nat -> T) : [T] = Array.tabulate<T>(n, f);
-func key(day : Int, i : Nat) : Text = debug_show (day) # ":p" # Nat.toText(i);
+// The production key format (Policy.dailyKey), so it parses under any clock value.
+func key(day : Int, i : Nat) : Text = Int.toText(day) # ":p" # Nat.toText(i);
 
 // Stale entries: spend from yesterday and a malformed key; rate-limit hits older than 60 s;
 // grants revoked more than 7 days ago. Live entries: today's spend, a hit now, a fresh revocation.
@@ -90,7 +92,9 @@ suite("Gateway.runMaintenance", func() {
   });
 
   test("on empty state it returns zeros and does not trap", func() {
-    let r = Gateway.Gateway(config, owner).runMaintenance();
+    let gate = Gateway.Gateway(config, owner);
+    assert not gate.maintenanceTimerArmed(); // nothing armed before startTimers
+    let r = gate.runMaintenance();
     assert r.dailySpendRemoved == 0 and r.rateLimitRemoved == 0 and r.revokedGrantsRemoved == 0;
     assert not r.more;
   });
@@ -122,6 +126,14 @@ suite("Gateway.runMaintenance", func() {
     let second = gate.runMaintenance();
     assert second.revokedGrantsRemoved == 1 and not second.more;
     assert sizes(gate) == (0, 0, 1);
+  });
+
+  test("the cap is per map, not per call: 6,000 stale in two maps (12,000 in all) go in one call", func() {
+    let gate = gatewayWith(staleDaily(6_000), staleRate(6_000), staleGrants(1));
+    let r = gate.runMaintenance();
+    assert r.dailySpendRemoved == 6_000 and r.rateLimitRemoved == 6_000 and r.revokedGrantsRemoved == 1;
+    assert not r.more;
+    assert sizes(gate) == (0, 0, 0);
   });
 
   test("exactly the cap's worth of stale entries is not 'more'", func() {

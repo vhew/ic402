@@ -13,19 +13,23 @@ as 80–95% of a quiet engram's remaining upkeep: 24 wakes and ~0.68B cycles a d
 - **`Gateway.runMaintenance()`** runs the hourly clean-up on demand and returns
   `{ dailySpendRemoved; rateLimitRemoved; revokedGrantsRemoved; more }`. It drops daily-spend entries
   from earlier days, rate-limit entries with no hit in the last 60 s, and grants revoked more than 7
-  days ago. It is synchronous, needs no `<system>` and never traps.
-  - It removes at most `Gateway.maintenanceCapPerMap` (10,000) entries per map per call. `more = true`
-    means the cap stopped it, so call again in a later message.
+  days ago. It is synchronous, needs no `<system>` and has no trap path.
+  - It removes at most `maintenanceCapPerMap` (10,000) entries per map per call. Reach the cap as
+    `Ic402.maintenanceCapPerMap`. `more = true` means the cap stopped it, so call again in a later
+    message.
   - The cap counts entries removed, not entries examined. The maps keep no position between calls,
     so a cap on entries examined would rescan the same live entries every time and never reach the
-    stale ones. Each call scans at most each whole map.
+    stale ones. The cap therefore bounds removals, not the scan: a call can walk each whole map, as
+    the hourly timer always has, and its cost grows with the maps. Run it often enough to keep them
+    small.
 - **`Gateway.startTimersWith<system>({ hourlyGc : Bool })`.** `startTimers()` is now
   `startTimersWith({ hourlyGc = true })`. With `hourlyGc = false` it arms the session sweep and the
   HMAC-seed and EVM-derivation one-shots, but not the hourly timer.
   - **A host that turns it off MUST call `runMaintenance()` at least once a day**, and more often
-    while payments flow. The rate-limit log is keyed on the payer principal, which on the
-    unauthenticated settle path is attacker-chosen, so it grows with attacker-chosen keys until a
-    clean-up runs (SEC-1).
+    under heavy inbound traffic. While `rateLimitPerMinute` is set, the rate-limit log gains an
+    entry per caller on every session-open attempt (before any other check; principals cost nothing
+    to mint) and on every successful settle. It grows with attacker-chosen keys until a clean-up
+    runs (SEC-1).
   - Timers do not survive an upgrade and the init body re-runs, so a host switches at its next
     upgrade. There is no `stopTimers`.
 - **`Gateway.maintenanceTimerArmed()`** reports whether the hourly clean-up is armed. The example

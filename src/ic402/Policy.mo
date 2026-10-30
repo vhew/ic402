@@ -244,7 +244,7 @@ module {
     public func gcDailySpend() { ignore gcDailySpendUpTo(dailySpend.size()) };
 
     /// gcDailySpend, removing at most `limit` stale entries. `more` is true when stale entries
-    /// remain because the limit stopped it. Never traps (2.19.0, for Gateway.runMaintenance).
+    /// remain because the limit stopped it. No trap path (2.19.0, for Gateway.runMaintenance).
     public func gcDailySpendUpTo(limit : Nat) : { removed : Nat; more : Bool } {
       let today = dayNumber(Time.now());
       removeUpTo<Nat>(
@@ -483,7 +483,6 @@ module {
 
   // ── Helpers ──
 
-  // Extract the day number prefix from a key like "12345:principalText".
   // Delete up to `limit` entries of `map` matching `stale`; `more` when a further one matched.
   // Collects first, then deletes: a HashMap must not change while it is being iterated.
   func removeUpTo<V>(map : HashMap.HashMap<Text, V>, stale : (Text, V) -> Bool, limit : Nat) : {
@@ -502,6 +501,7 @@ module {
     { removed = keys.size(); more };
   };
 
+  // Extract the day number prefix from a key like "12345:principalText".
   func extractDayPrefix(key : Text) : Text {
     var result = "";
     for (c in key.chars()) {

@@ -142,7 +142,7 @@ module {
     public func gcRevokedGrants() { ignore gcRevokedGrantsUpTo(revokedGrants.size()) };
 
     /// gcRevokedGrants, removing at most `limit` stale entries. `more` is true when stale entries
-    /// remain because the limit stopped it. Never traps (2.19.0, for Gateway.runMaintenance).
+    /// remain because the limit stopped it. No trap path (2.19.0, for Gateway.runMaintenance).
     public func gcRevokedGrantsUpTo(limit : Nat) : { removed : Nat; more : Bool } {
       let cutoff = Time.now() - 7 * 24 * 60 * 60 * 1_000_000_000; // 7 days in nanoseconds
       // Collect first, then delete: a HashMap must not change while it is being iterated.
