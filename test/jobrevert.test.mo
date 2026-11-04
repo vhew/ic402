@@ -1,4 +1,4 @@
-/// 2.17.6 — job-registry fixes found by adversarial review.
+/// 2.17.6 — job-registry fixes found by adversarial review. 2.19.1 — the suites at the end.
 ///
 ///   1. A failed in-flight transfer must not undo a controller's resolveJob (below).
 ///   2. The expiry sweep must judge each job by its live record, not the iterator's copy.
@@ -23,21 +23,34 @@ import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat32 "mo:base/Nat32";
 import Text "mo:base/Text";
+import Nat "mo:base/Nat";
+import Error "mo:base/Error";
 import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
 let buyerP = Principal.fromText("2vxsx-fae");
 let operatorP = Principal.fromText("aaaaa-aa");
 
+// What the fake ledger does with a transfer: answer #Ok, answer #Err, or reject the call (as a
+// stopped or trapping ledger does; 2.19.1).
+type Outcome = { #ok; #err; #reject };
+
 let ledger = persistent actor {
-  var hops = 0; var ok = false; var transfers = 0;
-  public func script(h : Nat, o : Bool) : async () { hops := h; ok := o; transfers := 0 };
+  var hops = 0; var outcomes : [Outcome] = [#err]; var transfers = 0;
+  public func script(h : Nat, o : Bool) : async () { hops := h; outcomes := [if o #ok else #err]; transfers := 0 };
+  /// One outcome per transfer, in order; the last repeats.
+  public func scriptSeq(h : Nat, seq : [Outcome]) : async () { hops := h; outcomes := seq; transfers := 0 };
   public func transferCalls() : async Nat { transfers };
   public func icrc1_transfer(_ : Types.TransferArg) : async Types.TransferResult {
     transfers += 1;
     let n = transfers;
+    let o = outcomes[Nat.min(n, outcomes.size()) - 1 : Nat];
     var i = 0; while (i < hops) { await async {}; i += 1 };
-    if (ok) { #Ok(n) } else { #Err(#TemporarilyUnavailable) };
+    switch (o) {
+      case (#ok) { #Ok(n) };
+      case (#err) { #Err(#TemporarilyUnavailable) };
+      case (#reject) { throw Error.reject("ledger is stopped") };
+    };
   };
 };
 
@@ -187,5 +200,174 @@ await suite("a job left #Verified by a failed payment can be re-driven (2.17.6)"
     switch (await reg.resolveDispute("job-1", true)) { case (#ok) {}; case (#err(_)) { assert false } };
     assert status(reg) == ?#Refunded;
     assert (await ledger.transferCalls()) == 1;
+  });
+});
+
+// ── 2.19.1 ──────────────────────────────────────────────────────────────────────────────────
+
+/// A registry with one ICP job "job-1" (status, actualCost). amount 1_000, ledgerFee 10, so an
+/// Upto job with actualCost ?100 pays the operator 100 and refunds the buyer 880 (two transfers).
+func mkUpto(status : Types.JobStatus, actualCost : ?Nat) : ServiceRegistry.ServiceRegistry {
+  let reg = mk([("job-1", status, 9_999_999_999_999_999_999)]);
+  let s = reg.toStable();
+  reg.loadStable({ s with jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with actualCost }) }) });
+  reg;
+};
+
+/// Yield until `n` transfers have been sent.
+func untilCalls(n : Nat) : async () {
+  var k = 0; while ((await ledger.transferCalls()) < n and k < 200) { await async {}; k += 1 };
+  assert (await ledger.transferCalls()) == n;
+};
+
+await suite("2.19.1: a ledger reject means nothing was paid, so the job rolls back", func() : async () {
+
+  await test("settle: the ledger rejects, the job is back in #Verified, and a retry pays once", func() : async () {
+    // Mutation: drop the try/catch in payFromMainAccount — the reject propagates out of settleJob
+    // and strands the job in #Settling (this await throws instead of returning #err).
+    await ledger.scriptSeq(0, [#reject]);
+    let reg = mk([("job-1", #Disputed, 9_999_999_999_999_999_999)]);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Verified;
+    await ledger.script(0, true);
+    switch (await reg.resolveDispute("job-1", false)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Settled;
+  });
+
+  await test("dispute refund: the ledger rejects, the job is back in #Disputed", func() : async () {
+    // Mutation: as above, on the refund leg (refundOnRail shares payFromMainAccount).
+    await ledger.scriptSeq(0, [#reject]);
+    let reg = mk([("job-1", #Disputed, 0)]);
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Disputed;
+  });
+
+  await test("expiry sweep: a rejected refund no longer aborts the sweep's other jobs", func() : async () {
+    // Mutation: as above — the first rejected refund throws out of expireJobs, so the second job
+    // is never visited and this await throws.
+    await ledger.scriptSeq(0, [#reject]);
+    let reg = mk([("job-1", #Submitted, 0), ("job-2", #Submitted, 0)]);
+    let swept = await reg.expireJobs();
+    assert swept.size() == 2;
+    assert (await ledger.transferCalls()) == 2;
+    assert status(reg) == ?#Expired and reg.getJobStatus("job-2") == ?#Expired;
+  });
+});
+
+await suite("2.19.1: a payout that completes after resolveJob leaves the job as resolved", func() : async () {
+
+  await test("settle: resolveJob lands mid-transfer, the payment succeeds, the job stays terminal", func() : async () {
+    // Mutation: drop both the #ok-arm and the final guard in settleJob — the controller's
+    // #Refunded is overwritten with #Settled.
+    await ledger.script(40, true);
+    let reg = mk([("job-1", #Disputed, 0)]);
+    let f = reg.resolveDispute("job-1", false);
+    await untilTransferring(reg);
+    switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await f) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Refunded;
+  });
+
+  await test("settle (Upto): resolved during the operator payment, no remainder refund is sent", func() : async () {
+    // Mutation: drop the guard on settleJob's operator #ok arm — the remainder refund still goes
+    // out after the controller resolved the job (a second transfer).
+    await ledger.script(40, true);
+    let reg = mkUpto(#Disputed, ?100);
+    let f = reg.resolveDispute("job-1", false);
+    await untilTransferring(reg);
+    switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await f) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Refunded;
+    assert (await ledger.transferCalls()) == 1;
+  });
+
+  await test("settle (Upto): resolved during the remainder refund, which succeeds; the job stays terminal", func() : async () {
+    // Mutation: drop settleJob's final guard — #Expired is overwritten with #Settled.
+    await ledger.script(40, true);
+    let reg = mkUpto(#Disputed, ?100);
+    let f = reg.resolveDispute("job-1", false);
+    await untilCalls(2);
+    switch (reg.resolveJob("job-1", #Expired)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await f) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+  });
+
+  await test("settle (Upto): resolved during the remainder refund, which fails; the job stays terminal", func() : async () {
+    // Mutation: drop the guard on the remainder #err arm — #Expired is overwritten with #Settled.
+    await ledger.scriptSeq(40, [#ok, #err]);
+    let reg = mkUpto(#Disputed, ?100);
+    let f = reg.resolveDispute("job-1", false);
+    await untilCalls(2);
+    switch (reg.resolveJob("job-1", #Expired)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await f) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+  });
+
+  await test("dispute refund: resolveJob lands mid-transfer, the refund succeeds, the job stays terminal", func() : async () {
+    // Mutation: drop the guard on resolveDispute's refund #ok arm — #Expired becomes #Refunded.
+    await ledger.script(40, true);
+    let reg = mk([("job-1", #Disputed, 0)]);
+    let f = reg.resolveDispute("job-1", true);
+    await untilTransferring(reg);
+    switch (reg.resolveJob("job-1", #Expired)) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await f) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+  });
+});
+
+/// A registry with one EVM-paid job "job-1" whose transfer hook, on call number `resolveOn`,
+/// resolves the job to `terminal` and then answers #pending (a broadcast left unconfirmed);
+/// other calls answer #confirmed. The hook runs inside the payout's await, so this is the same
+/// interleaving as a resolveJob landing while a real broadcast is in flight.
+func mkEvm(status : Types.JobStatus, actualCost : ?Nat, resolveOn : Nat, terminal : Types.JobStatus) : ServiceRegistry.ServiceRegistry {
+  let reg = mkUpto(status, actualCost);
+  let s = reg.toStable();
+  reg.loadStable({
+    s with
+    jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with buyer = "0x1111111111111111111111111111111111111111" }) });
+    evmRails = ?[("job-1", { network = "eip155:8453"; token = "0x2222222222222222222222222222222222222222" })];
+    operatorPayouts = ?[(operatorP, "0x3333333333333333333333333333333333333333")];
+  });
+  var calls = 0;
+  reg.setEvmTransfer(func(_ : Nat, _ : Text, _ : Text, _ : Nat) : async { #confirmed : Text; #reverted : Text; #pending : Text; #err : Text } {
+    calls += 1;
+    if (calls == resolveOn) {
+      switch (reg.resolveJob("job-1", terminal)) { case (#ok) {}; case (#err(_)) { assert false } };
+      #pending("0xpending");
+    } else { #confirmed("0xconfirmed") };
+  });
+  reg;
+};
+
+func parked(reg : ServiceRegistry.ServiceRegistry) : Bool {
+  switch (reg.getJob("job-1")) { case (?j) { j.parkedTx != null }; case (null) { false } };
+};
+
+await suite("2.19.1: an EVM broadcast left pending after resolveJob leaves the job as resolved", func() : async () {
+
+  await test("settle: the operator transfer is pending, the job stays terminal and unparked", func() : async () {
+    // Mutation: drop the guard on settleJob's #pending arm — the job goes back to #Settling with
+    // a parked tx, un-resolving the controller's decision.
+    let reg = mkEvm(#Disputed, null, 1, #Refunded);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Refunded;
+    assert not parked(reg);
+  });
+
+  await test("settle (Upto): the remainder refund is pending, the job stays terminal and unparked", func() : async () {
+    // Mutation: drop the guard on the remainder #pending arm — #Expired becomes #Settled.
+    let reg = mkEvm(#Disputed, ?100, 2, #Expired);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+    assert not parked(reg);
+  });
+
+  await test("dispute refund: the refund is pending, the job stays terminal and unparked", func() : async () {
+    // Mutation: drop the guard on resolveDispute's refund #pending arm — #Expired goes back to
+    // #Settling with a parked tx.
+    let reg = mkEvm(#Disputed, null, 1, #Expired);
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+    assert not parked(reg);
   });
 });

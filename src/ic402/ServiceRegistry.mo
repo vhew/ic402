@@ -18,6 +18,7 @@ import Nat "mo:base/Nat";
 import Utils "Utils";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
+import Error "mo:base/Error";
 import Timer "mo:base/Timer";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
@@ -296,18 +297,31 @@ module {
     // callers are separate messages themselves, so their callers see a reject either way. refundOnRail itself stays a separate message: it parses
     // the buyer principal before its first await, and that isolation keeps one malformed job from wedging
     // the job sweep.
+    // 2.19.1: a REJECT of the ledger call is returned as #err, so every caller takes its existing
+    // "no funds moved" branch (settle and dispute-refund roll back for a retry; the sweep leaves the
+    // job #Expired and moves on). That is sound because the call is unbounded-wait (plain await,
+    // guaranteed response) and icrc1_transfer makes no calls of its own: a reject means the ledger
+    // never ran the transfer or trapped and rolled it back. Before, the reject was thrown, stranding
+    // the job in #Settling (only resolveJob could move it) and aborting the sweep's tick. Do NOT add
+    // a timeout to this call: a bounded-wait SYS_UNKNOWN reject would no longer prove "not paid".
+    // A reply that fails to decode still traps (the transfer may have happened): that strands the
+    // job in #Settling, the safe failure.
     func payFromMainAccount(to : Types.Account, amount : Nat) : async* { #ok : Nat; #err : Text } {
       if (amount == 0) return #ok(0);
       if (config.tokens.size() == 0) return #err("No token configured");
       let ledger : Types.LedgerActor = actor (Principal.toText(config.tokens[0].ledger));
-      let result = await ledger.icrc1_transfer({
-        from_subaccount = config.recipient.subaccount;
-        to;
-        amount;
-        fee = null;
-        memo = null;
-        created_at_time = null;
-      });
+      let result = try {
+        await ledger.icrc1_transfer({
+          from_subaccount = config.recipient.subaccount;
+          to;
+          amount;
+          fee = null;
+          memo = null;
+          created_at_time = null;
+        });
+      } catch (e) {
+        return #err("ledger rejected the transfer (nothing was paid): " # Error.message(e));
+      };
       switch (result) {
         case (#Ok(b)) { #ok(b) };
         case (#Err(e)) { #err(debug_show(e)) };
@@ -764,10 +778,12 @@ module {
         let refundAmt = Utils.satSub(job.amount, fee);
         switch (await refundOnRail(jobId, job, refundAmt)) {
           case (#ok) {
+            if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The buyer WAS refunded");
             jobs.put(jobId, { job with status = #Refunded; completedAt = ?Time.now() });
             #ok;
           };
           case (#pending(p)) {
+            if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The buyer refund was broadcast but not confirmed: tx " # p.txHash);
             // B2/recovery: broadcast but unconfirmed — do NOT revert (a re-drive would double-
             // refund). Persist the parked refund (leg #Refund); stay parked in #Settling.
             jobs.put(jobId, { job with status = #Settling; parkedTx = ?{ txHash = p.txHash; leg = #Refund; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
@@ -786,6 +802,20 @@ module {
         jobs.put(jobId, { job with status = #Verified });
         await settleJob(jobId);
       };
+    };
+
+    // 2.19.1: whether `jobId` is still the #Settling job this message reserved. A controller's
+    // resolveJob (which accepts any #Settling job) can make it terminal while a payout await is in
+    // flight. Each post-await write checks this first, so the controller's terminal state is never
+    // overwritten (2.17.6 guarded only the rollback branches).
+    func stillSettling(jobId : Text) : Bool {
+      switch (jobs.get(jobId)) { case (?j) { j.status == #Settling }; case (null) { false } };
+    };
+
+    // The error for a payout that completed (or broadcast) after a controller resolved the job.
+    func resolvedMeanwhile(jobId : Text, what : Text) : { #err : Text } {
+      let status = switch (jobs.get(jobId)) { case (?j) { debug_show (j.status) }; case (null) { "deleted" } };
+      #err("A controller resolved this job (now " # status # ") while its payout was in flight, so it was left as resolved. " # what # " — reconcile the funds.");
     };
 
     /// Settle a verified job: pay the operator (and refund the Upto remainder to
@@ -823,13 +853,16 @@ module {
           return #err("Settlement failed: " # e);
         };
         case (#pending(p)) {
+          if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator settle was broadcast but not confirmed: tx " # p.txHash);
           // B2/recovery: broadcast but unconfirmed — it MAY have landed, so do NOT roll back to
           // #Verified (re-broadcast would double-pay). Persist the parked tx (leg #Settle) so a
           // controller can confirm-only reconcile it; stay parked in #Settling (set above).
           jobs.put(jobId, { job with status = #Settling; parkedTx = ?{ txHash = p.txHash; leg = #Settle; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
           return #err("Settlement pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
         };
-        case (#ok) {};
+        case (#ok) {
+          if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator WAS paid (" # Nat.toText(cost) # ")");
+        };
       };
 
       // C-4/C-5 / 1a: refund the Upto remainder to the buyer on its rail, net of the refund's own
@@ -838,6 +871,7 @@ module {
       if (refundAmount > 0) {
         switch (await refundOnRail(jobId, job, refundAmount)) {
           case (#err(e)) {
+            if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator was paid; the buyer remainder refund failed: " # e);
             jobs.put(jobId, { job with status = #Settled });
             return #err("Operator paid but buyer remainder refund failed: " # e);
           };
@@ -845,6 +879,7 @@ module {
             // B2/recovery: operator is paid (confirmed); the remainder refund is broadcast-but-
             // unconfirmed. The job IS settled — mark #Settled and record the parked remainder
             // (leg #UptoRemainder) so reconcileJob can confirm/clear it (no re-drive).
+            if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator was paid; the buyer remainder refund was broadcast but not confirmed: tx " # p.txHash);
             jobs.put(jobId, { job with status = #Settled; parkedTx = ?{ txHash = p.txHash; leg = #UptoRemainder; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
             return #err("Operator paid; buyer remainder refund pending (reconcileJob to confirm): tx " # p.txHash);
           };
@@ -852,6 +887,7 @@ module {
         };
       };
 
+      if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator was paid and any buyer remainder refunded");
       jobs.put(jobId, { job with status = #Settled });
       #ok;
     };
@@ -1029,6 +1065,9 @@ module {
     /// transfer never landed, the operator must reconcile the funds out-of-band (or via an EVM
     /// sweep). The consumer MUST gate this on Principal.isController. (A future confirm-only
     /// reconcileJob would automate the on-chain check; this is the manual remedy.)
+    /// 2.19.1: if a payout that was in flight when this ran completes afterwards (paid, failed or
+    /// broadcast), the job stays as resolved here; the in-flight call returns #err saying what
+    /// was paid, for the operator to reconcile. Before, a success overwrote this status.
     public func resolveJob(jobId : Text, terminal : Types.JobStatus) : { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
         case (null) { return #err("Job not found") };
