@@ -2,58 +2,57 @@
 
 ## v2.19.1 — 2026-11-04
 
-Patch — **a rejected ledger payout no longer strands a service job, and a payout that finishes after
-`resolveJob` no longer overwrites it.** Both are in `ServiceRegistry`. No API, type, stored-state or
-`example.did` change. Prompted by an EngramX hand-over; see "Not done" for what it proposed instead.
+Patch — **a service-job payout that finishes after a controller's `resolveJob` no longer overwrites
+it or sends more money.** `ServiceRegistry` only. No API, type, stored-state or `example.did` change.
+Prompted by an EngramX hand-over; see "Not done" for what it proposed instead.
 
 ### Fixed
 
-- **A ledger reject on an operator payout or ICP refund is now "nothing was paid".**
-  `payFromMainAccount` let a reject of `icrc1_transfer` escape as a thrown error:
-  - `settleJob` (behind `confirmJob`, `confirmJobEvm`, auto-settling `submitResult` and
-    `resolveDispute`) left the job in `#Settling`, where only a controller's `resolveJob` could move
-    it;
-  - a dispute refund did the same;
-  - the expiry sweep stopped that tick, leaving the remaining jobs for the next tick.
-
-  A reject is now returned as `#err`, so each path takes its existing no-funds-moved branch: settle
-  rolls back to `#Verified` for a retry, a dispute refund rolls back to its prior status, and the sweep
-  leaves the job `#Expired` and carries on. That is sound because the call has no timeout (an
-  unbounded-wait call always gets a definite answer) and `icrc1_transfer` makes no calls of its own,
-  so a reject means the ledger never ran the transfer or trapped and rolled it back. A ledger reply that
-  can't be decoded still traps, since the transfer may have happened, and leaves the job `#Settling`
-  as before. EVM transfer-hook rejects are deliberately not caught: the hook may already have
-  broadcast.
-- **A payout that completes after `resolveJob` leaves the job as the controller resolved it.**
-  `resolveJob` accepts any `#Settling` job, including one whose payout is in flight. 2.17.6 stopped a
-  *failed* payout from undoing that. A *successful* one still overwrote it with `#Settled`/`#Refunded`,
-  and an EVM broadcast still re-parked it in `#Settling`. An Upto settle also went on to refund the
-  buyer's remainder after the controller had resolved the job. Every write after a payout await now
-  checks the job is still `#Settling`. If not, the job is left alone and the call returns `#err` saying
-  what was paid (and the tx hash, if one is pending) so the funds can be reconciled.
+- **`resolveJob` is no longer undone by a payout that was in flight.** `resolveJob` accepts any
+  `#Settling` job, including one whose payout is awaiting the ledger or the chain. 2.17.6 stopped a
+  *failed* payout from undoing it, but a *successful* one still overwrote the controller's status with
+  `#Settled` or `#Refunded`. Worse, an Upto settle then went on to refund the buyer's remainder after
+  the controller had stepped in.
+  - When a definite outcome (paid or failed) arrives after a resolve, the job now keeps the
+    controller's status and no further transfer is sent.
+  - The call returns `#err` saying what was paid, including any Upto remainder left unrefunded.
+  - The same text goes to the canister log, because the `#err` reaches whoever triggered the settle
+    (often the buyer or operator), not the controller.
+  - A pending EVM broadcast is still recorded on the job (re-parked with its tx hash), as before.
+    That hash is the only handle `reconcileJob` has on a transfer that may land.
 
 ### Not done
 
-- **Ledger deduplication (`memo` + `created_at_time`) on operator payouts.** It would need the
-  timestamp stored on the job before sending: a stored-record change, a schema bump, and a migration
-  in every consumer. That guards against "did it land?" uncertainty, which these unbounded-wait calls
-  don't have.
-- **A settle callback on `ServiceRegistry`.** It would run in the settle's own message after the
-  final write, so a callback that trapped would roll the job back to `#Settling` with the operator
-  already paid. It was also open to firing twice in the race fixed above.
-- **Not changed, for the record:**
-  - `Gateway.settle` and session close already catch ledger rejects.
-  - Session open does not catch a reject on its deposit pull. Nothing moves, but the caller's open
-    lock is held until it expires (5 minutes) and the caller sees a reject instead of an error.
+- **Catching ledger rejects so the job rolls back.** Proposed and reverted in review, because a
+  reject does not prove the transfer failed.
+  - The DFINITY ICP and ICRC-1 ledgers commit the transfer and then await `archive_blocks` inside the
+    same `icrc1_transfer` call. A trap after that await would reject a transfer that landed.
+  - They are written not to trap there, but a library that accepts any ledger cannot rely on it.
+  - A stopped ledger, the common reject, answers with the same code (`CANISTER_ERROR`) as such a trap.
+  - So a rejected payout still leaves the job `#Settling`, for a controller to check on the ledger and
+    `resolveJob`. A test now pins this.
+- **Ledger deduplication (`memo` + `created_at_time`).** This is the structural fix for the case above.
+  `job.createdAt` could serve as `created_at_time` without a stored-record change. The limit is the
+  ledger's 24 h dedup window: a job settled more than a day after it was created gets `#TooOld`, and
+  service jobs routinely live longer. Making it work for every job means storing a send time, which is
+  a stored-record change and a migration in every consumer. Worth revisiting on its own.
+- **A settle callback on `ServiceRegistry`.** It would run in the settle's own message after the final
+  write, so a callback that trapped would roll the job back to `#Settling` with the operator already
+  paid.
+- **Follow-up, not changed here:** `Gateway.settle` and session close *do* catch ledger rejects and
+  treat them as "not paid" (since 2.17.3). They rest on the same ledger behaviour described above.
+  Session open does not catch a reject on its deposit pull: nothing is lost, but the caller's open
+  lock is held until it expires (5 minutes).
 
 ### Tests
 
-- `test/jobrevert.test.mo` gains 11 tests. Its fake ledger can now script a reject and a different
+- `test/jobrevert.test.mo` gains 10 tests. Its fake ledger can now script a reject and a different
   outcome per transfer, and an injected EVM hook calls `resolveJob` from inside the payout's await.
-  - A reject rolls back the settle (and a retry pays) and the dispute refund, and no longer stops the
-    expiry sweep.
-  - Each of the seven post-await guards has a test where `resolveJob` lands mid-payout.
-- Mutation: removing the `try/catch`, or any one of the seven guards, fails its own test (8 of 8).
+  - A ledger reject is not caught, so the job stays `#Settling` (settle and dispute refund).
+  - Each of the four definite-outcome guards has a test where `resolveJob` lands mid-payout.
+  - Each of the three pending-broadcast paths keeps its tx hash on the job.
+- Mutation: 8 of 8 fail their own test: a blanket catch, each guard dropped, and an early return on
+  each pending path.
 
 ## v2.19.0 — 2026-10-30
 
