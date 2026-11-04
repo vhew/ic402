@@ -1459,7 +1459,10 @@ module {
       };
     };
 
-    /// Recovery: confirm-only reconcile an EVM session parked in #closing (delegates to Sessions).
+    /// Recovery: reconcile a session left in #closing (delegates to Sessions). EVM: confirm-only
+    /// re-poll of the parked close tx. ICP (2.20.0): after a settle rejected with an unknown
+    /// outcome, reads the escrow balance and reopens the session (nothing paid) or closes it with
+    /// the remainder recoverable (paid). Moves no funds itself. Controller-gate it at the consumer.
     public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
       await sessionsMgr.reconcileSession(sessionId);
     };

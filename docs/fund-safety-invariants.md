@@ -286,6 +286,7 @@ citation set for every partial.
 | NONCE-EXPIRY | both | Lockable only while now ≤ expiry; gc removes nonce+lock | `Nonce.mo:100-102,133-144` | enforced |
 | EIP3009-TIME-WINDOW | EVM | now ∈ [validAfter, validBefore] before processing | `Gateway.mo:580-582` | enforced |
 | EVM-PAYER-PRINCIPAL-IS-POLICY-ONLY | EVM | evm-derived principal for policy buckets only, not auth | `Gateway.mo:584-591` | enforced |
+| UNKNOWN-LEDGER-REJECT-IS-NOT-UNPAID | ICP | A ledger reject not raised before execution never unlocks/retries: settle → #settlementPending (nonce locked); close settle leg → #closing until reconcileSession reads the escrow (2.20.0) | `Utils.rejectedBeforeExecution`, `Gateway.settleCore`, `Sessions.closeIcpSession` / `reconcileIcpClose` | enforced |
 | VERIFY-IS-READONLY-AND-MATCHES-SETTLE | EVM | verifyPayment mutates no state; same checks as settle | `Gateway.mo:403-472` | enforced |
 | EIP3009-SIG-MATCHES-CHAIN | EVM | A payment signature passes only in a form USDC accepts: low s, v 27/28 (or 0/1), Ethereum's ecrecover (2.18.2) | `Eip712.recoverAuthorizationSigner`, `EvmAddress.ecRecoverEvm` | enforced |
 | RECEIPT-ID-UNIQUENESS | both | Monotonic `rcpt-N`, persisted across upgrades | `Gateway.mo:189-192,1112,1131` | **partial** |

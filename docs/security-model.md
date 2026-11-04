@@ -42,6 +42,15 @@ The `Gateway`, `Policy`, and `ContentStore` modules intentionally ship **without
 
 > The README quick‑start is deliberately minimal. Treat [`example/main.mo`](../example/main.mo) — not the quick‑start — as the secure baseline to copy.
 
+## 2b. ICP‑rail: a rejected ledger call is not "not paid" (2.20.0)
+
+- **A reject does not prove the transfer failed.** The DFINITY ICP and ICRC‑1 ledgers commit a transfer and then await `archive_blocks` inside the same call, so a trap after that await rejects a transfer that landed. A stopped ledger answers with the same code (`CANISTER_ERROR`).
+- **What ic402 does.** Only rejects the system raises before the ledger runs (`#destination_invalid`, `#system_transient`, `#call_error`; `Utils.rejectedBeforeExecution`) count as nothing moved. Any other reject:
+  - **`settle` / `settleFrom`** return `#settlementPending`. The nonce stays locked and the daily reservation held. **Do not deliver, and do not re‑submit**; check the ledger before taking a new payment.
+  - **Session close (settle leg)** leaves the session `#closing` (also `#settlementPending`). `reconcileSession` then reads the escrow balance: the full deposit means nothing was paid, so it reopens; less means the settle landed, so it closes with the remainder owed to the payer.
+  - **ServiceRegistry payouts** (2.19.1) leave the job `#Settling` for a controller to check and `resolveJob`.
+- **Not covered.** Session open does not catch a reject on its deposit pull. If one ever followed a committed transfer, the deposit would sit in that session's escrow subaccount with no session record.
+
 ## 3. EVM‑rail trust assumptions (integrators + operators)
 
 - **No confirmation‑depth / reorg protection.** `confirmTransaction` treats `status == 1` at the chain tip as final, on *both* the inbound (you got paid) and outbound (you refunded) directions. A shallow reorg can un‑mine a credited payment or a confirmed refund after value was delivered. (`#Safe`/`#Finalized` block tags exist but are unused — blocked by the absence of `eth_getBlockByNumber` in the RPC interface.) Practically low‑risk for optimistic‑L2 USDC; real for L1 or high value.

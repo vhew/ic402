@@ -1422,11 +1422,12 @@ persistent actor KnowledgeBase {
     gate.forceResolveSession(sessionId);
   };
 
-  // Recovery (controller-only): CONFIRM-ONLY auto-reconcile of an EVM session parked in #closing.
-  // Re-polls the stored parked close tx and finalizes #closed only on a mined status==1 (never
-  // re-broadcasts). A confirmed settle with a remainder still owed can't be auto-completed (the
-  // refund is unsent) — use forceResolveSession + sweepEvm there. Find parked sessions via
-  // `health` (sessions.closing).
+  // Recovery (controller-only): reconcile a session left in #closing. EVM: CONFIRM-ONLY re-poll of
+  // the stored parked close tx; finalizes #closed only on a mined status==1 (never re-broadcasts).
+  // A confirmed settle with a remainder still owed can't be auto-completed (the refund is unsent) —
+  // use forceResolveSession + sweepEvm there. ICP (2.20.0): after a settle rejected with an unknown
+  // outcome, reads the escrow balance and reopens the session (nothing paid) or closes it with the
+  // remainder recoverable by the payer (paid). Find such sessions via `health` (sessions.closing).
   public shared(msg) func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
     requireController(msg.caller);
     await gate.reconcileSession(sessionId);
