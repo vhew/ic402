@@ -9,6 +9,7 @@ import Buffer "mo:base/Buffer";
 import Text "mo:base/Text";
 import Char "mo:base/Char";
 import Iter "mo:base/Iter";
+import Error "mo:base/Error";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 
@@ -440,5 +441,21 @@ module {
       key #= "/" # hexNoPrefix(Blob.toArray(element));
     };
     key;
+  };
+
+  /// 2.20.0: whether a rejected inter-canister call provably never ran in the callee, so a ledger
+  /// transfer it carried did NOT happen. True only for rejects the system raises before the callee
+  /// executes: no such canister (#destination_invalid), a transient system condition such as an
+  /// overloaded queue or low cycles (#system_transient), or a call that could not be issued at all
+  /// (#call_error). Every other code means the outcome is UNKNOWN. The DFINITY ICP and ICRC-1 ledgers
+  /// commit a transfer and then await archive_blocks inside the same call, so a trap after that
+  /// await (#canister_error) rejects a transfer that landed, and a stopped ledger answers with the
+  /// same #canister_error. #canister_reject, #system_fatal, #system_unknown and #future are unknown
+  /// too. Callers must not treat an unknown reject as "not paid" (no rollback, no retry).
+  public func rejectedBeforeExecution(code : Error.ErrorCode) : Bool {
+    switch (code) {
+      case (#destination_invalid or #system_transient or #call_error(_)) { true };
+      case (_) { false };
+    };
   };
 };
