@@ -45,6 +45,8 @@ incident.
 | `openSession` returned `#err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx …) — no session was created…"))` | Deposit may or may not have landed in the shared pool; **no session exists** | §4 |
 | You are about to upgrade the canister | Transient recovery state (parked txs, pending-deposit tracker) would be wiped | §5 |
 | A marketplace job returned `"Settlement failed: …"` and rests in `#Verified` | Nothing moved; the buyer's payment is still in the pool | §6 |
+| ICP charge `settle()`/`settleFrom()` returned `#settlementPending("Ledger call rejected (…)")` (2.20.0) | **Unknown**: the payer may have been charged; no receipt; the nonce stays locked | §7 |
+| ICP close returned `#settlementPending("Settle leg rejected (…)")` (2.20.0), session rests `#closing` | **Unknown**: the escrow is either intact or already settled to the recipient | §7 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
 | EVM charge returned `#settlementFailed("EIP-3009 transfer reverted on-chain …")` | Nothing moved, nonce unlocked | Not stuck — fix the cause (payer balance / reused authz nonce), client re-signs fresh |
 | EVM close returned `#settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry)")` | Nothing moved; session is `#open` again | Not stuck — retry `closeSession` |
@@ -153,11 +155,14 @@ caps `amount` at `deposited − consumed`).
 > refused: a close is in progress for them, and a recovery that lands mid-close drains the escrow
 > under the close's settle (which then fails and reopens the session; repeated, the merchant's
 > consumed share is recoverable too). Exits:
-> - **`#closing` at rest** (an ICP close interrupted by a trap, or left by an earlier version;
->   since v2.17.4 a ledger reject no longer leaves one there):
->   controller `forceResolveSession(sessionId)` → `#closed` (no funds move, `lastActivityAt`
->   refreshed), then the payer's `recoverEscrow`. 2.17.2 let the payer recover a `#closing` session
->   directly; a controller step is now required.
+> - **ICP `#closing` at rest** (a settle rejected with an unknown outcome, since 2.20.0; a close
+>   interrupted by a trap; or one left by an earlier version): controller **`reconcileSession(sessionId)`
+>   first** (§7). It reads the escrow and either reopens the session (the settle never landed) or
+>   closes it with the remainder owed, after which the payer runs `recoverEscrow`. Use
+>   `forceResolveSession` only if reconcile cannot decide (the ledger stays unreachable), and only
+>   after checking the ledger yourself. **If the settle did not land, `forceResolveSession` strands the
+>   recipient's `consumed` share**: `recoverEscrow` returns at most `deposited − consumed` to the
+>   payer, and no library call moves the rest.
 > - **`#expired` at rest with its escrow intact** (a sweep close that never ran before 2.17.3, or
 >   one restored across an upgrade): the payer's `closeSession` or the controller's
 >   `forceCloseSession` closes it normally — the close guard refuses only `#closed`/`#closing`. Do
@@ -271,11 +276,43 @@ path reserves `#Settling` before its transfer, so a concurrent call aborts rathe
 `resolveDispute` is a library method: the reference example does not expose it, so wire it
 controller-gated, as the example does `resolveJob`.
 
+
+## §7 ICP ledger call rejected with an unknown outcome (2.20.0)
+
+A rejected ledger call does not prove the transfer failed. The DFINITY ledgers commit a transfer and
+then await their archive inside the same call, and a stopped ledger answers with the same reject
+code as a trap after commit. So ic402 treats any reject not raised before the ledger ran as
+**unknown** (`Utils.rejectedBeforeExecution`).
+
+**ICP session close: the settle leg was rejected.** The session rests in `#closing`; nothing re-closes it.
+1. Once the ledger answers again, run **`reconcileSession(sessionId)`** (controller). It reads the
+   session's escrow subaccount balance and moves no funds itself:
+   - `#ok("Escrow still holds the full deposit …")`: the settle never landed, and the session is `#open`
+     again. Close it (or let the expiry sweep); it settles once.
+   - `#ok("The settle landed …")`: the session is `#closed` and the remainder is recorded as owed. The
+     payer runs `recoverEscrow`.
+   - `#err("… query failed …")`: the ledger is still unreachable. Nothing changed; run it again later.
+   - `#err("A close of this session is still in flight …")`: wait for that close to return.
+2. Only if reconcile can never decide, check the ledger yourself before `forceResolveSession` (see §3's
+   warning: forcing a session whose settle did not land strands the recipient's share).
+
+**ICP charge (`settle` / `settleFrom`).** It returned `#settlementPending("Ledger call rejected …")`. No
+receipt was issued, the nonce stays locked until it expires (so the same payment cannot be replayed),
+and the payer's daily reservation stays held. There is **no in-band resolution**:
+1. Do not deliver, and tell the payer not to pay again yet.
+2. Look on the ledger for an `icrc2_transfer_from` from the payer to the canister's recipient account
+   for the charged amount, around the time of the call.
+3. If it landed, deliver (or refund the payer) out of band. If it did not, the payer pays again once
+   the nonce has expired (default 5 minutes).
+
+Ledger deduplication (`created_at_time` + `memo`) would let the canister answer this itself. It is a
+tracked follow-up, not built.
+
 ## Method reference
 
 | Method | Gate | Broadcasts / moves funds? | Use for |
 |---|---|---|---|
-| `reconcileSession(sessionId)` | controller (consumer-gated) | **No** — confirm-only; finalize releases allocation + daily reservation | Session parked in `#closing` with a recorded tx (§2) |
+| `reconcileSession(sessionId)` | controller (consumer-gated) | **No** — confirm-only; finalize releases allocation + daily reservation | EVM session parked in `#closing` with a recorded tx (§2); ICP session resting in `#closing` — reads the escrow balance (§7, 2.20.0) |
 | `forceResolveSession(sessionId)` | controller | **No** — moves no on-chain funds; releases the pool allocation + daily reservation (v2.5.5) | `#closing` with no parked tx / after out-of-band verification (§2) |
 | `reconcileEvmDeposit(txHash)` | controller | **Yes** — refunds on confirmed deposit | Broadcast-but-unconfirmed inbound deposit, no session (§4) |
 | `pendingEvmDepositCount()` / `listPendingEvmDeposits()` | controller | No | Drain / triage (§4, §5) |

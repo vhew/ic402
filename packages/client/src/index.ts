@@ -46,6 +46,8 @@ export {
 } from './eip712.js';
 export {
   Ic402Error,
+  isSettlementPendingBody,
+  settlementError402,
   classifyNetworkError,
   findPaymentOption,
   applyVerbatimAccepted,

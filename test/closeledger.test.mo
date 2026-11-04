@@ -15,8 +15,9 @@
 ///   - B1: recoverEscrow does pay out once a session is #closed.
 ///   - 2.17.4: a refund the ledger REJECTS ends #closed and recoverable, like a refused one; a
 ///     force landing during a failing refund does not release the daily reservation twice.
-///   - B2: the expiry sweep handles ledger rejects without parking sessions. Since 2.17.4 no ICP
-///     ledger reject makes the close throw, so the sweep's catch arm is reached only by a rejected
+///   - B2: the expiry sweep handles ledger rejects without throwing: a refund reject ends #closed,
+///     and (2.20.0) a settle reject leaves #closing for reconcileSession. Since 2.17.4 no ICP ledger
+///     reject makes the close throw, so the sweep's catch arm is reached only by a rejected
 ///     self-call or a trap, neither inducible in-process: that arm is covered by review only.
 ///
 /// Each test names the mutation that turns it red.
@@ -300,11 +301,13 @@ await suite("2.20.0: reconcileSession resolves an ICP close left #closing", func
   });
 
   await test("escrow below the deposit → the settle landed → #closed, daily released, remainder owed", func() : async () {
-    // Mutation: reopen in this branch too — the next close would settle a second time.
-    // deposited 50_000 − settle 1_000 − fee 10_000 = 39_000 left in escrow.
+    // Mutations: reopen in this branch too — the next close would settle a second time; or record
+    // the queried balance as owed. deposited 50_000 − settle 1_000 − fee 10_000 = 39_000 is what the
+    // close leaves; the ledger reports 45_000 because 6_000 was transferred in on top, and the owed
+    // record must still be the computed 39_000 (Types.RefundOwed).
     let (m, policy) = mk(1_000);
     await makeStuck(m);
-    await ledger.scriptBalance(39_000, false);
+    await ledger.scriptBalance(45_000, false);
     switch (await m.reconcileSession("sess-1")) { case (#ok(_)) {}; case (#err(_)) { assert false } };
     assert session(m).status == #closed;
     assert policy.getDailySpendAmount(payerP) == 51_000;
@@ -338,7 +341,8 @@ await suite("2.20.0: reconcileSession resolves an ICP close left #closing", func
 
   await test("a second reconcile that resumes after the first reopened the session and a new close began is refused", func() : async () {
     // Mutation: drop icpClosesInFlight from the post-await re-check — the second reconcile sees
-    // #closing (the NEW close's) and acts on a live close, reading its escrow mid-settle.
+    // #closing (the NEW close's) and acts on a live close, reading its escrow mid-close. The new
+    // close's transfers park for 2_000 yields each, far beyond r2's 400, so r2 resumes inside it.
     let (m, _) = mk(1_000);
     await makeStuck(m);
     await ledger.scriptBalance(50_000, false);
@@ -347,7 +351,7 @@ await suite("2.20.0: reconcileSession resolves an ICP close left #closing", func
     let r2 = m.reconcileSession("sess-1");
     switch (await r1) { case (#ok(_)) {}; case (#err(_)) { assert false } };
     assert session(m).status == #open;
-    await ledger.script(0, 200, 1_000, 1_000); // the new close parks inside its settle transfer
+    await ledger.script(0, 2_000, 1_000, 1_000); // the new close parks inside its settle transfer
     await ledger.scriptBalance(50_000, false);
     let close = m.closeSessionInternal("sess-1");
     await untilTransferring(1);

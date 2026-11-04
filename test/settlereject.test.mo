@@ -77,14 +77,15 @@ await suite("2.20.0: a rejected ICP settle is unknown, not 'not paid'", func() :
     switch (await gate.settle(sig, ?5_000)) { case (#settlementPending(_)) {}; case (_) { assert false } };
   });
 
-  await test("after the reject, the same payment cannot be re-submitted (nonce stays locked)", func() : async () {
-    // Mutation: unlock the nonce on an unknown reject — the second settle reaches the ledger
-    // again, which is the double charge this release closes.
+  await test("after the reject, re-submitting the same payment is refused as pending, not 'expired, pay again'", func() : async () {
+    // Mutations: unlock the nonce on an unknown reject — the second settle reaches the ledger
+    // again, which is the double charge this release closes; or drop the isLocked branch in
+    // settleCore — the caller is told the nonce expired and to pay with a fresh one.
     await ledger.script(true);
     let (gate, sig) = setup();
     ignore await gate.settle(sig, ?5_000);
     await ledger.script(false);
-    switch (await gate.settle(sig, ?5_000)) { case (#expired(_)) {}; case (_) { assert false } };
+    switch (await gate.settle(sig, ?5_000)) { case (#settlementPending(_)) {}; case (_) { assert false } };
     assert (await ledger.pullCalls()) == 0;
   });
 

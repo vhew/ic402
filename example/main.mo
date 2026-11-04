@@ -402,7 +402,11 @@ persistent actor KnowledgeBase {
       case (#networkNotSupported(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_network") };
       case (#tokenNotAccepted(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unsupported_scheme") };
       case (#policyDenied(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unexpected_settle_error") };
-      // settlementFailed (on-chain revert / RPC), settlementPending, and any other variant.
+      // 2.20.0: the outcome is unknown (an EVM broadcast not yet confirmed, or an ICP ledger call
+      // rejected after it may have run). A distinct reason so a client does not pay again:
+      // @ic402/client and the MCP server map it to an error with fundsMoved = true.
+      case (#settlementPending(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"settlement_pending") };
+      // settlementFailed (on-chain revert / RPC) and any other variant.
       case (_) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_transaction_state") };
     };
   };

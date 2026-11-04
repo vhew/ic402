@@ -121,6 +121,11 @@ module {
       locked.delete(nonce);
     };
 
+    /// 2.20.0: whether a nonce is locked, i.e. a settlement with it is in flight or ended with an
+    /// unknown outcome (#settlementPending). Lets settle tell "do not pay again" apart from
+    /// "expired, pay with a fresh nonce".
+    public func isLocked(nonce : Blob) : Bool { locked.get(nonce) != null };
+
     /// Check if a nonce exists and is valid (without consuming or locking).
     public func exists(nonce : Blob) : Bool {
       switch (nonces.get(nonce)) {

@@ -49,6 +49,29 @@ A stopped ledger answers with the same code (`CANISTER_ERROR`). Found while revi
   - A failed balance or fee query leaves the session `#closing`; call it again later.
   - Gateway and the example already expose `reconcileSession` (controller-only).
 
+### Also changed (from the release review)
+
+- **The example's HTTP routes** (`/content`, `/search`, `/service`) now send `#settlementPending` as a 402
+  `SettlementResponse` with its own `errorReason`, `settlement_pending`. Before, it got the same
+  `invalid_transaction_state` as a definite failure, which reads as "pay again".
+- **`@ic402/client`** has new `isSettlementPendingBody` / `settlementError402`. A 402 whose
+  `errorReason` is `settlement_pending` becomes an `Ic402Error` with `fundsMoved = true`, from `fetchX402`
+  and the client's paid fetch.
+- **The MCP server** uses the same helper, and its error results now include `fundsMoved: true` when it's
+  set, so an agent is told not to pay again.
+- **Re-submitting a payment whose nonce is locked** (a settlement in flight, or one that ended pending)
+  now returns `#settlementPending` ("do NOT pay again") instead of `#expired`, which told the caller to
+  pay with a fresh nonce. `Nonce.isLocked` is new.
+- **The `reconcileSession` owed remainder is computed** the way the close computes it, not read from the
+  queried balance, which anyone can raise by sending into the subaccount. The query only decides
+  whether the settle landed. The `Types.RefundOwed` doc says so.
+- **Recovery guidance now routes an ICP session stuck in `#closing` to `reconcileSession`.** This covers
+  three library messages, the `forceResolveSession` doc, and the recovery runbook (two triage rows, the
+  `#closing` exit in §3, and a new §7). Forcing one whose settle never landed strands the recipient's
+  share.
+- **There is no in-band resolution for a pending ICP charge.** The canister keeps no record of the
+  attempt; runbook §7 says how to check the ledger. Ledger dedup is the tracked follow-up.
+
 ### Unchanged, and why
 
 - **The refund leg of a session close.** A rejected refund still ends `#closed`, with the remainder
@@ -64,12 +87,13 @@ A stopped ledger answers with the same code (`CANISTER_ERROR`). Found while revi
 ### Tests
 
 - **`test/settlereject.test.mo` (new, 5).** It drives an ICP `settle` against a fake ledger that
-  rejects: `#settlementPending`, the same payment can't be re-submitted, and the daily reservation is
-  held. It also tests the classifier against every reject code.
+  rejects: `#settlementPending`; re-submitting the same payment is refused as pending without reaching
+  the ledger; and the daily reservation is held. It also tests the classifier against every reject code.
+- **`packages/client/test/evm.test.ts`:** `isSettlementPendingBody` / `settlementError402`.
 - **`test/closeledger.test.mo`.** The settle-reject and sweep tests now expect `#closing`, and 7 new
   tests cover `reconcileSession`:
   - nothing landed (exactly the deposit, and above it);
-  - landed (closed, released once, remainder owed, recoverable);
+  - landed (closed, released once, the owed remainder computed rather than read, recoverable);
   - the balance query fails;
   - refused while a close is in flight, and when a second reconcile resumes after a new close began;
   - a `forceResolveSession` landing mid-reconcile wins.

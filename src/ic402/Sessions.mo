@@ -127,9 +127,10 @@ module {
     let closeParkedTxs = HashMap.HashMap<Text, { leg : { #Settle; #Refund }; txHash : Text }>(8, Text.equal, Text.hash);
     // 2.20.0: ICP closes currently between their awaits. reconcileSession reads the escrow balance
     // of a session left #closing by an unknown settle reject, and must never do so while a close is
-    // still moving that escrow. Transient on purpose: no call is in flight across an upgrade (a
-    // canister is stopped first, which waits for its calls), so after an upgrade it is empty and
-    // every #closing ICP session is reconcilable. A close that traps keeps its entry until then.
+    // still moving that escrow. Transient on purpose: Motoko refuses an upgrade while callbacks are
+    // outstanding (canister_pre_upgrade traps and install_code is atomic), so no ledger call outlives
+    // an upgrade and the set is empty afterwards. A close that traps after an await still runs the
+    // `finally` and clears its entry; a trap before the first await rolls the entry back with it.
     let icpClosesInFlight = HashMap.HashMap<Text, ()>(8, Text.equal, Text.hash);
     // Per-caller lock to prevent concurrent openSession TOCTOU.
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
@@ -915,7 +916,7 @@ module {
       };
 
       if (session.status == #closed or session.status == #closing) {
-        return #settlementFailed("Session already closed or a close is in progress (#closing) — do not re-close. If it is stuck in #closing (parked EVM close), recover with reconcileSession (confirm-only) or forceResolveSession + manual sweep.");
+        return #settlementFailed("Session already closed or a close is in progress (#closing) — do not re-close. If it is stuck in #closing, the controller recovers it with reconcileSession (EVM: confirm-only re-poll of the parked tx; ICP: reads the escrow balance). forceResolveSession is a last resort: it moves no funds.");
       };
 
       // Dispatch: EVM sessions use tECDSA-signed ERC-20 transfers
@@ -970,7 +971,7 @@ module {
           if (Utils.rejectedBeforeExecution(Error.code(e))) {
             #err("ledger call rejected before it ran (nothing moved): " # Error.message(e));
           } else {
-            return #settlementPending("Settle leg rejected (" # debug_show (Error.code(e)) # "): the outcome is UNKNOWN — the recipient may have been paid. The session stays #closing. Once the ledger is reachable, call reconcileSession(\"" # session.id # "\"): it reads the escrow balance and either reopens the session (nothing was paid) or closes it with the remainder recoverable by the payer. " # Error.message(e));
+            return #settlementPending("Settle leg rejected (" # debug_show (Error.code(e)) # "): the outcome is UNKNOWN — the recipient may have been paid. The session stays #closing. Once the ledger is reachable, the canister's controller runs reconcileSession(\"" # session.id # "\"): it reads the escrow balance and either reopens the session (nothing was paid) or closes it with the remainder recoverable by the payer. Do not pay again meanwhile. " # Error.message(e));
           };
         };
         switch (settleResult) {
@@ -1256,7 +1257,7 @@ module {
                       s.status := #open;
                       #settlementFailed("Expiry close not delivered — session left open for retry: " # Error.message(e));
                     } else {
-                      #settlementFailed("Expiry close failed mid-close (session " # debug_show (s.status) # "; a #closing one needs forceResolveSession): " # Error.message(e));
+                      #settlementFailed("Expiry close failed mid-close (session " # debug_show (s.status) # "; a #closing one needs the controller's reconcileSession): " # Error.message(e));
                     };
                   };
                   case (null) { #settlementFailed("Expiry close failed: " # Error.message(e)) };
@@ -1316,10 +1317,14 @@ module {
       if (s.deposited > s.consumed) { policy.releaseDaily(s.payer, s.spendDay, s.deposited - s.consumed) };
     };
 
-    /// Operator escape hatch for a session STUCK in #closing (an EVM close whose settle/refund
-    /// broadcast but never confirmed). Moves NO funds; the operator reconciles the on-chain EVM
-    /// pool out-of-band. Releases the session's canister-side reservations and forces it to #closed
-    /// so GC can reclaim it. The consumer MUST gate this on Principal.isController.
+    /// Operator escape hatch for a session STUCK in #closing, when reconcileSession cannot resolve it
+    /// (an EVM close with no parked tx, or a ledger that stays unreachable). Moves NO funds; the
+    /// operator reconciles the funds out-of-band. Releases the session's canister-side reservations
+    /// and forces it to #closed so GC can reclaim it. The consumer MUST gate this on
+    /// Principal.isController.
+    /// 2.20.0, ICP: try reconcileSession first. Forcing an ICP session whose settle never landed
+    /// strands the recipient's `consumed` share in the escrow subaccount: recoverEscrow returns at
+    /// most deposited − consumed to the payer, and no library call moves the rest.
     /// 2.17.3: forcing a LIVE ICP close (between its awaits) no longer double-credits the daily
     /// limit when that close then succeeds; its transfers still run. If its settle fails, the
     /// close reopens the session as before.
@@ -1412,7 +1417,12 @@ module {
         #ok("Escrow still holds the full deposit (" # Nat.toText(balance) # " >= " # Nat.toText(s2.deposited) # "): the settle did not land. Session reopened — close it again (or let the expiry sweep).");
       } else {
         finalizeClosedSession(s2); // #closed + releaseDaily (shared with forceResolveSession)
-        if (balance > fee) { refundOwed.put(id, { escrow = balance; fee }) };
+        // The owed remainder is computed as the close computes it, not taken from `balance`: anyone
+        // can transfer into an escrow subaccount (Types.RefundOwed). The query only decided above
+        // whether the settle landed.
+        let settled = Nat.min(s2.consumed, Utils.satSub(s2.deposited, fee));
+        let left = Utils.satSub(s2.deposited, settled + fee);
+        if (left > fee) { refundOwed.put(id, { escrow = left; fee }) };
         #ok("The settle landed (escrow holds " # Nat.toText(balance) # " of " # Nat.toText(s2.deposited) # "). Session #closed; the payer can recover the remainder with recoverEscrow.");
       };
     };
@@ -1652,7 +1662,7 @@ module {
               return #err("Cannot recover escrow from an open session — close it first");
             };
             case (#closing or #expired) {
-              return #err("Cannot recover escrow while a close is in progress (" # debug_show (session.status) # ") — close an #expired session with closeSession; a session resting in #closing needs forceResolveSession first");
+              return #err("Cannot recover escrow while a close is in progress (" # debug_show (session.status) # ") — close an #expired session with closeSession; a session resting in #closing needs the controller's reconcileSession first (it reads the escrow and reopens or closes the session)");
             };
           };
           // H-5: Cap recovery amount to unconsumed portion

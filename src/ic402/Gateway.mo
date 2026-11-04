@@ -721,7 +721,14 @@ module {
       let usesServerNonce = signature.nonce.size() > 0;
       let amount = if (usesServerNonce) {
         switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
-          case (null) { return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.") };
+          case (null) {
+            // 2.20.0: a locked nonce means a settlement with it is in flight, or ended with an
+            // unknown outcome. Telling that caller to pay again with a fresh nonce could charge twice.
+            if (nonceManager.isLocked(signature.nonce)) {
+              return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew (the nonce is freed when it expires).");
+            };
+            return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.");
+          };
           case (?a) {
             switch (expectedAmount) {
               case (?e) {
