@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { findPaymentOption, applyVerbatimAccepted, Ic402Error, probeX402 } from '../src/evm.js';
+import {
+  findPaymentOption,
+  applyVerbatimAccepted,
+  Ic402Error,
+  probeX402,
+  isSettlementPendingBody,
+  settlementError402,
+} from '../src/evm.js';
 
 describe('probeX402 redirect re-validation (S2)', () => {
   let originalFetch: typeof globalThis.fetch;
@@ -487,5 +494,31 @@ describe('applyVerbatimAccepted (echo advertised requirement as v2 `accepted`)',
   it('returns the header unchanged when there is no raw requirement', () => {
     const header = btoa(JSON.stringify({ x402Version: 2, payload: {} }));
     expect(applyVerbatimAccepted(header, undefined)).toBe(header);
+  });
+});
+
+describe('settlement_pending 402 (2.20.0)', () => {
+  const pending = JSON.stringify({
+    success: false,
+    errorReason: 'settlement_pending',
+    network: 'icp:1',
+  });
+  const failed = JSON.stringify({ success: false, errorReason: 'invalid_transaction_state' });
+
+  it('recognises only a SettlementResponse whose errorReason is settlement_pending', () => {
+    expect(isSettlementPendingBody(pending)).toBe(true);
+    expect(isSettlementPendingBody(failed)).toBe(false);
+    expect(isSettlementPendingBody('not json')).toBe(false);
+    expect(isSettlementPendingBody('null')).toBe(false);
+    expect(isSettlementPendingBody('"settlement_pending"')).toBe(false);
+  });
+
+  it('a pending 402 becomes an error with fundsMoved; any other 402 does not', () => {
+    const e = settlementError402(pending);
+    expect(e).toBeInstanceOf(Ic402Error);
+    expect(e.kind).toBe('settlement_failed');
+    expect(e.fundsMoved).toBe(true);
+    expect(e.retryable).toBe(false);
+    expect(settlementError402(failed).fundsMoved).toBe(false);
   });
 });

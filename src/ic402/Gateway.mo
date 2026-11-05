@@ -675,6 +675,10 @@ module {
     /// #settlementPending, where the nonce stays LOCKED (GC'd at expiry) so the same challenge
     /// cannot be re-broadcast. #settlementPending is NOT final: no receipt is issued and the
     /// caller MUST NOT deliver value — the broadcast tx may still mine later (handle out-of-band).
+    /// 2.20.0: the ICP rail returns #settlementPending too, when the ledger call is rejected after
+    /// it may have run (Utils.rejectedBeforeExecution is false): the payer may have been charged.
+    /// Do not deliver, do not re-submit; check the ledger before taking a new payment. A reject
+    /// the system raised before the ledger ran is still #settlementFailed (nonce unlocked).
     ///
     /// Multi-token (v2.5.0): the EVM verify + on-chain execution key off `signature.asset`
     /// (the EIP-712 verifyingContract the payer signed for); `asset = null` falls back to the
@@ -717,7 +721,14 @@ module {
       let usesServerNonce = signature.nonce.size() > 0;
       let amount = if (usesServerNonce) {
         switch (nonceManager.lock(signature.nonce, signature.network, resolvedToken)) {
-          case (null) { return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.") };
+          case (null) {
+            // 2.20.0: a locked nonce means a settlement with it is in flight, or ended with an
+            // unknown outcome. Telling that caller to pay again with a fresh nonce could charge twice.
+            if (nonceManager.isLocked(signature.nonce)) {
+              return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew (the nonce is freed when it expires).");
+            };
+            return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.");
+          };
           case (?a) {
             switch (expectedAmount) {
               case (?e) {
@@ -995,9 +1006,19 @@ module {
           };
         };
       } catch (e) {
-        nonceManager.unlock(signature.nonce);
-        policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
-        #settlementFailed("Ledger call failed: " # Error.message(e));
+        if (Utils.rejectedBeforeExecution(Error.code(e))) {
+          // The ledger never ran the transfer (no such canister, overload, call never issued):
+          // nothing was charged, so release the nonce and the daily reservation for a retry.
+          nonceManager.unlock(signature.nonce);
+          policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
+          return #settlementFailed("Ledger call failed before it ran (nothing was charged; safe to retry): " # Error.message(e));
+        };
+        // 2.20.0: any other reject leaves the outcome UNKNOWN — the transfer may have been
+        // committed (see Utils.rejectedBeforeExecution). Before, this unlocked the nonce and
+        // reported #settlementFailed, so re-submitting the same payment could charge the payer a
+        // second time. Now the nonce stays locked (the same payment cannot be replayed; it is
+        // freed at expiry), the daily reservation stays held, and no receipt is issued.
+        #settlementPending("Ledger call rejected (" # debug_show (Error.code(e)) # "): the transfer's outcome is UNKNOWN — it may have been charged. Do NOT deliver value and do NOT re-submit this payment. Check the payer's ledger history for a transfer to this canister's account before taking a new payment: " # Error.message(e));
       };
     };
 
@@ -1445,7 +1466,10 @@ module {
       };
     };
 
-    /// Recovery: confirm-only reconcile an EVM session parked in #closing (delegates to Sessions).
+    /// Recovery: reconcile a session left in #closing (delegates to Sessions). EVM: confirm-only
+    /// re-poll of the parked close tx. ICP (2.20.0): after a settle rejected with an unknown
+    /// outcome, reads the escrow balance and reopens the session (nothing paid) or closes it with
+    /// the remainder recoverable (paid). Moves no funds itself. Controller-gate it at the consumer.
     public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
       await sessionsMgr.reconcileSession(sessionId);
     };

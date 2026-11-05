@@ -1,5 +1,108 @@
 # Changelog
 
+## v2.20.0 — 2026-11-04
+
+Minor — **an ICP payment whose ledger call is rejected with an unknown outcome is no longer treated as
+"not paid".** That assumption could charge a payer twice (`settle`) or settle a session twice out of
+the payer's escrow (session close). No type, stored-state or `example.did` change. The behaviour change
+is that ICP-rail calls can now return `#settlementPending`, which until now only the EVM rail returned.
+Handle it the same way: do not deliver, do not retry.
+
+### Why
+
+A reject does not prove the transfer failed. The DFINITY ICP and ICRC-1 ledgers commit a transfer and
+then await `archive_blocks` inside the same call, so a trap after that await rejects a transfer that
+landed. They are written not to trap there, but a library that accepts any ledger can't rely on that.
+A stopped ledger answers with the same code (`CANISTER_ERROR`). Found while reviewing 2.19.1.
+
+### Changed
+
+- **`Utils.rejectedBeforeExecution(code)`** is the one rule. Only three rejects, all raised by the
+  system before the callee runs, mean nothing moved: `#destination_invalid` (no such canister),
+  `#system_transient` (overload, low cycles) and `#call_error` (the call was never sent). Every other
+  code means the outcome is unknown.
+- **`Gateway.settle` / `settleFrom`, ICP rail.**
+  - A reject from before execution is still `#settlementFailed`, with the nonce unlocked.
+  - Any other reject now returns `#settlementPending`. The nonce **stays locked**, so the same payment
+    can't be replayed; it's freed at expiry. The payer's daily reservation stays held, and no receipt
+    is issued.
+  - Before, it unlocked the nonce and returned `#settlementFailed`. Re-submitting the payment could
+    then charge again whenever the payer's allowance still covered it.
+- **ICP session close, settle leg.**
+  - A reject from before execution still reopens the session for a retry.
+  - Any other reject leaves the session `#closing` and returns `#settlementPending`. Nothing re-closes a
+    `#closing` session.
+  - Before, the session reopened, and the expiry sweep, unattended, could close it again and settle a
+    second time out of the payer's escrow.
+- **`reconcileSession` now also resolves those ICP sessions.** It reads the session's escrow subaccount
+  balance and moves no funds itself.
+  - **The full deposit is still there:** the settle didn't land. The session reopens, and the next
+    close settles it once.
+  - **Less than the deposit is left:** the settle landed. The session ends `#closed`, the daily
+    reservation is released, and the remaining escrow is recorded as owed to the payer
+    (`recoverEscrow`).
+  - It's sound because the subaccount belongs to that session alone and only this canister moves money
+    out of it. A transfer *in* can only raise the balance. If that makes a settle that did land read as
+    "not landed", the second settle is paid out of that transfer, not the payer's share.
+  - It's refused while a close of that session is in flight, tracked by a transient set. Nothing is in
+    flight across an upgrade, so after one every such session is reconcilable.
+  - A failed balance or fee query leaves the session `#closing`; call it again later.
+  - Gateway and the example already expose `reconcileSession` (controller-only).
+
+### Also changed (from the release review)
+
+- **The example's HTTP routes** (`/content`, `/search`, `/service`) now send `#settlementPending` as a 402
+  `SettlementResponse` with its own `errorReason`, `settlement_pending`. Before, it got the same
+  `invalid_transaction_state` as a definite failure, which reads as "pay again".
+- **`@ic402/client`** has new `isSettlementPendingBody` / `settlementError402`. A 402 whose
+  `errorReason` is `settlement_pending` becomes an `Ic402Error` with `fundsMoved = true`, from `fetchX402`
+  and the client's paid fetch.
+- **The MCP server** uses the same helper, and its error results now include `fundsMoved: true` when it's
+  set, so an agent is told not to pay again.
+- **Re-submitting a payment whose nonce is locked** (a settlement in flight, or one that ended pending)
+  now returns `#settlementPending` ("do NOT pay again") instead of `#expired`, which told the caller to
+  pay with a fresh nonce. `Nonce.isLocked` is new.
+- **The `reconcileSession` owed remainder is computed** the way the close computes it, not read from the
+  queried balance, which anyone can raise by sending into the subaccount. The query only decides
+  whether the settle landed. The `Types.RefundOwed` doc says so.
+- **Recovery guidance now routes an ICP session stuck in `#closing` to `reconcileSession`.** This covers
+  three library messages, the `forceResolveSession` doc, and the recovery runbook (two triage rows, the
+  `#closing` exit in §3, and a new §7). Forcing one whose settle never landed strands the recipient's
+  share.
+- **There is no in-band resolution for a pending ICP charge.** The canister keeps no record of the
+  attempt; runbook §7 says how to check the ledger. Ledger dedup is the tracked follow-up.
+
+### Unchanged, and why
+
+- **The refund leg of a session close.** A rejected refund still ends `#closed`, with the remainder
+  recorded as owed. If the refund did land, that owed figure overstates what's left, but
+  `recoverEscrow` only draws on that session's escrow, which the refund emptied. Nothing is paid twice.
+- **Session open** still doesn't catch a reject on its deposit pull. If one ever followed a committed
+  transfer, the deposit would sit in that session's escrow subaccount with no session record. Fixing
+  that needs a new session state, so it's left for a separate decision.
+- **The trade-off:** a ledger stopped for an upgrade now gives "pending" instead of a clean retryable
+  failure. A `settle` then needs a fresh payment once the nonce expires; a session close needs
+  `reconcileSession`.
+
+### Tests
+
+- **`test/settlereject.test.mo` (new, 5).** It drives an ICP `settle` against a fake ledger that
+  rejects: `#settlementPending`; re-submitting the same payment is refused as pending without reaching
+  the ledger; and the daily reservation is held. It also tests the classifier against every reject code.
+- **`packages/client/test/evm.test.ts`:** `isSettlementPendingBody` / `settlementError402`.
+- **`test/closeledger.test.mo`.** The settle-reject and sweep tests now expect `#closing`, and 7 new
+  tests cover `reconcileSession`:
+  - nothing landed (exactly the deposit, and above it);
+  - landed (closed, released once, the owed remainder computed rather than read, recoverable);
+  - the balance query fails;
+  - refused while a close is in flight, and when a second reconcile resumes after a new close began;
+  - a `forceResolveSession` landing mid-reconcile wins.
+- The interpreter can't produce the three "never ran" codes, so that branch is covered by the classifier
+  test only.
+- Mutation: 17 mutants (5 on the Gateway, 12 on session close and reconcile). 16 are killed. The
+  survivor removes the first in-flight check, which the re-check after the ledger awaits duplicates;
+  it's kept as a cheap early exit.
+
 ## v2.19.1 — 2026-11-04
 
 Patch — **a service-job payout that finishes after a controller's `resolveJob` no longer overwrites

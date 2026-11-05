@@ -317,7 +317,8 @@ module {
   /// The payer's remainder is still in the session's escrow subaccount, and only the payer's
   /// recoverEscrow can move it. `escrow` is the balance the close left there (computed from the close,
   /// not queried — an escrow subaccount is derivable, and anyone can top it up); `fee` is the ledger fee
-  /// at the close. recoverEscrow subtracts each recovery plus `fee` and clears the entry once one fee or
+  /// at the close. 2.20.0: reconcileSession also writes one, after an unknown settle reject it finds
+  /// landed, with `escrow` computed the same way (not the balance it queried). recoverEscrow subtracts each recovery plus `fee` and clears the entry once one fee or
   /// less is left; if the ledger's fee changes before recovery, the figure is off by the difference, so
   /// recover the full balance − current fee in one call. Persist these in their own stable variable (Gateway.refundOwedToStable /
   /// loadRefundOwed): they are deliberately not part of StableSession or StableGatewayState. This

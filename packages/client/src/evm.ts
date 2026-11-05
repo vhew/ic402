@@ -32,6 +32,35 @@ export type Ic402ErrorKind =
   | 'config_error' // Missing required config (canisterId, network, etc.)
   | 'unknown'; // Unclassified error
 
+/**
+ * 2.20.0: true when a 402 body is an x402 SettlementResponse whose `errorReason` is
+ * `settlement_pending`: the canister could not tell whether the payment moved (an EVM broadcast not
+ * yet confirmed, or an ICP ledger call rejected after it may have run). The caller must not pay
+ * again or refund a spend reservation; the resulting Ic402Error carries `fundsMoved = true`.
+ */
+export function isSettlementPendingBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { errorReason?: unknown }).errorReason === 'settlement_pending'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The Ic402Error for a 402 paid-request response (fundsMoved when settlement is pending). */
+export function settlementError402(body: string): Ic402Error {
+  return new Ic402Error(
+    'settlement_failed',
+    body.slice(0, 200),
+    undefined,
+    isSettlementPendingBody(body),
+  );
+}
+
 export class Ic402Error extends Error {
   readonly kind: Ic402ErrorKind;
   readonly retryable: boolean;
@@ -461,7 +490,7 @@ export async function fetchX402(
     return { status: 'ok', code: response.status, body, paidAmount: signed.paidAmount };
   }
   if (response.status === 402) {
-    return { status: 'error', error: new Ic402Error('settlement_failed', body.slice(0, 200)) };
+    return { status: 'error', error: settlementError402(body) };
   }
   return {
     status: 'error',

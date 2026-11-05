@@ -8,6 +8,7 @@ import { Ed25519KeyIdentity } from '@icp-sdk/core/identity';
 import {
   Ic402Client,
   Ic402Error,
+  settlementError402,
   probeX402,
   applyVerbatimAccepted,
   exampleIdlFactory,
@@ -1035,7 +1036,13 @@ function errorResult(e: unknown): { content: [{ type: 'text'; text: string }] } 
           text: JSON.stringify(
             {
               status: 'error',
-              error: { kind: e.kind, message: e.message, retryable: e.retryable },
+              // fundsMoved (2.20.0): the payment may already have moved — do NOT pay again.
+              error: {
+                kind: e.kind,
+                message: e.message,
+                retryable: e.retryable,
+                ...(e.fundsMoved ? { fundsMoved: true } : {}),
+              },
             },
             null,
             2,
@@ -1238,7 +1245,9 @@ server.tool(
         };
       }
       if (paidResponse.status === 402) {
-        return errorResult(new Ic402Error('settlement_failed', body.slice(0, 200)));
+        // 2.20.0: a `settlement_pending` 402 (outcome unknown) becomes an error with
+        // fundsMoved = true, which errorResult shows the agent: do not pay again.
+        return errorResult(settlementError402(body));
       }
       return errorResult(
         new Ic402Error('http_error', `HTTP ${paidResponse.status}: ${body.slice(0, 200)}`),

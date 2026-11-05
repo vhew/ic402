@@ -9,12 +9,15 @@
 ///     since 2.17.4, the daily reservation released.
 ///   - B3: forceResolveSession landing while the close is suspended at an await does not make
 ///     the close release the daily reservation a second time; the close's transfers still run.
-///   - A ledger reject on the settle leaves the session #open for retry (nothing moved).
+///   - 2.20.0: a ledger reject on the settle has an UNKNOWN outcome, so the session stays
+///     #closing (#settlementPending) and nothing re-closes it; reconcileSession reads the escrow
+///     balance and reopens it (nothing paid) or closes it with the remainder owed (paid).
 ///   - B1: recoverEscrow does pay out once a session is #closed.
 ///   - 2.17.4: a refund the ledger REJECTS ends #closed and recoverable, like a refused one; a
 ///     force landing during a failing refund does not release the daily reservation twice.
-///   - B2: the expiry sweep handles ledger rejects without parking sessions. Since 2.17.4 no ICP
-///     ledger reject makes the close throw, so the sweep's catch arm is reached only by a rejected
+///   - B2: the expiry sweep handles ledger rejects without throwing: a refund reject ends #closed,
+///     and (2.20.0) a settle reject leaves #closing for reconcileSession. Since 2.17.4 no ICP ledger
+///     reject makes the close throw, so the sweep's catch arm is reached only by a rejected
 ///     self-call or a trap, neither inducible in-process: that arm is covered by review only.
 ///
 /// Each test names the mutation that turns it red.
@@ -39,8 +42,21 @@ let STALE : Int = 7; // fixture lastActivityAt — any refresh (even to 0 in the
 /// `transfers` counts icrc1_transfer calls.
 let ledger = persistent actor {
   var feeHops = 0; var transferHops = 0; var errFrom = 1_000; var rejectFrom = 1_000; var transfers = 0;
+  var balance = 50_000; var rejectBalance = false; var balanceHops : [Nat] = []; var balanceCalls = 0;
   public func script(fh : Nat, th : Nat, ef : Nat, rf : Nat) : async () {
     feeHops := fh; transferHops := th; errFrom := ef; rejectFrom := rf; transfers := 0;
+    balance := 50_000; rejectBalance := false; balanceHops := []; balanceCalls := 0;
+  };
+  /// What icrc1_balance_of answers for the escrow (2.20.0 reconcile), or `reject` to throw.
+  public func scriptBalance(b : Nat, reject : Bool) : async () { balance := b; rejectBalance := reject };
+  /// Yields before the nth balance answer (1-based; missing entries mean 0).
+  public func scriptBalanceHops(h : [Nat]) : async () { balanceHops := h; balanceCalls := 0 };
+  public func icrc1_balance_of(_ : Types.Account) : async Nat {
+    balanceCalls += 1;
+    let hops = if (balanceCalls <= balanceHops.size()) { balanceHops[balanceCalls - 1 : Nat] } else { 0 };
+    var i = 0; while (i < hops) { await async {}; i += 1 };
+    if (rejectBalance) { throw Error.reject("ledger is stopped") };
+    balance;
   };
   public func transferCalls() : async Nat { transfers };
   public func icrc1_fee() : async Nat {
@@ -189,14 +205,17 @@ await suite("forceResolveSession landing on a LIVE ICP close (B3)", func() : asy
 
 await suite("ledger rejects and recovery", func() : async () {
 
-  await test("a settle rejected by the ledger → #open, nothing moved, daily untouched", func() : async () {
-    // Mutation: drop the try/catch around escrowManager.settle — the close throws and the session
-    // rests in #closing.
+  await test("a settle rejected by the ledger is unknown → #settlementPending, #closing, nothing re-closes it (2.20.0)", func() : async () {
+    // Mutation: treat the reject as "nothing moved" again (reopen to #open) — the expiry sweep
+    // would then re-close and could settle a second time out of the payer's escrow. Or drop the
+    // try/catch — the close throws.
     await ledger.script(0, 0, 1_000, 1);
     let (m, policy) = mk(1_000);
-    switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
-    assert session(m).status == #open;
+    switch (await m.closeSessionInternal("sess-1")) { case (#settlementPending(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closing;
     assert policy.getDailySpendAmount(payerP) == 100_000;
+    switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+    assert (await ledger.transferCalls()) == 1; // the refused re-close moved nothing
   });
 
   await test("recoverEscrow pays out once the session is #closed", func() : async () {
@@ -228,15 +247,133 @@ await suite("ledger rejects and recovery", func() : async () {
     assert policy.getDailySpendAmount(payerP) == 51_000; // and released nothing again
   });
 
-  await test("the expiry sweep handles ledger rejects without parking sessions (B2)", func() : async () {
+  await test("the expiry sweep handles ledger rejects: refund reject → #closed, settle reject → #closing (B2, 2.20.0)", func() : async () {
     // The first session swept: settle #1 succeeds, its refund #2 is rejected → #closed. The
-    // second: its settle #3 is rejected → #open for retry. (HashMap order decides which is first.)
+    // second: its settle #3 is rejected → unknown outcome → #closing for reconcileSession
+    // (2.20.0; it was #open). (HashMap order decides which is first.)
     // Mutation: drop the refund's try/catch — that close throws and the session rests #closing.
     await ledger.script(0, 0, 1_000, 2);
     let m = mkExpired();
     let results = await m.closeExpiredSessions();
     assert results.size() == 2;
     let (a, b) = (statusOf(m, "sess-1"), statusOf(m, "sess-2"));
-    assert (a == #closed and b == #open) or (a == #open and b == #closed);
+    assert (a == #closed and b == #closing) or (a == #closing and b == #closed);
+  });
+});
+
+/// A session left #closing by an unknown settle reject (the 2.20.0 close above).
+func makeStuck(m : Sessions.Sessions) : async () {
+  await ledger.script(0, 0, 1_000, 1);
+  switch (await m.closeSessionInternal("sess-1")) { case (#settlementPending(_)) {}; case (_) { assert false } };
+  assert session(m).status == #closing;
+  await ledger.script(0, 0, 1_000, 1_000); // the ledger is back
+};
+
+func owed(m : Sessions.Sessions) : ?Nat {
+  for (r in m.refundOwedToStable().values()) { if (r.sessionId == "sess-1") return ?r.escrow };
+  null;
+};
+
+await suite("2.20.0: reconcileSession resolves an ICP close left #closing", func() : async () {
+
+  await test("escrow still holds the full deposit → the settle did not land → #open, and a close then settles once", func() : async () {
+    // Mutation: compare `balance > deposited` — the exact-deposit case (the usual one: a stopped
+    // ledger never ran the settle) is read as "landed" and the merchant's share is never settled.
+    let (m, policy) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(50_000, false);
+    switch (await m.reconcileSession("sess-1")) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert session(m).status == #open;
+    assert policy.getDailySpendAmount(payerP) == 100_000; // still reserved: the session is live again
+    switch (await m.closeSessionInternal("sess-1")) { case (#ok(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closed;
+    assert (await ledger.transferCalls()) == 2; // one settle, one refund
+  });
+
+  await test("a transfer into the escrow does not make it read as 'landed'", func() : async () {
+    // Mutation: compare `balance == deposited` — a donation pushes the balance over the deposit
+    // and a settle that never landed is treated as landed.
+    let (m, _) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(60_000, false);
+    switch (await m.reconcileSession("sess-1")) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert session(m).status == #open;
+  });
+
+  await test("escrow below the deposit → the settle landed → #closed, daily released, remainder owed", func() : async () {
+    // Mutations: reopen in this branch too — the next close would settle a second time; or record
+    // the queried balance as owed. deposited 50_000 − settle 1_000 − fee 10_000 = 39_000 is what the
+    // close leaves; the ledger reports 45_000 because 6_000 was transferred in on top, and the owed
+    // record must still be the computed 39_000 (Types.RefundOwed).
+    let (m, policy) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(45_000, false);
+    switch (await m.reconcileSession("sess-1")) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert session(m).status == #closed;
+    assert policy.getDailySpendAmount(payerP) == 51_000;
+    assert owed(m) == ?39_000;
+    assert (await ledger.transferCalls()) == 0; // reconcile moved nothing itself
+    switch (await m.recoverEscrow(payerP, ledger, "sess-1", 1)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+  });
+
+  await test("the balance query is rejected → #err, the session stays #closing", func() : async () {
+    // Mutation: treat a failed balance query as a zero balance — the session would be closed as
+    // "settled" when nothing may have moved.
+    let (m, _) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(50_000, true);
+    switch (await m.reconcileSession("sess-1")) { case (#err(_)) {}; case (#ok(_)) { assert false } };
+    assert session(m).status == #closing;
+  });
+
+  await test("refused while a close of the session is in flight", func() : async () {
+    // Mutation: drop the icpClosesInFlight check — reconcile reads the escrow mid-close (here:
+    // before the settle lands, so it would reopen a session whose settle then completes).
+    await ledger.script(0, 200, 1_000, 1_000); // park the close inside its settle transfer
+    let (m, _) = mk(1_000);
+    let close = m.closeSessionInternal("sess-1");
+    await untilTransferring(1);
+    switch (await m.reconcileSession("sess-1")) { case (#err(_)) {}; case (#ok(_)) { assert false } };
+    assert session(m).status == #closing;
+    switch (await close) { case (#ok(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closed;
+  });
+
+  await test("a second reconcile that resumes after the first reopened the session and a new close began is refused", func() : async () {
+    // Mutation: drop icpClosesInFlight from the post-await re-check — the second reconcile sees
+    // #closing (the NEW close's) and acts on a live close, reading its escrow mid-close. The new
+    // close's transfers park for 2_000 yields each, far beyond r2's 400, so r2 resumes inside it.
+    let (m, _) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(50_000, false);
+    await ledger.scriptBalanceHops([0, 400]); // the second reconcile's balance answer comes late
+    let r1 = m.reconcileSession("sess-1");
+    let r2 = m.reconcileSession("sess-1");
+    switch (await r1) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert session(m).status == #open;
+    await ledger.script(0, 2_000, 1_000, 1_000); // the new close parks inside its settle transfer
+    await ledger.scriptBalance(50_000, false);
+    let close = m.closeSessionInternal("sess-1");
+    await untilTransferring(1);
+    switch (await r2) { case (#err(_)) {}; case (#ok(_)) { assert false } };
+    assert session(m).status == #closing;
+    switch (await close) { case (#ok(_)) {}; case (_) { assert false } };
+    assert session(m).status == #closed;
+  });
+
+  await test("a forceResolveSession that lands during reconcile's ledger query wins; nothing is released twice", func() : async () {
+    // Mutation: drop the status from the post-await re-check — reconcile would act on the #closed
+    // session: reopen it, or finalize it again and release the daily reservation a second time.
+    let (m, policy) = mk(1_000);
+    await makeStuck(m);
+    await ledger.scriptBalance(39_000, false); // "landed": reconcile would finalize
+    await ledger.scriptBalanceHops([200]);
+    let r = m.reconcileSession("sess-1");
+    var n = 0; while (n < 50) { await async {}; n += 1 }; // reconcile is inside its balance query
+    force(m);
+    assert policy.getDailySpendAmount(payerP) == 51_000;
+    switch (await r) { case (#err(_)) {}; case (#ok(_)) { assert false } };
+    assert session(m).status == #closed;
+    assert policy.getDailySpendAmount(payerP) == 51_000; // released once, by the force
   });
 });

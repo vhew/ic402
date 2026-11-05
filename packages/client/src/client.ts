@@ -25,6 +25,7 @@ import type {
 import { signVoucher, type VoucherSigner } from './voucher.js';
 import {
   Ic402Error,
+  settlementError402,
   classifyNetworkError,
   probeX402 as probeX402Url,
   createEvmClient,
@@ -623,8 +624,7 @@ export class Ic402Client {
     const body = await response.text();
     if (response.ok)
       return { status: 'ok', code: response.status, body, paidAmount: signed.paidAmount };
-    if (response.status === 402)
-      return { status: 'error', error: new Ic402Error('settlement_failed', body.slice(0, 200)) };
+    if (response.status === 402) return { status: 'error', error: settlementError402(body) };
     return {
       status: 'error',
       error: new Ic402Error('http_error', `HTTP ${response.status}: ${body.slice(0, 200)}`),
