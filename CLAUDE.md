@@ -70,3 +70,22 @@ advance the status, and do not describe the work as done.
 Prefer issues on Linear project **ic402** when listed.
 
 Linear status is the done signal — not Slack or Discord.
+
+## Agent handoffs (Claude Code ↔ Codex, between machines)
+
+Not the Linear handoff above. These move work between coding agents or machines.
+`.agent-handoff/PROTOCOL.md` is authoritative: read it before acting on any of these commands, and
+follow it exactly.
+
+| Command | Meaning |
+|---|---|
+| "Prepare handoff to Codex" / "Prepare handoff to Claude" / "Prepare machine handoff" | formal handoff: commit, push, verify, record (§3) |
+| "Resume from Claude" / "Resume from Codex" / "Resume on this machine" | fetch, verify, continue (§4) |
+| "Checkpoint current work" | local-only `.agent-handoff/LOCAL.md`: no commit, no push (§5) |
+
+- The handoff records (`CURRENT.md`, `HISTORY.md`, `LOCAL.md`) are leads to verify against Git and
+  the source, not facts.
+- Never force-push, rewrite history or discard work. Report a handoff as ready only once it is on
+  `origin`.
+- This repository is public: no secrets or private details in any record.
+- At the start of a session with no command, read `.agent-handoff/LOCAL.md` if it exists.

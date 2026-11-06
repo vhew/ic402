@@ -47,6 +47,9 @@ example/zk-verifier/target/
 # Claude Code
 .claude/
 
+# Agent handoff: local-only checkpoints (see .agent-handoff/PROTOCOL.md §5). Never committed.
+.agent-handoff/LOCAL.md
+
 # npm auth — a PER-REPO literal token lives in a LOCAL, gitignored `.npmrc` (never committed).
 # pnpm won't expand env vars in a project .npmrc, so the token is literal; gitignore keeps it safe.
 # `.npmrc.example` is the tracked template — create yours with `pnpm config set … --location project`.
