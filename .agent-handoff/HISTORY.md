@@ -17,4 +17,11 @@ Entry format:
 
 ---
 
-_No formal handoffs yet._
+## HO-20261106T1528Z-claude — claude -> codex
+- Branch / implementation commit: chore/agent-handoff @ 553ff1f
+- Progress: the handoff system is set up (PROTOCOL, CURRENT, HISTORY, BOOTSTRAP, AGENTS.md, and a
+  CLAUDE.md section). The library is at v2.20.0 (released, master 3af30b4).
+- Decisions: AGENTS.md defers to CLAUDE.md; working agreements are copied into PROTOCOL §6;
+  handoff commits stay off master. Each awaits the owner's review.
+- Risks / open: chore/agent-handoff is not merged; Codex discovery is untested; the follow-ups
+  are listed in CURRENT.md.
