@@ -3,10 +3,14 @@
 How Claude Code and OpenAI Codex hand work to each other, or to themselves on another machine,
 without losing context. Both agents follow **this file**; `CLAUDE.md` and `AGENTS.md` only point
 here. If anything else disagrees with this file about handoffs, this file wins.
+Always load the latest version from `origin/chore/agent-handoff` after fetching; a historical
+handoff may contain superseded instructions.
 
-- **Formal handoff:** committed and pushed to `origin`. It is the only kind another agent or
-  another machine can rely on. Its record is `.agent-handoff/CURRENT.md`, with one line per
-  handoff in `.agent-handoff/HISTORY.md`.
+- **Records branch:** `chore/agent-handoff`, permanently separate from `master`. It holds this
+  setup, protocol, bootstrap guide, and records. Never merge it into `master` or a product branch.
+- **Formal handoff:** implementation committed and pushed on its own code branch; records
+  committed and pushed on the records branch. Its record is `.agent-handoff/CURRENT.md`, with
+  one line per handoff in `.agent-handoff/HISTORY.md`. Both must be verified on `origin`.
 - **Local checkpoint:** `.agent-handoff/LOCAL.md`, git-ignored, never committed or pushed. It
   exists only on the machine that wrote it.
 - **New machine:** see `.agent-handoff/BOOTSTRAP.md`.
@@ -15,6 +19,45 @@ here. If anything else disagrees with this file about handoffs, this file wins.
 Never record secrets, keys, tokens, account names, local paths, private repository contents, or
 anything the owner has not approved to be public. Refer to private context by its location
 ("the owner has it", "see the issue tracker"), not its contents.
+
+**Separate does not mean private.** A branch in this public repository remains public. Deleting
+files, deleting a branch, or rewriting history cannot guarantee removal from clones, forks,
+caches, or other references. Do not call this setup private or semi-private. Use local-only
+storage or a separately authorized private repository for private context. Purging is not a
+privacy mechanism and is never automatic; any deletion or history rewrite needs a separate,
+explicit owner instruction specifying its scope.
+
+## Branch separation (owner-approved, 2026-11-06)
+
+- **Never merge this setup into `master`.** Do not open a PR to merge the records branch. Do not
+  merge, cherry-pick, or copy its handoff files/setup changes into product branches. This includes
+  this branch's `AGENTS.md`, the handoff additions to `CLAUDE.md` and `.gitignore`, and
+  `.agent-handoff/`. Keep any pre-existing project instructions on product branches intact.
+- **Code branches start from `origin/master` or a verified clean implementation branch**, never
+  from the records branch. Do not develop product code on `chore/agent-handoff`. Its code files
+  are an old snapshot, not the current implementation. Read build/test instructions and design
+  documents from the actual implementation branch.
+- **Use separate working directories.** Reuse an existing records worktree (check `git worktree
+  list`) or create one with `git worktree add <records-worktree> chore/agent-handoff` after fetching
+  and establishing the tracking branch. Keep product work in another checkout/worktree. Do not
+  switch over uncommitted work or check out the same branch in two worktrees.
+- **Before a product PR/merge**, inspect the commit history and changed paths relative to
+  `origin/master`. Verify that the setup commit `553ff1f89aa2978f4bdd81398771fb34f3dafa5e` is NOT
+  an ancestor of the proposed code branch (`git merge-base --is-ancestor <setup-sha> <code-branch>`
+  must return 1; errors are not proof). Check that no handoff files/setup changes were copied in.
+  If contaminated, stop: removing the files in a later commit does not remove them from history.
+  Propose a clean branch and transfer only reviewed product changes without rewriting the old one.
+- **No main-branch changes are needed to discover handoffs.** After fetching, read the protocol
+  with `git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md`. Start agents in the records
+  worktree, or explicitly provide that instruction when starting in a product checkout. The
+  records branch's entry points are not automatically present on `master`.
+- **Local checkpoints on product branches:** before writing `.agent-handoff/LOCAL.md`, add that
+  exact path to the clone's local exclude file (`git rev-parse --git-path info/exclude`) if missing.
+  Verify with `git check-ignore .agent-handoff/LOCAL.md`. Never modify the product branch's tracked
+  `.gitignore` just for handoffs. This also prevents a checkpoint left behind by switching branches
+  from becoming an untracked file eligible for accidental staging.
+- This is an agent workflow rule, not server-enforced branch protection. A non-default branch is
+  still public, and preserving it separately is not a privacy guarantee.
 
 ## 1. Commands
 
@@ -43,7 +86,7 @@ prefix is how §4 finds handoffs, so use it exactly.
   `git` and the source, never ground truth.
 - **Never destroy work.** No force-push, history rewrite, `reset --hard`, `checkout -- .`,
   `clean`, branch deletion, or stash drop, and never overwrite divergent work. If a step would
-  need one of these, stop and report.
+  need one of these, stop and report. A discussion of periodic cleanup is not authorization.
 - **Stage by name.** Never `git add -A` or `git add .`. Review `git diff --cached` before every
   commit. Leave unrelated changes uncommitted and say so.
 - **Never commit** secrets, `deploy/` (git-ignored; it holds real keys, so never read or print it
@@ -53,7 +96,7 @@ prefix is how §4 finds handoffs, so use it exactly.
   current agent's own attribution rules require.
 - **Never commit to `master` directly with task work.** Work happens on a branch: `feat/…`,
   `fix/…`, `chore/…`, `test/…`, or `wip/…` when unsure. `master` takes merges (`--merge`, never
-  squash) and `release:` commits.
+  squash) and `release:` commits for product work only. Handoff/setup branches never merge there.
 - **A formal handoff authorizes** ordinary reviewed commits, and pushes of non-default branches
   to `origin`. It does **not** authorize pushing to `master`, tags (a `vX.Y.Z` tag publishes to
   npm and mops), merging PRs, or anything else the owner has not explicitly asked for.
@@ -63,88 +106,98 @@ prefix is how §4 finds handoffs, so use it exactly.
 The same procedure applies whether the receiver is the other agent, the same agent on another
 machine, or both.
 
-### Phase A: inspect
+### Phase A: inspect both working directories
 
-```bash
-git rev-parse --show-toplevel; git branch --show-current; git rev-parse HEAD
-git remote -v; git fetch origin --prune
-git status --short --branch          # ahead/behind, staged, unstaged, untracked
-git log --oneline @{u}..HEAD 2>/dev/null || echo "no upstream"   # unpushed commits
-git stash list
-```
-
-1. Sort every changed or untracked file into one of: task work, unrelated work (leave it), or
-   must-never-commit (§2). Check diffs for secrets before staging anything.
-2. Note what is done, what is incomplete, and what is blocked. Note the tests you actually ran
-   and their results; tests you did not run must not be reported as passing.
-3. If the branch has **diverged** from its upstream (both ahead and behind), stop. Don't merge,
-   rebase or push. Report the handoff as **incomplete** with the divergence.
+1. Identify the implementation branch/worktree and the records branch/worktree separately. Run
+   `git status --short --branch`, `git branch --show-current`, `git rev-parse HEAD`, and
+   `git stash list` in each. Fetch `origin` and compare each branch with its upstream.
+2. Classify changed files: product work, handoff metadata, unrelated work (leave it), or
+   must-never-commit (§2). Check intended commits for secrets. Do not copy private context.
+3. If either branch has diverged, stop. Do not merge, rebase, or push it. Note completed work,
+   incomplete work, blockers, and only the tests actually run. Ensure the code branch satisfies
+   the separation checks above before continuing.
 
 ### Phase B: commit and push the implementation
 
-4. If you are on `master` with uncommitted task work, create a task branch first:
-   `git switch -c <type>/<slug>`.
-5. Stage the task files by name and commit. Unfinished work is fine as `wip(scope): …`. If
-   nothing is uncommitted, skip the commit.
-6. Push: `git push -u origin <branch>`. If the branch is `master` and there is no task work,
-   nothing is pushed in this phase.
-7. Verify, and record the result as the **implementation commit**:
-   ```bash
-   git fetch origin
-   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/<branch>)" && echo synced
-   ```
+4. On `master` with task work, create a clean task branch before committing. If working on the
+   records branch, only handoff-system maintenance belongs there; create a separate code worktree
+   from `origin/master` for any product work. A metadata-only task can name the records branch as
+   its implementation branch, explicitly marked **metadata only** in CURRENT.md.
+5. Stage product task files by name in the code worktree, review `git diff --cached`, and commit.
+   Unfinished work may use `wip(scope): …`. Skip this commit if nothing changed. Do not stage the
+   records or local checkpoint. Leave unrelated work untouched and report it.
+6. Push the implementation branch to `origin`. If idle on `master`, do not push it; verify that
+   the intended implementation commit is already on `origin/master`. For metadata-only work,
+   commit and push the setup changes on the records branch instead; never open a product PR.
+7. Fetch and compare full local and remote SHAs. Record the **implementation branch and full
+   commit SHA** only after verifying they match. Never claim a local-only commit is delivered.
 
-### Phase C: record and push the handoff
+### Phase C: record and push on the records branch only
 
-8. Make the ID, then rewrite `.agent-handoff/CURRENT.md` to its template (keep the headings).
-   Record the implementation commit's full SHA and branch. **Do not try to record the handoff
-   commit's own SHA**; it is whatever commit contains this CURRENT.md, and §4 finds it with
-   `git log`.
-9. Append one entry to `.agent-handoff/HISTORY.md` (format at the top of that file).
-10. Commit only those two files: `git add .agent-handoff/CURRENT.md .agent-handoff/HISTORY.md`,
-    with the subject from §1.
-    - **On a task branch:** commit there.
-    - **On `master` with no task branch** (for example, idle after a release): create
-      `handoff/<ID>` from `master` and commit there. `master` stays untouched; the owner can
-      merge or delete that branch later.
-11. Push it and verify, as in step 7.
-12. Report **"Handoff ready"** with the ID, the implementation commit, the handoff commit and the
-    branch, and give the receiver's resume command. Report it **only** if both commits are on
-    `origin`.
-13. If anything failed, report which steps succeeded and which did not, the exact error, and what
-    is left on this machine. Write a local checkpoint (§5) so nothing is lost. **Never** call an
-    incomplete handoff ready.
+8. In the records worktree, confirm the branch is `chore/agent-handoff`, fast-forward only if
+   clean and behind, then make the ID. Rewrite `.agent-handoff/CURRENT.md` using its headings.
+   Record the implementation branch/SHA, records branch, task type (product or metadata only),
+   verified progress, decisions, tests, and next steps. Do not record the handoff commit's own SHA;
+   discovery finds it through the commit subject. The implementation and records branches may
+   differ; never infer one from the other.
+9. Append an entry to `.agent-handoff/HISTORY.md`. Keep earlier entries unchanged; append a
+   correction if an earlier claim or policy has been superseded.
+10. Stage only CURRENT.md and HISTORY.md by name **in the records worktree**, review the staged
+    diff, and commit with the §1 handoff subject. Never write these records onto a code branch,
+    including when idle on `master`. Do not create disposable `handoff/<ID>` branches.
+11. Push `chore/agent-handoff`, fetch, and verify its local HEAD equals
+    `origin/chore/agent-handoff`. Do not merge it, open a merge PR, or delete it after handoff.
+12. Report **"Handoff ready"** only when both implementation and record commits are on `origin`.
+    Include the ID, both SHAs, both branch names, and the receiver's resume command.
+13. On failure, report the exact failed step, what succeeded, and what remains local. Write a
+    local checkpoint (§5). Never call an incomplete handoff ready.
 
 ## 4. Resume (all three "Resume …" commands)
 
-1. **Look before touching anything:** run `git status --short --branch`, `git stash list` and
-   `git branch --show-current`. If there are local changes, keep them; don't switch branches over
-   them. Ask the owner, or commit them to their own branch first.
-2. `git fetch origin --prune`. Never `pull` into a branch with local changes or divergence.
-3. Find the newest formal handoff on the remote:
+1. **Look before touching anything:** inspect status, stash, current branch, and worktrees. Keep
+   local changes. Do not switch branches over them; use an existing clean worktree or ask the
+   owner if preserving them requires a decision.
+2. Fetch `origin` and read the latest protocol with
+   `git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md`. This policy overrides older
+   records, including earlier suggestions to merge the setup. Never pull into local changes or
+   divergence.
+3. Search the records branch, filtering the sender **before** limiting results:
    ```bash
-   git log --remotes=origin --grep='^handoff: HO-' --format='%h %cI %s%n    %D' -n 5
+   # Resume from Claude
+   git log origin/chore/agent-handoff --grep='^handoff: HO-.* claude->' --format='%H %cI %s' -n 1
+   # Resume from Codex
+   git log origin/chore/agent-handoff --grep='^handoff: HO-.* codex->' --format='%H %cI %s' -n 1
+   # Resume on this machine
+   git log origin/chore/agent-handoff --grep='^handoff: HO-' --format='%H %cI %s' -n 1
    ```
-   For "Resume from Claude" or "Resume from Codex", take the newest entry whose subject says
-   `claude->` or `codex->`. For "Resume on this machine", take the newest of any. Read the record
-   without switching branches:
-   `git show <handoff-sha>:.agent-handoff/CURRENT.md`.
-4. Verify the implementation commit named in the record is on the remote:
-   `git branch -r --contains <impl-sha>`. If it isn't, the handoff is broken. Go to §7.
-5. **Look for newer work than the handoff:** commits on that branch after the handoff commit
-   (`git log <handoff-sha>..origin/<branch>`), and the local `.agent-handoff/LOCAL.md` if this
-   machine has one. Newer work wins over the record; never discard it.
-6. Check out the branch (`git switch <branch>`, tracking `origin/<branch>`), fast-forward only.
-7. Read `CLAUDE.md`, this protocol, and the documents the record names as authoritative. Then
-   verify the record's claims that matter against the source, and re-run the tests it names.
-   Note any discrepancy and tell the owner.
-8. Tell the owner, briefly: what you verified, the task, and the first next action. Then continue
-   from the verified state, without redoing completed work.
+   Read the selected record without checking out its branch:
+   `git show <handoff-sha>:.agent-handoff/CURRENT.md`. Also read CURRENT.md and HISTORY.md at the
+   records branch tip for later corrections. No matching record is not a successful resume;
+   report it and use §7 to recover, never silently select a different sender.
+4. Verify the named implementation commit is present on `origin` using
+   `git branch -r --contains <impl-sha>`, and that the named remote implementation branch contains
+   it (`git merge-base --is-ancestor <impl-sha> origin/<implementation-branch>` must return 0).
+   A missing branch/commit requires recovery, not guessing. For old records, infer missing
+   records-branch/type fields from Git and explain the result; the initial setup is metadata only.
+5. Look for newer work separately: `git log <impl-sha>..origin/<implementation-branch>` and
+   `git log <handoff-sha>..origin/chore/agent-handoff`. Check local checkpoints in both known
+   worktrees. Newer verified work and owner instructions override older records.
+6. Resume **product work in the implementation worktree**, on its tracking branch, fast-forward
+   only. Read metadata through `git show` or the separate records worktree; do not copy it into
+   the code branch. For metadata-only tasks, work on the records branch. Before starting any
+   product task from a metadata-only handoff, create a clean branch/worktree from `origin/master`.
+7. Read `CLAUDE.md` and authoritative design documents from the implementation branch; keep the
+   latest records-branch protocol in context. Verify material record claims against source, and
+   rerun relevant named tests. Report discrepancies. Do not use the stale product snapshot on
+   the records branch as the current implementation.
+8. Tell the owner what was verified, the task, and the next action, then continue. Lack of a PR
+   or merge for handoff metadata is intentional, not unfinished product delivery.
 
 ## 5. Local checkpoint ("Checkpoint current work")
 
-1. Collect the current Git state: branch, HEAD, ahead/behind, and staged/unstaged/untracked file
-   names.
+1. In the worktree being checkpointed, ensure LOCAL.md is ignored (use the per-clone exclude
+   above on product branches). Collect branch, HEAD, ahead/behind, and staged/unstaged/untracked
+   file names. Identify which implementation and records branches the checkpoint concerns.
 2. Overwrite `.agent-handoff/LOCAL.md` with: the ID; the time; the agent; the task and progress;
    important decisions; that Git state; incomplete work; known failures; and the immediate next
    steps.
@@ -173,6 +226,11 @@ to verify.
 ### Owner-approved working agreements
 
 These standing rules apply to both agents:
+
+- **Handoff isolation.** The owner requires this setup and all handoff records to stay off
+  `master` permanently. Use `chore/agent-handoff` without merging it into product branches.
+  Public branches are public; purging provides no privacy guarantee and requires separate,
+  explicit authorization. Keep private context local or in separately approved private storage.
 
 - **Propose before modifying.** When a report or request asks for a change to library behaviour,
   verify it against the source, show the proposed change, and wait for the owner's "yes".

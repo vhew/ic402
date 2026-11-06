@@ -1,5 +1,14 @@
 # Current formal handoff
 
+> **Owner policy update, 2026-11-06:** the record below describes the earlier setup handoff.
+> Its suggestions to open a PR or merge the setup are superseded. **Never merge this setup into
+> master or product branches.** Keep it on `chore/agent-handoff`, which is public, not semi-private.
+> No purge or history rewrite is authorized. Read the latest PROTOCOL.md from the records branch
+> before acting on any historical record. Code work uses a separate clean implementation branch.
+> Codex verified the handoff and reran `mops test` (731 passed); discovery worked. No PR or merge
+> was created. The historical implementation is **metadata only**, not a base for future code work.
+> This policy addendum is not a new formal handoff; the original handoff commit remains 1821c10.
+
 The latest synchronized formal handoff. Procedure: `.agent-handoff/PROTOCOL.md` §3 (prepare) and §4
 (resume). Everything here is a lead to verify against Git and the source.
 

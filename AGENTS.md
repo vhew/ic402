@@ -15,8 +15,15 @@ include: tags are publishes and need the owner's explicit instruction; never rea
 
 ## Agent handoffs (Claude Code ↔ Codex, between machines)
 
-`.agent-handoff/PROTOCOL.md` is authoritative: read it before acting on any of these commands, and
-follow it exactly.
+The protocol on `origin/chore/agent-handoff` is authoritative. Fetch and read its latest version
+before acting: `git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md`.
+The local `.agent-handoff/PROTOCOL.md` belongs to that dedicated records branch.
+
+**Never merge this handoff setup into `master` or any product branch.** Do not open a PR for it.
+Keep records on `chore/agent-handoff`; create product branches from `origin/master` or a verified
+clean code branch. Read product instructions from that code branch, not this branch's old snapshot.
+A public branch is not private or semi-private, and deleting it cannot guarantee erasure.
+Purging, deletion, and history rewriting require separate, explicit owner authorization.
 
 | Command | Meaning |
 |---|---|

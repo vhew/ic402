@@ -3,6 +3,11 @@
 Do these steps once per machine, then resume with the command in step 6. Nothing here is secret.
 Credentials stay in each tool's own login flow, never in this repository.
 
+**Owner policy:** `chore/agent-handoff` is the dedicated records branch and must never merge into
+`master` or a product branch. This setup stays on that branch. It is public, not semi-private;
+periodic purging cannot guarantee erasure and is never automatic. Private context belongs in
+local-only or separately authorized private storage.
+
 ## 1. Accounts and access
 
 - **GitHub:** you need an account with push rights to `vhew/ic402`. SSH works, as does HTTPS with
@@ -20,12 +25,28 @@ Credentials stay in each tool's own login flow, never in this repository.
 git clone git@github.com:vhew/ic402.git    # or https://github.com/vhew/ic402.git
 cd ic402
 git fetch origin --prune
+git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md
 ```
+
+A fresh default-branch checkout does not contain this handoff setup. Read the protocol from the
+remote branch as above. Keep code in this checkout and metadata in a separate worktree. In a
+fresh clone with no local records branch/worktree, create it with:
+
+```bash
+git worktree add -b chore/agent-handoff ../ic402-handoffs origin/chore/agent-handoff
+```
+
+On an existing clone, inspect `git worktree list` and local branches first; reuse the records
+worktree or attach the existing records branch, without resetting it. Create product task branches
+from `origin/master` (or a verified clean implementation branch), never from the records branch.
+Do not merge or copy this setup into the default branch merely to make agent discovery automatic.
 
 ## 3. Development tools
 
-The versions are pinned. The source of truth is `package.json` (`engines`, `packageManager`),
-`mops.toml` (`[toolchain]`) and `.github/workflows/ci.yml`.
+Run builds in the **implementation checkout**, not the records worktree. The latter contains an
+old code snapshot. The versions below are setup-time hints; the current source of truth is
+`package.json` (`engines`, `packageManager`), `mops.toml` (`[toolchain]`) and
+`.github/workflows/ci.yml` on the implementation branch.
 
 | Tool | Version | Install |
 |---|---|---|
@@ -48,28 +69,45 @@ needs it, the owner copies it over separately.
 ## 4. Coding agents
 
 - **Claude Code:** install it from the official docs (https://code.claude.com/docs) and launch it
-  from the repository root. It loads `CLAUDE.md` automatically.
+  from the records worktree for handoff discovery, where `CLAUDE.md` points to the protocol.
 - **Codex:** install it from the official docs (https://developers.openai.com/codex) and launch it
-  from the repository root. It loads `AGENTS.md` automatically, and that file sends it to
+  from the records worktree for handoff discovery, where `AGENTS.md` points to
   `CLAUDE.md` and the protocol.
 - Each agent's private memory and settings stay on the old machine. Anything the work depends on
-  must be in the repository; that is what the handoff records are for.
+  must be in the public-safe records or separately approved private storage. Never copy private
+  memory wholesale into this public branch.
 
 ## 5. Find and check the handoff
 
 `.agent-handoff/PROTOCOL.md` §4 is the procedure. In short:
 
 ```bash
-git log --remotes=origin --grep='^handoff: HO-' --format='%h %cI %s%n    %D' -n 5
+git log origin/chore/agent-handoff --grep='^handoff: HO-' --format='%H %cI %s' -n 1
 git show <handoff-sha>:.agent-handoff/CURRENT.md
 git branch -r --contains <implementation-sha-from-the-record>
 ```
 
 `.agent-handoff/LOCAL.md` (local checkpoints) does not travel between machines. Only formal
-handoffs do.
+handoffs do. Before writing a checkpoint on a product branch, exclude that path in the clone's
+local `info/exclude` (find it with `git rev-parse --git-path info/exclude`) and verify it with
+`git check-ignore .agent-handoff/LOCAL.md`. Do not modify tracked product files for that exclusion.
+For a sender-specific resume, use the sender-filtered commands in protocol §4 before limiting
+results. Read metadata from the records branch; verify the separate implementation branch/SHA.
 
 ## 6. Resume
 
-Launch the agent in the repository root and say **"Resume on this machine"**, or "Resume from
-Claude" / "Resume from Codex" when switching agents too. The agent checks the record against Git
-and the source before continuing.
+Start the agent in the records worktree and say **"Resume on this machine"**, or "Resume from
+Claude" / "Resume from Codex" when switching agents too. It reads the latest protocol and then
+resumes product work in the implementation checkout. Metadata-only work stays on the records branch.
+
+If starting in a product checkout, provide this explicit startup prompt (the handoff entry points
+are intentionally absent there):
+
+> Fetch origin and read `git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md`, then
+> follow its "Resume on this machine" procedure. Keep the records branch and all handoff setup
+> out of master and product branches. Read metadata via git show or the separate records worktree;
+> verify and continue code work in the named implementation checkout. Do not merge or copy the
+> handoff setup into the code branch.
+
+For privacy, use private storage; deleting a public branch is not a privacy boundary. No bootstrap
+or resume command authorizes deleting branches, purging records, or rewriting history.

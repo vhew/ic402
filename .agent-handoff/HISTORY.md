@@ -25,3 +25,15 @@ Entry format:
   handoff commits stay off master. Each awaits the owner's review.
 - Risks / open: chore/agent-handoff is not merged; Codex discovery is untested; the follow-ups
   are listed in CURRENT.md.
+
+## Policy correction — 2026-11-06 (owner instruction; not a new handoff)
+
+- Supersedes the merge suggestions in HO-20261106T1528Z-claude and earlier local checkpoints.
+- The owner requires this setup to remain on `chore/agent-handoff`, never merged into `master`
+  or product branches. No PR is needed or wanted for merging the setup.
+- Future code work starts from `origin/master` or a clean implementation branch. Records and
+  implementation branch/commit references are separate; metadata stays on the records branch.
+- A public branch is public. Purging is not a privacy guarantee and requires separate explicit
+  authorization; no branch deletion or history rewrite is authorized by this policy update.
+- Codex discovery succeeded; the resume reran `mops test` with 731 passing. No PR or merge was
+  created. The existing setup branch and history are preserved.
