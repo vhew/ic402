@@ -95,3 +95,38 @@ The latest synchronized formal handoff. Procedure: `.agent-handoff/PROTOCOL.md` 
    change decisions (a) to (c).
 4. **Then whatever the owner asks next.** Candidate work is the open items above, each with a
    proposal first.
+
+
+## Local update — 2026-11-08 (not a new synchronized handoff)
+
+- [approved] Use STANDING.md and the dated protocol corrections; the next formal handoff uses
+  TEMPLATE.md. Preserve the historical record above. Source: owner request R2/R3/R7.
+- [verified] Local helper commit: `ccef51a0eae92e6e26c5ccfaf99fa3aa3085dd9d`; evidence committed
+  separately at `28c0cd9bae9984836d035f1af1594979e938dbaf` before this update cites it.
+- [approved] No push without the owner's request (STANDING.md S6); this update is not on origin.
+
+### Task ledger
+
+| ID | What | Authority (date/source) | Design first | Must not change | Mode | Acceptance | Status |
+|---|---|---|---|---|---|---|---|
+| H1 | [approved] Add handoff lessons/template/standing rules | 2026-11-08 owner request R2/R7 | PROTOCOL.md; STANDING.md | Existing rules, records separation | done | Additive corrections; source-backed claims | [verified] ccef51a; preservation audit in VALIDATION.md |
+| H2 | [approved] Read-only doctor and failure probes | 2026-11-08 owner request R7 | DOCTOR.md | No installs, secrets output, deploys or false OK | done | Every check fails on broken input; shell controls | [verified] 44 probes/29 IDs, Bash+Zsh; real green machine control remains H3 |
+| H3 | [open] Establish a real configured-machine control | 2026-11-08 owner request R7 | DOCTOR.md; VALIDATION.md | No silent PATH/environment changes | ask-first | tools/integration ready in actual agent shell | [open] Current PATH shadows icp/mops; recommend select pinned tools, rerun; do-less option: keep readiness blocked |
+| H4 | [open] Guard the actual production deploy entrypoint | 2026-11-08 owner request R7 | DOCTOR.md deploy boundary | No guessed targets or duplicate creation | ask-first | Match recorded target before plan; --no-create | [open] Need public target/identity and private entrypoint integration; recommend record target first; do-less option: production stays blocked |
+
+### Decisions I made without a ruling
+
+- [assumed] Python 3.11+ stdlib helper: avoids extra parser dependencies; undo by replacing the
+  dispatcher/runtime while preserving probes. Explicit committed JSON deployment profile:
+  avoids guessing live IDs; undo by adapting to another owner-approved authoritative format.
+- [verified] Raised these technical choices to the owner; no product behavior was changed.
+
+### Verified state, next actions and unsafe states
+
+- [verified] Fresh-reader source/quote/helper/evidence checks passed; see VALIDATION.md and its
+  committed logs. Real doctor runs all exit 1: PATH, absent deploy profile, CI-only auth limits.
+- [open] No real ready-machine control or live publishing control. No release is underway;
+  before a release, missing exact-commit green phase evidence means “gate owed” first.
+- [open] Next: owner resolves H3/H4 or leaves their readiness blocked. Push only on explicit request.
+- [verified] No persistent process was started by this update; the timeout probe killed its own
+  child group. [open] Existing local service process ownership was not inventoried; do not stop it.

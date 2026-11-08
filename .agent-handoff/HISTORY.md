@@ -37,3 +37,15 @@ Entry format:
   authorization; no branch deletion or history rewrite is authorized by this policy update.
 - Codex discovery succeeded; the resume reran `mops test` with 731 passing. No PR or merge was
   created. The existing setup branch and history are preserved.
+
+
+## Local protocol update — 2026-11-08 (not a formal handoff)
+
+- [approved] Owner requested additive lessons, doctor/probes, template and standing instructions;
+  no push unless asked. Source: `authorities/2026-11-08-owner-request.md`, committed at `999aeb3`.
+- [verified] Helper/protocol commit `ccef51a`; independently checked evidence commit `28c0cd9`.
+  All prior protocol/entry-point lines retained; CURRENT.md has an additive local task ledger.
+- [verified] 44 failure probes across 29 IDs pass under Bash and Zsh. Real doctor remains NOT READY;
+  details and limits in committed VALIDATION.md. No application changes, deployment, tag or push.
+- [open] Real ready-machine control, authoritative production target/guard integration and CI-held
+  publishing credential usability are unresolved. Historical handoff 1821c10 is not reclassified.
