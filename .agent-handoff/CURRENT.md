@@ -1,5 +1,13 @@
 # Claude handoff — prepared locally, not synchronized
 
+> [approved] **2026-11-08 publication correction:** the owner explicitly approved the push;
+> source `authorities/2026-11-08-claude-handoff.md` at `8d64cf2` (already on origin).
+> [verified] Implementation `383b7fe` and handoff `efc63c1` are now on origin/chore/agent-handoff.
+> The title and pending-push statements below describe preparation and are superseded for this
+> handoff. Q1 is resolved; Claude can now use “Resume from Codex” after fetching and reading the
+> latest branch-tip corrections. H3/H4 and the NOT READY doctor verdict remain open.
+> [approved] This approval is limited to this handoff; STANDING.md S6 still governs other pushes.
+
 ## 1. Read this first
 
 - [verified] ID: HO-20261108T2116Z-codex; UTC: 2026-11-08 21:16; codex -> claude.

@@ -63,3 +63,12 @@ Entry format:
   control owed; production target/guard integration unresolved; existing PocketIC ownership unknown.
 - [approved] Never merge this metadata into master; receiver follows STANDING.md and restates
   the ledger/design/doctor verdict for owner confirmation before building.
+
+
+### Publication correction — HO-20261108T2116Z-codex (2026-11-08)
+
+- [approved] Owner answered “yes” to pushing the prepared records branch; authority committed
+  at 8d64cf2 and verified on origin before this correction. This resolves the prior push-pending note.
+- [verified] Implementation 383b7fe and handoff efc63c1 are both on origin/chore/agent-handoff.
+  master remains unchanged at 3af30b4. Read the branch-tip CURRENT correction when resuming.
+- [open] The existing doctor/readiness and production guard decisions remain unresolved.

@@ -15,6 +15,7 @@
 | S4 | approved | 2026-11-08 | “The owner confirms or corrects once.” | R3; receiving a handoff |
 | S5 | approved | 2026-11-08 | “Only include rules this repo's owner has actually stated.” | R5; standing instructions |
 | S6 | approved | 2026-11-08 | “Do not push unless I ask.” | R6; this update, until an explicit push request |
+| S6 correction | approved | 2026-11-08 | “yes” | authorities/2026-11-08-claude-handoff.md, Publication approval; permits this prepared Claude handoff push only |
 
 - [open] Protocol §6 contains earlier attributed working agreements whose verbatim original
   owner messages are not in the repository. Keep those existing rules; do not invent quotations
