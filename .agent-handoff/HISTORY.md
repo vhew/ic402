@@ -49,3 +49,17 @@ Entry format:
   details and limits in committed VALIDATION.md. No application changes, deployment, tag or push.
 - [open] Real ready-machine control, authoritative production target/guard integration and CI-held
   publishing credential usability are unresolved. Historical handoff 1821c10 is not reclassified.
+
+
+## HO-20261108T2116Z-codex — codex -> claude (prepared locally)
+
+- [verified] Branch / metadata implementation: chore/agent-handoff @ 383b7fe; product baseline
+  master @ 3af30b4. This entry describes preparation, not successful remote synchronization.
+- [verified] Progress: lessons/template/standing instructions and read-only doctor are implemented;
+  existing Bash/Zsh logs pass 44 failure probes / 29 check IDs. Fresh tools doctor is NOT READY.
+- [assumed] Decisions: Python stdlib runtime and explicit JSON target profile; rationale/undo in
+  CURRENT.md/DOCTOR.md. No new product decision or production target was invented.
+- [open] Risks / next: explicit push approval still needed; shell prerequisites and real green
+  control owed; production target/guard integration unresolved; existing PocketIC ownership unknown.
+- [approved] Never merge this metadata into master; receiver follows STANDING.md and restates
+  the ledger/design/doctor verdict for owner confirmation before building.
