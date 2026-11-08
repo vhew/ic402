@@ -6,6 +6,12 @@ here. If anything else disagrees with this file about handoffs, this file wins.
 Always load the latest version from `origin/chore/agent-handoff` after fetching; a historical
 handoff may contain superseded instructions.
 
+> [approved] **2026-11-08 addition:** new claims use `[verified]` (checked with named evidence),
+> `[approved]` (owner instruction with date/source), `[assumed]` (agent choice; reversible and
+> surfaced), or `[open]` (unverified/missing authority). Existing prose is retained, not silently
+> reclassified. Authority: `authorities/2026-11-08-owner-request.md` R2/R7, committed first.
+> [approved] Read `STANDING.md` for verbatim owner rules; do not restate it in each record.
+
 - **Records branch:** `chore/agent-handoff`, permanently separate from `master`. It holds this
   setup, protocol, bootstrap guide, and records. Never merge it into `master` or a product branch.
 - **Formal handoff:** implementation committed and pushed on its own code branch; records
@@ -71,6 +77,11 @@ explicit owner instruction specifying its scope.
 | "Resume on this machine" | §4 resume from the newest formal handoff, whoever made it |
 | "Checkpoint current work" | §5 local checkpoint; no commit, no push |
 
+| Added command (2026-11-08) | Meaning |
+|---|---|
+| `handoff.sh doctor --repo <implementation-worktree> --level <level>` | [approved, 2026-11-08] Read-only fail-closed readiness (§9); no setup, deploy, or publish |
+| `probe-doctor.sh` | [approved, 2026-11-08] Passing controls and broken-input probes (§9); scratch fixtures only |
+
 Agent names in records are exactly `claude` and `codex`.
 
 **IDs.** A formal handoff is `HO-<UTC yyyymmddTHHMMZ>-<from>`, for example `HO-20261106T1430Z-claude`.
@@ -101,12 +112,22 @@ prefix is how §4 finds handoffs, so use it exactly.
   to `origin`. It does **not** authorize pushing to `master`, tags (a `vX.Y.Z` tag publishes to
   npm and mops), merging PRs, or anything else the owner has not explicitly asked for.
 
+> [approved] **2026-11-08 correction beside the authorization rule:** for this update the owner
+> says “Do not push unless I ask.” (`STANDING.md` S6). Local implementation/record commits are
+> permitted by the update request; no push or synchronized-handoff claim is permitted. Future
+> formal-handoff requests remain subject to the owner's latest explicit publishing limits.
+
 ## 3. Formal handoff (all three "Prepare …" commands)
 
 The same procedure applies whether the receiver is the other agent, the same agent on another
 machine, or both.
 
 ### Phase A: inspect both working directories
+
+> [approved] **2026-11-08 addition:** run doctor in the outgoing agent's own shell before gates
+> and before leaving a machine. Include verdict, level, code/helper SHAs and a safe transfer
+> manifest (§9). Check cited rationale is already committed; mark unrecoverable citations lost
+> rather than guessing (§10). Review `STANDING.md`, then use `TEMPLATE.md` for the next record.
 
 1. Identify the implementation branch/worktree and the records branch/worktree separately. Run
    `git status --short --branch`, `git branch --show-current`, `git rev-parse HEAD`, and
@@ -129,6 +150,9 @@ machine, or both.
 6. Push the implementation branch to `origin`. If idle on `master`, do not push it; verify that
    the intended implementation commit is already on `origin/master`. For metadata-only work,
    commit and push the setup changes on the records branch instead; never open a product PR.
+
+   > [approved] **2026-11-08 correction:** stop before this push while the current no-push
+   > instruction remains in force. A local commit is not a synchronized handoff.
 7. Fetch and compare full local and remote SHAs. Record the **implementation branch and full
    commit SHA** only after verifying they match. Never claim a local-only commit is delivered.
 
@@ -140,6 +164,13 @@ machine, or both.
    verified progress, decisions, tests, and next steps. Do not record the handoff commit's own SHA;
    discovery finds it through the commit subject. The implementation and records branches may
    differ; never infer one from the other.
+
+   > [approved] **2026-11-08 correction:** the next record uses the nine-section `TEMPLATE.md`,
+   > with a task ledger instead of free-form task prose, and a target of about 150 lines.
+   > Preserve historical records and provenance; do not rewrite them to pretend earlier handoffs
+   > used the new template. Cite committed detail. No separate review packet unless requested.
+   > Every record includes “Decisions I made without a ruling”: what/why/undo, or explicit “None”.
+   > Raise those decisions in the next owner message too (§10).
 9. Append an entry to `.agent-handoff/HISTORY.md`. Keep earlier entries unchanged; append a
    correction if an earlier claim or policy has been superseded.
 10. Stage only CURRENT.md and HISTORY.md by name **in the records worktree**, review the staged
@@ -147,6 +178,12 @@ machine, or both.
     including when idle on `master`. Do not create disposable `handoff/<ID>` branches.
 11. Push `chore/agent-handoff`, fetch, and verify its local HEAD equals
     `origin/chore/agent-handoff`. Do not merge it, open a merge PR, or delete it after handoff.
+
+    > [approved] **2026-11-08 addition/correction:** before publishing, a fresh reader fact-checks
+    > every verifiable claim against commands/source, including SHAs, symbols, counts, quotes,
+    > citations and logs, and records that review (§10). No push during the current update.
+    > A pre-release handoff needs one green run per phase at the recorded commit, or “gate owed”
+    > as next action 1; several partial logs do not constitute one run (§11).
 12. Report **"Handoff ready"** only when both implementation and record commits are on `origin`.
     Include the ID, both SHAs, both branch names, and the receiver's resume command.
 13. On failure, report the exact failed step, what succeeded, and what remains local. Write a
@@ -161,6 +198,11 @@ machine, or both.
    `git show origin/chore/agent-handoff:.agent-handoff/PROTOCOL.md`. This policy overrides older
    records, including earlier suggestions to merge the setup. Never pull into local changes or
    divergence.
+
+   > [approved] **2026-11-08 addition:** run doctor in the receiving agent's own shell against
+   > the actual implementation checkout before any gate/deploy. Read standing instructions and
+   > the ledger's design citations. If readiness is uncheckable, report the block and fixes; do
+   > not discover missing prerequisites by repeatedly running expensive gates.
 3. Search the records branch, filtering the sender **before** limiting results:
    ```bash
    # Resume from Claude
@@ -193,6 +235,14 @@ machine, or both.
 8. Tell the owner what was verified, the task, and the next action, then continue. Lack of a PR
    or merge for handoff metadata is intentional, not unfinished product delivery.
 
+   > [approved] **2026-11-08 correction beside “then continue”:** the receiver's first substantive
+   > report states checkpoint ID and mismatches, doctor verdict, each ledger row in its own words
+   > (build/ask/held/done with preserved design), and needed decisions with recommendations.
+   > The owner confirms/corrects once. Read-only investigation may continue while waiting;
+   > building and committing begin only after that answer. Do not infer confirmation from time
+   > elapsed. This receiving-handoff gate does not retroactively block the explicitly requested
+   > implementation of this protocol update. Source: owner request R3/R7.
+
 ## 5. Local checkpoint ("Checkpoint current work")
 
 1. In the worktree being checkpointed, ensure LOCAL.md is ignored (use the per-clone exclude
@@ -203,6 +253,11 @@ machine, or both.
    steps.
 3. Don't commit, push or stage it, and don't touch CURRENT.md or HISTORY.md. Confirm
    `git check-ignore .agent-handoff/LOCAL.md` prints the path.
+
+   > [approved] **2026-11-08 addition:** checkpoint notes target fewer than about 60 lines;
+   > replace sections rather than append a diary. Cite durable detail, and include exact current
+   > branch/worktree, unruled decisions, doctor verdict, unsafe processes and next action.
+
 4. Tell the owner it exists only on this machine. If the work must move machines, it needs a
    formal handoff.
 
@@ -226,6 +281,11 @@ to verify.
 ### Owner-approved working agreements
 
 These standing rules apply to both agents:
+
+> [approved] **2026-11-08 addition:** `STANDING.md` holds dated, sourced verbatim owner quotes.
+> The existing agreements below remain in effect. Where their original owner quotation is
+> unavailable, label that provenance open; do not invent quotes or copy sibling-project examples.
+> Amend a standing quote only on a new owner ruling, keeping a dated correction beside the old.
 
 - **Handoff isolation.** The owner requires this setup and all handoff records to stay off
   `master` permanently. Use `chore/agent-handoff` without merging it into product branches.
@@ -265,3 +325,101 @@ The previous agent may have stopped mid-handoff, for example when it ran out of 
 Report plainly what failed: the step, the command and its error. Report what was done, what is
 left, and what the owner needs to do. Prefer stopping over improvising, especially for anything
 in §2.
+
+
+## 9. Machine readiness — 2026-11-08 additions
+
+- [approved] `handoff.sh doctor --repo <code-worktree> --level tools|integration|deploy|release`
+  is read-only and time-bounded to about a minute. It reads pins from the selected implementation
+  checkout, reports selected executable paths, and never installs, sources env files, exports
+  keys, links canisters, funds identities, deploys or publishes. Every failure includes a fix.
+  Timeout, unsupported schema/platform, inaccessible API, missing expected value, and “could not
+  check” are failures, not OK. An explicitly evidenced not-applicable check is separate from PASS.
+- [approved] Run doctor in each agent's own shell, not only the owner's terminal. Check tools,
+  dependency installs, downloaded binaries, identities/principals, permissions, needed env files,
+  mappings and working API authentication at the relevant level. Read the implementation's
+  setup/CI instructions; `DOCTOR.md` documents chosen checks and exact scope.
+- [approved] On the old machine, run doctor before leaving and record a safe transfer manifest:
+  identity labels and public fingerprints/principals, necessary env-file names and permissions,
+  deployment link names/expected IDs, and credentials the owner must reauthenticate. Transfer
+  secrets out of band; never read/print `deploy/`, commit secrets, or export them through an agent.
+  Mark missing/unknown items open. Dependencies can be reinstalled; private identities cannot be
+  regenerated as if they were the same identity. Do not copy opaque caches as identity evidence.
+- [approved] On the new machine, restore owner-controlled assets, authenticate in the owner's
+  terminal, then run doctor in the actual receiving agent shell before gates/deploys. A later
+  terminal PATH change does not establish the existing agent's environment; rerun there.
+- [approved] Commands needing passphrases/passwords/confirmation run in the owner's terminal.
+  The agent verifies preconditions first and resulting public refs/status afterward. Doctor has
+  closed stdin and bounded subprocesses; it cannot certify a signing operation it did not perform.
+- [approved] `probe-doctor.sh` tests each applicable check with a passing fixture and a mutation
+  that must fail. Exercise the helper from Bash and Zsh, the shells used here; label synthetic
+  controls separately from a real configured-machine run. Missing supported shells or absent
+  live controls remain open, not passing. No real API/key/deploy mutation is used for probes.
+- [verified] Public tracked deploy entrypoints `scripts/setup.sh` and `setup-evm-outbound.sh` are
+  local fixtures; `icp.yaml` names the `ic` environment but records no deployed example ID.
+  [open] Production linkage enforcement cannot be claimed for private `deploy/` tooling, which
+  remains unread. Doctor deploy must fail closed until an authoritative public-safe target is
+  provided. A guard must compare local mapping to that target before planning and use
+  `icp deploy --no-create`; a separate wrapper does not prove all private entrypoints guarded.
+
+## 10. Ledger, rationale and fact checking — 2026-11-08 additions
+
+- [approved] Every next-task row includes id, one-line what, dated/source-backed owner authority,
+  read-first design documents, must-not-change contract, mode, acceptance and status. Modes:
+  **build** (ruled scope), **ask-first** (a real choice remains), **held** (owner explicitly held,
+  with citation), **done** (acceptance evidence and any required issue-delivery evidence).
+- [approved] Commit every cited rationale before a ruling/task/record cites it; check with
+  `git ls-files --error-unmatch <path>` AND `git cat-file -e <commit>:<path>` in the correct branch.
+  Before publishing, verify that commit is on origin. Merely existing on disk or being staged
+  is insufficient. Include heading/symbol and source SHA. Mark missing rationale **lost/open**.
+  Use committed public-safe studies on the records branch or existing clean product docs; do
+  not put private session scratchpads or this handoff history onto product branches.
+- [approved] A record cites `STANDING.md` and does not repeat its rules. Target about 150 lines;
+  local checkpoints below about 60. Put detail in cited documents. Separate review packets require
+  an owner request. Unruled decisions must say what, why and undo; write “None” when empty and
+  raise any entries in the next owner-facing message. Product-meaningful choices need a real
+  owner question, with options including doing less and a recommendation, before implementation.
+- [approved] Before publishing, a fresh reader (another agent or a separate command-backed author
+  pass) checks every verifiable claim. Validate branch/SHA reachability and what commits contain,
+  file paths/symbols, line/test counts, exact quotations and log exits/commit labels. Correct errors
+  beside historical claims, not silently. Record who checked, when, sources, and unresolved items.
+
+## 11. Release evidence — 2026-11-08 additions
+
+- [approved] A handoff preceding release needs one complete green gate run per phase at the
+  recorded implementation commit. Record command, phase, code SHA, UTC, exit, dirty state and
+  durable sanitized summary/log. Re-running a failed phase is a new run; do not stitch passing
+  pieces into a synthetic green run. Missing evidence means **gate owed** is next action 1.
+- [verified] This repository has several CI jobs/check scripts, not one tracked omnibus gate
+  helper. The inspected `scripts/check-*.sh` scripts do not provide a TTY-only summary logger.
+  [assumed] Recommend a future gate wrapper that always writes a summary (phase/result/commit/time)
+  under local ignored storage, regardless of TTY, rather than changing every checker. No existing
+  gate's logging behavior is changed by this protocol task; approval is open if such a wrapper
+  would introduce phase policy. Existing CI artifacts remain usable evidence for their exact SHA.
+- [verified] `.github/workflows/release.yml` uses npm OIDC and a protected mops identity secret.
+  `RELEASING.md` still describes manual publication; the earlier §6 correction remains binding.
+  [open] A local doctor cannot prove that an unread secret is valid or that a future OIDC exchange
+  succeeds. It must distinguish checked API access/configuration from unverified publishing ability.
+  Do not publish, dispatch a release, or create a tag just to probe credentials.
+
+## 12. Lessons — 2026-11-08
+
+[approved] Requested by the owner (source `authorities/2026-11-08-owner-request.md` R7).
+[open] Sibling incidents are supplied context, not independently verified incidents in ic402.
+
+| Lesson supplied | Resulting rule in this repository |
+|---|---|
+| [approved] 1. Setup discovered through failing gates; missing links risked duplicate deploys | §9 doctor/probes, migration manifest, fail-closed deploy linkage |
+| [approved] 2. Agent shell differs from owner's terminal | §9 own-shell runs, no prompting in agents, pre/post verification |
+| [approved] 3. Rationale did not travel | §10 committed citations or explicit lost/open rationale |
+| [approved] 4. Thin records omitted contracts; long records cost review | §3 step 8 correction, TEMPLATE.md ledger, ~150/~60-line budgets |
+| [approved] 5. Receiver built before confirming interpretation | §4 step 8 correction: restate, recommend, await one answer |
+| [approved] 6. Product choices went unsurfaced | §10 required unruled decisions with why/undo, surfaced next message |
+| [approved] 7. Working rules were relearned | STANDING.md with dated quotations and adjacent corrections |
+| [approved] 8. Records contained wrong facts | §3 step 11 and §10 fresh-reader source/command fact check |
+| [approved] 9. Evidence assembled from partial runs | §11 one green run per phase/commit, otherwise gate owed first |
+| [approved] 10. Preserve the reason for each rule | This dated map, with references to the resulting rules |
+
+- [verified] This repository already separates code and handoff records within one Git repository.
+  [approved] Keep that separation; omit sibling multi-repo WIP refs, paired commits and cross-repo
+  scans. This request does not expand access to other repositories.

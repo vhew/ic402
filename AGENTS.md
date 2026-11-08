@@ -37,3 +37,12 @@ Purging, deletion, and history rewriting require separate, explicit owner author
   `origin`.
 - This repository is public: no secrets or private details in any record.
 - At the start of a session with no command, read `.agent-handoff/LOCAL.md` if it exists.
+
+
+> [approved] **2026-11-08 handoff addendum:** preserve all instructions above. Read the latest
+> protocol's dated corrections, `STANDING.md` and `TEMPLATE.md` from the records branch. Run
+> `.agent-handoff/handoff.sh doctor --repo <implementation-checkout> --level <level>` in this
+> agent's own shell before gates/deploys. Receiving a handoff requires ledger/design/doctor
+> restatement and one owner confirmation before building/committing; read-only work may continue.
+> Source: `.agent-handoff/authorities/2026-11-08-owner-request.md` R3/R7. The current update must
+> remain local until the owner asks to push (R6).

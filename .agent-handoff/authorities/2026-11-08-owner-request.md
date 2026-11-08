@@ -4,6 +4,10 @@
   2026-11-06 and 2026-11-08; these are excerpts, not invented rulings or sibling-project rules.
 - [approved] Scope: this handoff-system update. Preserve the existing protocol and public-branch
   separation; the request does not authorize pushing, publishing, deploying, or accessing secrets.
+- [approved] **2026-11-08 correction to the preceding paraphrase:** identity fingerprint/principal
+  and env-file checks ARE requested. The boundary is no printing/exporting secret material and
+  no exception to the existing ban on reading `deploy/`. “Accessing secrets” above was overbroad;
+  it must not prevent the authorized non-disclosing checks.
 
 ## R1 — 2026-11-06, branch decision
 

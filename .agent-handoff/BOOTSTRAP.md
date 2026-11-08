@@ -19,6 +19,11 @@ local-only or separately authorized private storage.
 - **Check access:** `git ls-remote origin HEAD` should print a SHA, and `gh auth status` should
   show the right account.
 
+> [approved] **2026-11-08 correction:** a status display is not proof of working credentials.
+> Run the helper's relevant doctor level in the receiving agent's shell; its real read-only API
+> calls must succeed. Authenticate or unlock prompting credentials in the owner's terminal.
+> Source: `authorities/2026-11-08-owner-request.md` R7; protocol §9.
+
 ## 2. Clone
 
 ```bash
@@ -42,6 +47,16 @@ from `origin/master` (or a verified clean implementation branch), never from the
 Do not merge or copy this setup into the default branch merely to make agent discovery automatic.
 
 ## 3. Development tools
+
+> [approved] **2026-11-08 addition:** first run the read-only doctor against the actual code
+> checkout; fix reported prerequisites, then rerun before any build/gate/deploy. Do not run the
+> install/build commands below blindly. Read `DOCTOR.md`; no auto-install is done by doctor.
+>
+> `bash <records-worktree>/.agent-handoff/handoff.sh doctor --repo <code-worktree> --level tools`
+>
+> [approved] Run `probe-doctor.sh` through Bash and Zsh after changing doctor. A passing synthetic
+> control is not proof this machine is configured. Use integration/deploy/release levels for those
+> actions; uncheckable credentials/mappings block their level.
 
 Run builds in the **implementation checkout**, not the records worktree. The latter contains an
 old code snapshot. The versions below are setup-time hints; the current source of truth is
@@ -111,3 +126,24 @@ are intentionally absent there):
 
 For privacy, use private storage; deleting a public branch is not a privacy boundary. No bootstrap
 or resume command authorizes deleting branches, purging records, or rewriting history.
+
+
+## 7. Migration checklist — 2026-11-08 additions
+
+- [approved] Before leaving the OLD machine, run doctor in that agent's shell and put the result
+  plus a safe transfer manifest in the template's machine-prerequisites section. Identify owner-held
+  keys/identities, expected public principals/fingerprints, required env filenames/permissions,
+  local deployment links and reauthentication needs. Never print secrets or inspect `deploy/`.
+- [approved] On the NEW machine, let the owner restore non-rebuildable material via a private
+  channel, reauthenticate/unlock in their terminal, and restore verified links to existing IDs.
+  Do not create replacement identities or canisters to make readiness appear green.
+- [approved] Run doctor in each receiving agent's own shell; shell-startup changes elsewhere do
+  not establish its PATH. Check downloaded binaries, dependencies and needed test fixture state.
+  Keep the report's failures/open items; do not start an expensive gate until its level passes.
+- [approved] Read `STANDING.md`, the task ledger and its committed design rationale. The first
+  substantive receiving message restates the ID/mismatches, doctor verdict, each task's scope and
+  preserved design, and decisions with options/recommendations. Wait for the owner's one
+  confirmation/correction before building/committing; read-only verification can continue.
+- [open] Production target/deployer expectations are not recorded in current public configuration.
+  Doctor cannot certify those by guessing from external ledger/RPC IDs. Keep production blocked
+  until the owner supplies an authoritative target and approves the guard integration path.
