@@ -1,0 +1,88 @@
+{
+  "classification": "verified",
+  "date_utc": "2026-11-08",
+  "launch_context": "main implementation checkout; agent shell",
+  "helper_commit": "bb3e4224abce6e56f844105e4c68e12ff516b1cb",
+  "implementation_commit": "3af30b40ec7875a3bd734fb83756ec06c22d3aeb",
+  "level": "tools",
+  "exit": 1,
+  "seconds": 1.38,
+  "verdict": "NOT READY",
+  "checks": [
+    {
+      "id": "repo-pins",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "node",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "pnpm",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "icp",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "mops",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "path",
+      "status": "FAIL",
+      "fix": "Remove foreign node_modules/.bin entries from this agent shell PATH; restart the session if needed."
+    },
+    {
+      "id": "dependencies",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "mops-dependencies",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "moc",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "wasmtime",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "binaryen",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "didc",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "prebuilt",
+      "status": "PASS",
+      "fix": ""
+    },
+    {
+      "id": "browsers",
+      "status": "NA",
+      "fix": ""
+    },
+    {
+      "id": "env",
+      "status": "NA",
+      "fix": ""
+    }
+  ]
+}
