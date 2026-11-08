@@ -1,0 +1,339 @@
+{
+  "classification": "verified",
+  "date_utc": "2026-11-08",
+  "helper_commit": "ccef51a0eae92e6e26c5ccfaf99fa3aa3085dd9d",
+  "implementation_commit": "3af30b40ec7875a3bd734fb83756ec06c22d3aeb",
+  "shell": "bash launched from the primary agent shell",
+  "source": "handoff.sh doctor --repo <implementation-checkout> --level <level> --json",
+  "scope": "Sanitized statuses only; no paths, principals, account names or secret contents retained. API run allowed outside network sandbox.",
+  "results": [
+    {
+      "level": "tools",
+      "exit": 1,
+      "elapsed_seconds": 1.53,
+      "verdict": "NOT READY",
+      "checks": [
+        {
+          "id": "repo-pins",
+          "status": "PASS"
+        },
+        {
+          "id": "node",
+          "status": "PASS"
+        },
+        {
+          "id": "pnpm",
+          "status": "PASS"
+        },
+        {
+          "id": "icp",
+          "status": "PASS"
+        },
+        {
+          "id": "mops",
+          "status": "PASS"
+        },
+        {
+          "id": "path",
+          "status": "FAIL"
+        },
+        {
+          "id": "dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "mops-dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "moc",
+          "status": "PASS"
+        },
+        {
+          "id": "wasmtime",
+          "status": "PASS"
+        },
+        {
+          "id": "binaryen",
+          "status": "PASS"
+        },
+        {
+          "id": "didc",
+          "status": "PASS"
+        },
+        {
+          "id": "prebuilt",
+          "status": "PASS"
+        },
+        {
+          "id": "browsers",
+          "status": "NA"
+        },
+        {
+          "id": "env",
+          "status": "NA"
+        }
+      ]
+    },
+    {
+      "level": "integration",
+      "exit": 1,
+      "elapsed_seconds": 1.53,
+      "verdict": "NOT READY",
+      "checks": [
+        {
+          "id": "repo-pins",
+          "status": "PASS"
+        },
+        {
+          "id": "node",
+          "status": "PASS"
+        },
+        {
+          "id": "pnpm",
+          "status": "PASS"
+        },
+        {
+          "id": "icp",
+          "status": "PASS"
+        },
+        {
+          "id": "mops",
+          "status": "PASS"
+        },
+        {
+          "id": "path",
+          "status": "FAIL"
+        },
+        {
+          "id": "dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "mops-dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "moc",
+          "status": "PASS"
+        },
+        {
+          "id": "wasmtime",
+          "status": "PASS"
+        },
+        {
+          "id": "binaryen",
+          "status": "PASS"
+        },
+        {
+          "id": "didc",
+          "status": "PASS"
+        },
+        {
+          "id": "prebuilt",
+          "status": "PASS"
+        },
+        {
+          "id": "browsers",
+          "status": "NA"
+        },
+        {
+          "id": "env",
+          "status": "NA"
+        },
+        {
+          "id": "payer-key",
+          "status": "FAIL"
+        },
+        {
+          "id": "local-links",
+          "status": "FAIL"
+        },
+        {
+          "id": "local-signing",
+          "status": "FAIL"
+        },
+        {
+          "id": "minter",
+          "status": "FAIL"
+        },
+        {
+          "id": "funding",
+          "status": "FAIL"
+        }
+      ]
+    },
+    {
+      "level": "deploy",
+      "exit": 1,
+      "elapsed_seconds": 1.52,
+      "verdict": "NOT READY",
+      "checks": [
+        {
+          "id": "repo-pins",
+          "status": "PASS"
+        },
+        {
+          "id": "node",
+          "status": "PASS"
+        },
+        {
+          "id": "pnpm",
+          "status": "PASS"
+        },
+        {
+          "id": "icp",
+          "status": "PASS"
+        },
+        {
+          "id": "mops",
+          "status": "PASS"
+        },
+        {
+          "id": "path",
+          "status": "FAIL"
+        },
+        {
+          "id": "dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "mops-dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "moc",
+          "status": "PASS"
+        },
+        {
+          "id": "wasmtime",
+          "status": "PASS"
+        },
+        {
+          "id": "binaryen",
+          "status": "PASS"
+        },
+        {
+          "id": "didc",
+          "status": "PASS"
+        },
+        {
+          "id": "prebuilt",
+          "status": "PASS"
+        },
+        {
+          "id": "browsers",
+          "status": "NA"
+        },
+        {
+          "id": "deploy-profile",
+          "status": "FAIL"
+        },
+        {
+          "id": "env",
+          "status": "NA"
+        },
+        {
+          "id": "deploy-link",
+          "status": "FAIL"
+        },
+        {
+          "id": "deploy-identity",
+          "status": "FAIL"
+        },
+        {
+          "id": "deploy-status",
+          "status": "FAIL"
+        }
+      ]
+    },
+    {
+      "level": "release",
+      "exit": 1,
+      "elapsed_seconds": 2.9,
+      "verdict": "NOT READY",
+      "checks": [
+        {
+          "id": "repo-pins",
+          "status": "PASS"
+        },
+        {
+          "id": "node",
+          "status": "PASS"
+        },
+        {
+          "id": "pnpm",
+          "status": "PASS"
+        },
+        {
+          "id": "icp",
+          "status": "PASS"
+        },
+        {
+          "id": "mops",
+          "status": "PASS"
+        },
+        {
+          "id": "path",
+          "status": "FAIL"
+        },
+        {
+          "id": "dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "mops-dependencies",
+          "status": "PASS"
+        },
+        {
+          "id": "moc",
+          "status": "PASS"
+        },
+        {
+          "id": "wasmtime",
+          "status": "PASS"
+        },
+        {
+          "id": "binaryen",
+          "status": "PASS"
+        },
+        {
+          "id": "didc",
+          "status": "PASS"
+        },
+        {
+          "id": "prebuilt",
+          "status": "PASS"
+        },
+        {
+          "id": "browsers",
+          "status": "NA"
+        },
+        {
+          "id": "env",
+          "status": "NA"
+        },
+        {
+          "id": "gh-auth",
+          "status": "PASS"
+        },
+        {
+          "id": "release-config",
+          "status": "PASS"
+        },
+        {
+          "id": "release-secret",
+          "status": "PASS"
+        },
+        {
+          "id": "release-runtime",
+          "status": "FAIL"
+        },
+        {
+          "id": "signing",
+          "status": "NA"
+        }
+      ]
+    }
+  ]
+}

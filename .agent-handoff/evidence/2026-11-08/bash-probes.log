@@ -1,0 +1,55 @@
+[verified] Helper ccef51a0eae92e6e26c5ccfaf99fa3aa3085dd9d; bash .agent-handoff/probe-doctor.sh; exit 0; 2026-11-08 UTC.
+PASS mutation: repo-pins -> ✗ with fix
+PASS mutation: node -> ✗ with fix
+PASS mutation: pnpm -> ✗ with fix
+PASS mutation: icp -> ✗ with fix
+PASS mutation: mops -> ✗ with fix
+PASS mutation: prerelease does not satisfy stable pin -> ✗ with fix
+PASS mutation: foreign PATH shadow -> ✗ with fix
+PASS control: explicit PNPM_HOME is retained like scripts/lib/toolchain-path.sh
+PASS mutation: dependencies -> ✗ with fix
+PASS mutation: stale installed lockfile -> ✗ with fix
+PASS mutation: mops-dependencies -> ✗ with fix
+PASS mutation: registry package manifest without source -> ✗ with fix
+PASS mutation: installed mops version differs from lock -> ✗ with fix
+PASS mutation: empty Git dependency -> ✗ with fix
+PASS mutation: moc -> ✗ with fix
+PASS mutation: wasmtime -> ✗ with fix
+PASS mutation: binaryen -> ✗ with fix
+PASS mutation: didc -> ✗ with fix
+PASS mutation: prebuilt -> ✗ with fix
+PASS mutation: zk prebuilt missing before Rust fallback -> ✗ with fix
+PASS mutation: browsers -> ✗ with fix
+PASS mutation: env -> ✗ with fix
+PASS mutation: required env missing -> ✗ with fix
+PASS mutation: env never sourced -> ✗ with fix
+PASS mutation: payer-key -> ✗ with fix
+PASS mutation: unsafe key permissions -> ✗ with fix
+PASS mutation: local-links -> ✗ with fix
+PASS mutation: local-signing -> ✗ with fix
+PASS mutation: minter -> ✗ with fix
+PASS mutation: same minter owner with non-default subaccount -> ✗ with fix
+PASS mutation: funding -> ✗ with fix
+PASS mutation: exit-zero error response -> ✗ with fix
+PASS mutation: deploy-profile -> ✗ with fix
+PASS mutation: deploy-link -> ✗ with fix
+PASS mutation: deploy-identity -> ✗ with fix
+PASS mutation: deploy-status -> ✗ with fix
+PASS mutation: dead login despite saved configuration -> ✗ with fix
+PASS mutation: release-config -> ✗ with fix
+PASS mutation: release-secret -> ✗ with fix
+PASS mutation: explicit or valueless true signing requires owner terminal -> ✗ with fix
+PASS mutation: invalid signing boolean is uncheckable -> ✗ with fix
+PASS mutation: unavailable CI-held publish credentials remain uncheckable -> ✗ with fix
+PASS mutation: dirty profile remains rejected -> ✗ with fix
+PASS mutation: manifest changed without lockfile -> ✗ with fix
+PASS mutation: parent symlink into deploy rejected before key read -> ✗ with fix
+PASS dependency guard: mismatched icp is never used for identity/API checks
+PASS read-only guard: Corepack network and auto-pin disabled regardless of inherited settings
+PASS mutation: hanging real subprocess -> could not check
+PASS shell: bash wrapper fails closed with missing repo
+PASS shell: bash unavailable/old Python fail with fixes
+PASS shell: zsh wrapper fails closed with missing repo
+PASS shell: zsh unavailable/old Python fail with fixes
+44 broken-input probes cover all 29 check IDs; three full fixture level controls pass; release control explicitly fails on CI-only runtime check; subprocess deadline and bash/zsh wrappers pass.
+Fixture controls are not a green result for the real machine. Run doctor in each agent shell.

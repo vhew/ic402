@@ -104,3 +104,7 @@ zsh <records-worktree>/.agent-handoff/probe-doctor.sh
   terminal. Check preconditions and public results afterward; never put passphrases in arguments.
 - [approved] See the final validation evidence for actual runs and unresolved checks; an earlier
   library test run is not evidence for this new helper. No release is being prepared by this task.
+
+- [verified] The prebuilt check also reads the ZK artifact path from `icp.yaml` and verifies its
+  gzip stream starts with the Wasm header. This is a presence/format check, not a claimed source
+  rebuild or checksum verification. Actual results are in `VALIDATION.md`.
