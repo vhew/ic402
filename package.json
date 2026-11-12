@@ -42,15 +42,15 @@
     "@icp-sdk/icp-cli": "1.7.0",
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
-    "@x402/core": "2.28.0",
-    "eslint": "10.13.0",
+    "@x402/core": "2.30.0",
+    "eslint": "10.14.0",
     "husky": "9.1.7",
     "lint-staged": "17.6.0",
     "prettier": "3.9.10",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.1",
-    "vitest": "5.0.5"
+    "vitest": "5.1.0"
   },
   "lint-staged": {
     "packages/client/**/*.ts": [
