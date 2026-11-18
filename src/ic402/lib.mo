@@ -176,6 +176,9 @@ module {
   public let Gateway = GatewayModule.Gateway;
   /// Entries Gateway.runMaintenance removes from each map per call, at most (2.19.0).
   public let maintenanceCapPerMap = GatewayModule.maintenanceCapPerMap;
+  /// The policy principal of an EVM payer (`0x…` address, any hex case): the key its spending
+  /// limits, rate limit and blocklist entry use. Build EVM blocklist entries with this.
+  public let evmPolicyPrincipal = GatewayModule.evmPolicyPrincipal;
   /// Encrypted content store with chunked upload.
   public let ContentStore = ContentStoreMod.ContentStore;
   /// ERC-8004 agent identity: metadata and key derivation.
