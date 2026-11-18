@@ -24,6 +24,12 @@
 > - [approved] The handoff-system work is closed. Product work continues through proposals: PR #51
 >   (viem colon-name interop, scoped `setup.sh` cleanup, `RELEASING.md`) and a ledger-deduplication
 >   design the owner asked to have done by Fable (“3 design fix use fable.”).
+>
+> [verified] **2026-11-18 H3 control:** with the owner's OK (“ok for the two checks.”), Claude's
+> shell now selects `mops` 3.5.1 from the `ic402` conda environment and the project's own `icp` 1.7.0
+> ahead of the Homebrew copy. `handoff.sh doctor --level tools` against master 3af30b4: READY, exit 0
+> (every check PASS except `browsers` and `env`, both N/A). That is the first real configured-machine
+> control for H3 at the tools level; integration level not yet run.
 
 ## 1. Read this first
 
