@@ -484,13 +484,12 @@ persistent actor KnowledgeBase {
                 case (null) { return Http.httpError(404, "Service not found") };
                 case (?svc) {
                   if (not svc.enabled) return Http.httpError(404, "Service not available");
-                  switch (svc.pricing) {
+                  switch (serviceCharge(svc)) {
                     // #Session is billed against an existing session deposit, not a
                     // per-request 402 charge — requireAll(0) would trap.
-                    case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+                    case (null) { return Http.httpError(400, "Service uses session billing — open a session instead") };
                     // A1: charge price + ledger fee so the canister can cover the outbound settle.
-                    case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
-                    case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                    case (?charge) { return Http.http402(gate.requireAll(charge), resourceUrl) };
                   };
                 };
               };
@@ -578,11 +577,14 @@ persistent actor KnowledgeBase {
         case (null) { return Http.httpError(404, "Service not found") };
         case (?s) { if (not s.enabled) { return Http.httpError(404, "Service not available") }; s };
       };
-      // Option A: validate BEFORE settling (money-moved ⇒ job-exists). The 402 was minted with
-      // price + CKUSDC_FEE (see the GET handler at main.mo:459-460), so validate that same expected
-      // amount; a rejection here moves no funds. See docs/decisions/settled-then-job-failed.md.
-      let svcPrice = switch (svc.pricing) { case (#Exact(p)) { p }; case (#Upto(p)) { p }; case (#Session) { 0 } };
-      switch (registry.validateSubmittable(sig.sender, serviceId, svcPrice + CKUSDC_FEE)) {
+      // Option A: validate BEFORE settling (money-moved ⇒ job-exists). The 402 was minted for
+      // serviceCharge(svc) (the 402 branch above), so validate that same amount; a rejection here
+      // moves no funds. See docs/decisions/settled-then-job-failed.md.
+      let charge = switch (serviceCharge(svc)) {
+        case (?c) { c };
+        case (null) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+      };
+      switch (registry.validateSubmittable(sig.sender, serviceId, charge)) {
         case (#err(e)) { return Http.httpError(400, e) };
         case (#ok) {};
       };
@@ -595,7 +597,9 @@ persistent actor KnowledgeBase {
       // poll within two ticks (2.17.5: the arm itself counts as work for the next tick, so a tick
       // landing during this settle does not drop to the idle poll just before the job exists).
       registry.armExpiryTimer<system>();
-      let serviceResult = await gate.settle(sig, null);
+      // 2.22.0: settle for the service's charge. With null, settle took the nonce's own amount, so
+      // a nonce minted elsewhere (a 1,000-unit /search challenge) bought any service.
+      let serviceResult = await gate.settle(sig, ?charge);
       switch (serviceResult) {
         case (#ok(receipt)) {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM). Pass it through as
@@ -605,8 +609,7 @@ persistent actor KnowledgeBase {
           let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
         };
-        // amount unknown on a failed service settle (varies per service); 0 in the response.
-        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, 0)) };
+        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, charge)) };
       };
     };
 
@@ -812,13 +815,28 @@ persistent actor KnowledgeBase {
 
   // (registry is declared at top for stable state loading)
 
+  // What a per-request service payment must settle for: price + ledger fee (#Upto: the maximum
+  // price + fee) — the amount the 402 is minted for and validateSubmittable is given. null for
+  // #Session, which bills against a session deposit, so both per-request routes refuse it.
+  func serviceCharge(svc : Ic402.ServiceDefinition) : ?Nat {
+    switch (svc.pricing) {
+      case (#Exact(p)) { ?(p + CKUSDC_FEE) };
+      case (#Upto(p)) { ?(p + CKUSDC_FEE) };
+      case (#Session) { null };
+    };
+  };
+
   // Admin: register and manage services
   public shared(msg) func registerService(
     name : Text,
     description : Text,
     serviceType : Ic402.ServiceType,
     pricing : Ic402.PricingScheme,
-    verificationMethod : Text, // "AutoSettle", "HashMatch", "BuyerConfirm:300", "ZkGroth16"
+    // "AutoSettle", "HashMatch", "BuyerConfirm:<seconds>", "ZkGroth16" or "ZkGroth16:bind"; anything
+    // else is refused. BuyerConfirm:<seconds> is the dispute window: once it ends with no dispute,
+    // the job sweep pays the operator (0 = no window: the job is refunded at its timeout unless
+    // the buyer confirms first).
+    verificationMethod : Text,
     verifierCanisterId : ?Text,
     verificationKey : ?Blob,
     delivery : Ic402.ServiceDeliveryMethod,
@@ -843,14 +861,16 @@ persistent actor KnowledgeBase {
         };
       };
       case (other) {
-        if (Text.startsWith(other, #text "BuyerConfirm:")) {
-          let seconds = switch (Text.stripStart(other, #text "BuyerConfirm:")) {
-            case (?s) { switch (Nat.fromText(s)) { case (?n) { n }; case (null) { 3600 } } };
-            case (null) { 3600 };
+        // 2.22.0: an unrecognised method is refused. It used to register #AutoSettle (pay on
+        // submit), and a malformed BuyerConfirm window used to become 3600.
+        switch (Text.stripStart(other, #text "BuyerConfirm:")) {
+          case (?s) {
+            switch (Nat.fromText(s)) {
+              case (?n) { #BuyerConfirm({ disputeWindowSeconds = n }) };
+              case (null) { return #err("BuyerConfirm needs a window in seconds, e.g. BuyerConfirm:3600") };
+            };
           };
-          #BuyerConfirm({ disputeWindowSeconds = seconds });
-        } else {
-          #AutoSettle;
+          case (null) { return #err("Unknown verification method: " # other # " (expected AutoSettle, HashMatch, BuyerConfirm:<seconds>, ZkGroth16 or ZkGroth16:bind)") };
         };
       };
     };
@@ -924,33 +944,30 @@ persistent actor KnowledgeBase {
     // M14: reject a disabled service BEFORE settling (and before quoting) — otherwise
     // submitRequest rejects after the funds have moved, keeping the buyer's payment with no job.
     if (not svc.enabled) { return #error("Service not available") };
-    let amount = switch (svc.pricing) {
-      case (#Exact(p)) { p };
-      case (#Upto(p)) { p };
-      case (#Session) { 0 };
+    // #Session pricing is billed against a session deposit, not per request (and requireAll(0)
+    // would trap), so it is refused with or without a payment.
+    let charge = switch (serviceCharge(svc)) {
+      case (?c) { c };
+      case (null) { return #error("Service uses session billing — open a session instead") };
     };
     switch (paymentSig) {
-      // #Session pricing has amount 0 (billed against a session deposit) — guard
-      // against requireAll(0), which traps.
-      case (null) {
-        if (amount == 0) { #error("Service uses session billing — open a session instead") } else {
-          // A1: quote price + ledger fee (matches quoteServiceRequest.total).
-          #paymentRequired(gate.requireAll(amount + CKUSDC_FEE));
-        };
-      };
+      // A1: quote price + ledger fee (matches quoteServiceRequest.total).
+      case (null) { #paymentRequired(gate.requireAll(charge)) };
       case (?sig) {
         // Option A: validate BEFORE settling so a #ok settle always yields a job (money-moved ⇒
         // job-exists), closing the settled-then-no-job strand. expectedAmount is what settle will
-        // produce — the 402 nonce was minted via requireAll(amount + CKUSDC_FEE) above.
+        // produce — the 402 nonce was minted via requireAll(charge) above.
         // See docs/decisions/settled-then-job-failed.md (Option A).
-        switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, amount + CKUSDC_FEE)) {
+        switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, charge)) {
           case (#err(e)) { return #error(e) }; // rejected before any funds move
           case (#ok) {};
         };
         // Arm the job-expiry sweep BEFORE settling — see the /service/ handler for why the arm
         // belongs on this side of the fund move rather than next to createJobFromReceipt.
         registry.armExpiryTimer<system>();
-        switch (await gate.settleFrom(msg.caller, sig, null)) { // 2.17.0: caller must be sig.sender (ICP)
+        // 2.22.0: settle for `charge` — with null a nonce minted for another resource (a 1,000-unit
+        // search) bought this service. 2.17.0: the caller must be sig.sender (ICP).
+        switch (await gate.settleFrom(msg.caller, sig, ?charge)) {
           case (#ok(receipt)) {
             // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
             // G2: record the ACTUAL payer as buyer. For an EVM payment the payer is the on-chain
@@ -1008,13 +1025,31 @@ persistent actor KnowledgeBase {
     registry.disputeJob(msg.caller, jobId, reason);
   };
 
+  // Controller-only: settle (refundBuyer = false) or refund (true) a #Submitted, #Disputed or
+  // #Verified job — how a disputed BuyerConfirm job is decided before its timeout refunds it, and
+  // how a job a failed operator payment left #Verified is re-driven.
+  public shared(msg) func resolveDispute(jobId : Text, refundBuyer : Bool) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    await registry.resolveDispute(jobId, refundBuyer);
+  };
+
   // Query: job status and results
   public query func getJobStatus(jobId : Text) : async ?Ic402.JobStatus {
     registry.getJobStatus(jobId);
   };
 
-  public query func getJob(jobId : Text) : async ?Ic402.Job {
-    registry.getJob(jobId);
+  // 2.22.0: a job's params, result and proof are for its buyer, its assigned operator and the
+  // controllers; anyone else gets null (job ids are sequential, so they are easy to guess). An
+  // EVM-paid buyer (a 0x address) has no principal to call as. getJobStatus stays public.
+  func canReadJob(caller : Principal, job : Ic402.Job) : Bool {
+    job.buyer == Principal.toText(caller) or job.operator == ?caller or Principal.isController(caller);
+  };
+
+  public shared query (msg) func getJob(jobId : Text) : async ?Ic402.Job {
+    switch (registry.getJob(jobId)) {
+      case (?job) { if (canReadJob(msg.caller, job)) { ?job } else { null } };
+      case (null) { null };
+    };
   };
 
   // Observability (controller-only): list a service's jobs, optionally filtered by status —
@@ -1024,8 +1059,11 @@ persistent actor KnowledgeBase {
     registry.listJobs(serviceId, statusFilter);
   };
 
-  public query func getJobResult(jobId : Text) : async ?Blob {
-    registry.getJobResult(jobId);
+  public shared query (msg) func getJobResult(jobId : Text) : async ?Blob {
+    switch (registry.getJob(jobId)) {
+      case (?job) { if (canReadJob(msg.caller, job)) { registry.getJobResult(jobId) } else { null } };
+      case (null) { null };
+    };
   };
 
   // ═══════════════════════════════════════════════════════════════════════

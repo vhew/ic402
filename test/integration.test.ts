@@ -660,6 +660,64 @@ describe('ic402 integration', () => {
       expect(result.ok.pricingKind).toBe('Exact');
     });
 
+    // 2.22.0: the service routes settled with expectedAmount = null, so settle took whatever the
+    // nonce was minted for: a 1,000-unit search nonce bought a 10,500 service (operator paid 0).
+    it('rejects a search nonce redeemed at a service (cross-resource underpayment)', async () => {
+      if (skip) return;
+      const searchReq = await actor.search('service underpay probe', []);
+      const icpReq = searchReq.paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      expect(BigInt(icpReq.amount)).toBe(1_000n);
+      await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      const caller = await agent.getPrincipal();
+      const cheapSig: PaymentSignatureArg = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        asset: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const result = await actor.submitServiceRequest(
+        testSvcId,
+        new TextEncoder().encode('underpay'),
+        [cheapSig],
+      );
+      // Refused before settling: no funds move and no job is created.
+      expect(result).toHaveProperty('error');
+      expect(String(result.error)).toContain('does not match the resource price');
+    });
+
+    it('registerService refuses an unknown verification method (2.22.0)', async () => {
+      if (skip) return;
+      // It used to register the service as AutoSettle (operator paid on submit).
+      const result = await actor.registerService(
+        'Typo Service',
+        'misspelt verification',
+        { Async: null },
+        { Exact: 500n },
+        'BuyerConfrim:300',
+        [],
+        [],
+        { Poll: null },
+        300n,
+      );
+      expect(result).toHaveProperty('err');
+      expect(String(result.err)).toContain('Unknown verification method');
+    });
+
     it('quoteServiceRequest errors for a missing service', async () => {
       if (skip) return;
       const result = await actor.quoteServiceRequest('no-such-service');
@@ -730,6 +788,9 @@ describe('ic402 integration', () => {
       const submitted = await actor.submitServiceRequest(testSvcId, params, [paymentSig]);
       expect(submitted).toHaveProperty('ok');
       const jobId = submitted.ok.jobId;
+      // 2.22.0: the job record is for its buyer, operator and controllers; a stranger gets none.
+      expect((await actor.getJob(jobId)).length).toBe(1);
+      expect(await (await actorAs()).getJob(jobId)).toEqual([]);
       // The job is #Pending, so the job sweep must be at its working cadence: example/main.mo arms
       // it right before gate.settle (createJobFromReceipt is synchronous and cannot). Armed but not
       // active means that call site was dropped, and the job's expiry would wait for the hourly poll.
@@ -745,6 +806,8 @@ describe('ic402 integration', () => {
       const status = await actor.getJobStatus(jobId);
       expect(status.length).toBe(1);
       expect(status[0]).toHaveProperty('Settled');
+      expect((await actor.getJobResult(jobId)).length).toBe(1);
+      expect(await (await actorAs()).getJobResult(jobId)).toEqual([]);
     });
   });
 
