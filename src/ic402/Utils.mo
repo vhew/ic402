@@ -455,6 +455,12 @@ module {
     for (t in tokens.values()) {
       if (Principal.toText(t.ledger) == identifier) return ?t;
     };
+    // 2.22.0: an exact configured symbol resolves too. Session close and reconcile no longer fall
+    // back to tokens[0] for an unknown token, so a session opened with a symbol ("ckUSDC") must
+    // still find ITS ledger (before, the fallback could pick another one).
+    for (t in tokens.values()) {
+      if (t.symbol == identifier) return ?t;
+    };
     // CAIP-2 network match: "icp:*" matches any configured ICP token
     if (Text.startsWith(identifier, #text "icp:")) {
       if (tokens.size() > 0) return ?tokens[0];

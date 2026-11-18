@@ -483,3 +483,30 @@ suite("Utils", func() {
     });
   });
 });
+
+// 2.22.0: session close and reconcile no longer fall back to tokens[0] for an unknown token, so a
+// session opened with a configured SYMBOL must still resolve to its own ledger.
+suite("Utils.findLedger", func() {
+  let usdc = { ledger = Principal.fromText("xevnm-gaaaa-aaaar-qafnq-cai"); symbol = "ckUSDC"; decimals = 6 : Nat8 };
+  let icp = { ledger = Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai"); symbol = "ICP"; decimals = 8 : Nat8 };
+  let tokens = [usdc, icp];
+  func ledgerOf(id : Text) : ?Text {
+    switch (Utils.findLedger(tokens, id)) { case (?t) { ?Principal.toText(t.ledger) }; case (null) { null } };
+  };
+
+  test("the ledger principal text resolves to that ledger", func() {
+    assert(ledgerOf("ryjl3-tyaaa-aaaaa-aaaba-cai") == ?"ryjl3-tyaaa-aaaaa-aaaba-cai");
+  });
+
+  test("an exact configured symbol resolves to ITS ledger, not tokens[0]", func() {
+    // Mutation: drop the symbol match — "ICP" no longer resolves, and a session opened with it
+    // could never close.
+    assert(ledgerOf("ICP") == ?"ryjl3-tyaaa-aaaaa-aaaba-cai");
+  });
+
+  test("an icp:* network still resolves to tokens[0]; anything else resolves to nothing", func() {
+    assert(ledgerOf("icp:1") == ?"xevnm-gaaaa-aaaar-qafnq-cai");
+    assert(ledgerOf("ckusdc") == null); // symbols match exactly
+    assert(ledgerOf("unknown") == null);
+  });
+});
