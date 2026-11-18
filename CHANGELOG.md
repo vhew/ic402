@@ -1,6 +1,56 @@
 # Changelog
 
-## Unreleased
+## v2.21.1 — 2026-11-18
+
+Patch — **security fixes for three high-severity issues, found by a whole-library adversarial
+review. Upgrade promptly.** No stored-state change (`STABLE_SCHEMA_VERSION` stays 1), no API or
+`example.did` change.
+
+### Security
+
+- **HTTP ICP payments could be paid out of the canister's own funds.**
+  - The flaw: `settle`, the HTTP path where `sender` is only claimed, accepted the canister's own
+    principal as the payer. DFINITY ledgers skip the allowance check when a transfer_from's `from`
+    is the caller's own account.
+  - The effect: anyone could get a paid response free, and each attempt also burned one ledger fee
+    from the canister's default account.
+  - The fix: `Gateway.settleCore` now refuses the canister as payer (`#invalidSignature`), on
+    `settle` and `settleFrom`. `Escrow.depositCore` refuses a session deposit from the canister's
+    own account.
+  - Affected: canisters that call `settle` for ICP and hold a balance in their default account.
+  - Not affected: `settleFrom` callers (the caller must be the sender), session opens, and the EVM
+    rail.
+- **EVM sessions: two closes of one session could pay the refund more than once from the shared
+  pool.**
+  - The flaw: the re-close guard and the `#closing` write ran in different messages, because the
+    EVM close was a self-call. A close that then failed before broadcast (the single-flight send
+    lock) reopened the session while the other close was paying, so a further close paid again.
+  - Who could trigger it: a session's payer.
+  - The fix: `closeEvmSessionInternal` now runs inline (`async*`), as the ICP close has since 2.18.1,
+    so the guard and `#closing` share one message and the second close is refused.
+- **EVM outbound sends: "nonce too low", and node or outcall errors after dispatch, were read as
+  "not broadcast".**
+  - The flaw: a send is not idempotent. A node whose copy of a tx arrives after another node's copy
+    was included answers "nonce too low" for that same tx. With a 2-of-N threshold, a third provider
+    may also have accepted a tx the agreeing two refused.
+  - The effect: callers rolled back and sent again, a second transfer from the pool. This affected
+    session closes, `reconcileEvmDeposit` and marketplace EVM payouts.
+  - The fix: these outcomes are now `#maybeSent` (`EvmSender.classifySend`), so callers confirm-poll
+    the tx hash and park instead of re-sending. Only failures raised before any provider was called
+    are still safe to retry: provider or validation errors, and insufficient gas funds.
+  - Side effect: more ambiguous sends park for confirm-only recovery (`reconcileSession`,
+    `reconcileJob`).
+- **Until you upgrade:** keep revenue out of the canister's default account (use a recipient
+  subaccount or an external owner), or stop accepting ICP payments over HTTP; and keep EVM pool
+  balances minimal.
+
+### Tests
+
+- `test/payerguards.test.mo` (3): the canister refused as payer on `settle` (the nonce stays
+  usable) and as depositor, and the second of two queued EVM closes refused by the guard.
+- `test/evmsender.test.mo` (+5): every `classifySend` arm.
+- `test/evm-outbound.test.ts` (+1, replica): a NonceTooLow send ends pending with the tx recorded.
+- Mutation check: 7 mutations, each test run in isolation; each turns exactly one test red.
 
 ### Release tooling
 

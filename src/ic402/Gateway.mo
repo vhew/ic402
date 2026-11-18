@@ -967,6 +967,14 @@ module {
         nonceManager.unlock(signature.nonce);
         return #invalidSignature("Invalid sender principal: " # signature.sender);
       };
+      // 2.21.1: the canister itself is never a payer. Its icrc2_transfer_from pulls `from` as the
+      // spender, and DFINITY ledgers skip the allowance check when `from` is the caller's own
+      // account, so a payment naming this canister would be paid out of its own funds — on the
+      // HTTP path, where `sender` is only claimed, by anyone.
+      if (Principal.equal(senderPrincipal, selfPrincipal)) {
+        nonceManager.unlock(signature.nonce);
+        return #invalidSignature("The paying principal cannot be this canister — name the principal whose allowance pays.");
+      };
 
       // I6: `signature.sender` is only CLAIMED — the ledger's icrc2_transfer_from authenticates
       // it. Check read-only here and record the rate hit only on #Ok, so a settle that merely
@@ -1122,7 +1130,8 @@ module {
     /// is only a claim — the payer's ICRC-2 allowance is the sole authentication — so the caller
     /// must BE the named sender (canonical text), checked before the nonce lock or any ledger call
     /// (#policyDenied otherwise). EVM: exactly `settle` (the EIP-3009 authorization is payer-signed).
-    /// HTTP endpoints have no caller and keep `settle` (allowance-authenticated).
+    /// HTTP endpoints have no caller and keep `settle` (allowance-authenticated; 2.21.1: the
+    /// canister itself is refused as the payer on both paths).
     public func settleFrom(caller : Principal, signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       if (not isEvmNetwork(signature.network) and signature.sender != Principal.toText(caller)) {
         return #policyDenied("Not authorized: this payment names sender " # signature.sender # " but was submitted by " # Principal.toText(caller) # " — on the ICP rail the caller must be the paying principal");

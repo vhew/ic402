@@ -51,6 +51,9 @@ persistent actor EvmRpcMock {
   public type SendMode = {
     #ok;
     #nonceTooHigh;
+    // 2.21.1: NonceTooLow can follow the inclusion of this very tx (a send is not idempotent),
+    // so the library maps it to #maybeSent too, never to a safe-to-retry failure.
+    #nonceTooLow;
   };
 
   // ── scriptable state ──
@@ -99,6 +102,7 @@ persistent actor EvmRpcMock {
       // the RPC reports NonceTooHigh, which the library maps to #maybeSent(txHash). The caller must
       // preserve the hash (poll/track) rather than treat it as a clean, safe-to-retry failure.
       case (#nonceTooHigh) { #Consistent(#Ok(#NonceTooHigh)) };
+      case (#nonceTooLow) { #Consistent(#Ok(#NonceTooLow)) };
       case (#ok) { #Consistent(#Ok(#Ok(?mockTxHash(sentTxs.size())))) };
     };
   };

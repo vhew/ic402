@@ -40,7 +40,7 @@ const ReceiptMode = IDL.Variant({
   pendingThenConfirmed: IDL.Nat,
 });
 const FeeMode = IDL.Variant({ consistent: IDL.Null, inconsistentOutlier: IDL.Null });
-const SendMode = IDL.Variant({ ok: IDL.Null, nonceTooHigh: IDL.Null });
+const SendMode = IDL.Variant({ ok: IDL.Null, nonceTooHigh: IDL.Null, nonceTooLow: IDL.Null });
 const mockIdl = () =>
   IDL.Service({
     setReceiptMode: IDL.Func([ReceiptMode], [], []),
@@ -164,6 +164,17 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     // safe-to-retry failure. (Exercises the outbound #maybeSent path, which the G5/G6 inbound
     // change now mirrors: preserve the hash instead of collapsing to a hash-less #settlementFailed.)
     await mock.setSendMode({ nonceTooHigh: null });
+    const res = await sweep();
+    expect(res).toHaveProperty('pending');
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('2.21.1: NonceTooLow after dispatch → #pending with the tx recorded, never a safe-to-retry failure', async () => {
+    if (skip) return;
+    await mock.reset();
+    // A node whose copy of the tx arrives after another node's copy was included answers "nonce
+    // too low" for that same tx. Treating it as "not broadcast" let callers send again.
+    await mock.setSendMode({ nonceTooLow: null });
     const res = await sweep();
     expect(res).toHaveProperty('pending');
     expect(await mock.sentTxCount()).toBe(1n);

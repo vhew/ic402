@@ -1,5 +1,6 @@
 /// ic402 — Escrow manager for session deposits using ICRC-2 subaccounts.
 import Types "Types";
+import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Text "mo:base/Text";
@@ -41,6 +42,12 @@ module {
       amount : Nat,
       subaccount : Blob,
     ) : async* { #ok : Nat; #err : Text } {
+      // 2.21.1: never pull from this canister's own account. The ledger skips the allowance check
+      // when `from` is the caller's own account, so a deposit "from" the canister would be paid
+      // out of its own funds.
+      if (Principal.equal(from.owner, canisterPrincipal)) {
+        return #err("The depositor cannot be this canister.");
+      };
       let result = await ledger.icrc2_transfer_from({
         spender_subaccount = null;
         from;

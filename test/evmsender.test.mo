@@ -78,3 +78,42 @@ suite("EvmSender fee helpers", func() {
     switch (EvmSender.robustBaseFee([200, 1_000_000_000_000_000, 1])) { case (?b) { assert(b == 200) }; case null { assert(false) } };
   });
 });
+
+// 2.21.1: an eth_sendRawTransaction result is #err ("not broadcast — safe to retry") ONLY for
+// failures raised before anything was sent. Everything after dispatch is #maybeSent: a send is
+// not idempotent, so "nonce too low" can follow this very tx's inclusion, and with a 2-of-N
+// threshold a third provider may have accepted a tx the agreeing two refused.
+suite("EvmSender.classifySend", func() {
+  let H = "0xabc";
+  func isMaybe(o : EvmSender.SendOutcome) : Bool { switch (o) { case (#maybeSent(m)) { m.txHash == H }; case (_) { false } } };
+  func isErr(o : EvmSender.SendOutcome) : Bool { switch (o) { case (#err(_)) { true }; case (_) { false } } };
+
+  test("accepted: the echoed hash, or the local hash when none is echoed", func() {
+    assert(EvmSender.classifySend(#Consistent(#Ok(#Ok(?"0xdef"))), H) == #ok("0xdef"));
+    assert(EvmSender.classifySend(#Consistent(#Ok(#Ok(null))), H) == #ok(H));
+  });
+
+  test("NonceTooLow may follow this tx's own inclusion: maybe sent, never a retry", func() {
+    // Mutation: map NonceTooLow back to #err — the caller re-sends, a second transfer.
+    assert(isMaybe(EvmSender.classifySend(#Consistent(#Ok(#NonceTooLow)), H)));
+  });
+
+  test("node and outcall errors come after dispatch: maybe sent", func() {
+    // Mutation: map every consistent #Err to #err again.
+    assert(isMaybe(EvmSender.classifySend(#Consistent(#Err(#JsonRpcError({ code = -32000; message = "x" }))), H)));
+    assert(isMaybe(EvmSender.classifySend(#Consistent(#Err(#HttpOutcallError(#IcError({ code = #SysTransient; message = "timeout" })))), H)));
+  });
+
+  test("errors raised before any provider was called: not sent", func() {
+    // Mutation: map provider/validation errors to #maybeSent — a failure that sent nothing would
+    // park the payment instead of letting it be retried.
+    assert(isErr(EvmSender.classifySend(#Consistent(#Err(#ProviderError(#ProviderNotFound))), H)));
+    assert(isErr(EvmSender.classifySend(#Consistent(#Err(#ValidationError(#InvalidHex("x")))), H)));
+    assert(isErr(EvmSender.classifySend(#Consistent(#Ok(#InsufficientFunds)), H)));
+  });
+
+  test("unchanged: NonceTooHigh and inconsistent providers are maybe sent", func() {
+    assert(isMaybe(EvmSender.classifySend(#Consistent(#Ok(#NonceTooHigh)), H)));
+    assert(isMaybe(EvmSender.classifySend(#Inconsistent([]), H)));
+  });
+});

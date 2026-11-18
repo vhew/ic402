@@ -19,6 +19,39 @@ import SchnorrSigner "SchnorrSigner";
 
 module {
 
+  /// The outcome of an outbound send. #err: the tx was definitely NOT broadcast (safe to roll
+  /// back and retry). #maybeSent: it may be on chain; the caller must confirm-poll `txHash`, never
+  /// re-broadcast. #ok: accepted, with its hash.
+  public type SendOutcome = { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } };
+
+  /// 2.21.1: classify an eth_sendRawTransaction result. Only failures raised before anything was
+  /// sent are #err. Everything after dispatch is #maybeSent, because a send is not idempotent: a
+  /// node whose copy arrives after another node's copy was included answers "nonce too low" for
+  /// that SAME tx, and with a 2-of-N threshold a third provider may have accepted a tx the
+  /// agreeing two refused. Before 2.21.1 a consistent NonceTooLow or RPC error was #err, so
+  /// callers rolled back and sent again — a second transfer when the first had landed.
+  /// `broadcastTxHash` is the locally derived hash of the signed raw tx, always pollable.
+  public func classifySend(r : EvmRpc.MultiSendRawTransactionResult, broadcastTxHash : Text) : SendOutcome {
+    switch (r) {
+      case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
+      // Accepted with no hash echoed — use the locally derived canonical hash, NOT the raw tx.
+      case (#Consistent(#Ok(#Ok(null)))) { #ok(broadcastTxHash) };
+      case (#Consistent(#Ok(#NonceTooLow))) {
+        #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too low — this tx may already have been included (a send is not idempotent); confirming instead of re-sending" });
+      };
+      // Queued in the mempool (nonce ahead) — it can still mine.
+      case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
+      case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast.") };
+      // Raised by the EVM-RPC canister before any provider was called.
+      case (#Consistent(#Err(#ProviderError(e)))) { #err("RPC error before sending: " # EvmRpc.rpcErrorToText(#ProviderError(e))) };
+      case (#Consistent(#Err(#ValidationError(e)))) { #err("RPC error before sending: " # EvmRpc.rpcErrorToText(#ValidationError(e))) };
+      // A node error or an outcall error: the tx may have reached a provider.
+      case (#Consistent(#Err(e))) { #maybeSent({ txHash = broadcastTxHash; reason = "RPC error after dispatch (may have broadcast): " # EvmRpc.rpcErrorToText(e) }) };
+      // Providers disagree — one may have accepted the tx into its mempool.
+      case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
+    };
+  };
+
   // ── Pure fee helpers (module scope so they're unit-testable) ──
 
   /// Pick the latest base fee from one provider's FeeHistory: prefer the forecast
@@ -279,18 +312,7 @@ module {
           txInProgress := false;
           return #maybeSent({ txHash = broadcastTxHash; reason = "EVM send failed after dispatch (may have broadcast): " # Error.message(e) });
         };
-        switch (sendResult) {
-          case (#Consistent(#Ok(#Ok(?hash)))) { #ok(hash) };
-          // Accepted with no hash echoed — use the locally derived canonical hash, NOT the raw tx.
-          case (#Consistent(#Ok(#Ok(null)))) { #ok(broadcastTxHash) };
-          case (#Consistent(#Ok(#NonceTooLow))) { #err("Nonce too low — retry") };
-          // Queued in the mempool (nonce ahead) — it can still mine, so treat as maybe-sent.
-          case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
-          case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast.") };
-          case (#Consistent(#Err(e))) { #err("RPC error: " # EvmRpc.rpcErrorToText(e)) };
-          // Providers disagree — exactly one may have accepted the tx into its mempool.
-          case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
-        };
+        classifySend(sendResult, broadcastTxHash);
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
         #err("EVM tx failed before broadcast: " # Error.message(e));

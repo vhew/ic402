@@ -957,9 +957,13 @@ module {
         return #settlementFailed("Session already closed or a close is in progress (#closing) — do not re-close. If it is stuck in #closing, the controller recovers it with reconcileSession (EVM: confirm-only re-poll of the parked tx; ICP: reads the escrow balance). forceResolveSession is a last resort: it moves no funds.");
       };
 
-      // Dispatch: EVM sessions use tECDSA-signed ERC-20 transfers
+      // Dispatch: EVM sessions use tECDSA-signed ERC-20 transfers. 2.21.1: inline (`await*`), so
+      // the guard above and closeEvmSessionInternal's `#closing` write run in the SAME message.
+      // As a self-call they did not: two closes queued together both passed the guard, and the
+      // one that then failed before broadcast (the single-flight send lock) reopened the session
+      // while the other was paying, so a further close paid the refund again from the shared pool.
       if (isEvmNetwork(session.network)) {
-        return await closeEvmSessionInternal(session);
+        return await* closeEvmSessionInternal(session);
       };
 
       icpClosesInFlight.put(sessionId, ());
@@ -1557,7 +1561,7 @@ module {
 
     /// Close an EVM session: settle consumed to recipient, refund remainder to payer.
     /// Both operations use tECDSA-signed ERC-20 transfer transactions.
-    func closeEvmSessionInternal(session : Types.InternalSessionState) : async Types.PaymentResult {
+    func closeEvmSessionInternal(session : Types.InternalSessionState) : async* Types.PaymentResult {
       let wasExpired = (session.status == #expired);
       session.status := #closing;
 
