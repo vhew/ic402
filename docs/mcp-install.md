@@ -66,6 +66,8 @@ Windows: `%APPDATA%\Claude\`) and add:
       "command": "npx",
       "args": ["-y", "@ic402/mcp"],
       "env": {
+        "IC402_MCP_CANISTER_ID": "<your-canister-principal>",
+        "IC402_MCP_HOST": "https://icp-api.io",
         "ICP_IDENTITY_PEM": "/abs/path/to/identity.pem",
         "IC402_MCP_PER_CALL_MAX_ATOMIC": "1000000",
         "IC402_MCP_SESSION_MAX_ATOMIC": "5000000"
@@ -80,7 +82,11 @@ Restart Claude Desktop; the server appears as **ic402** in the MCP tools list.
 ### Claude Code
 
 ```bash
-claude mcp add ic402 --env ICP_IDENTITY_PEM=/abs/path/to/identity.pem -- npx -y @ic402/mcp
+claude mcp add ic402 \
+  --env IC402_MCP_CANISTER_ID=<your-canister-principal> \
+  --env IC402_MCP_HOST=https://icp-api.io \
+  --env ICP_IDENTITY_PEM=/abs/path/to/identity.pem \
+  -- npx -y @ic402/mcp
 ```
 
 ### Cursor
@@ -94,6 +100,8 @@ Create (or extend) `.cursor/mcp.json` in your project — or `~/.cursor/mcp.json
       "command": "npx",
       "args": ["-y", "@ic402/mcp"],
       "env": {
+        "IC402_MCP_CANISTER_ID": "<your-canister-principal>",
+        "IC402_MCP_HOST": "https://icp-api.io",
         "ICP_IDENTITY_PEM": "/abs/path/to/identity.pem"
       }
     }
@@ -113,6 +121,8 @@ mcpServers:
       - "-y"
       - "@ic402/mcp"
     env:
+      IC402_MCP_CANISTER_ID: <your-canister-principal>
+      IC402_MCP_HOST: https://icp-api.io
       ICP_IDENTITY_PEM: /abs/path/to/identity.pem
 ```
 
@@ -130,6 +140,8 @@ Any MCP client that can spawn a stdio server works with:
       "command": "node",
       "args": ["/abs/path/to/ic402/integrations/mcp/dist/index.js"],
       "env": {
+        "IC402_MCP_CANISTER_ID": "<your-canister-principal>",
+        "IC402_MCP_HOST": "https://icp-api.io",
         "IC402_MCP_PER_CALL_MAX_ATOMIC": "1000000",
         "IC402_MCP_SESSION_MAX_ATOMIC": "5000000"
       }
@@ -143,20 +155,23 @@ Any MCP client that can spawn a stdio server works with:
 ### First contact: the `configure` tool
 
 Every other tool throws `Not configured. Call the "configure" tool first.` until the agent has
-connected to a canister. So the first thing to tell your agent is something like:
+connected. The canister, replica host and identity are the **operator's** (set in the server's
+env above — `IC402_MCP_CANISTER_ID`, `IC402_MCP_HOST`, `ICP_IDENTITY_PEM`), so the first thing to
+tell your agent is simply:
 
-> Configure ic402 with canister `<your-canister-principal>` at host `https://icp-api.io`.
+> Configure ic402 (ledger `<ckUSDC-ledger-id>` if you pay on ICP).
 
-`configure` parameters (all set by the agent in-band, except where noted):
+`configure` parameters (set by the agent in-band):
 
 | Param | Default | Purpose |
 |---|---|---|
-| `canisterId` | — (required) | Principal of the ic402 canister. |
-| `host` | `http://localhost:4944` | ICP replica URL. Root key auto-fetched when the host contains `localhost`. |
 | `network` | `icp:1` | CAIP-2 network identifier. |
-| `identityPem` | `ICP_IDENTITY_PEM` env var, else anonymous | Path to a secp256k1 PEM for signing. Parse failures throw loudly — no silent anonymous fallback. |
 | `ledger` | — | ICRC-2 ledger canister ID for auto-payment (e.g. ckUSDC). |
+| `canisterId`, `host`, `identityPem` | operator config | **Connection — ignored** (and reported as ignored) unless the operator set `IC402_MCP_ALLOW_SECURITY_CHANGES=1`. Without an operator canister, `configure` fails. The root key is fetched only with `localDev` and an exact `localhost` / `127.0.0.1` / `[::1]` host. An unparseable PEM throws loudly — no silent anonymous fallback. |
 | `autoPayment`, `localDev`, `perCallMaxAtomic`, `sessionMaxAtomic` | operator config | **Security knobs — ignored** (and reported as ignored) unless the operator set `IC402_MCP_ALLOW_SECURITY_CHANGES=1`. |
+
+A tool's per-call `canisterId` must likewise name the configured canister unless the operator set
+`IC402_MCP_ALLOW_SECURITY_CHANGES=1`.
 
 ### Operator configuration (env vars)
 
@@ -168,14 +183,16 @@ Booleans are true only for `"1"` or `"true"`; amounts are atomic-unit integer **
 | Env var | Config file key | Default | Gates |
 |---|---|---|---|
 | `IC402_MCP_CONFIG` | — | — | Path to the JSON config file (alt: `--config <path>`). |
+| `IC402_MCP_CANISTER_ID` | `canisterId` | — | The ic402 canister the server talks to. Required unless `allowSecurityChanges` lets `configure` set it. |
+| `IC402_MCP_HOST` | `host` | `http://localhost:4944` | ICP replica / gateway URL. |
 | `IC402_MCP_PER_CALL_MAX_ATOMIC` | `perCallMaxAtomic` | `1000000` (1.00 USDC) | Cap on a single signed transfer. |
 | `IC402_MCP_SESSION_MAX_ATOMIC` | `sessionMaxAtomic` | `5000000` (5.00 USDC) | Cumulative spend cap for the server session. |
-| `IC402_MCP_LOCAL_DEV` | `localDev` | `false` | Allow `http://localhost` / private / loopback fetch targets (local dev only). |
+| `IC402_MCP_LOCAL_DEV` | `localDev` | `false` | Allow `http://localhost` / private / loopback fetch targets, and fetch a local replica's root key (local dev only). |
 | `IC402_MCP_AUTO_PAYMENT` | `autoPayment` | `false` | Allow paid endpoints to auto-approve/pay (still capped + confirm-gated). |
-| `IC402_MCP_ALLOW_SECURITY_CHANGES` | `allowSecurityChanges` | `false` | Let the LLM retune caps / `localDev` / `autoPayment` via `configure`. |
+| `IC402_MCP_ALLOW_SECURITY_CHANGES` | `allowSecurityChanges` | `false` | Let the LLM retune caps / `localDev` / `autoPayment` and change the canister / host / identity via `configure` (and a per-call `canisterId`). |
 | `IC402_MCP_ALLOW_DANGEROUS_TOOLS` | `allowDangerousTools` | `false` | Enable `sign_typed_data` and `delete_content`. |
 | `IC402_MCP_ALLOW_ADMIN_TOOLS` | `allowAdminTools` | `false` | Enable the state-changing admin tools (`register_service`, `enable_service`, `claim_job`, `submit_job_result`, `upload_content`). |
-| `ICP_IDENTITY_PEM` | — | — | Fallback path for the signing identity PEM (consumed by `configure`). |
+| `ICP_IDENTITY_PEM` | `identityPem` | anonymous | Path to the signing identity PEM (loaded by `configure`). |
 
 Only loosen these in a trusted context — the startup banner on stderr warns when any loosened
 knob is active.
@@ -193,7 +210,9 @@ always see the price before anything is signed.
 probe it, have the canister sign the USDC payment with its threshold-ECDSA key on the requested
 chain (Base, Ethereum, Avalanche, Optimism, or Arbitrum), and retry with the payment header.
 Called without `confirm`, it's a free price probe. Your agent can now consume paid data feeds,
-inference endpoints, and search APIs that return HTTP 402 — no API keys, no accounts. `search`
+inference endpoints, and search APIs that return HTTP 402 — no API keys, no accounts. It pays
+only USDC, and the `confirm:true` call must repeat the proposal's amount, recipient, asset and
+chain: if the server's 402 changed in between, nothing is signed. `search`
 runs the same x402 charge flow against the connected canister's own paid endpoint.
 
 **Stream micropayments instead of paying per call.** `request_session` quotes the pricing
@@ -217,9 +236,11 @@ just spend.
 
 **Establish an on-chain identity.** `register_agent` registers the canister as an ERC-8004 agent
 on Base (confirm-gated: it broadcasts a gas-spending transaction), making it discoverable to
-other agents. A generic read-only `call` tool rounds things out for allowlisted getters
-(`listServices`, `getJobStatus`, `getAgentCard`, …) — anything state-changing is blocked there
-and routed to its dedicated, gated tool.
+other agents. A generic `call` tool rounds things out for allowlisted getters
+(`listServices`, `getJobStatus`, `getAgentCard`, …) — signing and admin methods are blocked there
+and routed to their dedicated, gated tools. One exception moves funds: `getContent` (and
+`getAssetContent` / `getExternalContent`) called *with* a PaymentSignature settles a payment from
+an ICRC-2 allowance the payer already granted, with no spend cap and no confirmation.
 
 ---
 

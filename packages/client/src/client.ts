@@ -34,6 +34,7 @@ import {
   broadcastTransaction as broadcastTx,
   registerAgent as registerAgentFlow,
   type FetchX402Result,
+  type Ic402ErrorKind,
 } from './evm.js';
 
 export interface SessionPreferences {
@@ -111,12 +112,47 @@ export interface SessionHandle {
 const FUNDS_MOVED_MARKER = 'do NOT retry payment';
 
 /**
+ * 2.22.0: the canister's answer when a settlement with the SAME payment is still running ("A
+ * settlement with this payment is already in progress — retry this same payment in a few seconds;
+ * do not pay with a new nonce."). Not funds-moved, and not a refusal that frees the payer to pay
+ * anew: it is retryable with the same payment only.
+ */
+const SETTLE_IN_PROGRESS_MARKER = 'retry this same payment';
+
+/**
  * Build the Ic402Error for a canister-returned settle/session error, tagging `fundsMoved` when the
  * canister marked the payment as already moved. Keeps the brittle string match confined to this one
  * spot so downstream (the MCP refund guard) can rely on the structured `fundsMoved` flag instead.
+ * `paymentNotSent` is true only for an answer to the UNPAID request (no payment was attached).
  */
-function settleError(text: string): Ic402Error {
-  return new Ic402Error('sign_failed', text, undefined, text.includes(FUNDS_MOVED_MARKER));
+function settleError(text: string, paymentNotSent = false): Ic402Error {
+  const fundsMoved = text.includes(FUNDS_MOVED_MARKER);
+  const inProgress = !fundsMoved && text.includes(SETTLE_IN_PROGRESS_MARKER);
+  return new Ic402Error(
+    inProgress ? 'transient' : 'sign_failed',
+    text,
+    undefined,
+    fundsMoved,
+    paymentNotSent,
+  );
+}
+
+/** A refusal raised before any paying call was sent (Ic402Error.paymentNotSent). */
+function notSentError(kind: Ic402ErrorKind, text: string): Ic402Error {
+  return new Ic402Error(kind, text, undefined, false, true);
+}
+
+/**
+ * 2.22.0: refuse a payment requirement above the caller's ceiling BEFORE approving anything. The
+ * ceiling bounds the payment amount; the ledger fee is approved on top (approvalFor).
+ */
+function checkCeiling(amount: bigint, maxAmount: bigint | undefined): void {
+  if (maxAmount !== undefined && amount > maxAmount) {
+    throw notSentError(
+      'no_match',
+      `The canister asks ${amount}, above maxAmount ${maxAmount} — refused before approving; nothing was paid.`,
+    );
+  }
 }
 
 /**
@@ -154,8 +190,18 @@ export class Ic402Client {
    * Call a canister method, auto-handling 402 payment if needed.
    *
    * Flow: call method → if #paymentRequired → icrc2_approve → create sig → retry
+   *
+   * `options.maxAmount` (2.22.0): the most this call may pay (atomic units; the ledger fee is
+   * approved on top). A #paymentRequired above it is refused before anything is approved. After
+   * paying, an `error` answer throws an Ic402Error (fundsMoved when the canister says the payment
+   * moved) and a fresh `paymentRequired` throws instead of being returned.
    */
-  async call(method: string, args: unknown[], canisterId?: string): Promise<unknown> {
+  async call(
+    method: string,
+    args: unknown[],
+    canisterId?: string,
+    options?: { maxAmount?: bigint },
+  ): Promise<unknown> {
     const cid = canisterId ?? this.config.canisterId;
     const actor = this.config.actorFactory(cid);
     const result = await actor[method](...args);
@@ -163,7 +209,8 @@ export class Ic402Client {
     // Check for payment required response
     if (result && typeof result === 'object' && 'paymentRequired' in result) {
       if (!this.config.autoPayment) {
-        throw new Error(
+        throw notSentError(
+          'config_error',
           'Payment required but autoPayment is disabled — set autoPayment: true (plus ledger + ledgerActorFactory for ICP), or handle the paymentRequired response and retry the call with a PaymentSignature yourself.',
         );
       }
@@ -176,11 +223,18 @@ export class Ic402Client {
       const requirementRaw = result.paymentRequired;
       const requirement = unwrapOpt<{ amount: bigint; nonce: unknown }>(requirementRaw);
       if (!requirement || typeof requirement.amount !== 'bigint') {
-        throw new Error(`Malformed paymentRequired response: ${safeStringify(requirementRaw)}`);
+        throw notSentError(
+          'unknown',
+          `Malformed paymentRequired response: ${safeStringify(requirementRaw)}`,
+        );
       }
+      checkCeiling(requirement.amount, options?.maxAmount);
 
       if (!this.config.ledger || !this.config.ledgerActorFactory) {
-        throw new Error('Auto-approval requires ledger and ledgerActorFactory in config');
+        throw notSentError(
+          'config_error',
+          'Auto-approval requires ledger and ledgerActorFactory in config',
+        );
       }
 
       // ICRC-2 approve: allow the target canister to spend exactly amount + fee (approvalFor)
@@ -198,7 +252,10 @@ export class Ic402Client {
       });
 
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
-        throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
+        throw notSentError(
+          'sign_failed',
+          `ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`,
+        );
       }
 
       // Construct PaymentSignature from the requirement's nonce and retry. `sender` MUST be the
@@ -221,8 +278,18 @@ export class Ic402Client {
       retryArgs[retryArgs.length - 1] = [sig];
       const retryResult = await actor[method](...retryArgs);
 
-      if (retryResult && typeof retryResult === 'object' && 'ok' in retryResult) {
-        return retryResult.ok;
+      if (retryResult && typeof retryResult === 'object') {
+        if ('ok' in retryResult) return retryResult.ok;
+        // 2.22.0 (I6): a non-ok answer AFTER paying is an error, never a value: a returned
+        // {error} hid the funds-moved marker, and a fresh {paymentRequired} invited a second payment.
+        if ('error' in retryResult) throw settleError(String(retryResult.error));
+        if ('paymentRequired' in retryResult) {
+          throw new Ic402Error(
+            'settlement_failed',
+            'The paid call answered with a new paymentRequired: the payment was sent but not accepted. Not paying again automatically — check whether it settled before paying anew.',
+            retryResult.paymentRequired,
+          );
+        }
       }
       return retryResult;
     }
@@ -238,6 +305,10 @@ export class Ic402Client {
    * Open a streaming session with escrow deposit.
    *
    * Flow: requestSession → calculate deposit → icrc2_approve → openSession → SessionHandle
+   *
+   * `maxDeposit` is the ceiling: the deposit approved and pulled is min(suggestedDeposit,
+   * maxDeposit), whatever this call's own requestSession() answers. A caller that confirmed an
+   * amount elsewhere passes it as maxDeposit.
    */
   async openSession(
     sessionConfig: Partial<SessionPreferences> | undefined,
@@ -293,7 +364,10 @@ export class Ic402Client {
       });
 
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
-        throw new Error(`ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`);
+        throw notSentError(
+          'sign_failed',
+          `ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`,
+        );
       }
     }
 
@@ -762,28 +836,41 @@ export class Ic402Client {
 
   /**
    * Submit a paid service request. Handles x402 payment automatically.
-   * Returns the job ID for polling.
+   * Returns the job ID for polling, plus `paidAmount` (2.22.0) when this call paid: the payment
+   * amount approved and sent (the ledger fee is approved on top).
+   *
+   * `options.maxAmount` (2.22.0): the most this request may pay (atomic units, excluding the
+   * ledger fee). A #paymentRequired above it is refused before anything is approved. Pass 0n to
+   * submit only if the service is free.
    */
-  async submitServiceRequest(serviceId: string, params: Uint8Array): Promise<{ jobId: string }> {
+  async submitServiceRequest(
+    serviceId: string,
+    params: Uint8Array,
+    options?: { maxAmount?: bigint },
+  ): Promise<{ jobId: string; paidAmount?: bigint }> {
     const actor = this.config.actorFactory(this.config.canisterId);
     const result = await actor.submitServiceRequest(serviceId, Array.from(params), []);
 
     if (result && typeof result === 'object' && 'paymentRequired' in result) {
       if (!this.config.autoPayment) {
-        throw new Ic402Error(
+        throw notSentError(
           'config_error',
           'Payment required but autoPayment is disabled — set autoPayment: true (plus ledger + ledgerActorFactory for ICP), or handle the paymentRequired response and retry the call with a PaymentSignature yourself.',
         );
       }
       if (!this.config.ledger || !this.config.ledgerActorFactory) {
-        throw new Ic402Error(
-          'config_error',
-          'Auto-approval requires ledger and ledgerActorFactory',
-        );
+        throw notSentError('config_error', 'Auto-approval requires ledger and ledgerActorFactory');
       }
 
       const req0 = unwrapOpt<{ amount: bigint; nonce: unknown }>(result.paymentRequired);
-      const amount = req0?.amount ?? 0n;
+      if (!req0 || typeof req0.amount !== 'bigint') {
+        throw notSentError(
+          'unknown',
+          `Malformed paymentRequired response: ${safeStringify(result.paymentRequired)}`,
+        );
+      }
+      const amount = req0.amount;
+      checkCeiling(amount, options?.maxAmount);
 
       // Approve exactly amount + fee (ICRC-2 transfer_from deducts the fee from the allowance)
       const ledgerActor = this.config.ledgerActorFactory(this.config.ledger);
@@ -799,13 +886,13 @@ export class Ic402Client {
         expires_at: approval.expires_at,
       });
       if (approveResult && typeof approveResult === 'object' && 'Err' in approveResult) {
-        throw new Ic402Error(
+        throw notSentError(
           'sign_failed',
           `ICRC-2 approve failed: ${safeStringify(approveResult.Err)}`,
         );
       }
 
-      const nonce = toByteArray(req0?.nonce ?? new Uint8Array(32));
+      const nonce = toByteArray(req0.nonce ?? new Uint8Array(32));
       // Sender must be the caller's principal — derive from identity if available
       const sender = this.config.identity?.getPrincipal().toText() ?? '';
       const sig = {
@@ -821,7 +908,7 @@ export class Ic402Client {
       const retryResult = await actor.submitServiceRequest(serviceId, Array.from(params), [sig]);
 
       if (retryResult && typeof retryResult === 'object' && 'ok' in retryResult) {
-        return retryResult.ok as { jobId: string };
+        return { ...(retryResult.ok as { jobId: string }), paidAmount: amount };
       }
       if (retryResult && typeof retryResult === 'object' && 'error' in retryResult) {
         throw settleError(retryResult.error as string);
@@ -829,13 +916,14 @@ export class Ic402Client {
       throw new Ic402Error('unknown', `Unexpected result: ${safeStringify(retryResult)}`);
     }
 
+    // The unpaid request: no payment was attached, so nothing below can have moved funds.
     if (result && typeof result === 'object' && 'ok' in result) {
       return result.ok as { jobId: string };
     }
     if (result && typeof result === 'object' && 'error' in result) {
-      throw settleError(result.error as string);
+      throw settleError(result.error as string, true);
     }
-    throw new Ic402Error('unknown', `Unexpected result: ${safeStringify(result)}`);
+    throw notSentError('unknown', `Unexpected result: ${safeStringify(result)}`);
   }
 
   /**

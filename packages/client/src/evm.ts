@@ -76,14 +76,29 @@ export class Ic402Error extends Error {
    * retry the payment on such an error (either would misaccount or double-pay). Default false.
    */
   readonly fundsMoved: boolean;
+  /**
+   * 2.22.0: true only when the SDK stopped BEFORE sending the paying call: the price was above the
+   * caller's `maxAmount`, autoPayment or the ledger was not configured, the ledger answered the
+   * approve with #Err, or the canister refused the unpaid request. Nothing that could move funds was
+   * submitted, so a spend reservation may be released. False (the default) means the paying call
+   * may have been sent: keep any reservation.
+   */
+  readonly paymentNotSent: boolean;
 
-  constructor(kind: Ic402ErrorKind, message: string, detail?: unknown, fundsMoved = false) {
+  constructor(
+    kind: Ic402ErrorKind,
+    message: string,
+    detail?: unknown,
+    fundsMoved = false,
+    paymentNotSent = false,
+  ) {
     super(message);
     this.name = 'Ic402Error';
     this.kind = kind;
     this.retryable = kind === 'transient' || kind === 'nonce_error';
     this.detail = detail;
     this.fundsMoved = fundsMoved;
+    this.paymentNotSent = paymentNotSent;
   }
 }
 
