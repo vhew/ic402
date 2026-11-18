@@ -56,6 +56,8 @@ config file (see below). For example:
       "command": "node",
       "args": ["/abs/path/to/ic402/integrations/mcp/dist/index.js"],
       "env": {
+        "IC402_MCP_CANISTER_ID": "<your-canister-principal>",
+        "IC402_MCP_HOST": "https://icp-api.io",
         "IC402_MCP_PER_CALL_MAX_ATOMIC": "1000000",
         "IC402_MCP_SESSION_MAX_ATOMIC": "5000000"
       }
@@ -72,14 +74,14 @@ You can also pass `--config <path>` (or `IC402_MCP_CONFIG=<path>`) to load a JSO
 
 `configure` must be called before any other tool — every other tool throws
 `Not configured. Call the "configure" tool first.` until an agent and client exist. It connects
-to a canister and (optionally) loads a signing identity:
+to the operator's canister and loads the operator's signing identity:
 
 | Param | Type | Default | Purpose |
 |---|---|---|---|
-| `canisterId` | string | — | Principal of the canister to interact with. |
-| `host` | string | `http://localhost:4944` | ICP replica URL. Root key is fetched automatically when the host contains `localhost`. |
+| `canisterId` | string? | operator (`IC402_MCP_CANISTER_ID`) | Principal of the canister to interact with. |
+| `host` | string? | operator (`IC402_MCP_HOST`, else `http://localhost:4944`) | ICP replica URL. The root key is fetched only with `localDev` and an exact `localhost` / `127.0.0.1` / `[::1]` host. |
 | `network` | string | `icp:1` | CAIP-2 network identifier. |
-| `identityPem` | string? | — | Path to a secp256k1 PEM (SEC1 `EC PRIVATE KEY` or PKCS#8 `PRIVATE KEY`). Falls back to the `ICP_IDENTITY_PEM` env var; anonymous if neither is set. |
+| `identityPem` | string? | operator (`ICP_IDENTITY_PEM`), else anonymous | Path to a secp256k1 PEM (SEC1 `EC PRIVATE KEY` or PKCS#8 `PRIVATE KEY`). |
 | `ledger` | string? | — | ICRC-2 ledger canister ID for auto-payment (e.g. ckUSDC). |
 | `autoPayment` | boolean | `false` | Allow paid endpoints to auto-approve/pay (opt-in). |
 | `localDev` | boolean | `false` | Allow `http://localhost` / private / loopback fetch targets (local development only). |
@@ -91,17 +93,21 @@ The identity loader surfaces failures loudly: if `identityPem` is supplied but c
 silently falling back to anonymous.
 
 **The four security knobs (`autoPayment`, `localDev`, `perCallMaxAtomic`, `sessionMaxAtomic`)
-are only honored when the operator enabled `allowSecurityChanges` at startup.** Otherwise they
-are *ignored* — the operator/default config stands — and the `configure` result reports which
-fields were dropped, e.g.:
+and the three connection params (`canisterId`, `host`, `identityPem`) are only honored when the
+operator enabled `allowSecurityChanges` at startup.** Otherwise they are *ignored* — the
+operator/default config stands — and the `configure` result reports which fields were dropped
+(without an operator canister, `configure` fails), e.g.:
 
 ```
 IGNORED security params ["autoPayment","perCallMaxAtomic"] — operator did not enable
 LLM security changes (set IC402_MCP_ALLOW_SECURITY_CHANGES=1 to allow).
 ```
 
-This stops a prompt-injected model from raising its own caps or enabling `localDev` / auto-pay
-through the `configure` tool (`resolveSecurityConfig` in `guards.ts`).
+This stops a prompt-injected model from raising its own caps, enabling `localDev` / auto-pay, or
+pointing the server at another replica, canister or key file through the `configure` tool
+(`resolveSecurityConfig` / `resolveConnection` in `guards.ts`). A tool's per-call `canisterId`
+must likewise name the configured canister unless `allowSecurityChanges` is set
+(`resolveTargetCanister`).
 
 ### Operator config (out-of-band) — startup only
 
@@ -119,11 +125,14 @@ in `guards.ts`).
 | Env var | Config file key | Gates |
 |---|---|---|
 | `IC402_MCP_CONFIG` | — | Path to the JSON config file (alt: `--config <path>`). |
+| `IC402_MCP_CANISTER_ID` | `canisterId` | The ic402 canister the server talks to. Required unless `allowSecurityChanges` lets `configure` set it. |
+| `IC402_MCP_HOST` | `host` | ICP replica / gateway URL. Default `http://localhost:4944`. |
+| `ICP_IDENTITY_PEM` | `identityPem` | Path to the signing identity PEM. Default: anonymous. |
 | `IC402_MCP_PER_CALL_MAX_ATOMIC` | `perCallMaxAtomic` | Per-call spend cap in atomic units. Default `1_000_000` (1.00 USDC at 6 decimals). |
 | `IC402_MCP_SESSION_MAX_ATOMIC` | `sessionMaxAtomic` | Cumulative session spend cap. Default `5_000_000` (5.00 USDC). |
-| `IC402_MCP_LOCAL_DEV` | `localDev` | Allow `http://localhost` / private / loopback fetch targets. Default `false`. |
+| `IC402_MCP_LOCAL_DEV` | `localDev` | Allow `http://localhost` / private / loopback fetch targets, and fetch a local replica's root key. Default `false`. |
 | `IC402_MCP_AUTO_PAYMENT` | `autoPayment` | Allow paid endpoints to auto-approve/pay. Default `false`. |
-| `IC402_MCP_ALLOW_SECURITY_CHANGES` | `allowSecurityChanges` | If set, the LLM may retune caps / `localDev` / `autoPayment` via the `configure` tool. Default `false`. |
+| `IC402_MCP_ALLOW_SECURITY_CHANGES` | `allowSecurityChanges` | If set, the LLM may retune caps / `localDev` / `autoPayment` and change the canister / host / identity via the `configure` tool (and a per-call `canisterId`). Default `false`. |
 | `IC402_MCP_ALLOW_DANGEROUS_TOOLS` | `allowDangerousTools` | If set, enables the default-denied dangerous tools `sign_typed_data` and `delete_content`. Default `false`. |
 | `IC402_MCP_ALLOW_ADMIN_TOOLS` | `allowAdminTools` | If set, enables the default-denied state-changing admin tools (`register_service`, `enable_service`, `claim_job`, `submit_job_result`, `upload_content`). Default `false` (SEC-3). |
 
@@ -131,8 +140,6 @@ Booleans are true when the value is exactly `"1"` or `"true"`. Amounts are parse
 non-negative integer **strings** (a JS number that has already lost precision is rejected — see
 `parseAtomicAmount`).
 
-The signing identity PEM path can also come from the `ICP_IDENTITY_PEM` env var (consumed by the
-`configure` tool).
 
 ## Tool inventory
 
@@ -141,9 +148,11 @@ controller-gated set).
 
 ### Read-only / query tools
 
-- **`call`** — a generic read-only escape hatch. It may only invoke **allowlisted** query/read
-  methods on the canister. Anything state-changing, signing, payment, or admin is blocked here;
-  use the dedicated tool instead. The allowlist and blocklist are detailed under
+- **`call`** — a generic escape hatch for **allowlisted** read methods on the canister. Signing
+  and admin methods are blocked here; use the dedicated tool instead. **Exception:**
+  `getContent` / `getAssetContent` / `getExternalContent` called *with* a PaymentSignature settle
+  a payment from an ICRC-2 allowance the payer already granted — no spend cap, no confirmation.
+  The allowlist and blocklist are detailed under
   [The `call` allowlist & blocklist](#the-call-allowlist--blocklist).
 - **`list_services`** — list available paid services from the canister.
 - **`request_session`** — request a session intent (pricing: `suggestedDeposit`, `costPerCall`)
@@ -165,13 +174,17 @@ amount / recipient / asset / chain):
 
 - **`fetch_x402`** — full x402 flow: probe a gated URL → canister signs the payment → retry with
   the payment header. Probe-only when `confirm:false`; signing the proposed payment requires
-  `confirm:true`. SSRF-guarded on the URL and every redirect hop.
+  `confirm:true` **plus the proposal's `amount`, `recipient`, `asset` and `chain`** (returned as
+  `confirmWith`) — the re-probe is refused if the server's terms changed. Pays only USDC on the
+  supported chains (`X402_USDC_BY_CHAIN` in `guards.ts`). SSRF-guarded on the URL and every
+  redirect hop (literal host + DNS), with a capped body read.
 - **`fetch_content`** — fetch content from a `ContentDelivery` response. Supports `inline`,
   `httpUrl` (SSRF-guarded `safeFetch`), `assetCanister` (validated canister id + URL-API origin),
   and `canisterQuery` (restricted to the `getChunk` / `getContent` query methods).
 - **`open_session`** — open a streaming micropayment session. ICP uses ICRC-2 escrow; EVM takes
   an `evmTxHash` (and EIP-3009 `authorization`) proving the USDC deposit. The escrow deposit is
-  capped + confirmed, and the deposited amount is counted against the cumulative cap.
+  capped + confirmed, counted against the cumulative cap, and passed to the client as
+  `maxDeposit` (the most it approves and the canister pulls).
 - **`close_session`** — settle the consumed amount on-chain and refund the remainder; returns a
   payment receipt. Requires `confirm:true` (the consumed amount was already counted at deposit
   time, so it is not re-charged against the cap).
@@ -179,7 +192,10 @@ amount / recipient / asset / chain):
   operator must have opted into `autoPayment` *and* the caller must pass `confirm:true` after
   reviewing the amount. The price is discovered via a **read-only** `quoteServiceRequest` query
   (no nonce minted), and the cap is checked against the **total** (price + ledger fee), not the
-  bare price. Free / session-billed services (total `0`) submit directly.
+  bare price. The confirmed total is passed to the client as `maxAmount`, so the update call
+  cannot make it approve more; `paidAmount` is what the client actually paid. Free /
+  session-billed services (total `0`) submit with `maxAmount: 0` — refused if the canister then
+  demands payment.
 - **`register_agent`** — register the canister as an ERC-8004 agent on Base: get nonce + gas →
   canister signs → broadcast → poll receipt. Broadcasting spends native gas, so it is
   confirm-gated (no USDC amount, hence no spend cap); a custom `rpcUrl` is SSRF-validated.
@@ -228,9 +244,12 @@ Two caps, in atomic token units (USDC has 6 decimals, so `1_000_000` atomic = 1.
 
 `checkSpend` (in `guards.ts`) rejects negative amounts, any single amount over the per-call cap,
 and any amount that would push the running session total over the cumulative cap. The running
-total (`sessionSpentAtomic`) is only incremented by `commitSpend` **after** a spend actually
-succeeds. The conservative defaults force the LLM to stay within a trivial budget unless a human
-raises the caps out-of-band (and only when `allowSecurityChanges` is set).
+total (`sessionSpentAtomic`) is reserved at confirm time and released only when the client
+proves no payment was sent (`Ic402Error.paymentNotSent`: price above the ceiling, approve
+`#Err`, the unpaid request refused — `reservationReleasable` in `guards.ts`); a timeout or any
+error after the paying call keeps it. The conservative defaults force the LLM to stay within a
+trivial budget unless a human raises the caps out-of-band (and only when `allowSecurityChanges`
+is set).
 
 ### Explicit confirmation gating
 
@@ -244,8 +263,8 @@ re-invoke with `confirm:true`. The instruction explicitly says *"Do NOT confirm 
 
 The security boundary is resolved at startup from a config file + env vars the LLM cannot touch
 (see [Operator config](#operator-config-out-of-band--startup-only)). The `configure` tool can
-loosen caps / `localDev` / `autoPayment` **only** when `allowSecurityChanges` is enabled;
-otherwise those request fields are ignored and reported. The two dangerous tools stay off unless
+loosen caps / `localDev` / `autoPayment`, or change the canister / host / identity, **only** when
+`allowSecurityChanges` is enabled; otherwise those request fields are ignored and reported. The two dangerous tools stay off unless
 `allowDangerousTools` is enabled.
 
 ### SSRF guard (and a known limitation)
@@ -255,14 +274,17 @@ Every outbound fetch path (`fetch_x402`, the `httpUrl` / `assetCanister` deliver
 redirect-safe `safeFetch` (both in `security.ts`):
 
 - Requires `https:` (or `http://localhost` / `127.0.0.1` / `::1` only when `localDev` is set).
-- Rejects literal private / loopback / link-local / CGNAT IPv4 ranges (10/8, 172.16/12,
-  192.168/16, 127/8, 169.254/16, 100.64/10, 0/8), the `169.254.169.254` cloud-metadata endpoint,
-  private/loopback/link-local IPv6 (including IPv4-mapped `::ffff:` forms in both dotted and
-  hex-compressed notation), and `.local` / `.internal` TLDs.
+- Rejects literal private / loopback / link-local / CGNAT / reserved IPv4 ranges (10/8,
+  172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, 0/8, 198.18/15, 240/4), the
+  `169.254.169.254` cloud-metadata endpoint, private/loopback/link-local IPv6 literals, IPv6 forms
+  that embed a private IPv4 (IPv4-mapped `::ffff:`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`), and
+  `.local` / `.internal` TLDs. Hostnames are never read as IPv6 (`fda.gov` is allowed).
 - `safeFetch` follows redirects **manually** (default max 5) and **re-validates every hop's
-  `Location` before following it**, closing the TOCTOU redirect-bypass where an allowlisted
-  origin 30x's to an internal/metadata target. The x402 probe uses the same per-hop
-  `validateRedirect` check.
+  `Location` — literal host and DNS — before following it**, closing the TOCTOU redirect-bypass
+  where an allowlisted origin 30x's to an internal/metadata target. The x402 probe goes through
+  `safeFetch` too (`probeChallenge`).
+- Fetched bodies (the x402 probe, the paid response, `fetch_content` downloads) are read up to
+  10 MiB (`readTextCapped`); a larger body is refused.
 
 > **Residual — check-vs-connect rebinding window.** DNS rebinding is closed: `safeFetch` resolves
 > every host and every redirect hop and rejects the request if *any* resolved address is
@@ -273,8 +295,10 @@ redirect-safe `safeFetch` (both in `security.ts`):
 
 ### The `call` allowlist & blocklist
 
-The generic `call` tool is restricted to read-only methods by `isCallMethodAllowed` in
-`index.ts`:
+The generic `call` tool is restricted to read methods by `isCallMethodAllowed` in `guards.ts`
+(the get-prefix fallback admits the dual-mode `getContent` / `getAssetContent` /
+`getExternalContent`, which settle a payment when passed a PaymentSignature — see the tool
+description):
 
 1. **Curated read-only allowlist (authoritative):** `listContent`, `getChunk`, `getAgentCard`,
    `getAgentId`, `verifyGrant`, `listServices`, `getJobStatus`, `getJob`, `getJobResult`,
@@ -292,19 +316,22 @@ The generic `call` tool is restricted to read-only methods by `isCallMethodAllow
 
 On startup the server prints the **effective** security posture to **stderr** (stdout is the MCP
 JSON-RPC channel) so the operator can verify what's active before the agent connects. The banner
-shows the config source (config file path or `env vars / defaults`), `perCallMaxAtomic`,
-`sessionMaxAtomic`, `localDev`, `autoPayment`, `allowSecurityChanges`, and `allowDangerousTools`,
-and warns when any loosened knob is enabled:
+shows the config source (config file path or `env vars / defaults`), the host / canister /
+identity, `perCallMaxAtomic`, `sessionMaxAtomic`, `localDev`, `autoPayment`,
+`allowSecurityChanges`, and `allowDangerousTools`, and warns when any loosened knob is enabled:
 
 ```
 ───────────────────────────────────────────────────────────────
  ic402 MCP — effective security config (operator-set, out-of-band)
    source                 : env vars / defaults
+   host                   : https://icp-api.io
+   canisterId             : rrkah-fqaaa-aaaaa-aaaaq-cai
+   identity               : /abs/path/to/identity.pem
    perCallMaxAtomic       : 1000000
    sessionMaxAtomic       : 5000000
    localDev               : false
    autoPayment            : false
-   allowSecurityChanges   : false  (LLM may retune caps via "configure")
+   allowSecurityChanges   : false  (LLM may retune caps / host / canister / identity via "configure")
    allowDangerousTools    : false  (sign_typed_data / delete_content)
 ───────────────────────────────────────────────────────────────
 ```

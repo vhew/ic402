@@ -9,21 +9,36 @@ import {
   Ic402Client,
   Ic402Error,
   settlementError402,
-  probeX402,
+  classifyNetworkError,
+  findPaymentOption,
   applyVerbatimAccepted,
   exampleIdlFactory,
 } from '@ic402/client';
 import type { SessionHandle, PaymentReceipt, VoucherSigner } from '@ic402/client';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
-import { validateFetchUrl, safeFetch, assertResolvedHostIsPublic } from './security.js';
+import {
+  validateFetchUrl,
+  safeFetch,
+  assertResolvedHostIsPublic,
+  probeChallenge,
+  readTextCapped,
+  shouldFetchRootKey,
+} from './security.js';
 import {
   parseAtomicAmount,
   checkSpend,
   resolveSecurityConfig,
+  resolveConnection,
+  resolveTargetCanister,
+  isAllowedX402Asset,
+  x402TermsMismatch,
+  reservationReleasable,
   isToolAllowed,
   isCallMethodAllowed,
   resolveOperatorConfig,
+  DEFAULT_HOST,
+  type ConnectionConfig,
   type OperatorConfig,
 } from './guards.js';
 
@@ -74,6 +89,8 @@ let allowDangerousTools = false;
 // SEC-3: state-changing admin tools (register/enable service, claim/submit job, upload content)
 // are off unless the operator opts in at startup.
 let allowAdminTools = false;
+// 2.22.0 (I8/D3): host, canister and identity, fixed by the operator at startup (main()).
+let operatorConnection: ConnectionConfig = { host: DEFAULT_HOST };
 
 const securityConfig: SecurityConfig = {
   localDev: false,
@@ -98,21 +115,18 @@ function spendGuard(amountAtomic: bigint, opts: { commit?: boolean } = {}): void
   if (opts.commit) sessionSpentAtomic += amountAtomic;
 }
 
-/** Release a reservation made by spendGuard(commit:true) when the action then failed. */
+/**
+ * Release a reservation made by spendGuard(commit:true) when the action then failed. 2.22.0 (I5):
+ * callers release only when nothing that could move funds was sent — see reservationReleasable.
+ */
 function refundSpend(amountAtomic: bigint): void {
   sessionSpentAtomic -= amountAtomic;
   if (sessionSpentAtomic < 0n) sessionSpentAtomic = 0n;
 }
 
-/**
- * True when an error signals the payment already SETTLED or was BROADCAST (funds moved) — the
- * client sets Ic402Error.fundsMoved for settle-#ok-then-job-failed and #settlementPending. On such
- * an error the reservation must be KEPT: refunding it would un-count spend that really happened and
- * let a later auto-pay exceed the cumulative session cap (and a retry would double-pay). See
- * docs/decisions/settled-then-job-failed.md (S2/S4).
- */
-function settleMayHaveMoved(e: unknown): boolean {
-  return e instanceof Ic402Error && e.fundsMoved;
+/** 2.22.0 (I8/D3): a tool's per-call canisterId override must name the configured canister. */
+function targetCanister(requested: string | undefined): string {
+  return resolveTargetCanister(requested, defaultCanisterId, allowSecurityChanges);
 }
 
 /** Standard MCP text result helper. */
@@ -136,6 +150,8 @@ function requireConfirmation(args: {
   asset?: string;
   chain?: string | number;
   note?: string;
+  /** The exact arguments the confirm:true call must repeat (fetch_x402, I3). */
+  confirmWith?: Record<string, unknown>;
 }): { content: [{ type: 'text'; text: string }] } | null {
   // Enforce caps first (only meaningful when an amount is known). SEC-0: on the CONFIRMED
   // invocation, RESERVE the amount synchronously (commit:true) so a concurrent/pipelined tool call
@@ -160,9 +176,14 @@ function requireConfirmation(args: {
       sessionMaxAtomic: securityConfig.sessionMaxAtomic.toString(),
       sessionSpentAtomic: sessionSpentAtomic.toString(),
     },
+    ...(args.confirmWith ? { confirmWith: args.confirmWith } : {}),
     instruction:
       `This action signs/moves value. Review the amount, recipient, asset, and chain above. ` +
-      `If correct, re-invoke "${args.action}" with confirm:true. Do NOT confirm automatically.`,
+      (args.confirmWith
+        ? `If correct, re-invoke "${args.action}" with confirm:true plus every confirmWith value ` +
+          `unchanged; it is refused if the server's terms changed. `
+        : `If correct, re-invoke "${args.action}" with confirm:true. `) +
+      `Do NOT confirm automatically.`,
   });
 }
 
@@ -287,7 +308,9 @@ const server = new McpServer(
       'Rules:\n' +
       '1. Call "configure" first — every other tool fails until it succeeds.\n' +
       '2. Read-only tools (never move funds): search, request_session, get_session, ' +
-      'list_sessions, list_services, get_job_result, fetch_content, call.\n' +
+      'list_sessions, list_services, get_job_result, fetch_content. call is read-only EXCEPT ' +
+      'getContent/getAssetContent/getExternalContent with a PaymentSignature, which settle a ' +
+      'payment from an existing ICRC-2 allowance (no spend cap, no confirmation).\n' +
       '3. Value-moving tools (escrow, sign, pay, settle, or spend gas): open_session, ' +
       'close_session, fetch_x402, submit_request, register_agent. session_query spends from a ' +
       'deposit already escrowed and confirmed at open_session. dispute_job mutates job state on ' +
@@ -300,8 +323,9 @@ const server = new McpServer(
       '5. Token amounts are ATOMIC units passed as decimal integer strings ("1000000" = 1.00 ' +
       'USDC at 6 decimals). Never floats; JS numbers that lose precision are rejected.\n' +
       '6. Spend caps: every capped spend must pass perCallMaxAtomic and the cumulative ' +
-      'sessionMaxAtomic. Caps, autoPayment, and localDev are operator-set at startup; ' +
-      '"configure" cannot loosen them unless the operator enabled security changes out-of-band.\n' +
+      'sessionMaxAtomic. Caps, autoPayment, localDev, and the host, canister and identity are ' +
+      'operator-set at startup; "configure" (and a per-call canisterId) cannot change them ' +
+      'unless the operator enabled security changes out-of-band.\n' +
       '7. Admin tools (upload_content, register_service, enable_service, claim_job, ' +
       'submit_job_result) and dangerous primitives (sign_typed_data, delete_content) are ' +
       'DISABLED by default and fail unless the operator enabled them at startup. If one reports ' +
@@ -315,22 +339,25 @@ const server = new McpServer(
 
 server.tool(
   'configure',
-  'Connect to an ic402-enabled ICP canister and optionally load a signing identity. MUST be ' +
-    'called before any other tool (they all fail until configured). Does not move funds. The ' +
-    'security params (autoPayment, localDev, perCallMaxAtomic, sessionMaxAtomic) are requests ' +
-    'only: they are IGNORED unless the operator started the server with ' +
+  'Connect to the ic402-enabled ICP canister the operator configured and load its signing ' +
+    'identity. MUST be called before any other tool (they all fail until configured). Does not ' +
+    'move funds. The host, canister and identity are fixed by the operator at startup ' +
+    '(IC402_MCP_HOST, IC402_MCP_CANISTER_ID, ICP_IDENTITY_PEM); the canisterId/host/identityPem ' +
+    'params and the security params (autoPayment, localDev, perCallMaxAtomic, sessionMaxAtomic) ' +
+    'are requests only: they are IGNORED unless the operator started the server with ' +
     'IC402_MCP_ALLOW_SECURITY_CHANGES=1, and the result reports any ignored fields.',
   {
     canisterId: z
       .string()
+      .optional()
       .describe(
-        'Principal of the ic402 canister to connect to (e.g. "rrkah-fqaaa-aaaaa-aaaaq-cai"). Becomes the default target for all other tools.',
+        'Principal of the ic402 canister (e.g. "rrkah-fqaaa-aaaaa-aaaaq-cai"). Omit it to use the canister the operator fixed at startup (IC402_MCP_CANISTER_ID); a different value is IGNORED unless the operator enabled security changes.',
       ),
     host: z
       .string()
-      .default('http://localhost:4944')
+      .optional()
       .describe(
-        'ICP replica/gateway URL. Default targets a local replica; the root key is auto-fetched when the host contains "localhost".',
+        "ICP replica/gateway URL. Omit it to use the operator's host (IC402_MCP_HOST, default http://localhost:4944); a different value is IGNORED unless the operator enabled security changes. The root key is fetched only with localDev and an exact localhost / 127.0.0.1 / [::1] host.",
       ),
     network: z
       .string()
@@ -340,7 +367,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Filesystem path to a secp256k1 private-key PEM (SEC1 "EC PRIVATE KEY" or PKCS#8 "PRIVATE KEY") used to sign canister calls. Falls back to the ICP_IDENTITY_PEM env var; anonymous if neither is set. An unparseable PEM is a hard error, not a silent fallback.',
+        'Filesystem path to a secp256k1 private-key PEM (SEC1 "EC PRIVATE KEY" or PKCS#8 "PRIVATE KEY"). Omit it to use the operator\'s identity (ICP_IDENTITY_PEM; anonymous if unset); a different path is IGNORED unless the operator enabled security changes. An unparseable PEM is a hard error, not a silent fallback.',
       ),
     ledger: z
       .string()
@@ -384,12 +411,45 @@ server.tool(
     perCallMaxAtomic,
     sessionMaxAtomic,
   }) => {
-    // Load identity from PEM if provided, otherwise check env, otherwise anonymous.
+    // S8: Apply the security knobs ONLY if the operator allowed LLM-driven changes;
+    // otherwise the request's localDev/autoPayment/caps are ignored and the
+    // operator/default config stands. This stops a prompt-injected model from raising
+    // its own caps or enabling localDev/autoPayment via the configure tool.
+    const resolved = resolveSecurityConfig(
+      securityConfig,
+      { localDev, autoPayment, perCallMaxAtomic, sessionMaxAtomic },
+      allowSecurityChanges,
+    );
+    // 2.22.0 (I8/D3): the same gate for where the server connects and as whom.
+    const conn = resolveConnection(
+      operatorConnection,
+      { host, canisterId, identityPem },
+      allowSecurityChanges,
+    );
+    const ignored = [...resolved.ignored, ...conn.ignored];
+    const hostUrl = conn.config.host;
+    const cid = conn.config.canisterId;
+    if (!cid) {
+      throw new Error(
+        'No canister configured: the operator sets it at startup with IC402_MCP_CANISTER_ID ' +
+          '(or "canisterId" in the --config file)' +
+          (allowSecurityChanges ? ', or pass canisterId to configure.' : '.'),
+      );
+    }
+    validateCanisterId(cid);
+    const ssrf = { localDev: resolved.config.localDev };
+    if (hostUrl !== operatorConnection.host) {
+      // A host the LLM chose (only possible under allowSecurityChanges) gets the SSRF checks.
+      const target = validateFetchUrl(hostUrl, ssrf);
+      await assertResolvedHostIsPublic(target.hostname, ssrf);
+    }
+
+    // Load identity from PEM if provided, otherwise anonymous.
     // icp identity export outputs PKCS#8 ("BEGIN PRIVATE KEY"), but
     // Secp256k1KeyIdentity.fromPem expects SEC1 ("BEGIN EC PRIVATE KEY").
     // We handle both by extracting the raw 32-byte secret key from PKCS#8.
     let identity: Secp256k1KeyIdentity | null = null;
-    const pemPath = identityPem || process.env.ICP_IDENTITY_PEM;
+    const pemPath = conn.config.identityPem;
     if (pemPath) {
       try {
         const pem = readFileSync(pemPath, 'utf-8');
@@ -427,35 +487,27 @@ server.tool(
     }
 
     agent = await HttpAgent.create({
-      host,
-      shouldFetchRootKey: host.includes('localhost'),
+      host: hostUrl,
+      // 2.22.0 (I8): only under localDev AND an exact local host (was: host.includes('localhost')).
+      shouldFetchRootKey: shouldFetchRootKey(hostUrl, resolved.config.localDev),
       identity: identity ?? undefined,
     });
 
-    defaultCanisterId = canisterId;
-    agentHost = host;
+    defaultCanisterId = cid;
+    agentHost = hostUrl;
 
-    // S8: Apply the security knobs ONLY if the operator allowed LLM-driven changes;
-    // otherwise the request's localDev/autoPayment/caps are ignored and the
-    // operator/default config stands. This stops a prompt-injected model from raising
-    // its own caps or enabling localDev/autoPayment via the configure tool.
-    const resolved = resolveSecurityConfig(
-      securityConfig,
-      { localDev, autoPayment, perCallMaxAtomic, sessionMaxAtomic },
-      allowSecurityChanges,
-    );
     securityConfig.localDev = resolved.config.localDev;
     securityConfig.autoPayment = resolved.config.autoPayment;
     securityConfig.perCallMaxAtomic = resolved.config.perCallMaxAtomic;
     securityConfig.sessionMaxAtomic = resolved.config.sessionMaxAtomic;
     const ignoredNote =
-      resolved.ignored.length > 0
-        ? ` IGNORED security params ${JSON.stringify(resolved.ignored)} — operator did not enable ` +
+      ignored.length > 0
+        ? ` IGNORED security params ${JSON.stringify(ignored)} — operator did not enable ` +
           `LLM security changes (set IC402_MCP_ALLOW_SECURITY_CHANGES=1 to allow).`
         : '';
 
     client = new Ic402Client({
-      canisterId,
+      canisterId: cid,
       actorFactory,
       identity,
       network,
@@ -471,7 +523,7 @@ server.tool(
         {
           type: 'text' as const,
           text:
-            `Connected to ${canisterId} at ${host} (network: ${network}, identity: ${identity ? identity.getPrincipal().toText() : 'anonymous'}). ` +
+            `Connected to ${cid} at ${hostUrl} (network: ${network}, identity: ${identity ? identity.getPrincipal().toText() : 'anonymous'}). ` +
             `autoPayment=${securityConfig.autoPayment}, localDev=${securityConfig.localDev}, ` +
             `perCallMaxAtomic=${securityConfig.perCallMaxAtomic}, sessionMaxAtomic=${securityConfig.sessionMaxAtomic}.` +
             ignoredNote,
@@ -499,8 +551,7 @@ server.tool(
       .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ query, canisterId }) => {
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID. Configure first or pass canisterId.');
+    const cid = targetCanister(canisterId);
     requireAgent();
 
     const actor = actorFactory(cid);
@@ -557,8 +608,7 @@ server.tool(
       .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ canisterId }) => {
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID.');
+    const cid = targetCanister(canisterId);
     requireAgent();
 
     const actor = actorFactory(cid);
@@ -663,8 +713,7 @@ server.tool(
     confirm,
   }) => {
     const c = requireClient();
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID.');
+    const cid = targetCanister(canisterId);
 
     // H13: opening a session escrows/deposits funds — cap + confirm it.
     // Determine the deposit amount: explicit maxDeposit, else the canister's
@@ -688,33 +737,36 @@ server.tool(
     });
     if (gate) return gate;
 
-    const prefs: Record<string, unknown> = {};
-    if (maxDeposit) prefs.maxDeposit = BigInt(maxDeposit);
-    if (evmTxHash) prefs.evmTxHash = evmTxHash;
-    // If authorization is provided, this is an EVM session — set evmTxHash to trigger EVM path
-    if (authorization && !evmTxHash) prefs.evmTxHash = 'eip3009-deposit';
-    if (evmNetwork) prefs.evmNetwork = evmNetwork;
-    if (evmSender) prefs.evmSender = evmSender;
-    if (evmToken) prefs.evmToken = evmToken;
-    if (evmRecipient) prefs.evmRecipient = evmRecipient;
-    if (authorization) {
-      // C5: normalize the EIP-3009 numeric fields to bigint, REJECTING JS numbers that
-      // would have already lost precision (a uint256 must be passed as a decimal string).
-      prefs.authorization = {
-        ...authorization,
-        value: parseAtomicAmount(authorization.value, 'authorization.value'),
-        validAfter: parseAtomicAmount(authorization.validAfter, 'authorization.validAfter'),
-        validBefore: parseAtomicAmount(authorization.validBefore, 'authorization.validBefore'),
-      };
-    }
-
     // SEC-0: the deposit was reserved against the cumulative cap at confirm time
-    // (requireConfirmation). Release the reservation if the deposit fails — but ONLY when funds did
-    // not move: on #settlementPending the EVM deposit was broadcast and may still mine, so keeping it
-    // reserved is correct (docs/decisions/settled-then-job-failed.md, S4). Return a structured
-    // errorResult rather than letting a raw string leak to the agent. The session key's agent is
-    // built in the try too: HttpAgent.create fetches the root key on a local host and may throw.
+    // (requireConfirmation). 2.22.0 (I5): it is released only when nothing that could move funds was
+    // sent — a failure building the request here, or an SDK refusal flagged paymentNotSent (approve
+    // #Err). Any other failure keeps it: the deposit may have been pulled or broadcast
+    // (docs/decisions/settled-then-job-failed.md, Option C). Errors return a structured errorResult.
+    let prefs: Record<string, unknown>;
+    let voucherSigner: VoucherSigner;
     try {
+      // 2.22.0 (M4): ALWAYS pass the confirmed (and reserved) deposit as maxDeposit — the SDK's own
+      // requestSession() may answer a different suggestedDeposit, and the ceiling bounds what it
+      // approves and what the canister pulls (min(suggestedDeposit, maxDeposit)).
+      prefs = { maxDeposit: depositAtomic };
+      if (evmTxHash) prefs.evmTxHash = evmTxHash;
+      // If authorization is provided, this is an EVM session — set evmTxHash to trigger EVM path
+      if (authorization && !evmTxHash) prefs.evmTxHash = 'eip3009-deposit';
+      if (evmNetwork) prefs.evmNetwork = evmNetwork;
+      if (evmSender) prefs.evmSender = evmSender;
+      if (evmToken) prefs.evmToken = evmToken;
+      if (evmRecipient) prefs.evmRecipient = evmRecipient;
+      if (authorization) {
+        // C5: normalize the EIP-3009 numeric fields to bigint, REJECTING JS numbers that
+        // would have already lost precision (a uint256 must be passed as a decimal string).
+        prefs.authorization = {
+          ...authorization,
+          value: parseAtomicAmount(authorization.value, 'authorization.value'),
+          validAfter: parseAtomicAmount(authorization.validAfter, 'authorization.validAfter'),
+          validBefore: parseAtomicAmount(authorization.validBefore, 'authorization.validBefore'),
+        };
+      }
+
       // Generate Ed25519 keypair for voucher signing
       const voucherIdentity = Ed25519KeyIdentity.generate();
       // 2.17.0: session calls go out AS this key (the IC authenticates it; the canister runs no
@@ -722,10 +774,10 @@ server.tool(
       // session. agentHost is set: requireClient() above threw if configure never ran.
       const voucherAgent = await HttpAgent.create({
         host: agentHost!,
-        shouldFetchRootKey: agentHost!.includes('localhost'),
+        shouldFetchRootKey: shouldFetchRootKey(agentHost!, securityConfig.localDev),
         identity: voucherIdentity,
       });
-      const voucherSigner: VoucherSigner = {
+      voucherSigner = {
         async sign(payload: Uint8Array): Promise<Uint8Array> {
           return new Uint8Array(await voucherIdentity.sign(payload));
         },
@@ -735,6 +787,12 @@ server.tool(
         actorFactory: (id: string) =>
           Actor.createActor(exampleIdlFactory, { agent: voucherAgent, canisterId: id }),
       };
+    } catch (e) {
+      refundSpend(depositAtomic); // nothing was sent
+      return errorResult(e);
+    }
+
+    try {
       const session = await c.openSession(
         prefs,
         voucherSigner,
@@ -758,7 +816,7 @@ server.tool(
         ],
       };
     } catch (e) {
-      if (!settleMayHaveMoved(e)) refundSpend(depositAtomic);
+      if (reservationReleasable(e)) refundSpend(depositAtomic);
       return errorResult(e);
     }
   },
@@ -951,7 +1009,7 @@ server.tool(
       // safeFetch validates the URL and re-validates every redirect hop.
       const resp = await safeFetch(String(del.httpUrl), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-      resultText = await resp.text();
+      resultText = await readTextCapped(resp); // I11: bounded read
     } else if ('assetCanister' in del) {
       // H11: validate the canister id and build the URL via the URL API (no
       // string concatenation of untrusted fields into host/path).
@@ -962,9 +1020,9 @@ server.tool(
       url.pathname = String(del.assetCanister.path ?? '/');
       const resp = await safeFetch(url.toString(), undefined, ssrfOpts());
       if (!resp.ok) throw new Error(`Asset fetch ${resp.status}: ${resp.statusText}`);
-      resultText = await resp.text();
+      resultText = await readTextCapped(resp); // I11: bounded read
     } else if ('canisterQuery' in del) {
-      const cid = validateCanisterId(canisterId ?? defaultCanisterId ?? '');
+      const cid = validateCanisterId(targetCanister(canisterId));
       requireAgent();
       const actor = actorFactory(cid);
       const { method, chunkCount } = del.canisterQuery;
@@ -1081,7 +1139,9 @@ server.tool(
     '(amount/recipient/asset/chain) if payment is demanded. confirm:true = the canister SIGNS ' +
     'the payment from its own EVM address and retries the URL with the payment header — this ' +
     'MOVES FUNDS, is checked against the spend caps, and must only be used after the human ' +
-    'approves the exact amount/recipient/asset/chain. The URL and every redirect hop are ' +
+    'approves the exact amount/recipient/asset/chain. The confirm:true call must repeat that ' +
+    'amount, recipient, asset and chain; it is refused if the server now asks anything else. ' +
+    'Only USDC on the supported chains is paid. The URL and every redirect hop are ' +
     'SSRF-validated.',
   {
     url: z
@@ -1093,7 +1153,7 @@ server.tool(
       .number()
       .default(84532)
       .describe(
-        "Fallback EVM chain ID used for the probe and when the server's payment requirement lacks a parseable eip155 network (default 84532 = Base Sepolia). The requirement's own network wins when present.",
+        'EVM chain ID whose payment option is selected from the 402 (default 84532 = Base Sepolia).',
       ),
     canisterId: z
       .string()
@@ -1107,20 +1167,35 @@ server.tool(
       .describe(
         'Two-phase gate: false (default) probes only and never signs; true signs and sends the payment shown in the prior proposal. Only pass true after the human approves.',
       ),
+    amount: z
+      .string()
+      .optional()
+      .describe(
+        'confirm:true only: the proposal amount (atomic units, decimal string) exactly as the confirm:false call returned it.',
+      ),
+    recipient: z
+      .string()
+      .optional()
+      .describe('confirm:true only: the proposal recipient (payTo) exactly as returned.'),
+    asset: z
+      .string()
+      .optional()
+      .describe('confirm:true only: the proposal asset (token contract) exactly as returned.'),
+    chain: z
+      .number()
+      .optional()
+      .describe('confirm:true only: the proposal chain exactly as returned.'),
   },
-  async ({ url, chainId, canisterId, confirm }) => {
+  async ({ url, chainId, canisterId, confirm, amount, recipient, asset, chain }) => {
     requireClient();
     requireAgent();
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID.');
+    const cid = targetCanister(canisterId);
 
-    // C2: SSRF guard — the URL is attacker-influenceable. Validate before any fetch.
+    // C2: SSRF guard — the URL is attacker-influenceable. Validate before any fetch. (The probe
+    // below goes through safeFetch, which repeats both checks on every redirect hop.)
     let target: URL;
     try {
       target = validateFetchUrl(url, ssrfOpts());
-      // SEC-0 (round 2): the probe leg below (probeX402) does NOT route through safeFetch, so its
-      // only SSRF defence is validateFetchUrl (literal host). Add the DNS-resolution guard here so a
-      // public name that resolves to an internal/metadata IP is rejected before the probe ever fetches.
       await assertResolvedHostIsPublic(target.hostname, ssrfOpts());
     } catch (e) {
       return errorResult(e);
@@ -1128,43 +1203,57 @@ server.tool(
     const safeUrl = target.toString();
 
     try {
-      // 1. Probe (client-side HTTP, with 15s timeout)
+      // 1. Probe (client-side HTTP, with 15s timeout). 2.22.0 (I11): through probeChallenge —
+      // safeFetch (literal + DNS check on every redirect hop) and a capped body read.
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15_000);
-      let probeResult;
+      let challenge: Awaited<ReturnType<typeof probeChallenge>>;
       try {
-        probeResult = await probeX402(
-          safeUrl,
-          chainId,
-          { signal: controller.signal },
-          {
-            // S2: re-validate every redirect hop so an allowlisted origin cannot 30x us to
-            // an internal/metadata target during the x402 probe.
-            validateRedirect: (u) => {
-              validateFetchUrl(u, ssrfOpts());
-            },
-            maxRedirects: 5,
-          },
-        );
+        challenge = await probeChallenge(safeUrl, { signal: controller.signal }, ssrfOpts());
+      } catch (e) {
+        return errorResult(classifyNetworkError(e));
       } finally {
         clearTimeout(timeout);
       }
-      if (probeResult.status === 'free') {
-        return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(serialize(probeResult), null, 2) },
-          ],
-        };
+      if (challenge.status !== 402) {
+        if (challenge.ok) {
+          return textResult({ status: 'free', code: challenge.status, body: challenge.body });
+        }
+        return errorResult(
+          new Ic402Error('http_error', `HTTP ${challenge.status}: ${challenge.body.slice(0, 200)}`),
+        );
       }
-      if (probeResult.status === 'error') {
-        return {
-          content: [
-            { type: 'text' as const, text: JSON.stringify(serialize(probeResult), null, 2) },
-          ],
-        };
+      const opt = findPaymentOption(challenge.paymentJson ?? '', chainId);
+      if (!opt) {
+        return errorResult(
+          new Ic402Error(
+            'no_match',
+            `No payment option for eip155:${chainId} in the 402 response — the server does not advertise that chain. Inspect the accepts[] networks in the 402 body and pass one of them as chainId.`,
+          ),
+        );
       }
-      const opt = probeResult.paymentOption;
       const optionChainId = parseInt(opt.network.replace('eip155:', ''), 10) || chainId;
+
+      // 2.22.0 (I3): pay only USDC on a supported chain — the caps count 6-decimal USDC units.
+      if (!isAllowedX402Asset(optionChainId, opt.asset)) {
+        return errorResult(
+          new Ic402Error(
+            'no_match',
+            `Refusing to pay in asset ${opt.asset || '(none)'} on chain ${optionChainId}: fetch_x402 pays only USDC on Base, Ethereum, Avalanche, Optimism and Arbitrum (and their testnets). Nothing was signed.`,
+          ),
+        );
+      }
+      const terms = {
+        amount: opt.amount,
+        recipient: opt.recipient,
+        asset: opt.asset,
+        chain: optionChainId,
+      };
+      // 2.22.0 (I3): confirm:true re-probes; sign only the terms the human confirmed.
+      if (confirm) {
+        const mismatch = x402TermsMismatch({ amount, recipient, asset, chain }, terms);
+        if (mismatch) return errorResult(new Ic402Error('no_match', mismatch));
+      }
 
       // C2 + H13: cap + confirmation gate BEFORE signing. The canister signs
       // from its own EVM address, so an attacker-chosen recipient/amount must
@@ -1177,6 +1266,14 @@ server.tool(
         asset: opt.asset,
         chain: optionChainId,
         note: `Signing an x402 payment for ${safeUrl}`,
+        confirmWith: {
+          url,
+          chainId,
+          amount: opt.amount.toString(),
+          recipient: opt.recipient,
+          asset: opt.asset,
+          chain: optionChainId,
+        },
       });
       if (gate) return gate;
 
@@ -1223,7 +1320,7 @@ server.tool(
       } finally {
         clearTimeout(retryTimeout);
       }
-      const body = await paidResponse.text();
+      const body = await readTextCapped(paidResponse); // I11: bounded read
 
       if (paidResponse.ok) {
         return {
@@ -1294,8 +1391,7 @@ server.tool(
   },
   async ({ chainId, canisterId, rpcUrl, confirm }) => {
     const c = requireClient();
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID.');
+    targetCanister(canisterId); // I8/D3: refuses a canister other than the configured one
 
     // H13: register_agent signs + broadcasts a tx from the canister's EVM
     // address (spends native gas). Validate any custom RPC URL against SSRF
@@ -1368,7 +1464,8 @@ server.tool(
   'submit_request',
   'Submit a marketplace service request; MOVES FUNDS when the service is paid. Flow: the price ' +
     'is quoted via a read-only query first; a total of 0 (free or session-billed) submits ' +
-    'immediately with no payment; a paid service requires BOTH operator-enabled autoPayment AND ' +
+    'immediately and pays nothing (refused if the canister then demands payment); a paid ' +
+    'service requires BOTH operator-enabled autoPayment AND ' +
     'confirm:true. With confirm:false it returns a confirmation_required proposal with the ' +
     'exact total (price + ledger fee) — the amount the spend caps are checked against. Returns ' +
     '{jobId} (plus paidAmount when paid); poll the result with get_job_result.',
@@ -1391,10 +1488,9 @@ server.tool(
     if (!cid) throw new Error('No canister ID.');
     const encoded = new TextEncoder().encode(params);
 
-    // SEC-0 (round 2): tracks the amount reserved at confirm time so a failed submit (where NO
-    // value settled — approve error / error-variant / transient throw) RELEASES the reservation,
-    // instead of permanently burning cap headroom toward a self-inflicted spend-cap DoS. Stays 0
-    // (no refund) for any throw before the gate passed, so a pre-reservation error never over-refunds.
+    // SEC-0 (round 2): tracks the amount reserved at confirm time so a failed submit that sent no
+    // payment RELEASES the reservation (no self-inflicted spend-cap DoS). Stays 0 (no refund) for
+    // any throw before the gate passed, so a pre-reservation error never over-refunds.
     let reservedAmount = 0n;
     try {
       // C4: discover the price via a READ-ONLY query (no nonce minted), instead of the prior
@@ -1430,9 +1526,11 @@ server.tool(
       const fee = BigInt(String(q.fee ?? 0n));
       const amountAtomic = BigInt(String(q.total ?? price + fee));
 
-      // Free / session-billed services quote total 0 — submit directly (no payment).
+      // Free / session-billed services quote total 0 — submit directly (no payment). 2.22.0 (M4):
+      // the quote is an uncertified query, so the submit carries a ceiling of 0 — if the update
+      // call asks for payment anyway, the SDK refuses before approving anything.
       if (amountAtomic === 0n) {
-        const result = await c.submitServiceRequest(serviceId, encoded);
+        const result = await c.submitServiceRequest(serviceId, encoded, { maxAmount: 0n });
         return textResult({ status: 'ok', jobId: result.jobId });
       }
 
@@ -1462,21 +1560,23 @@ server.tool(
       // can release it on a no-money-moved failure (and ONLY then — pre-gate throws leave it 0).
       reservedAmount = amountAtomic;
 
-      // Confirmed and within caps — the client performs the single probe + approve + pay.
-      const result = await c.submitServiceRequest(serviceId, encoded);
+      // Confirmed and within caps — the client performs the single probe + approve + pay. 2.22.0
+      // (M4): the confirmed (and reserved) total is the SDK's ceiling, so the update call's
+      // #paymentRequired cannot make it approve more than the human saw.
+      const result = await c.submitServiceRequest(serviceId, encoded, { maxAmount: amountAtomic });
       return textResult({
         status: 'ok',
         jobId: result.jobId,
-        paidAmount: amountAtomic.toString(),
+        // What the SDK actually approved and paid, not the quote.
+        paidAmount: (result.paidAmount ?? 0n).toString(),
       });
     } catch (e) {
-      // SEC-0 (round 2): submitServiceRequest threw without settling (approve error, error-variant,
-      // transient) — release the confirm-time reservation so repeated failed submits don't drain the
-      // cumulative cap. reservedAmount is 0 for any throw before the gate passed, so this is safe.
-      // BUT NOT when the payment already settled (settle #ok then job-create failed, or
-      // #settlementPending): refunding there would un-count real spend and let a later auto-pay
-      // exceed the cap. Keep the reservation on those (docs/decisions/settled-then-job-failed.md, S2).
-      if (reservedAmount > 0n && !settleMayHaveMoved(e)) refundSpend(reservedAmount);
+      // 2.22.0 (I5): release the confirm-time reservation ONLY when the SDK proves no payment was
+      // sent (paymentNotSent: ceiling refusal, approve #Err, the unpaid request refused). A transport
+      // timeout or reject after the paying call, or any post-payment error, keeps it — the payment
+      // may have moved (docs/decisions/settled-then-job-failed.md, Option C). reservedAmount is 0
+      // for any throw before the gate passed.
+      if (reservedAmount > 0n && reservationReleasable(e)) refundSpend(reservedAmount);
       return errorResult(e);
     }
   },
@@ -1548,12 +1648,14 @@ server.tool(
 
 server.tool(
   'call',
-  'Escape hatch: invoke a READ-ONLY query method on the canister. Allowed: a curated getter ' +
-    'allowlist (listContent, getChunk, getAgentCard, getAgentId, verifyGrant, listServices, ' +
+  'Escape hatch: invoke a read method on the canister. Allowed: a curated getter allowlist ' +
+    '(listContent, getChunk, getAgentCard, getAgentId, verifyGrant, listServices, ' +
     'getJobStatus, getJob, getJobResult, keccak256, getPolicyConfig), plus other methods named ' +
-    'get*/list*/fetch*/is* whose names contain no state-changing keywords. Any signing, ' +
-    'payment, admin, or otherwise state-changing method is rejected — use its dedicated tool ' +
-    'instead. No funds moved.',
+    'get*/list*/fetch*/is* whose names contain no state-changing keywords. Signing, admin, and ' +
+    'other state-changing methods are rejected — use the dedicated tool instead. CAN MOVE FUNDS: ' +
+    'getContent / getAssetContent / getExternalContent called WITH a PaymentSignature settle a ' +
+    'payment from an ICRC-2 allowance the payer already granted — no spend cap and no ' +
+    'confirmation apply. Without a signature they only return the 402 challenge.',
   {
     method: z
       .string()
@@ -1572,8 +1674,7 @@ server.tool(
       .describe('Target canister (defaults to the canister set by configure).'),
   },
   async ({ method, args, canisterId }) => {
-    const cid = canisterId ?? defaultCanisterId;
-    if (!cid) throw new Error('No canister ID.');
+    const cid = targetCanister(canisterId);
     requireAgent();
 
     // C3: restrict the generic call path to read-only / query methods.
@@ -1667,8 +1768,7 @@ function adminTool(
           ),
         );
       }
-      const cid = canisterId ?? defaultCanisterId;
-      if (!cid) throw new Error('No canister ID.');
+      const cid = targetCanister(canisterId);
       requireAgent();
       const gate = requireConfirmation({ action: toolName, confirm, note });
       if (gate) return gate;
@@ -1767,12 +1867,17 @@ function printSecurityBanner(cfg: OperatorConfig, source: string | null): void {
   L('───────────────────────────────────────────────────────────────');
   L(' ic402 MCP — effective security config (operator-set, out-of-band)');
   L(`   source                 : ${source ? `config file: ${source}` : 'env vars / defaults'}`);
+  L(`   host                   : ${cfg.connection.host}`);
+  L(
+    `   canisterId             : ${cfg.connection.canisterId ?? '(none: configure needs allowSecurityChanges to set one)'}`,
+  );
+  L(`   identity               : ${cfg.connection.identityPem ?? 'anonymous'}`);
   L(`   perCallMaxAtomic       : ${cfg.security.perCallMaxAtomic}`);
   L(`   sessionMaxAtomic       : ${cfg.security.sessionMaxAtomic}`);
   L(`   localDev               : ${cfg.security.localDev}`);
   L(`   autoPayment            : ${cfg.security.autoPayment}`);
   L(
-    `   allowSecurityChanges   : ${cfg.allowSecurityChanges}  (LLM may retune caps via "configure")`,
+    `   allowSecurityChanges   : ${cfg.allowSecurityChanges}  (LLM may retune caps / host / canister / identity via "configure")`,
   );
   L(`   allowDangerousTools    : ${cfg.allowDangerousTools}  (sign_typed_data / delete_content)`);
   L(
@@ -1813,6 +1918,7 @@ async function main() {
   allowSecurityChanges = cfg.allowSecurityChanges;
   allowDangerousTools = cfg.allowDangerousTools;
   allowAdminTools = cfg.allowAdminTools;
+  operatorConnection = cfg.connection;
   printSecurityBanner(cfg, configPath);
 
   const transport = new StdioServerTransport();
