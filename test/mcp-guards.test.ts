@@ -7,6 +7,7 @@ import {
   resolveTargetCanister,
   isAllowedX402Asset,
   x402TermsMismatch,
+  confirmedAmountMismatch,
   reservationReleasable,
   icrc2PaymentCost,
   isToolAllowed,
@@ -357,5 +358,19 @@ describe('icrc2PaymentCost (fee accounting)', () => {
     // a session deposit pulled from an allowance the payer granted elsewhere (no approve here)
     expect(icrc2PaymentCost(50_000n, 10_000n, false)).toBe(60_000n);
     expect(icrc2PaymentCost(0n, 0n, true)).toBe(0n);
+  });
+});
+
+// 2.22.0: submit_request / open_session with confirm:true pay only the amount the human confirmed.
+describe('confirmedAmountMismatch (confirm binding)', () => {
+  // Fails on: the binding accepting a missing amount or a canister that now asks something else.
+  it('refuses a missing, malformed or changed amount; accepts the same one', () => {
+    expect(confirmedAmountMismatch('amount', '10100', 10_100n)).toBeNull();
+    expect(confirmedAmountMismatch('amount', undefined, 10_100n)).toMatch(
+      /must repeat the proposal/,
+    );
+    expect(confirmedAmountMismatch('amount', '10100', 20_100n)).toMatch(/now asks 20100/);
+    expect(confirmedAmountMismatch('maxDeposit', '50000', 40_000n)).toMatch(/maxDeposit 50000/);
+    expect(confirmedAmountMismatch('maxDeposit', '0x10', 16n)).toMatch(/Invalid maxDeposit/);
   });
 });

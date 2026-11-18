@@ -203,8 +203,9 @@ knob is active.
 
 The agent-facing economy runs on four flows, each mapped to concrete tools. Money-moving tools
 return a structured `confirmation_required` proposal (amount / recipient / asset / chain) when
-called with `confirm:false`, and only act on an explicit `confirm:true` — so the agent (and you)
-always see the price before anything is signed.
+called with `confirm:false`, and only act on an explicit `confirm:true` that repeats the
+proposal's `confirmWith` values — so the agent (and you) always see the price before anything is
+signed, and nothing is paid if the price changed in between.
 
 **Pay any x402 API on the open web.** `fetch_x402` runs the full flow against an x402-gated URL:
 probe it, have the canister sign the USDC payment with its threshold-ECDSA key on the requested

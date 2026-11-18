@@ -177,7 +177,9 @@ amount / recipient / asset / chain):
   `confirm:true` **plus the proposal's `amount`, `recipient`, `asset` and `chain`** (returned as
   `confirmWith`) — the re-probe is refused if the server's terms changed. Pays only USDC on the
   supported chains (`X402_USDC_BY_CHAIN` in `guards.ts`). SSRF-guarded on the URL and every
-  redirect hop (literal host + DNS), with a capped body read.
+  redirect hop (literal host + DNS), with a capped body read. A failure after the paid request
+  is sent (network error, the 15 s timeout, an oversized body, a non-402 status) is reported
+  with `fundsMoved`: the payment may have settled, so do not pay again.
 - **`fetch_content`** — fetch content from a `ContentDelivery` response. Supports `inline`,
   `httpUrl` (SSRF-guarded `safeFetch`), `assetCanister` (validated canister id + URL-API origin),
   and `canisterQuery` (restricted to the `getChunk` / `getContent` query methods).
@@ -186,7 +188,8 @@ amount / recipient / asset / chain):
   capped + confirmed and passed to the client as `maxDeposit` (the most it approves and the
   canister pulls). The caps and the proposal count what leaves the wallet: on ICP the deposit
   plus the ledger's transfer fee and, when the client approves, the approve fee (`totalCost` in
-  the result).
+  the result). The `confirm:true` call must repeat the proposal's `confirmWith` values,
+  including `maxDeposit`, so it never pays a fresh `suggestedDeposit` the human did not see.
 - **`close_session`** — settle the consumed amount on-chain and refund the remainder; returns a
   payment receipt. Requires `confirm:true` (the consumed amount was already counted at deposit
   time, so it is not re-charged against the cap).
@@ -197,7 +200,9 @@ amount / recipient / asset / chain):
   charge (`total` = price + its fee) plus the ledger's transfer and approve fees (`icrc1_fee`,
   queried as the client does). The charge is passed to the client as `maxAmount`, so the update
   call cannot make it approve more; `paidAmount` is what the client actually paid and
-  `totalCost` adds the ledger fees. Free /
+  `totalCost` adds the ledger fees. The `confirm:true` call must repeat the proposal's
+  `confirmWith` values, including the charge as `amount`, and is refused if the canister now
+  asks a different amount. Free /
   session-billed services (total `0`) submit with `maxAmount: 0` — refused if the canister then
   demands payment.
 - **`register_agent`** — register the canister as an ERC-8004 agent on Base: get nonce + gas →
