@@ -72,3 +72,13 @@ Entry format:
 - [verified] Implementation 383b7fe and handoff efc63c1 are both on origin/chore/agent-handoff.
   master remains unchanged at 3af30b4. Read the branch-tip CURRENT correction when resuming.
 - [open] The existing doctor/readiness and production guard decisions remain unresolved.
+
+
+### Resume confirmation — HO-20261108T2116Z-codex (2026-11-18)
+
+- [approved] Claude resumed on 2026-11-09; the owner confirmed the restatement and all nine
+  recommendations on 2026-11-18 (“1 confirmed.”). Authority: `authorities/2026-11-18-resume-confirmation.md`.
+- [approved] Push authority is PROTOCOL §2's rule again (STANDING S6 correction 2); lapsed
+  update-scoped lines are marked in one §2 correction; three working agreements published as
+  S7–S9; doctor frozen and advisory; H3 deferred; H4 held; handoff-system work closed.
+- [open] Q4: a product-only `AGENTS.md` on `master`.

@@ -117,6 +117,14 @@ prefix is how §4 finds handoffs, so use it exactly.
 > permitted by the update request; no push or synchronized-handoff claim is permitted. Future
 > formal-handoff requests remain subject to the owner's latest explicit publishing limits.
 
+> [approved] **2026-11-18 correction beside the correction above:** “this update” ended when the
+> owner approved its push (8d64cf2) and it was published (974116e). The owner confirmed that the
+> authorization rule above applies again (`STANDING.md` S6 correction 2). These update-scoped
+> lines are therefore no longer in force: the correction above; §3 step 11's “No push during the
+> current update.”; the 2026-11-08 addenda in `AGENTS.md` and `CLAUDE.md`, “The current update
+> must remain local until the owner asks to push (R6).”; and `VALIDATION.md`'s “These commits are
+> local, not published.” Source: `authorities/2026-11-18-resume-confirmation.md` decisions 1–2.
+
 ## 3. Formal handoff (all three "Prepare …" commands)
 
 The same procedure applies whether the receiver is the other agent, the same agent on another
@@ -286,6 +294,9 @@ These standing rules apply to both agents:
 > The existing agreements below remain in effect. Where their original owner quotation is
 > unavailable, label that provenance open; do not invent quotes or copy sibling-project examples.
 > Amend a standing quote only on a new owner ruling, keeping a dated correction beside the old.
+>
+> [approved] **2026-11-18 addition:** the owner confirmed publishing three agreements with dates:
+> tags (`STANDING.md` S7), propose before modifying (S8) and report size first (S9).
 
 - **Handoff isolation.** The owner requires this setup and all handoff records to stay off
   `master` permanently. Use `chore/agent-handoff` without merging it into product branches.
@@ -361,6 +372,11 @@ in §2.
   remains unread. Doctor deploy must fail closed until an authoritative public-safe target is
   provided. A guard must compare local mapping to that target before planning and use
   `icp deploy --no-create`; a separate wrapper does not prove all private entrypoints guarded.
+
+> [approved] **2026-11-18 addition:** the owner confirmed “freeze it as advisory, run the tools
+> level on each resume, and add no new checks without a size estimate first.” Source: `authorities/2026-11-18-resume-confirmation.md`
+> decision 3. [assumed] Advisory means a NOT READY verdict is reported and blocks only work that
+> needs the failing tool; it does not block reading, planning or unrelated work.
 
 ## 10. Ledger, rationale and fact checking — 2026-11-08 additions
 

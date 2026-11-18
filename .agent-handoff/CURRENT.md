@@ -7,6 +7,23 @@
 > handoff. Q1 is resolved; Claude can now use “Resume from Codex” after fetching and reading the
 > latest branch-tip corrections. H3/H4 and the NOT READY doctor verdict remain open.
 > [approved] This approval is limited to this handoff; STANDING.md S6 still governs other pushes.
+>
+> [approved] **2026-11-18 resume confirmation:** Claude resumed this handoff on 2026-11-09 and the
+> owner confirmed its restatement and all nine recommendations with “1 confirmed.” (`authorities/2026-11-18-resume-confirmation.md`).
+> It supersedes the open rows and questions below:
+> - H1 done. H2 done; the doctor is frozen and advisory (PROTOCOL §9 addition). H3 deferred until a
+>   product task needs `mops test`, then the shell is fixed with the owner's OK. H4 held: no mainnet
+>   deploy is planned. H5 done: published 2026-11-08.
+> - Q1 resolved (pushed). Q2 resolved as H3. Q3 resolved as H4. [open] Q4: should `master` get a
+>   product-only `AGENTS.md`, so Codex sessions in the main checkout get the project instructions?
+>   Unanswered.
+> - Push authority: PROTOCOL §2's rule again (`STANDING.md` S6 correction 2); the lapsed
+>   update-scoped lines are listed in one PROTOCOL §2 correction.
+> - [verified] The PocketIC processes in §9 belong to a sibling project's local network (read-only
+>   check, 2026-11-09). They are not ic402's to stop.
+> - [approved] The handoff-system work is closed. Product work continues through proposals: PR #51
+>   (viem colon-name interop, scoped `setup.sh` cleanup, `RELEASING.md`) and a ledger-deduplication
+>   design the owner asked to have done by Fable (“3 design fix use fable.”).
 
 ## 1. Read this first
 
