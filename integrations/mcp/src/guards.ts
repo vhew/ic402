@@ -439,6 +439,26 @@ export function x402TermsMismatch(
 }
 
 // ---------------------------------------------------------------------------
+// ICRC-2 payment cost (fee accounting)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ledger fee @ic402/client uses when the ledger actor has no icrc1_fee (Ic402Client.approvalFor);
+ * the MCP's fallback when no ledger is configured.
+ */
+export const LEGACY_LEDGER_FEE = 100_000n;
+
+/**
+ * 2.22.0: what an ICRC-2 auto-payment of `amount` takes from the payer's account — the amount, the
+ * transfer fee icrc2_transfer_from charges on top (the SDK approves amount + fee), and, when the
+ * payment includes an icrc2_approve call, that call's own fee. The spend caps and the human
+ * confirmation count this; before 2.22.0 they counted the bare amount and missed the fees.
+ */
+export function icrc2PaymentCost(amount: bigint, ledgerFee: bigint, approves: boolean): bigint {
+  return amount + ledgerFee + (approves ? ledgerFee : 0n);
+}
+
+// ---------------------------------------------------------------------------
 // Spend-reservation release (I5)
 // ---------------------------------------------------------------------------
 

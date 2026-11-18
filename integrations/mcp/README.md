@@ -183,17 +183,21 @@ amount / recipient / asset / chain):
   and `canisterQuery` (restricted to the `getChunk` / `getContent` query methods).
 - **`open_session`** — open a streaming micropayment session. ICP uses ICRC-2 escrow; EVM takes
   an `evmTxHash` (and EIP-3009 `authorization`) proving the USDC deposit. The escrow deposit is
-  capped + confirmed, counted against the cumulative cap, and passed to the client as
-  `maxDeposit` (the most it approves and the canister pulls).
+  capped + confirmed and passed to the client as `maxDeposit` (the most it approves and the
+  canister pulls). The caps and the proposal count what leaves the wallet: on ICP the deposit
+  plus the ledger's transfer fee and, when the client approves, the approve fee (`totalCost` in
+  the result).
 - **`close_session`** — settle the consumed amount on-chain and refund the remainder; returns a
   payment receipt. Requires `confirm:true` (the consumed amount was already counted at deposit
   time, so it is not re-charged against the cap).
 - **`submit_request`** — submit a paid service request. If the service demands payment, the
   operator must have opted into `autoPayment` *and* the caller must pass `confirm:true` after
   reviewing the amount. The price is discovered via a **read-only** `quoteServiceRequest` query
-  (no nonce minted), and the cap is checked against the **total** (price + ledger fee), not the
-  bare price. The confirmed total is passed to the client as `maxAmount`, so the update call
-  cannot make it approve more; `paidAmount` is what the client actually paid. Free /
+  (no nonce minted). The cap and the proposal count what leaves the wallet: the canister's
+  charge (`total` = price + its fee) plus the ledger's transfer and approve fees (`icrc1_fee`,
+  queried as the client does). The charge is passed to the client as `maxAmount`, so the update
+  call cannot make it approve more; `paidAmount` is what the client actually paid and
+  `totalCost` adds the ledger fees. Free /
   session-billed services (total `0`) submit with `maxAmount: 0` — refused if the canister then
   demands payment.
 - **`register_agent`** — register the canister as an ERC-8004 agent on Base: get nonce + gas →

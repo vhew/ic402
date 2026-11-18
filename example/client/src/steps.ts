@@ -166,6 +166,18 @@ async function mcpCallAndRender(
     return res;
   }
 
+  if (res?.status === 'confirmation_required') {
+    // Two-phase tools: the confirm:false call proposes, nothing is signed or paid yet.
+    const p = (res.proposal ?? {}) as Record<string, unknown>;
+    info(`${tool}: proposal (nothing signed yet)`);
+    if (p.amount != null)
+      state('Amount', `${p.amount} USDC units ($${formatUsdc(BigInt(String(p.amount)))})`);
+    if (p.recipient != null) state('Pay to', String(p.recipient));
+    if (p.asset != null) state('Asset', String(p.asset));
+    if (p.chain != null) state('Chain', String(p.chain));
+    return res;
+  }
+
   if (res?.status === 'free') {
     success(`Free response — HTTP ${res.code}`);
     if (res.body != null) state('Body', String(res.body).slice(0, 120));
@@ -1241,6 +1253,10 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         info(
           'the client library does the rest — probe the URL, parse the 402, retry with the signed header.',
         );
+        info(
+          'Two calls: confirm:false proposes the payment; confirm:true repeats those exact terms, and is',
+        );
+        info("refused if the server's 402 changed in between.");
 
         section('Live x402 payment');
         const x402Url = 'https://sandbox.node4all.com/v1/x402-test';
@@ -1252,19 +1268,29 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         );
         info('');
 
-        info('Probing → signing → paying...');
+        info('Probing (confirm:false — nothing is signed)...');
         try {
-          const res = await mcpCallAndRender(
+          let res = await mcpCallAndRender(
             client,
             'fetch_x402',
-            { url: x402Url, chainId: 84532, confirm: true },
+            { url: x402Url, chainId: 84532 },
             90_000,
           );
+          if (res?.status === 'confirmation_required') {
+            // The MCP pays only the terms the human confirmed: send them back exactly as proposed.
+            info('Paying exactly the proposed terms (confirm:true + confirmWith)...');
+            res = await mcpCallAndRender(
+              client,
+              'fetch_x402',
+              { ...(res.confirmWith as Record<string, unknown>), confirm: true },
+              90_000,
+            );
+          }
           // mcpCallAndRender never throws — it returns {status} and warns on error. Only claim
           // the paid round-trip when it actually settled.
           if (res?.status === 'ok') {
             highlight(
-              'One call: probe → canister signs → pay → content. All in the client library.',
+              'Probe and propose, then the canister signs the confirmed terms → pay → content.',
             );
           } else if (res?.status === 'free') {
             info('Resource returned content with no 402 challenge — nothing to pay.');
