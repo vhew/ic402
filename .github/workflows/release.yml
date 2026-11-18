@@ -129,10 +129,7 @@ jobs:
           printf '%s\n' "$MOPS_IDENTITY_PEM" > "$RUNNER_TEMP/mops.pem"
           mops user import --no-encrypt -- "$(cat "$RUNNER_TEMP/mops.pem")"
           rm -f "$RUNNER_TEMP/mops.pem"
-          set +e
-          OUT="$(mops publish --no-bench 2>&1)"; RC=$?
-          set -e
-          echo "$OUT"
-          if [ "$RC" -ne 0 ] && ! echo "$OUT" | grep -q "already published"; then
-            echo "::error::mops publish failed"; exit 1
-          fi
+          # A registry reject does not prove the publish failed (v2.21.0: finishPublish timed out
+          # with IC0406 and the version landed), so the script checks the registry before failing
+          # and retries once. Skips a version already on mops, so a re-run is safe.
+          bash scripts/publish-mops.sh
