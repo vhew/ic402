@@ -687,6 +687,13 @@ module {
     /// the system raised before the ledger ran is still #settlementFailed (nonce unlocked).
     /// 2.21.0, with setLedgerDedup on: a pending ICP charge made through settleFrom is resolved by
     /// the payer calling settleFrom again with the SAME payment (one receipt, never a second charge).
+    /// 2.22.0: a payment whose nonce another settle still holds IN FLIGHT gets #policyDenied("A
+    /// settlement with this payment is already in progress — …"): nothing is known to have moved;
+    /// retry the same payment shortly. #settlementPending now means only the unknown outcome above
+    /// (including any lock restored by loadStable). A pending ICP charge made over `settle` (HTTP)
+    /// releases the named sender's daily reservation; one made through settleFrom keeps it.
+    /// The clean-up also keeps a nonce whose settlement is still in flight for 24 hours past its
+    /// expiry.
     ///
     /// Multi-token (v2.5.0): the EVM verify + on-chain execution key off `signature.asset`
     /// (the EIP-712 verifyingContract the payer signed for); `asset = null` falls back to the
@@ -742,6 +749,12 @@ module {
                   case (?p) { return await* resolvePendingCharge(signature, expectedAmount, p) };
                   case (null) {};
                 };
+              };
+              // 2.22.0: in flight is not "funds may have moved". Nonces are predictable and not bound
+              // to a payer, so the attempt holding the lock may be anyone's (an HTTP settle naming
+              // any sender, or another principal's settleFrom); until it returns, answer "busy".
+              if (not nonceManager.outcomeIsUnknown(signature.nonce)) {
+                return #policyDenied("A settlement with this payment is already in progress — retry this same payment in a few seconds; do not pay with a new nonce.");
               };
               return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew.");
             };
@@ -935,10 +948,12 @@ module {
             // not re-broadcast; release the daily reservation since no receipt
             // is issued. Caller MUST NOT deliver value on #settlementPending.
             policy.releaseDaily(evmSender, evmSpendDay, amount);
+            nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
             return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain).");
           };
           case (#err(e)) {
             policy.releaseDaily(evmSender, evmSpendDay, amount);
+            nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
             return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending.");
           };
         };
@@ -956,16 +971,18 @@ module {
         };
       };
 
-      // Validate sender before Principal.fromText (which traps on invalid input)
       if (signature.sender == "" or signature.sender.size() < 5) {
         nonceManager.unlock(signature.nonce);
         return #invalidSignature("Invalid sender principal: too short or empty");
       };
-      let senderPrincipal = try {
-        Principal.fromText(signature.sender);
-      } catch (_) {
-        nonceManager.unlock(signature.nonce);
-        return #invalidSignature("Invalid sender principal: " # signature.sender);
+      // 2.22.0: Principal.fromText TRAPS on malformed text, and a trap is not caught by try/catch
+      // (only rejects are), so a malformed sender over HTTP was a 5xx. Parse without trapping.
+      let senderPrincipal = switch (Utils.principalFromText(signature.sender)) {
+        case (?p) { p };
+        case (null) {
+          nonceManager.unlock(signature.nonce);
+          return #invalidSignature("Invalid sender principal: " # signature.sender);
+        };
       };
       // 2.21.1: the canister itself is never a payer. Its icrc2_transfer_from pulls `from` as the
       // spender, and DFINITY ledgers skip the allowance check when `from` is the caller's own
@@ -1053,7 +1070,12 @@ module {
         // committed (see Utils.rejectedBeforeExecution). Before, this unlocked the nonce and
         // reported #settlementFailed, so re-submitting the same payment could charge the payer a
         // second time. Now the nonce stays locked (the same payment cannot be replayed), the daily
-        // reservation stays held, and no receipt is issued.
+        // reservation stays held (2.22.0: settleFrom only, below), and no receipt is issued.
+        nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
+        // 2.22.0: over HTTP (`settle`) the sender is only claimed, so its reservation protected
+        // nobody, and junk settles during a ledger outage could fill a victim's maxPerDay. Release
+        // it there; a settleFrom charge keeps it (its re-submit issues the receipt against it).
+        if (not payerIsCaller) { policy.releaseDaily(senderPrincipal, icpSpendDay, amount) };
         if (dedup and payerIsCaller) {
           // 2.21.0: make the stored transfer available, so the payer's settleFrom with this payment
           // can resolve it.
@@ -1381,8 +1403,9 @@ module {
 
     /// Start recurring timers: close expired/idle sessions every 60s (then GC closed sessions
     /// older than 24h), and hourly GC of daily-spend, rate-limit, and revoked-grant state.
-    /// Also one-shot: auto-initializes the HMAC seed from raw_rand, and derives the canister's
-    /// EVM address via tECDSA when config.ecdsaKeyName is set.
+    /// Also one-shot: auto-initializes the HMAC seed from raw_rand (2.22.0: retried a few times
+    /// on failure; grantsReady() says when it is set), and derives the canister's EVM address via
+    /// tECDSA when config.ecdsaKeyName is set.
     /// Must be called from actor context (requires <system> capability). A consumer that does
     /// not call this must schedule closeExpiredSessions()/GC itself, or sessions never expire
     /// and rate-limit logs grow unbounded.
@@ -1422,11 +1445,7 @@ module {
       };
 
       // Auto-init HMAC seed from randomness on first deployment
-      ignore Timer.setTimer<system>(#seconds 0, func() : async () {
-        let ic : actor { raw_rand : () -> async Blob } = actor "aaaaa-aa";
-        let seed = await ic.raw_rand();
-        ignore grants.initHmacSeed(seed);
-      });
+      seedGrants<system>(0);
 
       // Auto-derive EVM address from tECDSA key if configured
       switch (config.ecdsaKeyName) {
@@ -1439,6 +1458,20 @@ module {
         };
         case (null) {};
       };
+    };
+
+    // The grant HMAC seed, from raw_rand in a one-shot timer. 2.22.0: a failed raw_rand is retried
+    // (5 more one-shots, 5 s to 80 s apart, about 2.5 minutes in all), since issueGrant traps until
+    // seeded (grantsReady). Already seeded (restored by loadStable on upgrade): no call at all.
+    func seedGrants<system>(attempt : Nat) {
+      let delay = if (attempt == 0) { 0 } else { 5 * 2 ** (attempt - 1 : Nat) };
+      ignore Timer.setTimer<system>(#seconds delay, func() : async () {
+        if (grants.grantsReady()) return;
+        let ic : actor { raw_rand : () -> async Blob } = actor "aaaaa-aa";
+        try { ignore grants.initHmacSeed(await ic.raw_rand()) } catch (_) {
+          if (attempt < 5) { seedGrants<system>(attempt + 1) };
+        };
+      });
     };
 
     /// Whether startTimers armed the hourly clean-up (false after startTimersWith({ hourlyGc =
@@ -1646,7 +1679,15 @@ module {
       grants.initHmacSeed(randomBlob);
     };
 
-    /// Issue an access grant after successful payment.
+    /// 2.22.0: whether issueGrant can issue (the HMAC seed is set). startTimers seeds it from
+    /// raw_rand shortly after install, retrying a failed call a few times; loadStable restores it.
+    /// Check it BEFORE settling a payment you will answer with a grant: issueGrant traps while it
+    /// is false, and a trap after the settle leaves the payer charged with nothing delivered.
+    public func grantsReady() : Bool { grants.grantsReady() };
+
+    /// Issue an access grant after successful payment. Traps before the HMAC seed is set
+    /// (grantsReady) or for a content id containing '|' — check both before settling. A TTL above
+    /// 7 days is capped to 7 days (2.22.0: revocations are kept that long).
     public func issueGrant(
       contentRef : Types.ContentRef,
       grantee : Principal,

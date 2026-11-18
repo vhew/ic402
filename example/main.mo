@@ -755,6 +755,15 @@ persistent actor KnowledgeBase {
           case (null) { return #error("Not found") };
           case (?_) {};
         };
+        // 2.22.0: likewise refuse BEFORE settling what issueGrant (below) would trap on after it:
+        // the grant key not seeded yet (startTimers seeds it from raw_rand just after install), or
+        // a content id with '|'. A trap after the settle keeps the payment and delivers nothing.
+        if (not gate.grantsReady()) {
+          return #error("Content delivery is starting up (the grant key is not ready yet) — nothing was charged; retry in a minute.");
+        };
+        if (Text.contains(contentId, #char '|')) {
+          return #error("Content ids containing '|' cannot be granted — nothing was charged.");
+        };
         switch (await gate.settleFrom(msg.caller, sig, ?amount)) { // 2.17.0: caller must be sig.sender (ICP)
           case (#ok(receipt)) {
             // settle(sig, ?amount) enforces the cross-resource amount internally, so receipt.amount == amount here.

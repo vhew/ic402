@@ -1,8 +1,16 @@
 /// Motoko unit tests for Access Grants (content delivery).
 import Gateway "../src/ic402/Gateway";
 import Types "../src/ic402/Types";
+import Grants "../src/ic402/Grants";
+import Utils "../src/ic402/Utils";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
+import Array "mo:base/Array";
+import Int "mo:base/Int";
+import Nat8 "mo:base/Nat8";
+import Text "mo:base/Text";
+import SHA256 "mo:sha2/Sha256";
+import HMAC "mo:hmac";
 import { test; suite } "mo:test";
 
 suite("AccessGrants", func() {
@@ -147,6 +155,66 @@ suite("AccessGrants", func() {
       case (#invalidGrant(_)) {};
       case (_) { assert(false) };
     };
+  });
+
+  // 2.22.0 (C3): issueGrant traps until the HMAC seed is set, and the seed comes from a timer
+  // after install, so a host must be able to check before it settles a payment.
+  test("2.22.0: grantsReady is false until the seed is set, and loadStable restores it", func() {
+    // Mutation: grantsReady answers true before the seed is set — a host that checks it before
+    // settling still settles, and issueGrant traps after the payment.
+    let gate = Gateway.Gateway(config, testPrincipal);
+    assert not gate.grantsReady();
+    ignore gate.initHmacSeed(testSeed);
+    assert gate.grantsReady();
+    let gate2 = Gateway.Gateway(config, testPrincipal);
+    gate2.loadStable(gate.toStable());
+    assert gate2.grantsReady();
+  });
+
+  // 2.22.0 (C8a): revocations are forgotten after 7 days, so no grant may outlive that.
+  test("2.22.0: a grant's lifetime is capped at the 7 days a revocation is kept", func() {
+    // Mutation: drop the cap — a 30-day grant revoked today verifies again once the clean-up
+    // forgets its revocation in 7 days.
+    let gate = Gateway.Gateway(config, testPrincipal);
+    ignore gate.initHmacSeed(testSeed);
+    let DAY : Int = 86_400_000_000_000;
+    let long = gate.issueGrant(sampleContentRef, grantee, "rcpt-1", 30 * DAY);
+    assert long.expiresAt - long.issuedAt == 7 * DAY;
+    assert Grants.MAX_GRANT_TTL_NS == 7 * DAY;
+    let short = gate.issueGrant(sampleContentRef, grantee, "rcpt-2", DAY);
+    assert short.expiresAt - short.issuedAt == DAY;
+  });
+
+  // 2.22.0 (I9): the HMAC message joins grantId, content id, grantee and expiry with '|'. A grant
+  // for content "a|b" (grant-1) has the same message, so the same HMAC, as grant "grant-1|a" for
+  // content "b". The test computes that HMAC itself, with the test seed, as issueGrant would.
+  test("2.22.0: a grant with '|' in its id or content id is refused, even with a matching HMAC", func() {
+    // Mutation: drop the '|' check in verifyGrant — the re-split grant verifies, for content "b"
+    // the grantee never paid for.
+    let gate = Gateway.Gateway(config, testPrincipal);
+    ignore gate.initHmacSeed(testSeed);
+    let legit = gate.issueGrant(sampleContentRef, grantee, "rcpt-1", 5 * 60 * 1_000_000_000);
+    var seed : Nat = 0;
+    for (b in Blob.toArray(testSeed).vals()) { seed := seed * 256 + Nat8.toNat(b) };
+    let secret = Blob.toArray(SHA256.fromArray(#sha256, Array.append(Blob.toArray(Principal.toBlob(testPrincipal)), Utils.natToBytesBE(seed))));
+    func hmacOf(grantId : Text, contentId : Text) : Blob {
+      let msg = grantId # "|" # contentId # "|" # Principal.toText(grantee) # "|" # Int.toText(legit.expiresAt);
+      HMAC.generate(secret, Blob.toArray(Text.encodeUtf8(msg)).vals(), #sha256);
+    };
+    // Control: the computed HMAC is issueGrant's.
+    assert hmacOf(legit.grantId, legit.contentRef.id) == legit.hmac;
+    let resplit : Types.AccessGrant = {
+      legit with grantId = "grant-1|a";
+      contentRef = { sampleContentRef with id = "b" };
+      hmac = hmacOf("grant-1", "a|b");
+    };
+    switch (gate.verifyGrant(grantee, resplit)) { case (#invalidGrant(_)) {}; case (_) { assert false } };
+    let pipedContent : Types.AccessGrant = {
+      legit with contentRef = { sampleContentRef with id = "photo|001" };
+      hmac = hmacOf(legit.grantId, "photo|001");
+    };
+    switch (gate.verifyGrant(grantee, pipedContent)) { case (#invalidGrant(_)) {}; case (_) { assert false } };
+    assert not Grants.grantFieldOk("a|b") and Grants.grantFieldOk("photo-001");
   });
 
   test("stable state roundtrip preserves grants", func() {

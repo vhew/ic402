@@ -389,6 +389,40 @@ module {
     ownerText # "-" # checksum # "." # hex;
   };
 
+  /// 2.22.0: `Principal.fromText` without the trap — `null` for text that is not a principal.
+  /// Principal.fromText traps on malformed input, and a trap is not something try/catch catches.
+  /// The textual form is RFC 4648 base32 (lowercase, unpadded, a '-' after every 5 characters) of
+  /// the CRC-32 (big-endian) of the principal's bytes followed by those bytes, at most 29 of them.
+  /// This decodes the base32, refuses more than 29 bytes, and then requires that Principal.toText
+  /// of the result gives back exactly `t` — the check the Motoko runtime itself makes, which covers
+  /// the checksum, the case, the dashes and the unused low bits. Bounded: at most 63 characters
+  /// (29 + 4 bytes are 53 base32 characters, plus 10 dashes) are ever decoded.
+  public func principalFromText(t : Text) : ?Principal {
+    if (t.size() > 63) return null;
+    let bytes = Buffer.Buffer<Nat8>(33);
+    var acc : Nat = 0;
+    var bits : Nat = 0;
+    for (c in t.chars()) {
+      if (c != '-') {
+        let n = Char.toNat32(c);
+        let v : Nat32 = if (c >= 'a' and c <= 'z') { n - 97 } else if (c >= '2' and c <= '7') { n - 24 } else {
+          return null;
+        };
+        acc := acc * 32 + Nat32.toNat(v);
+        bits += 5;
+        if (bits >= 8) {
+          bits -= 8;
+          bytes.add(Nat8.fromNat(acc / 2 ** bits));
+          acc := acc % 2 ** bits;
+        };
+      };
+    };
+    // 4 checksum bytes, then 0 to 29 principal bytes (Principal.fromBlob traps above 29).
+    if (bytes.size() < 4 or bytes.size() > 33) return null;
+    let p = Principal.fromBlob(Blob.fromArray(Array.subArray(Buffer.toArray(bytes), 4, bytes.size() - 4 : Nat)));
+    if (Principal.toText(p) == t) { ?p } else { null };
+  };
+
   /// Find a token config by principal text or CAIP-2 network prefix.
   /// Accepts both "ryjl3-tyaaa-..." (principal) and "icp:1" (network).
   /// For ICP networks, returns the first configured token since ICP
