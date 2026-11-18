@@ -239,6 +239,43 @@ module {
     #Inconsistent : [(RpcService, FeeHistoryResult)];
   };
 
+  // ── eth_call (2.22.0: reads an EIP-3009 authorizationState after a reverted transfer) ──
+
+  /// EIP-2930 access-list entry — mirror of evm_rpc.did.
+  public type AccessListEntry = { address : Text; storageKeys : [Text] };
+
+  /// eth_call transaction request — a faithful mirror of evm_rpc.did's TransactionRequest (every
+  /// field optional). `type_` is Candid `type`. ic402 sets only `to` and `input`.
+  public type TransactionRequest = {
+    type_ : ?Text;
+    nonce : ?Nat;
+    to : ?Text;
+    from : ?Text;
+    gas : ?Nat;
+    value : ?Nat;
+    input : ?Text;
+    gasPrice : ?Nat;
+    maxPriorityFeePerGas : ?Nat;
+    maxFeePerGas : ?Nat;
+    maxFeePerBlobGas : ?Nat;
+    accessList : ?[AccessListEntry];
+    blobVersionedHashes : ?[Text];
+    blobs : ?[Text];
+    chainId : ?Nat;
+  };
+
+  /// Arguments for eth_call.
+  public type CallArgs = { transaction : TransactionRequest; block : ?BlockTag };
+
+  /// Result of a single-provider eth_call: the hex-encoded return data.
+  public type CallResult = { #Ok : Text; #Err : RpcError };
+
+  /// Multi-provider consensus result for eth_call.
+  public type MultiCallResult = {
+    #Consistent : CallResult;
+    #Inconsistent : [(RpcService, CallResult)];
+  };
+
   // ═══════════════════════════════════════════════════════════════════════
   // Actor interface
   // ═══════════════════════════════════════════════════════════════════════
@@ -249,6 +286,7 @@ module {
     eth_getTransactionCount : (RpcServices, ?RpcConfig, GetTransactionCountArgs) -> async MultiGetTransactionCountResult;
     eth_sendRawTransaction : (RpcServices, ?RpcConfig, Text) -> async MultiSendRawTransactionResult;
     eth_feeHistory : (RpcServices, ?RpcConfig, FeeHistoryArgs) -> async MultiFeeHistoryResult;
+    eth_call : (RpcServices, ?RpcConfig, CallArgs) -> async MultiCallResult;
   };
 
   // ═══════════════════════════════════════════════════════════════════════

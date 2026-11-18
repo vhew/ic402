@@ -10,6 +10,7 @@ import Eip712 "Eip712";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
 import Nat64 "mo:base/Nat64";
+import Int "mo:base/Int";
 import Text "mo:base/Text";
 import HashMap "mo:base/HashMap";
 import Iter "mo:base/Iter";
@@ -81,13 +82,22 @@ module {
   };
   /// Pure decision for reconciling a parked EVM session-close leg: finalize only on a #confirmed
   /// leg (see the golden rules above), otherwise stay parked.
+  /// 2.22.0 (F1): #dropped — the parked tx can never land (its nonce was used by another tx) —
+  /// is REPORTED, not acted on: the session stays parked and the operator resolves it.
   public func sessionReconcileDecision(
-    outcome : { #confirmed; #reverted; #pending; #err : Text },
+    outcome : { #confirmed; #reverted; #pending; #dropped : Text; #err : Text },
     leg : { #Settle; #Refund },
     refundOwed : Nat,
   ) : SessionReconcileResult {
     switch (outcome) {
       case (#pending) { #stay("Parked close tx still pending — stay parked") };
+      case (#dropped(why)) {
+        let owed = switch (leg) {
+          case (#Settle) { "the consumed amount to the recipient and the remainder to the payer" };
+          case (#Refund) { "the remainder to the payer" };
+        };
+        #stay("Parked " # (switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } }) # " tx can never land (" # why # ") — it moved no funds. Verify on a block explorer, then forceResolveSession and sweepEvm what is owed: " # owed);
+      };
       case (#reverted) { #stay("Parked close tx reverted on-chain; no funds moved — use forceResolveSession") };
       case (#err(e)) { #stay("Confirm RPC failed — stay parked: " # e) };
       case (#confirmed) {
@@ -101,6 +111,16 @@ module {
         };
       };
     };
+  };
+
+  /// 2.22.0: whether an EVM close whose leg failed BEFORE anything was broadcast reopens the
+  /// session (#open) — only when no leg of this close moved funds (`nothingMoved`), and either
+  /// the payer asked for the close or the failure is the busy single-flight send lock, which
+  /// clears by itself. A timer-initiated close that fails for another reason stays #closing, so
+  /// the 60 s sweep does not re-drive a persistent failure every tick (S16/C1); before 2.22.0
+  /// that included the busy lock, which parked an expired session with no tx to reconcile.
+  public func reopenAfterUnsentLeg(wasExpired : Bool, nothingMoved : Bool, err : Text) : Bool {
+    nothingMoved and (not wasExpired or EvmSender.isSendBusy(err));
   };
 
   /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
@@ -144,7 +164,8 @@ module {
     // Recovered via reconcileEvmDeposit (refund-on-confirm). A deposit still pending across an
     // upgrade is dropped from the tracker, but its tx hash is in the #settlementPending error for a
     // manual sweepEvm.
-    type PendingEvmDeposit = { payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int };
+    // 2.22.0: authNonce (transient record only) lets reconcileEvmDeposit read the authorization's state.
+    type PendingEvmDeposit = { payer : Principal; payerEvmAddress : Text; chainId : Nat; token : Text; amount : Nat; createdAt : Int; authNonce : Blob };
     let pendingEvmDeposits = HashMap.HashMap<Text, PendingEvmDeposit>(8, Text.equal, Text.hash);
     // M8: when true, openEvmSession rejects new inbound deposits so the tracker can drain to 0
     // before an upgrade. Transient — resets to false after upgrade (nothing is pending post-upgrade).
@@ -156,6 +177,13 @@ module {
     var admitRateFn : () -> { #ok; #throttled } = func() : { #ok; #throttled } { #ok };
     /// Wire the global rate-limit gate for openEvmSession's ecRecover (injected by the Gateway).
     public func setAdmitRate(f : () -> { #ok; #throttled }) { admitRateFn := f };
+
+    // 2.22.0 (E3): where every EVM path here gets its sender — read at each use, never captured.
+    // Defaults to the constructor's `evmSender`; the Gateway injects a getter of its CURRENT
+    // sender, which setEvmDerivationPath replaces.
+    var evmSenderSource : () -> ?EvmSender.EvmSender = func() : ?EvmSender.EvmSender { evmSender };
+    /// Read the EVM sender through `f` from now on (injected by the Gateway).
+    public func setEvmSenderSource(f : () -> ?EvmSender.EvmSender) { evmSenderSource := f };
 
     // Live EVM chain set consulted by openEvmSession's chain lookup. Starts as the constructor
     // config's evmChains; replaced at runtime via setEvmChains. Motoko records are immutable
@@ -550,6 +578,19 @@ module {
           return #err(#invalidSignature("EIP-3009 authorization required for EVM session deposits"));
         };
       };
+      // 2.22.0: as Gateway.settle — refuse fields the chain could not hold (they would be encoded
+      // truncated) and an authorization outside its window (validBefore strict, as on chain). The
+      // open path had no window check, so an expired deposit authorization was broadcast and
+      // reverted at the canister's gas.
+      let fromBytes = EvmUtils.hexToBytes(authz.from);
+      let authNonceBytes = Blob.toArray(authz.nonce);
+      if (not EvmUtils.eip3009FieldsFit(authz.value, authz.validAfter, authz.validBefore, authNonceBytes)) {
+        sessionOpenLocks.delete(caller);
+        return #err(#invalidSignature("EIP-3009 authorization fields out of range: value, validAfter and validBefore must fit uint256 and the nonce must be 32 bytes"));
+      };
+      let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
+      if (nowSeconds < authz.validAfter) { sessionOpenLocks.delete(caller); return #err(#expired("Authorization not yet valid")) };
+      if (nowSeconds >= authz.validBefore) { sessionOpenLocks.delete(caller); return #err(#expired("Authorization expired")) };
 
       // Extract chain ID
       let chainId = switch (extractChainId(intent.network)) {
@@ -660,9 +701,9 @@ module {
 
       let verified = Eip712.verifyAuthorization(
         chainId, EvmUtils.hexToBytes(tokenAddr),
-        EvmUtils.hexToBytes(authz.from), EvmUtils.hexToBytes(authz.to),
+        fromBytes, EvmUtils.hexToBytes(authz.to),
         authz.value, authz.validAfter, authz.validBefore,
-        Blob.toArray(authz.nonce), authz.v,
+        authNonceBytes, authz.v,
         Blob.toArray(authz.r), Blob.toArray(authz.s),
         tokenName, tokenVersion,
       );
@@ -672,7 +713,7 @@ module {
       };
 
       // Execute transferWithAuthorization via tECDSA (canister acts as facilitator)
-      let sender = switch (evmSender) {
+      let sender = switch (evmSenderSource()) {
         case (?s) { s };
         case (null) {
           sessionOpenLocks.delete(caller);
@@ -698,13 +739,26 @@ module {
         case (#ok) {};
       };
 
+      // 2.22.0 (E5): never broadcast one authorization twice (EvmSender.AuthorizationGuard, shared
+      // with Gateway.settle through the one sender). Claimed before the await; kept if the call
+      // throws (whether it broadcast is unknown), released on a pre-broadcast #err.
+      let authKey = sender.broadcastAuthorizations.key(chainId, intent.token, fromBytes, authNonceBytes);
+      switch (sender.broadcastAuthorizations.claim(authKey, authz.validBefore, nowSeconds)) {
+        case (#seen(prior)) {
+          ignore evmEscrowManager.deallocate(sessionId);
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementPending(EvmSender.alreadyBroadcastText(prior)));
+        };
+        case (#ok) {};
+      };
+
       let execResult = try {
         await sender.executeTransferWithAuthorization(
           chainId, intent.token,
-          EvmUtils.hexToBytes(authz.from),
+          fromBytes,
           EvmUtils.hexToBytes(authz.to),
           authz.value, authz.validAfter, authz.validBefore,
-          Blob.toArray(authz.nonce),
+          authNonceBytes,
           authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
         );
       } catch (e) {
@@ -716,6 +770,7 @@ module {
       let depositTxHash = switch (execResult) {
         case (#ok(hash)) { hash };
         case (#err(msg)) {
+          sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
           ignore evmEscrowManager.deallocate(sessionId); // H3: pre-broadcast failure — release reservation.
           sessionOpenLocks.delete(caller);
           return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
@@ -726,6 +781,7 @@ module {
         // rather than stranded as a hash-less #settlementFailed. Single-use EIP-3009 nonce → no double-pay.
         case (#maybeSent(m)) { m.txHash };
       };
+      sender.broadcastAuthorizations.noteTx(authKey, depositTxHash);
 
       // H-1 (v2): Confirm the deposit transfer actually mined before crediting an
       // escrow allocation. Otherwise a reverted/never-mined deposit would still
@@ -733,23 +789,34 @@ module {
       switch (await sender.confirmTransaction(chainId, depositTxHash, 4)) {
         case (#confirmed) {};
         case (#reverted) {
-          ignore evmEscrowManager.deallocate(sessionId); // H3: reverted → no funds moved, release reservation.
+          // H3: no session — release the reservation. 2.22.0 (E7): THIS tx reverting does not mean
+          // the deposit did not arrive: anyone can submit the authorization, so another tx may have
+          // executed it first. Ask the token before answering.
+          ignore evmEscrowManager.deallocate(sessionId);
           sessionOpenLocks.delete(caller);
-          return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")"));
+          switch (await sender.authorizationState(chainId, intent.token, fromBytes, authNonceBytes)) {
+            case (#unused) { return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")")) };
+            case (#used) {
+              return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, but the deposit authorization is already used on chain: another transaction executed it (anyone can submit it) or the payer cancelled it. The deposit may be in the canister's pool; no session was created. Do NOT re-sign — the operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
+            };
+            case (#unknown(e)) {
+              return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, and whether another transaction executed the deposit authorization could not be checked (" # e # "). The deposit may be in the canister's pool; no session was created. Do NOT re-sign until the token's authorizationState for payer " # authz.from # " shows it unused."));
+            };
+          };
         };
         case (#pending) {
           // H3: release the pool reservation so it does not leak headroom. M8: track the
           // broadcast-but-unconfirmed deposit so it can be reconciled (refunded) if it later mines,
           // instead of stranding unattributed in the shared pool.
           ignore evmEscrowManager.deallocate(sessionId);
-          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
+          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
           sessionOpenLocks.delete(caller);
           return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ") — no session was created. If the tx mines, the deposit lands in the shared pool: call reconcileEvmDeposit with this tx hash to refund it, then open a new session. Do not re-sign the same authorization."));
         };
         case (#err(e)) {
           // H3: release reservation. M8: track for reconcile (see #pending).
           ignore evmEscrowManager.deallocate(sessionId);
-          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now() });
+          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
           sessionOpenLocks.delete(caller);
           return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ") — no session was created; the deposit is tracked. Retry reconcileEvmDeposit with this tx hash once the RPC recovers (refund-on-confirm)."));
         };
@@ -1413,8 +1480,9 @@ module {
       if (not isEvmNetwork(session.network)) return await* reconcileIcpClose(session);
       let parked = switch (closeParkedTxs.get(sessionId)) { case (null) { return #err("Session is #closing but has no parked tx — use forceResolveSession") }; case (?p) { p } };
       let deposit = switch (session.evmDeposit) { case (null) { return #err("Session has no EVM deposit data") }; case (?d) { d } };
-      let sender = switch (evmSender) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
-      let outcome = await sender.confirmTransaction(deposit.chainId, parked.txHash, 1);
+      let sender = switch (evmSenderSource()) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
+      // 2.22.0 (F1): reconcileTransaction also reports a parked tx that can never land (#dropped).
+      let outcome = await sender.reconcileTransaction(deposit.chainId, parked.txHash, 1);
       // Re-fetch after the await: a concurrent transition may have moved the session.
       let s2 = switch (sessions.get(sessionId)) { case (null) { return #err("Session vanished during reconcile") }; case (?s) { s } };
       if (s2.status != #closing) return #err("Session no longer #closing (status: " # debug_show (s2.status) # ")");
@@ -1515,11 +1583,11 @@ module {
     /// reconciles of the same tx can't double-refund. Controller-gated by the consumer.
     public func reconcileEvmDeposit(txHash : Text) : async { #refunded : Text; #reverted; #stillPending; #notFound; #err : Text } {
       let dep = switch (pendingEvmDeposits.get(txHash)) { case (?d) { d }; case (null) { return #notFound } };
-      let sender = switch (evmSender) { case (?s) { s }; case (null) { return #err("EVM sender not configured") } };
+      let sender = switch (evmSenderSource()) { case (?s) { s }; case (null) { return #err("EVM sender not configured") } };
       // Claim synchronously (no await between get and delete) so a concurrent reconcile of the same
       // tx sees #notFound and cannot double-refund. Restore on any non-terminal outcome.
       pendingEvmDeposits.delete(txHash);
-      switch (await sender.confirmTransaction(dep.chainId, txHash, 4)) {
+      switch (await sender.reconcileTransaction(dep.chainId, txHash, 4)) {
         case (#confirmed) {
           // Deposit mined into the shared pool — refund it to the payer's EVM address.
           switch (await sender.sendErc20TransferConfirmed(dep.chainId, dep.token, dep.payerEvmAddress, dep.amount, 4)) {
@@ -1534,6 +1602,22 @@ module {
         case (#reverted) { #reverted }; // deposit never landed — nothing to refund; stays dropped
         case (#pending) { pendingEvmDeposits.put(txHash, dep); #stillPending };
         case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("receipt poll failed: " # e) };
+        // 2.22.0 (F1): this tx can never land. Nothing arrived THROUGH it, but its authorization
+        // can still be submitted by anyone until validBefore — so drop the entry (as #reverted)
+        // only when the token says the authorization is unused; otherwise keep it and report.
+        case (#dropped(why)) {
+          switch (await sender.authorizationState(dep.chainId, dep.token, EvmUtils.hexToBytes(dep.payerEvmAddress), Blob.toArray(dep.authNonce))) {
+            case (#unused) { #reverted };
+            case (#used) {
+              pendingEvmDeposits.put(txHash, dep);
+              #err("deposit tx can never land (" # why # "), but its authorization is used on chain: another transaction executed it or the payer cancelled it — verify on chain and, if the deposit arrived, return it with sweepEvm");
+            };
+            case (#unknown(e)) {
+              pendingEvmDeposits.put(txHash, dep);
+              #err("deposit tx can never land (" # why # "); whether its authorization was executed by another transaction could not be checked (" # e # ") — retry reconcile");
+            };
+          };
+        };
       };
     };
 
@@ -1573,7 +1657,7 @@ module {
         };
       };
 
-      let sender = switch (evmSender) {
+      let sender = switch (evmSenderSource()) {
         case (?s) { s };
         case (null) {
           // S16/C1: leave #closing (set above) — do NOT revert to #open, which the 60s expiry
@@ -1588,7 +1672,14 @@ module {
       // #closing (set above) for recovery and NEVER re-broadcast (a #pending tx may have landed,
       // so re-driving double-pays).
       var settleTxHash : ?Text = null;
-      if (session.consumed > 0) {
+      // 2.22.0 (E10): no settle leg when the recipient IS the canister's own EVM address — the
+      // consumed share already sits there, so the leg was a self-transfer that paid gas and gave
+      // the close one more step that could park it.
+      let settlesToSelf = switch (evmRecipientAddress.get()) {
+        case (?self) { EvmUtils.addressesEqual(self, session.recipient) };
+        case (null) { false };
+      };
+      if (session.consumed > 0 and not settlesToSelf) {
         switch (
           await sender.sendErc20TransferConfirmed(
             deposit.chainId, deposit.tokenAddress, session.recipient, session.consumed, 4,
@@ -1611,8 +1702,9 @@ module {
             // reject (e.g. a concurrent tx holding the EvmSender single-flight lock — the M10
             // race) would strand it permanently in #closing with no retry path. For a
             // timer-initiated (expired) close, keep #closing to avoid the 60s expiry timer
-            // re-driving a persistent failure every tick (S16/C1).
-            if (not wasExpired) {
+            // re-driving a persistent failure every tick (S16/C1). 2.22.0: except the busy send
+            // lock, which clears by itself — reopened, the next tick retries (reopenAfterUnsentLeg).
+            if (reopenAfterUnsentLeg(wasExpired, true, msg)) {
               session.status := #open;
               return #settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry): " # msg);
             };
@@ -1650,7 +1742,7 @@ module {
             // (settleTxHash set), we must NOT reopen — a retry would re-settle consumed; park in
             // #closing. If settle was SKIPPED (consumed == 0, nothing moved at all), a
             // client-initiated close can safely reopen to #open and retry.
-            if (settleTxHash == null and not wasExpired) {
+            if (reopenAfterUnsentLeg(wasExpired, settleTxHash == null, msg)) {
               session.status := #open;
               return #settlementFailed("EVM refund failed — nothing broadcast, session reopened (safe to retry): " # msg);
             };

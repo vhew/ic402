@@ -5,6 +5,7 @@
 /// EVM sessions are open concurrently.
 
 import Types "Types";
+import EvmUtils "EvmUtils";
 import HashMap "mo:base/HashMap";
 import Text "mo:base/Text";
 import Iter "mo:base/Iter";
@@ -15,6 +16,15 @@ module {
     chainId : Nat;
     token : Text;
     amount : Nat;
+  };
+
+  /// 2.22.0: whether two allocation token keys name the same token — the decoded 20-byte
+  /// addresses compared, so "0xAbC…" and "0xabc…" are one pool. Before 2.22.0 the keys were
+  /// compared as text, so a session opened with another case of a configured token's address
+  /// (intent.token comes from the consumer's intent) counted in a separate bucket, and the pool
+  /// cap was enforced per spelling. A key that is not an address compares as text.
+  public func sameToken(a : Text, b : Text) : Bool {
+    a == b or EvmUtils.addressesEqual(a, b);
   };
 
   /// Virtual escrow tracker for EVM session deposits on the canister's shared address.
@@ -72,7 +82,8 @@ module {
       };
     };
 
-    /// Total allocated across all sessions for a specific chain+token.
+    /// Total allocated across all sessions for a specific chain+token (token compared as an
+    /// address, case-insensitively — see sameToken).
     /// Consuming canisters SHOULD check `totalAllocated(chainId, token) + newAmount`
     /// against their known on-chain balance before calling `allocate()`. The library
     /// cannot verify on-chain balances itself (that would require an EVM RPC call),
@@ -80,7 +91,7 @@ module {
     public func totalAllocated(chainId : Nat, token : Text) : Nat {
       var total : Nat = 0;
       for ((_, a) in allocations.entries()) {
-        if (a.chainId == chainId and a.token == token) {
+        if (a.chainId == chainId and sameToken(a.token, token)) {
           total += a.amount;
         };
       };

@@ -105,6 +105,9 @@ module {
   };
 
   /// Big-endian Nat to fixed-length byte array (zero-padded on left).
+  /// TRUNCATES SILENTLY: a value ≥ 256^len keeps only its low `len` bytes. A caller encoding a
+  /// value it did not produce itself (a uint256 from a payer, an amount to sign) checks it first
+  /// with `isUint256` / `eip3009FieldsFit`; otherwise the bytes name a different number.
   public func natToBytes(n : Nat, len : Nat) : [Nat8] {
     let buf = Array.init<Nat8>(len, 0 : Nat8);
     var v = n;
@@ -116,6 +119,29 @@ module {
     };
     Array.freeze(buf);
   };
+
+  /// 2.22.0: whether `n` fits a Solidity uint256 (natToBytes(n, 32) would truncate it otherwise).
+  public func isUint256(n : Nat) : Bool { n < 2 ** 256 };
+
+  /// 2.22.0: whether an EIP-3009 authorization's fields fit their on-chain types: value,
+  /// validAfter and validBefore are uint256 and the nonce is bytes32. A field that does not fit
+  /// cannot be what the payer's wallet signed, and before 2.22.0 it was encoded truncated — a
+  /// validBefore of 2^256 + 5 passed the local expiry check as "far future" and reached the
+  /// chain as 5 (expired): the canister paid gas for a transfer that could only revert.
+  public func eip3009FieldsFit(value : Nat, validAfter : Nat, validBefore : Nat, nonce : [Nat8]) : Bool {
+    isUint256(value) and isUint256(validAfter) and isUint256(validBefore) and nonce.size() == 32;
+  };
+
+  /// 2.22.0: gas limit for an ERC-20 `transfer(address,uint256)`, used by EvmSender and EvmSigner.
+  /// Was 65_000. A USDC (FiatToken v2.2) transfer to an address holding none costs about 60_000
+  /// (base 21_000, a zero → non-zero balance write 20_000 + cold reads, the proxy's delegatecall,
+  /// the Transfer log), so 65_000 left under 10% headroom; another token implementation or a
+  /// chain's extra intrinsic cost could run out of gas, and an out-of-gas transfer still burns the
+  /// whole limit and fails (a session refund parks). Unused gas is not charged on EIP-1559 chains:
+  /// the limit only raises the up-front balance check (gasLimit × maxFeePerGas).
+  /// NOT covered: Arbitrum One charges its L1 data fee in L2 gas units, so the limit needed there
+  /// moves with L1 data prices; a fixed limit cannot track that (it needs eth_estimateGas).
+  public let ERC20_TRANSFER_GAS : Nat = 100_000;
 
   /// Big-endian byte array to Nat.
   public func bytesToNat(bytes : [Nat8]) : Nat {

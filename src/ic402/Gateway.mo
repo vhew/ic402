@@ -8,6 +8,7 @@ import SessionsMod "Sessions";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
 import Nat64 "mo:base/Nat64";
+import Nat8 "mo:base/Nat8";
 import Int "mo:base/Int";
 import Text "mo:base/Text";
 import Buffer "mo:base/Buffer";
@@ -51,6 +52,10 @@ module {
   /// Pick the token being paid on `chain`: the payer-signed `asset` when present (multi-token), else
   /// the chain's FIRST configured token (legacy / single-token). Returns "" for an empty chain.
   /// Module-level + pure so the multi-token asset selection is directly unit-testable.
+  /// The PAYER chooses among the chain's tokens, and the price is compared in raw units
+  /// (authorization.value == amount) — so every token listed on one chain must have the same
+  /// decimals (enforced: checkEvmTokenDecimals) AND the same unit value (an operator duty: e.g.
+  /// USDC beside EURC would let a payer pay the cheaper one).
   public func resolveEvmAsset(chain : Types.EvmChainConfig, asset : ?Text) : Text {
     switch (asset) {
       case (?a) { a };
@@ -67,6 +72,46 @@ module {
       if (EvmUtils.addressesEqual(tok.address, tokenAddr)) return ?{ name = tok.name; version = tok.version };
     };
     null;
+  };
+
+  /// 2.22.0 (E4, owner decision D2): refuse a chain whose tokens have different decimals. A payer
+  /// picks the token (`signature.asset`), the price is compared to `authorization.value` in raw
+  /// units, and a server nonce binds the chain's first token — so a chain listing a 6-decimal
+  /// and an 18-decimal token let a payer pay 10^-12 of the price. The tokens on one chain must
+  /// also be of equal unit value; that cannot be checked here and is the operator's duty.
+  /// Used by the Gateway constructor (traps) and setEvmChains (#err).
+  public func checkEvmTokenDecimals(chains : [Types.EvmChainConfig]) : { #ok; #err : Text } {
+    for (chain in chains.values()) {
+      if (chain.tokens.size() > 1) {
+        let first = chain.tokens[0];
+        for (tok in chain.tokens.values()) {
+          if (tok.decimals != first.decimals) {
+            return #err(
+              "chain " # Nat.toText(chain.chainId) # ": token " # tok.address # " has "
+              # Nat.toText(Nat8.toNat(tok.decimals)) # " decimals but " # first.address # " has "
+              # Nat.toText(Nat8.toNat(first.decimals)) # " — the payer chooses the token and prices are"
+              # " compared in raw units, so every token on one chain must have the same decimals"
+              # " (and the same unit value)"
+            );
+          };
+        };
+      };
+    };
+    #ok;
+  };
+
+  /// 2.22.0 (E9): the policy principal of an EVM payer: the first 29 bytes of
+  /// SHA-256("evm:" # address), where the address is the canonical lower-case 0x form of the
+  /// 20 decoded bytes. Before 2.22.0 the raw `authorization.from` text was hashed, so each
+  /// hex-case spelling of one address got its own daily/rate buckets and escaped a blocklist
+  /// entry made from another spelling. For a lower-case 0x address the result is unchanged, so
+  /// existing buckets and blocklist entries made from lower-case addresses keep working.
+  /// A `from` that is not 20 bytes of hex is hashed as given (its signature cannot verify).
+  public func evmPolicyPrincipal(from : Text) : Principal {
+    let bytes = EvmUtils.hexToBytes(from);
+    let canonical = if (bytes.size() == 20) { EvmUtils.bytesToHex(bytes) } else { from };
+    let hash = Blob.toArray(SHA256.fromArray(#sha256, Blob.toArray(Text.encodeUtf8("evm:" # canonical))));
+    Principal.fromBlob(Blob.fromArray(Array.subArray(hash, 0, 29)));
   };
 
   /// Entries runMaintenance removes from each map per call, at most.
@@ -180,6 +225,12 @@ module {
     // every Gateway chain lookup (findEvmChain, requireEvm, describeAll, supportedJson) reads
     // THIS, never config.evmChains, so a runtime swap takes effect for new requests.
     var liveEvmChains : [Types.EvmChainConfig] = config.evmChains;
+    // 2.22.0 (E4): fail closed on a chain whose tokens have different decimals — construction
+    // traps (install/upgrade fails with this message) rather than run a rail a payer can underpay.
+    switch (checkEvmTokenDecimals(config.evmChains)) {
+      case (#err(e)) { Debug.trap("ic402: config.evmChains: " # e) };
+      case (#ok) {};
+    };
 
     // SEC-1: a GLOBAL (caller-agnostic) admission gate for the UNAUTHENTICATED facilitator update
     // endpoints (POST /verify, /settle). The per-caller policy rate limit is bypassable — an
@@ -220,11 +271,16 @@ module {
     /// facilitatorAdmit on those routes avoids charging the global bucket twice per request.
     public func cyclesBelowFloor() : Bool { Cycles.balance() < FACILITATOR_MIN_CYCLES };
 
+    // 2.22.0 (E3): Sessions reads the sender through a getter, like the recipient, so it always
+    // uses the CURRENT one. It was handed the construction-time sender, which setEvmDerivationPath
+    // then replaced — so session deposits, closes and reconciles signed from the empty-path address
+    // while charges signed from the new one. `null` here: the getter is the only source.
     let sessionsMgr = SessionsMod.Sessions(
       selfPrincipal, config, policy, escrowManager,
-      evmEscrowMgr, evmSenderInst,
+      evmEscrowMgr, null,
       { get = func() : ?Text { evmRecipient } },
     );
+    sessionsMgr.setEvmSenderSource(func() : ?EvmSender.EvmSender { evmSenderInst });
     // SEC-0 (round 2): share the global facilitator token bucket with the session-open path, so the
     // expensive ecRecover in openEvmSession is rate-limited by the SAME caller-agnostic gate as
     // settle/verifyPayment — not just the mintable per-caller policy limit.
@@ -598,11 +654,18 @@ module {
         case (?a) { a };
         case (null) { return { isValid = false; invalidReason = ?"invalid_payload"; payer = null } };
       };
+      // 2.22.0: fields the chain could not hold are refused, not truncated (EvmUtils.eip3009FieldsFit).
+      if (not EvmUtils.eip3009FieldsFit(authz.value, authz.validAfter, authz.validBefore, Blob.toArray(authz.nonce))) {
+        return { isValid = false; invalidReason = ?"invalid_payload"; payer = ?authz.from };
+      };
       let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
       if (nowSeconds < authz.validAfter) {
         return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_after"; payer = ?authz.from };
       };
-      if (nowSeconds > authz.validBefore) {
+      // 2.22.0: strict, as the token checks it (block.timestamp < validBefore) — at nowSeconds ==
+      // validBefore the transfer can only revert. (validAfter stays non-strict: the tx mines
+      // seconds after this check, by when the chain's strict validAfter < block.timestamp holds.)
+      if (nowSeconds >= authz.validBefore) {
         return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_before"; payer = ?authz.from };
       };
       if (not EvmUtils.addressesEqual(authz.to, payTo)) {
@@ -693,6 +756,12 @@ module {
     /// chain's FIRST configured token. EVM additionally requires authorization.to == the
     /// canister's derived EVM address and authorization.value == the settled amount (exact).
     ///
+    /// 2.22.0, EVM: an authorization this canister already broadcast is not broadcast again —
+    /// #settlementPending naming the earlier tx (EvmSender.AuthorizationGuard). A transfer that
+    /// reverts is checked against the token's authorizationState: still unused → #settlementFailed
+    /// (no funds moved); used (another tx executed it, or the payer cancelled it) or unreadable →
+    /// #settlementPending (funds may have arrived; no receipt). validBefore is strict, as on chain.
+    ///
     /// Interleaving: this method awaits (EVM broadcast + confirmation poll / ICP ledger call).
     /// The nonce lock and the daily-spend reservation commit synchronously BEFORE the first
     /// await and are rolled back on failure; the per-caller rate hit is checked read-only before
@@ -778,19 +847,25 @@ module {
           };
         };
 
-        // M-4: Validate EIP-3009 time window before any further processing
+        // 2.22.0: refuse fields the chain could not hold instead of encoding them truncated.
+        let fromBytes = EvmUtils.hexToBytes(authz.from);
+        let authNonceBytes = Blob.toArray(authz.nonce);
+        if (not EvmUtils.eip3009FieldsFit(authz.value, authz.validAfter, authz.validBefore, authNonceBytes)) {
+          nonceManager.unlock(signature.nonce);
+          return #invalidSignature("EIP-3009 authorization fields out of range: value, validAfter and validBefore must fit uint256 and the nonce must be 32 bytes");
+        };
+        // M-4: Validate EIP-3009 time window before any further processing. 2.22.0: validBefore is
+        // strict, as on chain (see verifyPayment).
         let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
         if (nowSeconds < authz.validAfter) { nonceManager.unlock(signature.nonce); return #expired("Authorization not yet valid") };
-        if (nowSeconds > authz.validBefore) { nonceManager.unlock(signature.nonce); return #expired("Authorization expired") };
+        if (nowSeconds >= authz.validBefore) { nonceManager.unlock(signature.nonce); return #expired("Authorization expired") };
 
         // M-1: Derive deterministic Principal from EVM sender for policy tracking.
         // M-2: Uses 29 bytes of SHA-256 (232 bits) — collision probability ~2^-116.
         // Two EVM addresses mapping to the same Principal would share policy buckets.
         // This is acceptable for policy tracking (not for authentication).
-        let evmSenderBytes = Blob.toArray(Text.encodeUtf8("evm:" # authz.from));
-        let evmSenderHash = SHA256.fromArray(#sha256, evmSenderBytes);
-        let hashArray = Blob.toArray(evmSenderHash);
-        let evmSender = Principal.fromBlob(Blob.fromArray(Array.subArray(hashArray, 0, 29)));
+        // 2.22.0 (E9): from the decoded address, so every hex-case spelling is one payer.
+        let evmSender = evmPolicyPrincipal(authz.from);
         // I6: READ-ONLY here — a blocked/at-limit sender is still refused before the ecRecover
         // below, but the rate hit is recorded only on #confirmed (`from` is only claimed until
         // the signature verifies, so recording here let anyone spend a payer's budget).
@@ -850,12 +925,12 @@ module {
         let verified = Eip712.verifyAuthorization(
           chainId,
           EvmUtils.hexToBytes(tokenAddr),
-          EvmUtils.hexToBytes(authz.from),
+          fromBytes,
           EvmUtils.hexToBytes(authz.to),
           authz.value,
           authz.validAfter,
           authz.validBefore,
-          Blob.toArray(authz.nonce),
+          authNonceBytes,
           authz.v,
           Blob.toArray(authz.r),
           Blob.toArray(authz.s),
@@ -873,6 +948,16 @@ module {
           case (null) { nonceManager.unlock(signature.nonce); return #settlementFailed("EVM sender not configured") };
         };
 
+        // 2.22.0 (E5): never broadcast one authorization twice — a second broadcast can only
+        // revert, at the canister's gas, holding the send lock. Claimed here, synchronously with
+        // every check above, so two concurrent settles of it cannot both send. Pending, not failed:
+        // the earlier broadcast may have paid. A server nonce, if any, stays locked (as on pending).
+        let authKey = sender.broadcastAuthorizations.key(chainId, tokenAddr, fromBytes, authNonceBytes);
+        switch (sender.broadcastAuthorizations.claim(authKey, authz.validBefore, nowSeconds)) {
+          case (#seen(prior)) { return #settlementPending(EvmSender.alreadyBroadcastText(prior)) };
+          case (#ok) {};
+        };
+
         // H-4 (v2): Reserve the daily spend synchronously BEFORE the value-moving
         // await (this whole prefix runs atomically up to the await, so concurrent
         // charges can no longer each pass a stale daily-limit check). Released on
@@ -883,10 +968,10 @@ module {
 
         let execResult = await sender.executeTransferWithAuthorization(
           chainId, tokenAddr,
-          EvmUtils.hexToBytes(authz.from),
+          fromBytes,
           EvmUtils.hexToBytes(authz.to),
           authz.value, authz.validAfter, authz.validBefore,
-          Blob.toArray(authz.nonce),
+          authNonceBytes,
           authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
         );
 
@@ -897,6 +982,7 @@ module {
         // yields a receipt below, else it parks as #settlementPending WITH the hash (recoverable).
         let txHash = switch (execResult) {
           case (#err(msg)) {
+            sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
             nonceManager.unlock(signature.nonce);
             policy.releaseDaily(evmSender, evmSpendDay, amount);
             return #settlementFailed("EIP-3009 execution failed: " # msg);
@@ -904,6 +990,7 @@ module {
           case (#ok(h)) { h };
           case (#maybeSent(m)) { m.txHash };
         };
+        sender.broadcastAuthorizations.noteTx(authKey, txHash);
         // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the transfer actually
         // mined (status == 1) before issuing a receipt; an on-chain revert (insufficient balance,
         // reused token nonce, paused token) must not yield a "paid" receipt.
@@ -926,9 +1013,22 @@ module {
             return #ok(receipt);
           };
           case (#reverted) {
-            nonceManager.unlock(signature.nonce);
             policy.releaseDaily(evmSender, evmSpendDay, amount);
-            return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, authorization nonce already used, or token paused. Fix the cause and re-sign a fresh authorization.");
+            // 2.22.0 (E7): THIS tx reverting does not mean no funds moved. transferWithAuthorization
+            // can be submitted by anyone, so an earlier attempt or a mempool copier may have
+            // executed the same authorization first — and then ours reverts. Ask the token.
+            switch (await sender.authorizationState(chainId, tokenAddr, fromBytes, authNonceBytes)) {
+              case (#unused) {
+                nonceManager.unlock(signature.nonce);
+                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") and the authorization is still unused on chain — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, or token paused. Fix the cause and re-sign a fresh authorization.");
+              };
+              case (#used) {
+                return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, but the authorization is already used on chain: another transaction executed it (an earlier attempt, or anyone who copied it — transferWithAuthorization can be submitted by anyone), or the payer cancelled it. Funds may have reached the canister. No receipt is issued. Do NOT re-sign or pay again — check the chain for payer " # authz.from # "'s authorization before taking a new payment.");
+              };
+              case (#unknown(e)) {
+                return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, and whether another transaction executed the authorization could not be checked (" # e # "). Funds may have reached the canister. No receipt is issued. Do NOT re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused.");
+              };
+            };
           };
           case (#pending) {
             // Keep the nonce locked (only the nonce clean-up removes it) so the same challenge is
@@ -1250,6 +1350,9 @@ module {
     /// NOT finalize on #ok and MUST NOT re-broadcast on #err; use `sendErc20TransferConfirmed` (which
     /// parks #maybeSent as #pending) for any settle/refund path (B2). No in-repo caller uses this
     /// helper — it exists only for consumers that confirm independently.
+    ///
+    /// DEPRECATED (2.22.0): use `sendErc20TransferConfirmed`. Kept for compatibility; it may be
+    /// removed in 3.0.0.
     public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
       switch (evmSenderInst) {
         case (?sender) {
@@ -1319,11 +1422,19 @@ module {
     /// init — a forgotten re-apply on a mainnet-flipped canister silently reverts it to the
     /// compiled-in chains (verify with getEvmChains after upgrades). No caller auth here:
     /// gate this behind your own controller check.
+    ///
+    /// 2.22.0: refuses a chain whose tokens have different decimals (checkEvmTokenDecimals — the
+    /// constructor applies the same check and traps). Tokens listed on one chain must also be of
+    /// EQUAL UNIT VALUE: the payer chooses which one to pay with.
     public func setEvmChains(chains : [Types.EvmChainConfig]) : { #ok; #err : Text } {
       // Validation is all-or-nothing: a rejected set leaves the live set untouched. Beyond
-      // the constructor's (nonexistent) checks, reject what would settle ambiguously or
+      // the constructor's (decimals-only) check, reject what would settle ambiguously or
       // brokenly; an empty list turns the EVM rail off, and zero-token chains are tolerated
       // and skipped by the advertising helpers, as at construction.
+      switch (checkEvmTokenDecimals(chains)) {
+        case (#err(e)) { return #err(e) };
+        case (#ok) {};
+      };
       var i = 0;
       for (chain in chains.values()) {
         if (chain.chainId == 0) {
