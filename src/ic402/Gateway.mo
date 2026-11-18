@@ -1010,6 +1010,12 @@ module {
         created_at_time = if (dedup) { ?Nat64.fromIntWrap(Time.now()) } else { null };
       };
 
+      // 2.21.0: a settleFrom charge with dedup stores its transfer as in flight before the await,
+      // so the nonce clean-up keeps the nonce even if it expires meanwhile, and a concurrent
+      // re-submit cannot send it.
+      if (dedup and payerIsCaller) {
+        nonceManager.setInFlight(signature.nonce, { ledger = tokenConfig.ledger; network = signature.network; args });
+      };
       try {
         let result = await ledger.icrc2_transfer_from(args);
 
@@ -1041,7 +1047,8 @@ module {
         // second time. Now the nonce stays locked (the same payment cannot be replayed), the daily
         // reservation stays held, and no receipt is issued.
         if (dedup and payerIsCaller) {
-          // 2.21.0: keep the exact transfer, so the payer's settleFrom with this payment can resolve it.
+          // 2.21.0: make the stored transfer available, so the payer's settleFrom with this payment
+          // can resolve it.
           nonceManager.setPending(signature.nonce, { ledger = tokenConfig.ledger; network = signature.network; args });
           return #settlementPending("Ledger call rejected (" # debug_show (Error.code(e)) # "): the transfer's outcome is UNKNOWN — it may have been charged. Do NOT deliver value and do NOT pay with a new nonce. Once the ledger is reachable, submit this SAME payment again (settleFrom, as the payer): the ledger's deduplication then settles it once, with a receipt either way. That works for the ledger's 24-hour window; after it, check the ledger instead. " # Error.message(e));
         };
@@ -1073,8 +1080,10 @@ module {
     // the first had landed. Both issue the receipt, against the daily reservation the first
     // attempt still holds. Anything else keeps the charge pending and the nonce locked; #TooOld
     // (the 24 h window passed) and #BadFee (the fee changed) also drop the stored transfer, since
-    // re-sending it can no longer settle anything. The caller has already taken the stored
-    // transfer out (takePending), so a second re-submit arriving during the await sends nothing.
+    // re-sending it can no longer settle anything. The caller has checked the stored transfer out
+    // (takePending marks it in flight), so a second re-submit arriving during the await sends
+    // nothing, and the clean-up still keeps the nonce; every outcome below puts it back
+    // (setPending), drops it (dropPending) or consumes the nonce (chargeReceipt).
     func resolvePendingCharge(signature : Types.PaymentSignature, expectedAmount : ?Nat, p : Nonce.PendingCharge) : async* Types.PaymentResult {
       let nonce = signature.nonce;
       // Only the payment that started the charge resolves it. The caller is authenticated as the
@@ -1095,9 +1104,11 @@ module {
         case (#Ok(blockIndex)) { chargeReceipt(signature, p.args.from.owner, p.args.amount, p.ledger, blockIndex) };
         case (#Err(#Duplicate({ duplicate_of }))) { chargeReceipt(signature, p.args.from.owner, p.args.amount, p.ledger, duplicate_of) };
         case (#Err(#TooOld)) {
+          nonceManager.dropPending(nonce);
           #settlementPending("The pending charge is past the ledger's 24-hour deduplication window, so re-submitting can no longer settle it. Check the payer's ledger history for a transfer to this canister's account with this payment's nonce as memo before taking a new payment.");
         };
         case (#Err(#BadFee(_))) {
+          nonceManager.dropPending(nonce);
           #settlementPending("The ledger's fee changed since the pending charge was sent, so re-submitting can no longer settle it. Check the payer's ledger history for a transfer to this canister's account with this payment's nonce as memo before taking a new payment.");
         };
         case (#Err(err)) {

@@ -76,19 +76,41 @@ module {
 
     // 2.21.0: the transfer of each pending ICP charge, by nonce (Gateway.setLedgerDedup). Transient:
     // after an upgrade a pending charge answers #settlementPending, as in 2.20.0. An entry never
-    // outlives its nonce's lock: setPending requires the lock, and consumeLocked, unlock and
-    // gcExpired delete the entry with it.
+    // outlives its nonce's lock: storing requires the lock, and consumeLocked, unlock and gcExpired
+    // delete the entry with it. While a send of the transfer is in flight the entry stays stored
+    // (so the clean-up keeps the nonce) and is marked in `inFlight` (so nothing else sends it).
     var pending = HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash);
+    var inFlight = HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
 
-    /// 2.21.0: remember the transfer of a charge whose outcome is unknown. Ignored unless the nonce
-    /// is locked.
-    public func setPending(nonce : Blob, charge : PendingCharge) {
-      if (locked.get(nonce) != null) pending.put(nonce, charge);
+    /// 2.21.0: store a charge's transfer as in flight, before the first attempt's await: the
+    /// clean-up keeps the nonce, and takePending refuses it. Ignored unless the nonce is locked.
+    public func setInFlight(nonce : Blob, charge : PendingCharge) {
+      if (locked.get(nonce) != null) { pending.put(nonce, charge); inFlight.put(nonce, true) };
     };
 
-    /// 2.21.0: remove and return the pending transfer for `nonce`. The caller removes it BEFORE it
-    /// re-sends the transfer, so a second re-submit arriving meanwhile finds none and sends nothing.
-    public func takePending(nonce : Blob) : ?PendingCharge { pending.remove(nonce) };
+    /// 2.21.0: store (or put back) the transfer of a charge whose outcome is unknown, available to
+    /// takePending. Ignored unless the nonce is locked.
+    public func setPending(nonce : Blob, charge : PendingCharge) {
+      if (locked.get(nonce) != null) { pending.put(nonce, charge); inFlight.delete(nonce) };
+    };
+
+    /// 2.21.0: check out the stored transfer for a re-send: returns it and marks it in flight. A
+    /// second re-submit arriving before it is put back (setPending) or dropped gets null and sends
+    /// nothing. It stays stored meanwhile, so the clean-up keeps the nonce.
+    public func takePending(nonce : Blob) : ?PendingCharge {
+      if (inFlight.get(nonce) != null) return null;
+      switch (pending.get(nonce)) {
+        case (?p) { inFlight.put(nonce, true); ?p };
+        case (null) { null };
+      };
+    };
+
+    /// 2.21.0: drop the stored transfer (re-sending it can no longer decide anything). The nonce
+    /// stays locked.
+    public func dropPending(nonce : Blob) {
+      pending.delete(nonce);
+      inFlight.delete(nonce);
+    };
 
     // M-5: Evict the oldest unlocked nonce. Returns false if none can be evicted
     // (all remaining are locked — bounded by concurrent in-flight settlements).
@@ -145,12 +167,14 @@ module {
       nonces.delete(nonce);
       locked.delete(nonce);
       pending.delete(nonce);
+      inFlight.delete(nonce);
     };
 
     /// Unlock a nonce (call after failed settlement, allowing client retry).
     public func unlock(nonce : Blob) {
       locked.delete(nonce);
       pending.delete(nonce);
+      inFlight.delete(nonce);
     };
 
     /// 2.20.0: whether a nonce is locked, i.e. a settlement with it is in flight or ended with an
@@ -184,6 +208,7 @@ module {
         nonces.delete(nonce);
         locked.delete(nonce);
         pending.delete(nonce);
+        inFlight.delete(nonce);
       };
       // M-5: Compact the insertion-order ring so it tracks only live nonces.
       let compacted = Buffer.Buffer<Blob>(nonces.size());
@@ -219,6 +244,7 @@ module {
       insertionOrder := Buffer.Buffer<Blob>(nonces.size());
       for ((nonce, _) in nonces.entries()) { insertionOrder.add(nonce) };
       pending := HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash); // transient
+      inFlight := HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
       // C-1: Restore locked nonces if present
       switch (data.lockedNonces) {
         case (?locks) {

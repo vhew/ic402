@@ -339,7 +339,10 @@ transfer it committed. Then:
   (`#Duplicate`) or not yet (`#Ok`, charged now). Either way the payer gets one receipt. Another
   caller, network or price sends nothing. The nonce and the kept transfer survive the clean-up for 24
   hours past the nonce's expiry. It stays pending if:
-  - the ledger still rejects, or answers a fixable error (allowance, funds): call again later;
+  - the ledger still rejects, or answers a fixable error (allowance, funds): call again later. On
+    DFINITY ledgers `#InsufficientAllowance`/`#InsufficientFunds` on a re-send also show the first
+    transfer did not land (deduplication is checked first). The SDK's approvals expire after 5
+    minutes, so after a longer outage the payer re-approves, then calls `settleFrom` again;
   - the ledger answers `#TooOld` (its 24-hour window has passed) or `#BadFee` (its fee changed): a
     re-send can no longer decide it. Use the manual steps below;
   - the canister was upgraded since (the kept transfer is not persisted): manual steps below.

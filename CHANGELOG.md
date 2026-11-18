@@ -33,8 +33,10 @@ Behaviour changes integrators see:
     only a claim, and nonces are not secrets (the memo even shows the nonce on the ledger). A re-send
     on that path would let anyone who saw the transfer collect the payer's receipt. They stay
     `#settlementPending`, as in 2.20.0.
-  - **Re-sends are narrow.** Another caller, network or price sends nothing. The kept transfer is
-    taken out before the re-send's await, so two re-submits at once re-send it once.
+  - **Re-sends are narrow.** Another caller, network or price sends nothing.
+  - **A send in flight blocks re-sends.** While a send of the kept transfer is in flight (the first
+    attempt, or a re-send), it stays stored but marked in flight. A re-submit meanwhile sends
+    nothing, and the nonce clean-up still keeps the nonce.
   - **When re-sending stops.** `#TooOld` (the ledger's 24-hour window passed) and `#BadFee` (its fee
     changed) leave the charge pending and stop further re-sends. Other errors and rejects leave it
     re-sendable.
@@ -100,7 +102,7 @@ Behaviour changes integrators see:
 
 ### Tests
 
-- **`test/chargededup.test.mo` (18).** The resolution against a fake ledger that deduplicates as
+- **`test/chargededup.test.mo` (19).** The resolution against a fake ledger that deduplicates as
   DFINITY's do. It covers:
   - charged-then-rejected, with one fee query;
   - rejected-before-charge;
@@ -110,7 +112,7 @@ Behaviour changes integrators see:
   - HTTP charges kept nothing, and HTTP re-submits never re-send;
   - another caller, network or price;
   - no price given;
-  - two re-submits at once;
+  - two re-submits at once, and a re-submit during the first attempt;
   - re-sends rejected or refused;
   - `#TooOld`, `#BadFee`, and a failed fee query.
 
@@ -118,8 +120,12 @@ Behaviour changes integrators see:
   `created_at_time` from one that takes a fresh one. That part is pinned by review.
 - **`test/opendeposit.test.mo` (2):** reconciling a parked deposit, landed and not landed, against
   that session's escrow subaccount.
-- **`test/nonce.test.mo` (+3):** the kept transfer needs the lock, is taken once, goes with the lock,
-  and survives the clean-up for 24 hours past expiry.
+- **`test/nonce.test.mo` (+5):**
+  - the kept transfer needs the lock, and is checked out once until put back;
+  - a first attempt's transfer is in flight;
+  - dropping it keeps the lock;
+  - it goes with the lock;
+  - it survives the clean-up for 24 hours past expiry, also while checked out.
 - **`test/integration.test.ts` (+2, replica).** Both stop the local ckUSDC ledger with the icp CLI:
   - a charge is refused before any transfer, and the same payment then settles once;
   - a session open is refused before the deposit, nothing is parked, and the next open succeeds.
@@ -127,18 +133,28 @@ Behaviour changes integrators see:
   No test reaches the parking itself. The replica cannot stop the ledger between the fee query and
   the deposit, and the interpreter cannot run a successful `openSession`. It is covered by review;
   its reconcile is unit-tested.
-- **Mutation check:** 34 mutations, each test run in isolation. 30 turn exactly one test red. Four
-  turn more, by design:
+- **Mutation check:** 37 mutations, each test run in isolation. None went undetected; 32 turn exactly
+  one test red. Five turn more, by design:
   - treating the re-send's `#Ok` as pending breaks all 8 tests that resolve that way;
   - storing the transfer whatever the setting and path breaks the 3 tests that pin "off" and "HTTP";
-  - a `takePending` that keeps the record, or putting the record back before the re-send's await,
-    also breaks the concurrent-re-submit and `#TooOld`/`#BadFee` tests, which rely on it being gone.
-- **Adversarial review:** three Fable reviewers (fund safety, the parked deposit, tests and docs)
-  before these fixes. Confirmed and fixed:
+  - a `takePending` that hands out a checked-out record breaks the concurrency and `#TooOld`/`#BadFee`
+    tests as well as its unit test;
+  - `setInFlight` leaving the record available, and `dropPending` also unlocking, are each caught by
+    a Nonce unit test and by the Gateway test of the behaviour it protects.
+
+  The `openSession` fee check has no mutation here; only the replica test pins it.
+- **Adversarial review.** Three Fable reviewers (fund safety, the parked deposit, tests and docs),
+  then one on the fixes. Confirmed and fixed:
   - a pending HTTP charge's receipt could be collected by anyone who saw the transfer;
   - the nonce clean-up could drop a pending charge long before the ledger's 24 hours;
+  - the clean-up could still drop a nonce while its transfer was out for a send, which the in-flight
+    marker fixes;
   - a ledger outage turned every open attempt into a parked record;
   - plus test gaps and doc errors.
+
+  Not fixed: the open lock can be overridden after 5 minutes and then deleted by the stale call.
+  This pattern already existed on the deposit await, and the post-deposit concurrency re-check
+  still bounds it.
 
 ### Interop: viem accepts colon-namespaced EIP-712 names again
 

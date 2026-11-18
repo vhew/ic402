@@ -138,9 +138,11 @@ persistent actor KnowledgeBase {
     // sessionQuery. Library default is ON (compatibility); transient — re-applied here on upgrade.
     gate.setSignedVoucherFallback(false);
     // 2.21.0: the one ledger this example takes is ckUSDC (locally, DFINITY's ICRC-1 ledger build),
-    // which deduplicates on created_at_time + memo, so a pending ICP charge can be resolved
-    // by re-submitting the same payment. Turn this on ONLY for ledgers that deduplicate — on any
-    // other, the re-submit charges twice. Transient — re-applied here on upgrade.
+    // which deduplicates on created_at_time + memo, so a pending ICP charge made through the Candid
+    // routes (settleFrom) is resolved by the payer's settleFrom with the same payment. The HTTP
+    // routes (settle) keep 2.20.0's behaviour: a pending charge there is checked on the ledger.
+    // Turn this on ONLY for ledgers that deduplicate — on any other, the re-send charges twice.
+    // Transient — re-applied here on upgrade.
     gate.setLedgerDedup(true);
   };
 

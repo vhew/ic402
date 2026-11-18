@@ -277,6 +277,23 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
   });
 
+  await test("a re-submit while the first attempt is still in flight sends nothing", func() : async () {
+    // Mutation: store the first attempt's transfer available (setPending) instead of in flight —
+    // the re-submit sends it while the first is still out.
+    await ledger.script(REJECT);
+    await ledger.setHops(3);
+    let (gate, sig) = setup(true);
+    let first = gate.settleFrom(payerP, sig, ?5_000);
+    var n = 0; while ((await ledger.stats()).calls == 0 and n < 50) { await async {}; n += 1 };
+    assert isPending(await pay(gate, sig, ?5_000)); // the first is in flight
+    assert (await ledger.stats()).calls == 1;
+    assert isPending(await first);
+    await ledger.setHops(0);
+    await ledger.setMode(OK);
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
+  });
+
   await test("a re-send that is itself rejected stays pending, and a later re-submit resolves", func() : async () {
     // Mutation: do not store the transfer again after a rejected re-send — every later
     // re-submit answers pending without trying.
