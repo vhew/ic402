@@ -6,7 +6,8 @@
 ///       old behaviour.
 ///   M3  The expiry sweep's refund: a ledger reject parks the job #Settling (unknown outcome) and
 ///       the sweep goes on; a definite #Err puts the job back for the next tick. Before, either
-///       left it #Expired with the refund owed, for GC to drop after 24h.
+///       left it #Expired with the refund owed, for GC to drop after 24h. Round 2 bounds those
+///       retries (suites at the end).
 ///   M5  submitResult is refused while the ZK verifier call is in flight (#Computing); a verifier
 ///       call that throws puts the job back to #Assigned for a resubmit.
 ///   M6  Buyer confirm/dispute (and the EVM-signed variants) apply to BuyerConfirm jobs only.
@@ -14,7 +15,8 @@
 ///   M10 registerService validates before consuming an id, refuses `svc-<n>` ids from callers
 ///       and oversized ids/keys; settleJob stamps completedAt at settlement.
 ///
-/// The fake ledger and verifier are in-file `persistent actor`s (as in test/jobrevert.test.mo).
+/// The fake ledger and verifier are in-file `persistent actor`s (as in test/jobrevert.test.mo);
+/// the EVM transfer hook is an in-file function playing a script.
 /// Time.now() is a small constant under mo:test, so times here are relative: a dispute window that
 /// ended is a submit time ten seconds in the past, an expired job has expiresAt = -1.
 /// Each test names the mutation that turns it red.
@@ -328,5 +330,205 @@ await suite("M10: registerService and settlement time", func() : async () {
     switch (await reg.confirmJob(buyerP, "job-1")) { case (#ok) {}; case (#err(_)) { assert false } };
     assert reg.gcTerminalJobs() == 0;
     assert status(reg) == ?#Settled;
+  });
+});
+
+// ── 2.22.0 round 2: what the sweep retries on its own ──────────────────────────────────────
+//
+// A refund or operator payment that fails definitively (an ICP ledger #Err, an EVM send refused
+// before broadcast) is retried by later ticks, at most MAX_AUTO_ATTEMPTS (5) times. One that no
+// retry can fix (no hook, no payout address, …) is not retried. One that REVERTED on-chain is
+// never sent again: the reverted tx is recorded on the job. A #Verified job — left by a failed
+// settle — is now settled by the sweep too (before, only a controller could move it).
+
+type EvmOutcome = { #confirmed; #reverted; #pending; #err };
+var evmScript : [EvmOutcome] = [#confirmed];
+var evmCalls = 0;
+func evmPlay(seq : [EvmOutcome]) { evmScript := seq; evmCalls := 0 };
+
+func evmHook(_ : Nat, _ : Text, _ : Text, _ : Nat) : async { #confirmed : Text; #reverted : Text; #pending : Text; #err : Text } {
+  evmCalls += 1;
+  switch (evmScript[Nat.min(evmCalls, evmScript.size()) - 1 : Nat]) {
+    case (#confirmed) { #confirmed("0xok") };
+    case (#reverted) { #reverted("0xbad") };
+    case (#pending) { #pending("0xwait") };
+    case (#err) { #err("rpc down before broadcast") };
+  };
+};
+
+let EVM_BUYER = "0x1111111111111111111111111111111111111111";
+let EVM_PAYOUT = "0x3333333333333333333333333333333333333333";
+
+/// `jobs` paid on Base by an EVM buyer. `payout`: the operator has an EVM payout address;
+/// `hook`: the transfer hook is wired (it plays evmScript).
+func mkEvm(services : [(Text, Types.ServiceDefinition)], jobs : [(Text, Types.Job)], payout : Bool, hook : Bool) : ServiceRegistry.ServiceRegistry {
+  let reg = mk(services, []);
+  reg.loadStable({
+    services; serviceCounter = 0; jobCounter = jobs.size();
+    jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(jobs, func((id, j)) { (id, { j with buyer = EVM_BUYER }) });
+    evmRails = ?Array.map<(Text, Types.Job), (Text, Types.EvmRail)>(jobs, func((id, _)) { (id, { network = "eip155:8453"; token = "0x2222222222222222222222222222222222222222" }) });
+    operatorPayouts = if (payout) { ?[(operatorP, EVM_PAYOUT)] } else { null };
+  });
+  if (hook) reg.setEvmTransfer(evmHook);
+  reg;
+};
+
+func parkedHash(reg : ServiceRegistry.ServiceRegistry) : ?Text {
+  switch (reg.getJob("job-1")) { case (?j) { switch (j.parkedTx) { case (?p) { ?p.txHash }; case (null) { null } } }; case (null) { null } };
+};
+
+func sweeps(reg : ServiceRegistry.ServiceRegistry, n : Nat) : async () {
+  var i = 0; while (i < n) { ignore await reg.expireJobs(); i += 1 };
+};
+
+await suite("round 2: reverted EVM payments are never sent again", func() : async () {
+
+  await test("an expiry refund that reverts is parked #Expired with its tx; later ticks send nothing", func() : async () {
+    // Mutation: refundOnRail maps #reverted to #err again — the sweep restores the job and signs
+    // and broadcasts the refund again every tick.
+    evmPlay([#reverted]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    assert (await reg.expireJobs()) == [];
+    assert status(reg) == ?#Expired;
+    assert parkedHash(reg) == ?"0xbad";
+    await sweeps(reg, 2);
+    assert evmCalls == 1;
+    assert not reg.hasExpiryWork(); // terminal: it does not hold the sweep at its working cadence
+    switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert parkedHash(reg) == null;
+  });
+
+  await test("an operator payment that reverts is recorded on the #Verified job; later ticks send nothing, after an upgrade too", func() : async () {
+    // Mutation: settleJob's #reverted arm rolls back to a plain #Verified (no record), or the sweep
+    // ignores the record — the payment is broadcast again: at once, or after the next upgrade
+    // (which clears the sweep's transient give-up count; the record on the job is what persists).
+    evmPlay([#reverted]);
+    let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Verified;
+    assert parkedHash(reg) == ?"0xbad";
+    await sweeps(reg, 2);
+    assert evmCalls == 1;
+    let upgraded = mk([], []);
+    upgraded.loadStable(reg.toStable());
+    upgraded.setEvmTransfer(evmHook);
+    await sweeps(upgraded, 2);
+    assert evmCalls == 1;
+    assert parkedHash(upgraded) == ?"0xbad";
+  });
+
+  await test("a controller's resolveDispute sends it again and drops the record of the revert", func() : async () {
+    // Mutation: resolveDispute keeps the parked tx on its forward writes — the job ends #Settled
+    // still carrying the reverted tx, counted as parked and never GC'd.
+    evmPlay([#reverted, #confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Submitted, ?0, FAR)], true, true);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert parkedHash(reg) == ?"0xbad";
+    switch (await reg.resolveDispute("job-1", false)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Settled;
+    assert parkedHash(reg) == null;
+  });
+});
+
+await suite("round 2: bounded retries of definite failures", func() : async () {
+
+  await test("a refund that keeps failing (#Err) is tried 5 times, then left as it was for a controller", func() : async () {
+    // Mutation: drop the give-up check on the refund path — one ledger call per tick, forever.
+    await ledger.script([#err]);
+    let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)]);
+    await sweeps(reg, 7);
+    assert (await ledger.transferCalls()) == 5;
+    assert status(reg) == ?#Disputed;
+    await ledger.script([#ok]);
+    switch (await reg.resolveDispute("job-1", true)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Refunded;
+  });
+
+  await test("an auto-settle that fails (#Err) is settled by the next tick", func() : async () {
+    // Mutation: the sweep skips a #Verified job it finds — before round 2, the job sat #Verified
+    // with the operator unpaid and the buyer not refunded, and nothing told anyone.
+    await ledger.script([#err, #ok]);
+    let reg = mk([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Verified;
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Settled;
+    assert (await ledger.transferCalls()) == 2;
+  });
+
+  await test("an operator payment that keeps failing is tried 5 times, then left #Verified", func() : async () {
+    // Mutation: drop the give-up check on the settle path — one payment attempt per tick, forever.
+    evmPlay([#err]);
+    let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    await sweeps(reg, 7);
+    assert evmCalls == 5;
+    assert status(reg) == ?#Verified;
+    assert parkedHash(reg) == null;
+  });
+});
+
+await suite("round 2: failures no retry can fix are not retried", func() : async () {
+
+  await test("a settle with no operator payout address is not retried, even once one is set", func() : async () {
+    // Mutation: count it as a transient failure — the next tick tries again (here it then pays;
+    // with the cause unfixed it would fail every tick). A controller re-drives with resolveDispute.
+    evmPlay([#confirmed]);
+    let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], false, true);
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Verified;
+    ignore reg.setOperatorEvmPayout(operatorP, EVM_PAYOUT);
+    ignore await reg.expireJobs();
+    assert evmCalls == 0;
+    switch (await reg.resolveDispute("job-1", false)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Settled;
+  });
+
+  await test("a refund with no transfer hook is not retried, even once one is wired", func() : async () {
+    // Mutation: count it as a transient failure — the next tick tries again.
+    evmPlay([#confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, false);
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Disputed;
+    reg.setEvmTransfer(evmHook);
+    ignore await reg.expireJobs();
+    assert evmCalls == 0;
+    assert status(reg) == ?#Disputed;
+  });
+});
+
+await suite("round 2: the EVM rail follows the receipt's network", func() : async () {
+
+  await test("an EVM payer spelled 0X… or as bare hex is put on the EVM rail; an ICP payer is not", func() : async () {
+    // Mutation: key the rail on the buyer starting with "0x" again — the 0X and bare-hex payers
+    // land on the ICP rail, where their refund can never be paid.
+    let reg = mk([buyerConfirm(0)], []);
+    func receipt(network : Text, sender : Text) : Types.PaymentReceipt {
+      { id = "r"; amount = 1_000; token = "0x2222222222222222222222222222222222222222"; sender; recipient = "c"; network; timestamp = 0; txHash = null; sessionId = null; refunded = null };
+    };
+    let upper = "0XABCDEF0000000000000000000000000000000001";
+    let bare = "abcdef0000000000000000000000000000000002";
+    let a = reg.createJobFromReceipt(upper, "svc-bc", Blob.fromArray([]), receipt("eip155:8453", upper), null);
+    let b = reg.createJobFromReceipt(bare, "svc-bc", Blob.fromArray([]), receipt("eip155:8453", bare), null);
+    let c = reg.createJobFromReceipt(Principal.toText(buyerP), "svc-bc", Blob.fromArray([]), receipt("icp:1", Principal.toText(buyerP)), null);
+    assert reg.getEvmRail(a) == ?{ network = "eip155:8453"; token = "0x2222222222222222222222222222222222222222" };
+    assert reg.getEvmRail(b) != null;
+    assert reg.getEvmRail(c) == null;
+  });
+});
+
+await suite("round 2: a dispute after the dispute window has closed", func() : async () {
+
+  await test("is refused, on both entry points; inside the window, or with no window, it is accepted", func() : async () {
+    // Mutation: drop the window check from disputeJob or from disputeJobEvm — a buyer disputes
+    // a result the window has already accepted (and, at expiresAt, is refunded for it).
+    let sig = Array.tabulate<Nat8>(65, func(_) { 1 });
+    let closed = mk([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
+    assert closed.disputeJob(buyerP, "job-1", "late") == #err("Dispute window has closed: the result was accepted");
+    assert closed.disputeJobEvm("job-1", sig, "late") == #err("Dispute window has closed: the result was accepted");
+    assert status(closed) == ?#Submitted;
+    let open = mk([buyerConfirm(3600)], [job("job-1", "svc-bc", #Submitted, ?0, FAR)]);
+    assert open.disputeJob(buyerP, "job-1", "in time") == #ok;
+    let none = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
+    assert none.disputeJob(buyerP, "job-1", "no window") == #ok;
   });
 });

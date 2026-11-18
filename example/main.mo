@@ -1088,6 +1088,36 @@ persistent actor KnowledgeBase {
     registry.disputeJob(msg.caller, jobId, reason);
   };
 
+  // 2.22.0: an EVM-paid buyer (job.buyer is a 0x address) has no principal for confirmJob /
+  // disputeJob, so it confirms or disputes with a signature instead — without these, its
+  // BuyerConfirm job could only end with the operator paid when the dispute window closed.
+  // The buyer signs keccak256(buyerActionMessage(action, jobId)) as a RAW 32-byte digest (no
+  // EIP-191 "\x19Ethereum Signed Message" prefix) with the key of its 0x address; `signature` is
+  // r ‖ s ‖ v (65 bytes). The message binds the action, the job and this canister. Anyone may
+  // relay the signature. Recovering the signer is costly, so these share the facilitator's global
+  // admission gate (the settle path's rate limit and cycle floor).
+  public query func buyerActionMessage(action : Text, jobId : Text) : async Text {
+    registry.buyerActionMessage(action, jobId);
+  };
+
+  func evmBuyerAdmit() : ?Text {
+    switch (gate.facilitatorAdmit()) {
+      case (#ok) { null };
+      case (#throttled) { ?"Rate limited: signature checks share the facilitator's admission limit — retry shortly" };
+      case (#lowCycles) { ?"The canister's cycles are below the facilitator floor — try again later" };
+    };
+  };
+
+  public func confirmJobEvm(jobId : Text, signature : Blob) : async { #ok; #err : Text } {
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
+    await registry.confirmJobEvm(jobId, Blob.toArray(signature));
+  };
+
+  public func disputeJobEvm(jobId : Text, signature : Blob, reason : Text) : async { #ok; #err : Text } {
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
+    registry.disputeJobEvm(jobId, Blob.toArray(signature), reason);
+  };
+
   // Controller-only: settle (refundBuyer = false) or refund (true) a #Submitted, #Disputed or
   // #Verified job — how a disputed BuyerConfirm job is decided before its timeout refunds it, and
   // how a job a failed operator payment left #Verified is re-driven.
