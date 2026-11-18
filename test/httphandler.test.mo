@@ -367,5 +367,21 @@ suite("HttpHandler", func() {
         case (null) { assert(false) };
       };
     });
+
+    // I10 (2.22.0): OFFICIAL_HEADER's JSON re-serialized by Python 3 `json.dumps(json.loads(...))`
+    // (default separators ", " and ": "), base64-encoded. Before the fix every paid route
+    // answered such a client 400. Red if extractJsonField stops skipping whitespace after the
+    // colon (Utils' "whitespace after the colon" test goes red with it).
+    let PYTHON_HEADER = "eyJ4NDAyVmVyc2lvbiI6IDIsICJwYXlsb2FkIjogeyJhdXRob3JpemF0aW9uIjogeyJmcm9tIjogIjB4NGE2MjMxNjYyM2FkNDU3RjAyY0RDNUQ5OTdkZUQ2N2EzODNFQzU2OSIsICJ0byI6ICIweDk5Qzg1MWVhYTNjMzk3NjkxNEQ2M2I4MjJDNjdlMjAxRUMwQkZCYjgiLCAidmFsdWUiOiAiMTAwMDAiLCAidmFsaWRBZnRlciI6ICIwIiwgInZhbGlkQmVmb3JlIjogIjE3NTAwMDAzMDAiLCAibm9uY2UiOiAiMHg0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyNDI0MjQyIn0sICJzaWduYXR1cmUiOiAiMHhhNjM3MmUxNDcyMTUzOTY2YmFmYjExZThjZGUyYmIwNDAzNGNlNGIyODRmYjJmYmM5YTgzZGYyNmFhMGViYzA0NDBlOWEzYmM1OGQwNDc5YTcyNzdiOWViYzYzYWFlNTZiOTkyMDIxMWI0NjYwZjg4NjI1MjM3ZjAxODMyMzlkNjFjIn0sICJyZXNvdXJjZSI6IHsidXJsIjogImh0dHBzOi8vZXhhbXBsZS1jYW5pc3Rlci5pY3AwLmlvL2NvbnRlbnQvcHJlbWl1bS0xIn0sICJhY2NlcHRlZCI6IHsic2NoZW1lIjogImV4YWN0IiwgIm5ldHdvcmsiOiAiZWlwMTU1Ojg0NTMyIiwgImFtb3VudCI6ICIxMDAwMCIsICJhc3NldCI6ICIweDAzNkNiRDUzODQyYzU0MjY2MzRlNzkyOTU0MWVDMjMxOGYzZENGN2UiLCAicGF5VG8iOiAiMHg5OUM4NTFlYWEzYzM5NzY5MTRENjNiODIyQzY3ZTIwMUVDMEJGQmI4IiwgIm1heFRpbWVvdXRTZWNvbmRzIjogMzAwLCAiZXh0cmEiOiB7Im5hbWUiOiAiVVNEQyIsICJ2ZXJzaW9uIjogIjIifX19";
+
+    test("I10: Python json.dumps spacing parses exactly like compact JSON (x402 and legacy headers)", func() {
+      let compact = HttpHandler.parseX402PaymentHeader(OFFICIAL_HEADER);
+      assert(compact != null);
+      assert(HttpHandler.parseX402PaymentHeader(PYTHON_HEADER) == compact);
+      // The legacy ICP-rail X-PAYMENT header is raw JSON: json.dumps of the same five fields.
+      let spaced = HttpHandler.parsePaymentHeader("{\"scheme\": \"exact\", \"network\": \"icp:1\", \"signature\": \"00\", \"sender\": \"aaaaa-aa\", \"nonce\": \"0a0b\"}");
+      assert(spaced != null);
+      assert(spaced == HttpHandler.parsePaymentHeader("{\"scheme\":\"exact\",\"network\":\"icp:1\",\"signature\":\"00\",\"sender\":\"aaaaa-aa\",\"nonce\":\"0a0b\"}"));
+    });
   });
 });

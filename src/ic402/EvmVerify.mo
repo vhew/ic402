@@ -6,7 +6,9 @@
 ///
 // Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum (mainnet + testnet).
 ///
-// Used by Gateway.settle() when the payment network is "eip155:*".
+// Not on Gateway.settle()'s path: settle confirms its own EIP-3009 broadcast through
+// EvmSender.confirmTransaction, and nothing in the library calls this module. See
+// verifyTransaction for what it does NOT check (the payer, single use).
 
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";
@@ -79,6 +81,12 @@ module {
   /// Verify an EVM transaction receipt via the EVM RPC Canister.
   /// Checks: tx succeeded, sent to correct token contract,
   /// Transfer event log shows correct recipient and sufficient amount.
+  ///
+  /// ⚠️ It does NOT authenticate the payer and does NOT make a tx single-use. ANY successful
+  /// transfer of `expectedToken` to `expectedRecipient` of at least `expectedAmount` verifies —
+  /// one a third party sent, one already used to pay for something else, or one not sent by the
+  /// person presenting the hash. A caller that grants access on #ok must itself bind the tx to
+  /// the payer (e.g. check `from`) and record the hash so it is accepted once.
   public func verifyTransaction(
     txHash : Text,
     chainId : Nat,

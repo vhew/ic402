@@ -22,6 +22,7 @@ import Debug "mo:base/Debug";
 import Prim "mo:⛔"; // rts_total_allocation, for the ed25519VerifyCost diagnostic only
 import IC "mo:base/ExperimentalInternetComputer";
 import Ed25519 "../src/ic402/Ed25519";
+import Utils "../src/ic402/Utils"; // escapeJsonString, for the JSON this file builds by hand
 
 persistent actor KnowledgeBase {
 
@@ -418,6 +419,24 @@ persistent actor KnowledgeBase {
     };
   };
 
+  // M14/I7: why GET /content/<id> cannot deliver this content, as the response to send instead —
+  // or null when it can. Checked before the 402 is minted and again before settling, so no
+  // payment is taken for content this route would not hand over: an unknown id; an upload still
+  // in progress (it would settle, then fail "Read failed"); or multi-chunk content, whose chunks
+  // getChunk serves only against a grant bound to a principal, which an HTTP payer cannot hold.
+  func httpContentRefusal(contentId : Text) : ?Ic402.HttpResponse {
+    switch (store.getMetadata(contentId)) {
+      case (null) { ?Http.httpError(404, "Content not found") };
+      case (?metadata) {
+        if (store.isComplete(contentId) != ?true) {
+          ?Http.httpError(503, "Content upload incomplete — try again once the upload finishes");
+        } else if (metadata.chunkCount > 1) {
+          ?Http.httpError(501, "Multi-chunk content is not served over HTTP — buy it with the Candid getContent method");
+        } else { null };
+      };
+    };
+  };
+
   // 2.17.0: the HTTP settle paths below keep gate.settle — http_request_update has no caller (its
   // msg.caller is anonymous), so ICP payment here stays allowance-authenticated; that is why the
   // SDK approves exactly amount + fee with an expiry. Candid endpoints use gate.settleFrom.
@@ -465,12 +484,12 @@ persistent actor KnowledgeBase {
           case (?p) { p };
           case (null) {
             if (Text.startsWith(path, #text "/content/")) {
-              // M14: don't advertise a 402 for content that doesn't exist — the client would pay
-              // for an undeliverable resource. Check existence before minting the challenge.
+              // M14/I7: don't advertise a 402 for content this route cannot deliver — the client
+              // would pay for an undeliverable resource. Check before minting the challenge.
               let cid = switch (Text.stripStart(path, #text "/content/")) { case (?id) { id }; case (null) { "" } };
-              switch (store.getMetadata(cid)) {
-                case (null) { return Http.httpError(404, "Content not found") };
-                case (?_) {};
+              switch (httpContentRefusal(cid)) {
+                case (?refusal) { return refusal };
+                case (null) {};
               };
               return Http.http402(gate.requireAll(5_000), resourceUrl);
             };
@@ -484,13 +503,12 @@ persistent actor KnowledgeBase {
                 case (null) { return Http.httpError(404, "Service not found") };
                 case (?svc) {
                   if (not svc.enabled) return Http.httpError(404, "Service not available");
-                  switch (svc.pricing) {
+                  switch (serviceCharge(svc)) {
                     // #Session is billed against an existing session deposit, not a
                     // per-request 402 charge — requireAll(0) would trap.
-                    case (#Session) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+                    case (null) { return Http.httpError(400, "Service uses session billing — open a session instead") };
                     // A1: charge price + ledger fee so the canister can cover the outbound settle.
-                    case (#Exact(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
-                    case (#Upto(p)) { return Http.http402(gate.requireAll(p + CKUSDC_FEE), resourceUrl) };
+                    case (?charge) { return Http.http402(gate.requireAll(charge), resourceUrl) };
                   };
                 };
               };
@@ -516,12 +534,12 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
       };
-      // M14: verify the content exists BEFORE settling — don't take payment for an undeliverable
-      // resource (typo'd/nonexistent id, or content deleted since the 402) then return 404 while
-      // keeping the funds.
-      switch (store.getMetadata(contentId)) {
-        case (null) { return Http.httpError(404, "Content not found") };
-        case (?_) {};
+      // M14/I7: verify the content is deliverable BEFORE settling — don't take payment for an
+      // undeliverable resource (typo'd/nonexistent id, content deleted or replaced since the 402,
+      // an unfinished upload, multi-chunk content) then return an error while keeping the funds.
+      switch (httpContentRefusal(contentId)) {
+        case (?refusal) { return refusal };
+        case (null) {};
       };
       let contentResult = await gate.settle(sig, ?5_000);
       switch (contentResult) {
@@ -538,6 +556,8 @@ persistent actor KnowledgeBase {
               case (null) { return Http.httpError(500, "Read failed") };
             };
           } else {
+            // Reached only when the entry was replaced by multi-chunk content during the settle:
+            // httpContentRefusal turns chunked content away before any payment.
             return Http.http200JsonWithSettlement("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}", settlement);
           };
         };
@@ -557,7 +577,8 @@ persistent actor KnowledgeBase {
           var json = "[";
           for (i in results.keys()) {
             if (i > 0) { json #= "," };
-            json #= "\"" # results[i] # "\"";
+            // I10: results echo the caller's `q` — escape it, or a quote or backslash breaks the JSON.
+            json #= "\"" # Utils.escapeJsonString(results[i]) # "\"";
           };
           return Http.http200JsonWithSettlement("{\"results\":" # json # "]}", settlement);
         };
@@ -578,11 +599,14 @@ persistent actor KnowledgeBase {
         case (null) { return Http.httpError(404, "Service not found") };
         case (?s) { if (not s.enabled) { return Http.httpError(404, "Service not available") }; s };
       };
-      // Option A: validate BEFORE settling (money-moved ⇒ job-exists). The 402 was minted with
-      // price + CKUSDC_FEE (see the GET handler at main.mo:459-460), so validate that same expected
-      // amount; a rejection here moves no funds. See docs/decisions/settled-then-job-failed.md.
-      let svcPrice = switch (svc.pricing) { case (#Exact(p)) { p }; case (#Upto(p)) { p }; case (#Session) { 0 } };
-      switch (registry.validateSubmittable(sig.sender, serviceId, svcPrice + CKUSDC_FEE)) {
+      // Option A: validate BEFORE settling (money-moved ⇒ job-exists). The 402 was minted for
+      // serviceCharge(svc) (the 402 branch above), so validate that same amount; a rejection here
+      // moves no funds. See docs/decisions/settled-then-job-failed.md.
+      let charge = switch (serviceCharge(svc)) {
+        case (?c) { c };
+        case (null) { return Http.httpError(400, "Service uses session billing — open a session instead") };
+      };
+      switch (registry.validateSubmittable(sig.sender, serviceId, charge)) {
         case (#err(e)) { return Http.httpError(400, e) };
         case (#ok) {};
       };
@@ -595,7 +619,9 @@ persistent actor KnowledgeBase {
       // poll within two ticks (2.17.5: the arm itself counts as work for the next tick, so a tick
       // landing during this settle does not drop to the idle poll just before the job exists).
       registry.armExpiryTimer<system>();
-      let serviceResult = await gate.settle(sig, null);
+      // 2.22.0: settle for the service's charge. With null, settle took the nonce's own amount, so
+      // a nonce minted elsewhere (a 1,000-unit /search challenge) bought any service.
+      let serviceResult = await gate.settle(sig, ?charge);
       switch (serviceResult) {
         case (#ok(receipt)) {
           // C-5: receipt.sender is a principal (ICP) or a 0x EVM address (EVM). Pass it through as
@@ -605,8 +631,7 @@ persistent actor KnowledgeBase {
           let settlement = Http.settlementResponseJson(true, receipt.txHash, receipt.network, receipt.sender, receipt.amount, null);
           return Http.http200JsonWithSettlement("{\"jobId\":\"" # jobId # "\",\"status\":\"pending\",\"pollUrl\":\"/job/" # jobId # "\"}", settlement);
         };
-        // amount unknown on a failed service settle (varies per service); 0 in the response.
-        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, 0)) };
+        case (_) { return Http.http402WithSettlement(settleResultJson(serviceResult, sig.network, sig.sender, charge)) };
       };
     };
 
@@ -629,6 +654,11 @@ persistent actor KnowledgeBase {
   // Remove this section if you only need per-request charges.
   // ═══════════════════════════════════════════════════════════════════════
 
+  // The price of one sessionQuery. The intents advertise it as costPerCall, and sessionQuery
+  // enforces it: the library only requires each voucher's cumulative amount to rise. Transient:
+  // a constant, re-set on every install and upgrade.
+  transient let SESSION_COST_PER_CALL : Nat = 500;
+
   public shared func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
@@ -641,7 +671,7 @@ persistent actor KnowledgeBase {
       suggestedDeposit = 50_000;
       minDeposit = ?5_000;
       expiry = Time.now() + 300_000_000_000;
-      costPerCall = ?500;
+      costPerCall = ?SESSION_COST_PER_CALL;
       description = ?"Knowledge base session";
     });
   };
@@ -664,7 +694,7 @@ persistent actor KnowledgeBase {
             suggestedDeposit = 50_000;
             minDeposit = ?5_000;
             expiry = Time.now() + 300_000_000_000;
-            costPerCall = ?500;
+            costPerCall = ?SESSION_COST_PER_CALL;
             description = ?"Knowledge base session (EVM)";
           });
         };
@@ -694,7 +724,18 @@ persistent actor KnowledgeBase {
     // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
     // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
     switch (gate.consumeVoucherFrom(msg.caller, voucher)) {
-      case (#ok(_)) { #ok(doQuery(question)) };
+      case (#ok(delta)) {
+        // S2: the library accepts any increase, so a hand-rolled client could pay 1 per query.
+        // Refuse a voucher that pays less than the advertised price, and leave it unconsumed: a
+        // trap discards the state changes made since the message's last await, and there is no
+        // await between consumeVoucherFrom and here, so the consumption is undone. Keep it so.
+        // (Checking before consuming instead would tell a stranger, whom consumeVoucherFrom
+        // refuses #invalidSignature before it looks at any amount, the session's consumed total.)
+        if (delta < SESSION_COST_PER_CALL) {
+          Debug.trap("Voucher below the per-call price: each sessionQuery must raise cumulativeAmount by at least " # Nat.toText(SESSION_COST_PER_CALL) # " (the intent's costPerCall). The voucher was not consumed.");
+        };
+        #ok(doQuery(question));
+      };
       case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
       case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
@@ -706,6 +747,16 @@ persistent actor KnowledgeBase {
 
   public shared(msg) func endSession(sessionId : Text) : async Ic402.PaymentResult {
     await gate.closeSession(msg.caller, sessionId);
+  };
+
+  // Payer recovery: a closed ICP session that left the payer's remainder in its escrow (a refund
+  // leg that failed, a reconcileSession that found the settle landed, or a forceResolveSession) is
+  // owed it — health().sessions.refundOwed counts them, and those close/reconcile messages tell the
+  // payer to call this. Only the session's payer can (the library checks the caller), and the total
+  // is capped at what is owed less the ledger's fee per recovery. ckUSDC is this example's only ICP
+  // ledger; the library refuses it unless it is the session's own.
+  public shared(msg) func recoverEscrow(sessionId : Text, amount : Nat) : async { #ok : Nat; #err : Text } {
+    await gate.recoverEscrow(msg.caller, actor (CKUSDC), sessionId, amount);
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -745,6 +796,12 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let amount = 5_000;  // $0.005 USDC
+    // I7: an upload still in progress cannot be delivered (this would settle, then answer "Read
+    // failed" or grant chunks that are not there), so refuse it before quoting or settling.
+    // An unknown id (null) falls through to the M14 check below, as before.
+    if (store.isComplete(contentId) == ?false) {
+      return #error("Content upload incomplete — try again once the upload finishes");
+    };
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
@@ -754,6 +811,15 @@ persistent actor KnowledgeBase {
         switch (store.getMetadata(contentId)) {
           case (null) { return #error("Not found") };
           case (?_) {};
+        };
+        // 2.22.0: likewise refuse BEFORE settling what issueGrant (below) would trap on after it:
+        // the grant key not seeded yet (startTimers seeds it from raw_rand just after install), or
+        // a content id with '|'. A trap after the settle keeps the payment and delivers nothing.
+        if (not gate.grantsReady()) {
+          return #error("Content delivery is starting up (the grant key is not ready yet) — nothing was charged; retry in a minute.");
+        };
+        if (Text.contains(contentId, #char '|')) {
+          return #error("Content ids containing '|' cannot be granted — nothing was charged.");
         };
         switch (await gate.settleFrom(msg.caller, sig, ?amount)) { // 2.17.0: caller must be sig.sender (ICP)
           case (#ok(receipt)) {
@@ -812,13 +878,28 @@ persistent actor KnowledgeBase {
 
   // (registry is declared at top for stable state loading)
 
+  // What a per-request service payment must settle for: price + ledger fee (#Upto: the maximum
+  // price + fee) — the amount the 402 is minted for and validateSubmittable is given. null for
+  // #Session, which bills against a session deposit, so both per-request routes refuse it.
+  func serviceCharge(svc : Ic402.ServiceDefinition) : ?Nat {
+    switch (svc.pricing) {
+      case (#Exact(p)) { ?(p + CKUSDC_FEE) };
+      case (#Upto(p)) { ?(p + CKUSDC_FEE) };
+      case (#Session) { null };
+    };
+  };
+
   // Admin: register and manage services
   public shared(msg) func registerService(
     name : Text,
     description : Text,
     serviceType : Ic402.ServiceType,
     pricing : Ic402.PricingScheme,
-    verificationMethod : Text, // "AutoSettle", "HashMatch", "BuyerConfirm:300", "ZkGroth16"
+    // "AutoSettle", "HashMatch", "BuyerConfirm:<seconds>", "ZkGroth16" or "ZkGroth16:bind"; anything
+    // else is refused. BuyerConfirm:<seconds> is the dispute window: once it ends with no dispute,
+    // the job sweep pays the operator (0 = no window: the job is refunded at its timeout unless
+    // the buyer confirms first).
+    verificationMethod : Text,
     verifierCanisterId : ?Text,
     verificationKey : ?Blob,
     delivery : Ic402.ServiceDeliveryMethod,
@@ -843,14 +924,16 @@ persistent actor KnowledgeBase {
         };
       };
       case (other) {
-        if (Text.startsWith(other, #text "BuyerConfirm:")) {
-          let seconds = switch (Text.stripStart(other, #text "BuyerConfirm:")) {
-            case (?s) { switch (Nat.fromText(s)) { case (?n) { n }; case (null) { 3600 } } };
-            case (null) { 3600 };
+        // 2.22.0: an unrecognised method is refused. It used to register #AutoSettle (pay on
+        // submit), and a malformed BuyerConfirm window used to become 3600.
+        switch (Text.stripStart(other, #text "BuyerConfirm:")) {
+          case (?s) {
+            switch (Nat.fromText(s)) {
+              case (?n) { #BuyerConfirm({ disputeWindowSeconds = n }) };
+              case (null) { return #err("BuyerConfirm needs a window in seconds, e.g. BuyerConfirm:3600") };
+            };
           };
-          #BuyerConfirm({ disputeWindowSeconds = seconds });
-        } else {
-          #AutoSettle;
+          case (null) { return #err("Unknown verification method: " # other # " (expected AutoSettle, HashMatch, BuyerConfirm:<seconds>, ZkGroth16 or ZkGroth16:bind)") };
         };
       };
     };
@@ -924,33 +1007,30 @@ persistent actor KnowledgeBase {
     // M14: reject a disabled service BEFORE settling (and before quoting) — otherwise
     // submitRequest rejects after the funds have moved, keeping the buyer's payment with no job.
     if (not svc.enabled) { return #error("Service not available") };
-    let amount = switch (svc.pricing) {
-      case (#Exact(p)) { p };
-      case (#Upto(p)) { p };
-      case (#Session) { 0 };
+    // #Session pricing is billed against a session deposit, not per request (and requireAll(0)
+    // would trap), so it is refused with or without a payment.
+    let charge = switch (serviceCharge(svc)) {
+      case (?c) { c };
+      case (null) { return #error("Service uses session billing — open a session instead") };
     };
     switch (paymentSig) {
-      // #Session pricing has amount 0 (billed against a session deposit) — guard
-      // against requireAll(0), which traps.
-      case (null) {
-        if (amount == 0) { #error("Service uses session billing — open a session instead") } else {
-          // A1: quote price + ledger fee (matches quoteServiceRequest.total).
-          #paymentRequired(gate.requireAll(amount + CKUSDC_FEE));
-        };
-      };
+      // A1: quote price + ledger fee (matches quoteServiceRequest.total).
+      case (null) { #paymentRequired(gate.requireAll(charge)) };
       case (?sig) {
         // Option A: validate BEFORE settling so a #ok settle always yields a job (money-moved ⇒
         // job-exists), closing the settled-then-no-job strand. expectedAmount is what settle will
-        // produce — the 402 nonce was minted via requireAll(amount + CKUSDC_FEE) above.
+        // produce — the 402 nonce was minted via requireAll(charge) above.
         // See docs/decisions/settled-then-job-failed.md (Option A).
-        switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, amount + CKUSDC_FEE)) {
+        switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, charge)) {
           case (#err(e)) { return #error(e) }; // rejected before any funds move
           case (#ok) {};
         };
         // Arm the job-expiry sweep BEFORE settling — see the /service/ handler for why the arm
         // belongs on this side of the fund move rather than next to createJobFromReceipt.
         registry.armExpiryTimer<system>();
-        switch (await gate.settleFrom(msg.caller, sig, null)) { // 2.17.0: caller must be sig.sender (ICP)
+        // 2.22.0: settle for `charge` — with null a nonce minted for another resource (a 1,000-unit
+        // search) bought this service. 2.17.0: the caller must be sig.sender (ICP).
+        switch (await gate.settleFrom(msg.caller, sig, ?charge)) {
           case (#ok(receipt)) {
             // createJobFromReceipt is infallible → after a #ok settle a job ALWAYS exists.
             // G2: record the ACTUAL payer as buyer. For an EVM payment the payer is the on-chain
@@ -1008,13 +1088,61 @@ persistent actor KnowledgeBase {
     registry.disputeJob(msg.caller, jobId, reason);
   };
 
+  // 2.22.0: an EVM-paid buyer (job.buyer is a 0x address) has no principal for confirmJob /
+  // disputeJob, so it confirms or disputes with a signature instead — without these, its
+  // BuyerConfirm job could only end with the operator paid when the dispute window closed.
+  // The buyer signs keccak256(buyerActionMessage(action, jobId)) as a RAW 32-byte digest (no
+  // EIP-191 "\x19Ethereum Signed Message" prefix) with the key of its 0x address; `signature` is
+  // r ‖ s ‖ v (65 bytes). The message binds the action, the job and this canister. Anyone may
+  // relay the signature. Recovering the signer is costly, so these share the facilitator's global
+  // admission gate (the settle path's rate limit and cycle floor).
+  public query func buyerActionMessage(action : Text, jobId : Text) : async Text {
+    registry.buyerActionMessage(action, jobId);
+  };
+
+  func evmBuyerAdmit() : ?Text {
+    switch (gate.facilitatorAdmit()) {
+      case (#ok) { null };
+      case (#throttled) { ?"Rate limited: signature checks share the facilitator's admission limit — retry shortly" };
+      case (#lowCycles) { ?"The canister's cycles are below the facilitator floor — try again later" };
+    };
+  };
+
+  public func confirmJobEvm(jobId : Text, signature : Blob) : async { #ok; #err : Text } {
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
+    await registry.confirmJobEvm(jobId, Blob.toArray(signature));
+  };
+
+  public func disputeJobEvm(jobId : Text, signature : Blob, reason : Text) : async { #ok; #err : Text } {
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
+    registry.disputeJobEvm(jobId, Blob.toArray(signature), reason);
+  };
+
+  // Controller-only: settle (refundBuyer = false) or refund (true) a #Submitted, #Disputed or
+  // #Verified job — how a disputed BuyerConfirm job is decided before its timeout refunds it, and
+  // how a job a failed operator payment left #Verified is re-driven.
+  public shared(msg) func resolveDispute(jobId : Text, refundBuyer : Bool) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    await registry.resolveDispute(jobId, refundBuyer);
+  };
+
   // Query: job status and results
   public query func getJobStatus(jobId : Text) : async ?Ic402.JobStatus {
     registry.getJobStatus(jobId);
   };
 
-  public query func getJob(jobId : Text) : async ?Ic402.Job {
-    registry.getJob(jobId);
+  // 2.22.0: a job's params, result and proof are for its buyer, its assigned operator and the
+  // controllers; anyone else gets null (job ids are sequential, so they are easy to guess). An
+  // EVM-paid buyer (a 0x address) has no principal to call as. getJobStatus stays public.
+  func canReadJob(caller : Principal, job : Ic402.Job) : Bool {
+    job.buyer == Principal.toText(caller) or job.operator == ?caller or Principal.isController(caller);
+  };
+
+  public shared query (msg) func getJob(jobId : Text) : async ?Ic402.Job {
+    switch (registry.getJob(jobId)) {
+      case (?job) { if (canReadJob(msg.caller, job)) { ?job } else { null } };
+      case (null) { null };
+    };
   };
 
   // Observability (controller-only): list a service's jobs, optionally filtered by status —
@@ -1024,8 +1152,11 @@ persistent actor KnowledgeBase {
     registry.listJobs(serviceId, statusFilter);
   };
 
-  public query func getJobResult(jobId : Text) : async ?Blob {
-    registry.getJobResult(jobId);
+  public shared query (msg) func getJobResult(jobId : Text) : async ?Blob {
+    switch (registry.getJob(jobId)) {
+      case (?job) { if (canReadJob(msg.caller, job)) { registry.getJobResult(jobId) } else { null } };
+      case (null) { null };
+    };
   };
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1431,6 +1562,14 @@ persistent actor KnowledgeBase {
   public shared(msg) func forceResolveSession(sessionId : Text) : async { #ok; #err : Text } {
     requireController(msg.caller);
     gate.forceResolveSession(sessionId);
+  };
+
+  // Controller-only: drop an owed-refund entry (health().sessions.refundOwed) whose escrow is in
+  // fact empty — a refund the close reported as failed that had landed. Check the escrow balance
+  // first: afterwards recoverEscrow refuses the session. Moves no funds.
+  public shared(msg) func clearRefundOwed(sessionId : Text) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    gate.clearRefundOwed(sessionId);
   };
 
   // Recovery (controller-only): reconcile a session left in #closing. EVM: CONFIRM-ONLY re-poll of

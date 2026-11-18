@@ -23,9 +23,23 @@
 ///   setReceiptMode(#reverted)                receipts report status=0 (mined, reverted)
 ///   setReceiptMode(#pendingThenConfirmed n)  first n receipt polls => null (not yet
 ///                                            mined → caller parks); poll n+1 => status=1
+///   setReceiptMode(#inconsistent)            providers disagree (one null, one mined) — no
+///                                            answer (2.22.0 round 2)
+///   setReceiptMode(#error)                   every provider errors — no answer
 ///   setFeeMode(#consistent)                  one agreed base fee
 ///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
 ///                                            so the caller's robust-median fee logic runs
+///   setFeeMode(#unavailable)                 every provider errors → the send refuses
+///                                            BEFORE broadcasting (2.22.0)
+///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds)
+///                                            how eth_sendRawTransaction answers
+///   setPendingNonce(?n)                      pin eth_getTransactionCount(#Pending) at n;
+///                                            null (default) = advance by one per call
+///   setLatestNonce(n)                        eth_getTransactionCount(#Latest) — the mined
+///                                            count (default 0: nothing ever mined)
+///   setAuthStateMode(#unused | #used | #error)
+///                                            eth_call answer (the library's only eth_call
+///                                            is EIP-3009 authorizationState)
 /// ============================================================================
 
 import EvmRpc "../../src/ic402/EvmRpc";
@@ -38,11 +52,24 @@ persistent actor EvmRpcMock {
     #confirmed;
     #reverted;
     #pendingThenConfirmed : Nat;
+    // 2.22.0 round 2: receipt reads that give NO answer — a mined tx read during provider lag or
+    // an outage looks like this, and must never be reported as "not landed".
+    #inconsistent;
+    #error;
   };
 
   public type FeeMode = {
     #consistent;
     #inconsistentOutlier;
+    // 2.22.0: no provider has fee data — the library refuses to broadcast (a pre-broadcast #err).
+    #unavailable;
+  };
+
+  // 2.22.0: what eth_call (authorizationState) answers.
+  public type AuthStateMode = {
+    #unused;
+    #used;
+    #error;
   };
 
   // G5/G6: how eth_sendRawTransaction resolves. #ok = clean broadcast; #nonceTooHigh makes the
@@ -51,6 +78,12 @@ persistent actor EvmRpcMock {
   public type SendMode = {
     #ok;
     #nonceTooHigh;
+    // 2.21.1: NonceTooLow can follow the inclusion of this very tx (a send is not idempotent),
+    // so the library maps it to #maybeSent too, never to a safe-to-retry failure.
+    #nonceTooLow;
+    // 2.22.0: the agreeing providers say the gas account is unfunded. The library re-reads the
+    // pending nonce: moved past the tx → #maybeSent; not moved → #err (nothing broadcast).
+    #insufficientFunds;
   };
 
   // ── scriptable state ──
@@ -58,7 +91,11 @@ persistent actor EvmRpcMock {
   var feeMode : FeeMode = #consistent;
   var sendMode : SendMode = #ok;
   var receiptPolls : Nat = 0; // receipt polls since the last setReceiptMode/reset
-  var nonce : Nat = 0; // monotonic, advances once per eth_getTransactionCount
+  var nonce : Nat = 0; // monotonic, advances once per eth_getTransactionCount(#Pending) unless pinned
+  var pendingNoncePin : ?Nat = null; // 2.22.0: pinned #Pending answer
+  var latestNonce : Nat = 0; // 2.22.0: the #Latest (mined) count
+  var authStateMode : AuthStateMode = #unused; // 2.22.0
+  var ethCalls : Nat = 0; // 2.22.0: eth_call count since reset
   var sentTxs : [Text] = []; // every raw tx we were asked to broadcast, in order
 
   // ── test hooks (open by design — see header warning) ──
@@ -72,6 +109,12 @@ persistent actor EvmRpcMock {
 
   public func setSendMode(m : SendMode) : async () { sendMode := m };
 
+  public func setPendingNonce(n : ?Nat) : async () { pendingNoncePin := n };
+
+  public func setLatestNonce(n : Nat) : async () { latestNonce := n };
+
+  public func setAuthStateMode(m : AuthStateMode) : async () { authStateMode := m };
+
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   public func reset() : async () {
     receiptMode := #confirmed;
@@ -79,14 +122,19 @@ persistent actor EvmRpcMock {
     sendMode := #ok;
     receiptPolls := 0;
     nonce := 0;
+    pendingNoncePin := null;
+    latestNonce := 0;
+    authStateMode := #unused;
+    ethCalls := 0;
     sentTxs := [];
   };
 
   public query func getSentTxs() : async [Text] { sentTxs };
   public query func sentTxCount() : async Nat { sentTxs.size() };
   public query func getReceiptPolls() : async Nat { receiptPolls };
+  public query func getEthCalls() : async Nat { ethCalls };
 
-  // ── EvmRpc.EvmRpcCanister interface (the 4 methods the library calls) ──
+  // ── EvmRpc.EvmRpcCanister interface (the 5 methods the library calls) ──
 
   public func eth_sendRawTransaction(
     _services : EvmRpc.RpcServices,
@@ -99,6 +147,8 @@ persistent actor EvmRpcMock {
       // the RPC reports NonceTooHigh, which the library maps to #maybeSent(txHash). The caller must
       // preserve the hash (poll/track) rather than treat it as a clean, safe-to-retry failure.
       case (#nonceTooHigh) { #Consistent(#Ok(#NonceTooHigh)) };
+      case (#nonceTooLow) { #Consistent(#Ok(#NonceTooLow)) };
+      case (#insufficientFunds) { #Consistent(#Ok(#InsufficientFunds)) };
       case (#ok) { #Consistent(#Ok(#Ok(?mockTxHash(sentTxs.size())))) };
     };
   };
@@ -106,11 +156,17 @@ persistent actor EvmRpcMock {
   public func eth_getTransactionCount(
     _services : EvmRpc.RpcServices,
     _config : ?EvmRpc.RpcConfig,
-    _args : EvmRpc.GetTransactionCountArgs,
+    args : EvmRpc.GetTransactionCountArgs,
   ) : async EvmRpc.MultiGetTransactionCountResult {
-    let n = nonce;
-    nonce += 1;
-    #Consistent(#Ok(n));
+    switch (args.block, pendingNoncePin) {
+      case (#Latest, _) { #Consistent(#Ok(latestNonce)) };
+      case (_, ?p) { #Consistent(#Ok(p)) };
+      case (_, null) {
+        let n = nonce;
+        nonce += 1;
+        #Consistent(#Ok(n));
+      };
+    };
   };
 
   public func eth_getTransactionReceipt(
@@ -128,6 +184,13 @@ persistent actor EvmRpcMock {
           #Consistent(#Ok(null));
         };
       };
+      case (#inconsistent) {
+        #Inconsistent([
+          (#EthSepolia(#Sepolia), #Ok(null)),
+          (#EthSepolia(#Ankr), #Ok(?receipt(txHash, 1))),
+        ]);
+      };
+      case (#error) { #Consistent(#Err(#ProviderError(#NoPermission))) };
     };
   };
 
@@ -148,6 +211,22 @@ persistent actor EvmRpcMock {
           (#EthSepolia(#Ankr), #Ok(outlier)),
         ]);
       };
+      case (#unavailable) { #Consistent(#Err(#ProviderError(#NoPermission))) };
+    };
+  };
+
+  // 2.22.0: the library's only eth_call is the EIP-3009 view authorizationState(authorizer, nonce),
+  // read after an inbound transfer reverted. Answers one ABI bool word (or an error) per the mode.
+  public func eth_call(
+    _services : EvmRpc.RpcServices,
+    _config : ?EvmRpc.RpcConfig,
+    _args : EvmRpc.CallArgs,
+  ) : async EvmRpc.MultiCallResult {
+    ethCalls += 1;
+    switch (authStateMode) {
+      case (#unused) { #Consistent(#Ok("0x0000000000000000000000000000000000000000000000000000000000000000")) };
+      case (#used) { #Consistent(#Ok("0x0000000000000000000000000000000000000000000000000000000000000001")) };
+      case (#error) { #Consistent(#Err(#ProviderError(#NoPermission))) };
     };
   };
 

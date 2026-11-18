@@ -3,9 +3,17 @@ import {
   parseAtomicAmount,
   checkSpend,
   resolveSecurityConfig,
+  resolveConnection,
+  resolveTargetCanister,
+  isAllowedX402Asset,
+  x402TermsMismatch,
+  confirmedAmountMismatch,
+  reservationReleasable,
+  icrc2PaymentCost,
   isToolAllowed,
   isCallMethodAllowed,
   resolveOperatorConfig,
+  DEFAULT_HOST,
   type SecurityConfig,
 } from '../integrations/mcp/src/guards';
 
@@ -206,5 +214,163 @@ describe('isCallMethodAllowed (C3: generic call is read-only)', () => {
   it('rejects an unknown non-getter name', () => {
     blocked('doThing');
     blocked('frobnicate');
+  });
+});
+
+// 2.22.0 (I8, owner decision D3): host, canister and identity are the operator's; `configure` and a
+// per-call canisterId change them only under allowSecurityChanges.
+describe('connection pinning (I8/D3)', () => {
+  const base = {
+    host: 'https://icp-api.io',
+    canisterId: 'rrkah-fqaaa-aaaaa-aaaaq-cai',
+    identityPem: '/etc/ic402/operator.pem',
+  };
+  const req = {
+    host: 'https://localhost.evil.example',
+    canisterId: 'aaaaa-aa',
+    identityPem: '/home/u/.ssh/other.pem',
+  };
+
+  // Fails on: resolveConnection applying the request without the allowSecurityChanges gate.
+  it('IGNORES host/canisterId/identityPem from configure unless the operator allowed changes', () => {
+    const denied = resolveConnection(base, req, false);
+    expect(denied.config).toEqual(base);
+    expect(denied.ignored.sort()).toEqual(['canisterId', 'host', 'identityPem']);
+    // repeating the operator's own values is not a change
+    expect(resolveConnection(base, { ...base }, false).ignored).toEqual([]);
+    const allowed = resolveConnection(base, req, true);
+    expect(allowed.config).toEqual(req);
+    expect(allowed.ignored).toEqual([]);
+  });
+
+  // Fails on: a per-call canisterId accepted without the gate.
+  it('refuses a per-call canisterId other than the configured one unless allowed', () => {
+    expect(resolveTargetCanister(undefined, 'aaaaa-aa', false)).toBe('aaaaa-aa');
+    expect(resolveTargetCanister('aaaaa-aa', 'aaaaa-aa', false)).toBe('aaaaa-aa');
+    expect(() => resolveTargetCanister('ryjl3-tyaaa-aaaaa-aaaba-cai', 'aaaaa-aa', false)).toThrow(
+      /refused/,
+    );
+    expect(resolveTargetCanister('ryjl3-tyaaa-aaaaa-aaaba-cai', 'aaaaa-aa', true)).toBe(
+      'ryjl3-tyaaa-aaaaa-aaaba-cai',
+    );
+    expect(() => resolveTargetCanister(undefined, null, true)).toThrow(/configure/);
+  });
+
+  // Fails on: the operator connection not read from env / config file (env wins).
+  it('the operator sets host / canister / identity via env or config file; env wins', () => {
+    const defaults = { perCallMaxAtomic: 1n, sessionMaxAtomic: 1n };
+    expect(resolveOperatorConfig(null, {}, defaults).connection).toEqual({
+      host: DEFAULT_HOST,
+      canisterId: undefined,
+      identityPem: undefined,
+    });
+    const c = resolveOperatorConfig(
+      { host: 'https://file.example', canisterId: 'aaaaa-aa', identityPem: '/file.pem' },
+      { IC402_MCP_HOST: 'https://icp-api.io', ICP_IDENTITY_PEM: '/env.pem' },
+      defaults,
+    );
+    expect(c.connection).toEqual({
+      host: 'https://icp-api.io',
+      canisterId: 'aaaaa-aa',
+      identityPem: '/env.pem',
+    });
+    expect(
+      resolveOperatorConfig(
+        null,
+        { IC402_MCP_CANISTER_ID: 'ryjl3-tyaaa-aaaaa-aaaba-cai' },
+        defaults,
+      ).connection.canisterId,
+    ).toBe('ryjl3-tyaaa-aaaaa-aaaba-cai');
+  });
+});
+
+// 2.22.0 (I3): fetch_x402 pays only USDC on the supported chains, and only the confirmed terms.
+describe('fetch_x402 payment terms (I3)', () => {
+  const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+  const SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+
+  // Fails on: isAllowedX402Asset accepting any asset (or ignoring the chain).
+  it('allows only the USDC contract of the payment chain', () => {
+    expect(isAllowedX402Asset(8453, BASE_USDC)).toBe(true);
+    expect(isAllowedX402Asset(8453, BASE_USDC.toLowerCase())).toBe(true);
+    expect(isAllowedX402Asset(84532, SEPOLIA_USDC)).toBe(true);
+    expect(isAllowedX402Asset(8453, SEPOLIA_USDC)).toBe(false); // another chain's USDC
+    expect(isAllowedX402Asset(8453, '0x' + '11'.repeat(20))).toBe(false); // a lookalike token
+    expect(isAllowedX402Asset(56, BASE_USDC)).toBe(false); // unsupported chain
+    expect(isAllowedX402Asset(8453, '')).toBe(false);
+  });
+
+  const fresh = {
+    amount: 10_000n,
+    recipient: '0xAbC0000000000000000000000000000000000001',
+    asset: BASE_USDC,
+    chain: 8453,
+  };
+  const confirmed = {
+    amount: '10000',
+    recipient: '0xabc0000000000000000000000000000000000001',
+    asset: BASE_USDC.toLowerCase(),
+    chain: 8453,
+  };
+
+  // Fails on: x402TermsMismatch accepting changed terms or a confirm without them.
+  it('refuses a confirm whose terms differ from the fresh probe, or carries none', () => {
+    expect(x402TermsMismatch(confirmed, fresh)).toBeNull(); // addresses compare case-insensitively
+    expect(x402TermsMismatch({}, fresh)).toMatch(/must repeat the proposal/);
+    expect(x402TermsMismatch({ ...confirmed, amount: '9999' }, fresh)).toMatch(
+      /amount 9999 → 10000/,
+    );
+    expect(
+      x402TermsMismatch(
+        { ...confirmed, recipient: '0x0000000000000000000000000000000000000bad' },
+        fresh,
+      ),
+    ).toMatch(/recipient/);
+    expect(x402TermsMismatch({ ...confirmed, asset: SEPOLIA_USDC }, fresh)).toMatch(/asset/);
+    expect(x402TermsMismatch({ ...confirmed, chain: 84532 }, fresh)).toMatch(/chain/);
+    expect(x402TermsMismatch({ ...confirmed, amount: '1e4' }, fresh)).toMatch(/Invalid amount/);
+  });
+});
+
+// 2.22.0 (I5): release a spend reservation only when the payment provably was not sent.
+describe('reservationReleasable (I5)', () => {
+  // Fails on: the pre-2.22 rule (release unless fundsMoved), which un-counted a transport timeout
+  // or a post-payment error after the paying call went out.
+  it('releases only on paymentNotSent, never on a transport error or a post-payment error', () => {
+    const err = (flags: { fundsMoved?: boolean; paymentNotSent?: boolean }) =>
+      Object.assign(new Error('x'), { fundsMoved: false, paymentNotSent: false, ...flags });
+    expect(reservationReleasable(err({ paymentNotSent: true }))).toBe(true);
+    expect(reservationReleasable(new Error('Request timed out after 300000 msec'))).toBe(false);
+    expect(reservationReleasable(err({}))).toBe(false); // post-payment canister error
+    expect(reservationReleasable(err({ fundsMoved: true }))).toBe(false);
+    expect(reservationReleasable(err({ fundsMoved: true, paymentNotSent: true }))).toBe(false);
+    expect(reservationReleasable(undefined)).toBe(false);
+  });
+});
+
+// 2.22.0: the spend caps and the confirmation count what leaves the wallet, not the bare charge.
+describe('icrc2PaymentCost (fee accounting)', () => {
+  // Fails on: the transfer fee or the approve fee left out (the pre-2.22 cap counted the bare
+  // amount, so every ICP payment spent two ledger fees the cap never saw).
+  it('adds the transfer fee, and the approve fee when the payment approves', () => {
+    // submit_request: canister charge 10_100 (price 100 + its fee 10_000), ckUSDC fee 10_000
+    expect(icrc2PaymentCost(10_100n, 10_000n, true)).toBe(30_100n);
+    // a session deposit pulled from an allowance the payer granted elsewhere (no approve here)
+    expect(icrc2PaymentCost(50_000n, 10_000n, false)).toBe(60_000n);
+    expect(icrc2PaymentCost(0n, 0n, true)).toBe(0n);
+  });
+});
+
+// 2.22.0: submit_request / open_session with confirm:true pay only the amount the human confirmed.
+describe('confirmedAmountMismatch (confirm binding)', () => {
+  // Fails on: the binding accepting a missing amount or a canister that now asks something else.
+  it('refuses a missing, malformed or changed amount; accepts the same one', () => {
+    expect(confirmedAmountMismatch('amount', '10100', 10_100n)).toBeNull();
+    expect(confirmedAmountMismatch('amount', undefined, 10_100n)).toMatch(
+      /must repeat the proposal/,
+    );
+    expect(confirmedAmountMismatch('amount', '10100', 20_100n)).toMatch(/now asks 20100/);
+    expect(confirmedAmountMismatch('maxDeposit', '50000', 40_000n)).toMatch(/maxDeposit 50000/);
+    expect(confirmedAmountMismatch('maxDeposit', '0x10', 16n)).toMatch(/Invalid maxDeposit/);
   });
 });

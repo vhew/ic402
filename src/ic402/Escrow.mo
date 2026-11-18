@@ -1,5 +1,6 @@
 /// ic402 — Escrow manager for session deposits using ICRC-2 subaccounts.
 import Types "Types";
+import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Text "mo:base/Text";
@@ -41,6 +42,12 @@ module {
       amount : Nat,
       subaccount : Blob,
     ) : async* { #ok : Nat; #err : Text } {
+      // 2.21.1: never pull from this canister's own account. The ledger skips the allowance check
+      // when `from` is the caller's own account, so a deposit "from" the canister would be paid
+      // out of its own funds.
+      if (Principal.equal(from.owner, canisterPrincipal)) {
+        return #err("The depositor cannot be this canister.");
+      };
       let result = await ledger.icrc2_transfer_from({
         spender_subaccount = null;
         from;
@@ -80,8 +87,9 @@ module {
     /// ledger reject still throws to the caller. The body's only trap source is Candid-decoding a
     /// ledger reply that is not an ICRC-1 TransferResult: inline, that trap rolls back the CALLER's
     /// message instead of surfacing to it as a reject — an ICP close then rests in #closing
-    /// (forceResolveSession), as a malformed icrc1_fee reply already did, where it used to revert to
-    /// #open (settle) or end #closed + refundOwed (refund). Identical for any conformant ledger.
+    /// (reconcileSession; forceResolveSession only if that cannot resolve it), as a malformed
+    /// icrc1_fee reply already did, where it used to revert to #open (settle) or end #closed +
+    /// refundOwed (refund). Identical for any conformant ledger.
     public func settleCore(
       ledger : Types.LedgerActor,
       subaccount : Blob,

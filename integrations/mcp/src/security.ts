@@ -57,7 +57,9 @@ export function isPrivateIpv4(host: string): boolean {
     inRange('127.0.0.0', 8) ||
     inRange('169.254.0.0', 16) || // link-local incl. 169.254.169.254 metadata
     inRange('100.64.0.0', 10) || // CGNAT (S23)
-    inRange('0.0.0.0', 8)
+    inRange('0.0.0.0', 8) ||
+    inRange('198.18.0.0', 15) || // benchmarking (RFC 2544), routable on some internal networks
+    inRange('240.0.0.0', 4) // reserved, incl. broadcast 255.255.255.255
   );
 }
 
@@ -79,21 +81,51 @@ export function extractMappedIpv4(h: string): string | null {
   return null;
 }
 
-/** True if a host string is a loopback/link-local/ULA/metadata IPv6 literal. */
-export function isPrivateIpv6(host: string): boolean {
-  // URL hostnames keep IPv6 in brackets; strip them.
-  let h = host;
+/**
+ * Parse an IPv6 literal (brackets and a zone id allowed, a trailing dotted IPv4 allowed) into its
+ * eight 16-bit groups, or null when the string is not an IPv6 literal. A hostname such as
+ * `fda.gov` has no colon, so it is never read as an address.
+ */
+export function parseIpv6(host: string): number[] | null {
+  let h = host.toLowerCase();
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-  h = h.toLowerCase();
-  if (h === '::1' || h === '::') return true;
-  // Unique-local fc00::/7 → first byte 0xfc or 0xfd.
-  if (h.startsWith('fc') || h.startsWith('fd')) return true;
-  // Link-local fe80::/10.
-  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb'))
-    return true;
-  // IPv4-mapped (::ffff:...) — extract the embedded IPv4 and re-check it.
-  const embedded = extractMappedIpv4(h);
-  if (embedded !== null && isPrivateIpv4(embedded)) return true;
+  const zone = h.indexOf('%');
+  if (zone >= 0) h = h.slice(0, zone);
+  if (!h.includes(':')) return null;
+  const lastColon = h.lastIndexOf(':');
+  const tail = h.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    const v4 = ipv4ToInt(tail);
+    if (v4 === null) return null;
+    h = `${h.slice(0, lastColon + 1)}${(v4 >>> 16).toString(16)}:${(v4 & 0xffff).toString(16)}`;
+  }
+  const halves = h.split('::');
+  if (halves.length > 2) return null;
+  const groups = (s: string): number[] =>
+    s === '' ? [] : s.split(':').map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  const head = groups(halves[0]);
+  const rest = halves.length === 2 ? groups(halves[1]) : [];
+  if ([...head, ...rest].some(Number.isNaN)) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const fill = 8 - head.length - rest.length;
+  if (fill < 1) return null;
+  return [...head, ...new Array<number>(fill).fill(0), ...rest];
+}
+
+/** True if a host string is a loopback/link-local/ULA/metadata IPv6 literal, or an IPv6 form
+ *  that embeds a private IPv4 (IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, 6to4 2002::/16). */
+export function isPrivateIpv6(host: string): boolean {
+  const g = parseIpv6(host);
+  if (g === null) return false; // a hostname, not an IPv6 literal
+  const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  const zeroUpTo = (n: number) => g.slice(0, n).every((x) => x === 0);
+  if (zeroUpTo(7) && (g[7] === 0 || g[7] === 1)) return true; // :: and ::1
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // unique-local fc00::/7
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  if (zeroUpTo(5) && g[5] === 0xffff) return isPrivateIpv4(v4(g[6], g[7])); // ::ffff:a.b.c.d
+  if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0)
+    return isPrivateIpv4(v4(g[6], g[7])); // NAT64 (RFC 6052): a gateway forwards to the IPv4
+  if (g[0] === 0x2002) return isPrivateIpv4(v4(g[1], g[2])); // 6to4 (RFC 3056)
   return false;
 }
 
@@ -216,4 +248,109 @@ export async function safeFetch(
     return resp;
   }
   throw new Error(`Refusing to follow more than ${maxRedirects} redirects (from ${raw}).`);
+}
+
+/** 2.22.0 (I11): the most bytes the MCP reads from any fetched body (probe, paid response, content). */
+export const MAX_FETCH_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Read a response body as UTF-8 text, refusing (and cancelling) a body over `maxBytes`. */
+export async function readTextCapped(
+  resp: Response,
+  maxBytes: number = MAX_FETCH_BODY_BYTES,
+): Promise<string> {
+  const declared = resp.headers.get('content-length');
+  if (declared !== null && /^\d+$/.test(declared) && BigInt(declared) > BigInt(maxBytes)) {
+    await resp.body?.cancel().catch(() => {});
+    throw new Error(`Refusing a ${declared}-byte response body (limit ${maxBytes} bytes).`);
+  }
+  if (!resp.body) return '';
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`Refusing a response body over the ${maxBytes}-byte limit.`);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+/**
+ * 2.22.0 (I11): the HTTP half of the fetch_x402 probe. Goes through safeFetch, so the URL and
+ * EVERY redirect hop get the literal-host and the DNS check, and reads at most
+ * MAX_FETCH_BODY_BYTES. A 402 returns its payment JSON (the base64 `payment-required` header, else
+ * the body); any other status returns the body.
+ */
+export async function probeChallenge(
+  raw: string,
+  init: RequestInit | undefined,
+  opts: SafeFetchOptions,
+): Promise<{ status: number; ok: boolean; body: string; paymentJson?: string }> {
+  const resp = await safeFetch(raw, init, opts);
+  if (resp.status !== 402) {
+    return { status: resp.status, ok: resp.ok, body: await readTextCapped(resp) };
+  }
+  let paymentJson = '';
+  const header = resp.headers.get('payment-required');
+  if (header) {
+    try {
+      paymentJson = atob(header);
+    } catch {
+      paymentJson = header;
+    }
+  }
+  if (!paymentJson) paymentJson = await readTextCapped(resp);
+  return { status: 402, ok: false, body: '', paymentJson };
+}
+
+/**
+ * 2.22.0: the outcome of the PAID x402 request. `possiblyPaid` is any failure once the request
+ * carrying the signed payment header was attempted — a network error, the timeout, a refused
+ * redirect hop, an oversized or unreadable body: the server may have settled the authorization, so
+ * the caller must not offer a retry (that would sign a second one).
+ */
+export type PaidRequestOutcome =
+  | { kind: 'response'; status: number; ok: boolean; body: string }
+  | { kind: 'possiblyPaid'; error: unknown };
+
+/** Send the paid request through safeFetch (15 s timeout, capped body); never throws. */
+export async function sendPaidRequest(
+  raw: string,
+  headers: Record<string, string>,
+  opts: SafeFetchOptions,
+): Promise<PaidRequestOutcome> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const resp = await safeFetch(raw, { headers, signal: controller.signal }, opts);
+    const body = await readTextCapped(resp);
+    return { kind: 'response', status: resp.status, ok: resp.ok, body };
+  } catch (error) {
+    return { kind: 'possiblyPaid', error };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * 2.22.0 (I8): fetch the replica's root key only for local development against an EXACT local
+ * host — `localhost`, `127.0.0.1` or `[::1]`, any port. A substring test trusted
+ * `https://localhost.evil.example`; a fetched root key lets that host forge every response.
+ */
+export function shouldFetchRootKey(host: string, localDev: boolean): boolean {
+  if (!localDev) return false;
+  let u: URL;
+  try {
+    u = new URL(host);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const h = u.hostname.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
 }

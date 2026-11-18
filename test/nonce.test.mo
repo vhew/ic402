@@ -228,8 +228,9 @@ suite("NonceManager", func() {
 
   test("2.21.0: the clean-up keeps a locked nonce with a stored transfer until 24 h past its expiry", func() {
     // Mutations: no retention (the payer's re-submit after the clean-up is told to pay with a
-    // fresh nonce); or retention for every locked nonce (locks without a stored transfer, which
-    // anyone can create over HTTP, would pile up for a day).
+    // fresh nonce); or retention for every locked nonce, whatever its outcome (locks that ended
+    // unknown with no stored transfer, which anyone can create over HTTP, would pile up for a
+    // day). The locks here are restored by loadStable, so their outcome is unknown (2.22.0).
     let now = Time.now();
     let SEC : Int = 1_000_000_000;
     let a = Blob.fromArray([1]); // expired 1 s ago, stored transfer: kept
@@ -259,6 +260,72 @@ suite("NonceManager", func() {
     assert(not mgr.isLocked(b));
     assert(mgr.takePending(b) == null);
     assert(not mgr.isLocked(c));
+  });
+
+  test("2.22.0: a lock reads as in flight until marked unknown; the mark needs the lock and leaves with it", func() {
+    // Mutations: let unlock keep the mark (a later attempt with the nonce reads as unknown while
+    // in flight — the 'do NOT pay again' answer a stranger could trigger); or mark an unlocked
+    // nonce.
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let expiry = Time.now() + 300_000_000_000;
+    let n = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    mgr.markOutcomeUnknown(n); // not locked: ignored
+    assert not mgr.outcomeIsUnknown(n);
+    ignore mgr.lock(n, testNetwork, testToken);
+    assert not mgr.outcomeIsUnknown(n); // in flight
+    mgr.markOutcomeUnknown(n);
+    assert mgr.outcomeIsUnknown(n);
+    mgr.unlock(n);
+    ignore mgr.lock(n, testNetwork, testToken);
+    assert not mgr.outcomeIsUnknown(n); // a new attempt: in flight again
+  });
+
+  test("2.22.0: a lock's holder needs the lock and leaves with it", func() {
+    // Mutations: record a holder without a lock; or let unlock / consumeLocked keep it (a stale
+    // holder would outlive its lock in the map).
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let expiry = Time.now() + 300_000_000_000;
+    let a = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    let b = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    mgr.setHolder(a, "icp:p"); // not locked: ignored
+    assert not mgr.heldBy(a, "icp:p");
+    ignore mgr.lock(a, testNetwork, testToken);
+    ignore mgr.lock(b, testNetwork, testToken);
+    mgr.setHolder(a, "icp:p");
+    mgr.setHolder(b, "icp:p");
+    assert mgr.heldBy(a, "icp:p") and not mgr.heldBy(a, "icp:q");
+    mgr.unlock(a);
+    mgr.consumeLocked(b);
+    assert not mgr.heldBy(a, "icp:p");
+    assert not mgr.heldBy(b, "icp:p");
+  });
+
+  test("2.22.0: the clean-up keeps a nonce whose settlement is in flight until 24 h past its expiry", func() {
+    // Mutations: retain only nonces with a stored transfer, as in 2.21.0 — the clean-up running
+    // during a setLedgerDedup charge's fee query drops the lock, the transfer stored after the
+    // query is silently not stored, and the payer told to re-submit gets #expired; or retain an
+    // in-flight lock for ever (one left by a trap would never be removed).
+    let SEC : Int = 1_000_000_000;
+    let now = Time.now();
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let a = mgr.generate(now + 300 * SEC, testAmount, testNetwork, testToken); // in flight
+    let b = mgr.generate(now + 300 * SEC, testAmount, testNetwork, testToken); // ended unknown
+    let c = mgr.generate(now + 300 * SEC, testAmount, testNetwork, testToken); // never locked
+    ignore mgr.lock(a, testNetwork, testToken);
+    ignore mgr.lock(b, testNetwork, testToken);
+    mgr.markOutcomeUnknown(b);
+    mgr.gcExpiredAt(now + 301 * SEC);
+    assert mgr.isLocked(a);
+    assert not mgr.isLocked(b);
+    assert mgr.lock(c, testNetwork, testToken) == null; // removed
+    // The attempt's later bookkeeping still lands.
+    mgr.setInFlight(a, charge);
+    mgr.setPending(a, charge);
+    assert mgr.takePending(a) == ?charge;
+    mgr.unlock(a);
+    ignore mgr.lock(a, testNetwork, testToken); // in flight again, nothing stored
+    mgr.gcExpiredAt(now + 300 * SEC + Nonce.PENDING_RETENTION_NS + SEC);
+    assert not mgr.isLocked(a);
   });
 
   test("2.21.0: unlock and consumeLocked drop the pending charge with the lock", func() {

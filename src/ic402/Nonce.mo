@@ -82,6 +82,39 @@ module {
     var pending = HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash);
     var inFlight = HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
 
+    // 2.22.0: locked nonces whose settlement ended with an unknown outcome (#settlementPending).
+    // A locked nonce NOT in this set has a settlement in flight. Transient: loadStable marks every
+    // restored lock, since no settlement is in flight across an upgrade. A Motoko canister refuses
+    // to upgrade while calls it made are outstanding ("canister_pre_upgrade attempted with
+    // outstanding message callbacks"), and no continuation survives into the new code, so the
+    // attempt that took a restored lock never finishes: its outcome is unknown. Entries leave
+    // with the lock.
+    var outcomeUnknown = HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
+
+    /// 2.22.0: mark a locked nonce's settlement as ended with an unknown outcome: the attempt
+    /// returned #settlementPending and kept the lock. Until then a locked nonce reads as in flight
+    /// (outcomeIsUnknown false). Ignored unless the nonce is locked.
+    public func markOutcomeUnknown(nonce : Blob) {
+      if (locked.get(nonce) != null) { outcomeUnknown.put(nonce, true) };
+    };
+
+    /// 2.22.0: whether a locked nonce's settlement ended with an unknown outcome, as opposed to
+    /// still being in flight. False for a nonce that is not locked.
+    public func outcomeIsUnknown(nonce : Blob) : Bool { outcomeUnknown.get(nonce) != null };
+
+    // 2.22.0: the payer of the attempt holding each lock (Gateway's payer key). Lets a settle that
+    // finds the nonce in flight tell the same payer's duplicate (its funds may be moving) from
+    // anyone else's. Transient, like `outcomeUnknown`, and cleared with it.
+    var holders = HashMap.HashMap<Blob, Text>(4, Blob.equal, Blob.hash);
+
+    /// 2.22.0: record the payer of the attempt that just took the lock. Ignored unless locked.
+    public func setHolder(nonce : Blob, payerKey : Text) {
+      if (locked.get(nonce) != null) { holders.put(nonce, payerKey) };
+    };
+
+    /// 2.22.0: whether the attempt holding the lock recorded this payer. False when not locked.
+    public func heldBy(nonce : Blob, payerKey : Text) : Bool { holders.get(nonce) == ?payerKey };
+
     /// 2.21.0: store a charge's transfer as in flight, before the first attempt's await: the
     /// clean-up keeps the nonce, and takePending refuses it. Ignored unless the nonce is locked.
     public func setInFlight(nonce : Blob, charge : PendingCharge) {
@@ -168,6 +201,8 @@ module {
       locked.delete(nonce);
       pending.delete(nonce);
       inFlight.delete(nonce);
+      outcomeUnknown.delete(nonce);
+      holders.delete(nonce);
     };
 
     /// Unlock a nonce (call after failed settlement, allowing client retry).
@@ -175,11 +210,13 @@ module {
       locked.delete(nonce);
       pending.delete(nonce);
       inFlight.delete(nonce);
+      outcomeUnknown.delete(nonce);
+      holders.delete(nonce);
     };
 
     /// 2.20.0: whether a nonce is locked, i.e. a settlement with it is in flight or ended with an
     /// unknown outcome (#settlementPending). Lets settle tell "do not pay again" apart from
-    /// "expired, pay with a fresh nonce".
+    /// "expired, pay with a fresh nonce". 2.22.0: outcomeIsUnknown tells the two apart.
     public func isLocked(nonce : Blob) : Bool { locked.get(nonce) != null };
 
     /// Check if a nonce exists and is valid (without consuming or locking).
@@ -194,13 +231,23 @@ module {
     /// kept until PENDING_RETENTION_NS past its expiry. Only an authenticated payer's charge whose
     /// transfer, sent after a successful fee query, was rejected with an unknown outcome can store
     /// one (Gateway.settleFrom), so a caller cannot create them at will to fill the table.
-    public func gcExpired() {
-      let now = Time.now();
+    /// 2.22.0: so is a nonce whose settlement is in flight (locked, outcome not marked unknown):
+    /// removing its lock during the attempt's awaits (the fee query, the transfer) would make the
+    /// attempt's later setInFlight / setPending silent no-ops while the payer is told to re-submit.
+    /// Such locks are bounded by the calls outstanding at once; each attempt ends by releasing its
+    /// lock or marking it unknown, so they do not pile up.
+    public func gcExpired() { gcExpiredAt(Time.now()) };
+
+    /// gcExpired as of `now` (2.22.0; lets a test move the clock).
+    public func gcExpiredAt(now : Int) {
       let toRemove = Iter.toArray(
         Iter.filter<(Blob, (Int, Nat, Text, Text))>(
           nonces.entries(),
           func((nonce, (expiry, _, _, _))) {
-            if (pending.get(nonce) != null) { now > expiry + PENDING_RETENTION_NS } else { now > expiry };
+            let settling = locked.get(nonce) != null and outcomeUnknown.get(nonce) == null;
+            if (pending.get(nonce) != null or settling) { now > expiry + PENDING_RETENTION_NS } else {
+              now > expiry;
+            };
           },
         )
       );
@@ -209,6 +256,8 @@ module {
         locked.delete(nonce);
         pending.delete(nonce);
         inFlight.delete(nonce);
+        outcomeUnknown.delete(nonce);
+        holders.delete(nonce);
       };
       // M-5: Compact the insertion-order ring so it tracks only live nonces.
       let compacted = Buffer.Buffer<Blob>(nonces.size());
@@ -245,12 +294,16 @@ module {
       for ((nonce, _) in nonces.entries()) { insertionOrder.add(nonce) };
       pending := HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash); // transient
       inFlight := HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
-      // C-1: Restore locked nonces if present
+      outcomeUnknown := HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
+      holders := HashMap.HashMap<Blob, Text>(4, Blob.equal, Blob.hash);
+      // C-1: Restore locked nonces if present. 2.22.0: each with an unknown outcome — nothing that
+      // took the lock before the upgrade is still in flight (see `outcomeUnknown`).
       switch (data.lockedNonces) {
         case (?locks) {
           locked := HashMap.HashMap<Blob, Bool>(locks.size(), Blob.equal, Blob.hash);
           for (nonce in locks.values()) {
             locked.put(nonce, true);
+            outcomeUnknown.put(nonce, true);
           };
         };
         case (null) {};

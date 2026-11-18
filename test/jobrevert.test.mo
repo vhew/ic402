@@ -55,14 +55,21 @@ let ledger = persistent actor {
   };
 };
 
-/// A registry holding ICP jobs (id, status, expiresAt), all with the same buyer and operator.
+/// A registry holding ICP jobs (id, status, expiresAt), all with the same buyer and operator, of
+/// a BuyerConfirm service with no dispute window (2.22.0: buyers confirm/dispute only BuyerConfirm
+/// jobs; window 0 keeps the sweep's refund-at-expiresAt these tests were written against).
 func mk(specs : [(Text, Types.JobStatus, Int)]) : ServiceRegistry.ServiceRegistry {
   let reg = ServiceRegistry.ServiceRegistry(
     canisterP,
     { recipient = { owner = canisterP; subaccount = null }; tokens = [{ ledger = Principal.fromActor(ledger); symbol = "TKN"; decimals = 6 }]; ledgerFee = 10 },
   );
   reg.loadStable({
-    services = []; serviceCounter = 0; jobCounter = specs.size(); evmRails = null; operatorPayouts = null;
+    services = [("svc-1", {
+      id = "svc-1"; name = "s"; description = ""; serviceType = #Async; pricing = #Exact(990);
+      verification = #BuyerConfirm({ disputeWindowSeconds = 0 }); delivery = #Poll; timeout = 300;
+      operatorId = operatorP; enabled = true; createdAt = 0;
+    })];
+    serviceCounter = 1; jobCounter = specs.size(); evmRails = null; operatorPayouts = null;
     jobs = Array.map<(Text, Types.JobStatus, Int), (Text, Types.Job)>(specs, func((id, status, expiresAt)) {
       (id, {
         id; serviceId = "svc-1"; buyer = Principal.toText(buyerP); operator = ?operatorP;
@@ -351,11 +358,12 @@ await suite("2.19.1 review: a pending broadcast after resolveJob is still record
     assert parkedHash(reg) == ?"0xpending";
   });
 
-  await test("settle (Upto): the remainder refund is pending, the job is #Settled and parked", func() : async () {
-    // Mutation: as above, on the remainder #pending arm.
+  await test("settle (Upto): the remainder refund is pending, the job keeps the controller's status and is parked", func() : async () {
+    // Mutation: as above, on the remainder #pending arm. 2.22.0 (M8) mutation: drop that arm's
+    // still-#Settling check — the controller's #Expired is overwritten with #Settled.
     let reg = mkEvm(#Disputed, ?100, 2, #Expired);
     switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
-    assert status(reg) == ?#Settled;
+    assert status(reg) == ?#Expired;
     assert parkedHash(reg) == ?"0xpending";
   });
 

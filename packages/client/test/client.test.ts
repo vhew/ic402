@@ -464,6 +464,49 @@ describe('Ic402Client', () => {
       }
     });
 
+    // 2.22.0: after the paid request is sent, a failure is possibly paid — fundsMoved, not
+    // retryable (a retry signs a second authorization).
+    // Fails on: the paid-request catch using classifyNetworkError (transient, retryable), the
+    // body-read failure escaping, or a non-402 status after paying without fundsMoved.
+    it('a failure after the paid request is sent is possibly paid, never retryable', async () => {
+      const challenge = JSON.stringify({
+        accepts: [{ network: 'eip155:84532', payTo: '0xR', amount: '100', asset: '0xUSDC' }],
+      });
+      const actor = {
+        signX402Payment: vi.fn().mockResolvedValue({
+          ok: { header: 'h', paidAmount: 100n, authorization: {} },
+        }),
+      };
+      const client = new Ic402Client(
+        makeConfig({ network: 'eip155:84532', actorFactory: mockActorFactory(actor) }),
+      );
+      const broken = new ReadableStream({
+        start(c) {
+          c.error(new Error('connection reset'));
+        },
+      });
+      for (const answer of [
+        async () => {
+          throw new Error('The operation was aborted due to timeout');
+        },
+        async () => new Response(broken, { status: 200 }),
+        async () => new Response('upstream error', { status: 502 }),
+      ]) {
+        let n = 0;
+        globalThis.fetch = vi
+          .fn()
+          .mockImplementation(async () =>
+            ++n === 1 ? new Response(challenge, { status: 402 }) : answer(),
+          );
+        const r = await client.fetchX402('https://example.com/paid');
+        expect(r.status).toBe('error');
+        if (r.status === 'error') {
+          expect(r.error.fundsMoved).toBe(true);
+          expect(r.error.retryable).toBe(false);
+        }
+      }
+    });
+
     it('returns sign_failed when actor returns err', async () => {
       const paymentBody = JSON.stringify({
         accepts: [
@@ -531,7 +574,7 @@ describe('Ic402Client', () => {
       );
 
       const result = await client.submitServiceRequest('svc-1', new Uint8Array([1]));
-      expect(result).toEqual({ jobId: 'job-1' });
+      expect(result).toEqual({ jobId: 'job-1', paidAmount: 50n });
       expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
       expect(ledgerActor.icrc2_approve.mock.calls[0]![0].expires_at).toHaveLength(1);
       expect(mockActor.submitServiceRequest).toHaveBeenCalledTimes(2);
@@ -814,6 +857,237 @@ describe('Ic402Client', () => {
 
       await expect(client.disputeJob('job-1', 'reason')).resolves.toBeUndefined();
     });
+  });
+
+  // 2.22.0 (M4/I2): a per-call ceiling the SDK enforces BEFORE approving, so a caller (the MCP)
+  // that confirmed and reserved an amount from one canister answer cannot be made to approve what a
+  // second answer asks.
+  describe('payment ceiling (maxAmount, M4)', () => {
+    const cid = 'aaaaa-aa';
+    const nonce = new Uint8Array(32).fill(7);
+
+    // Fails on: call()'s checkCeiling removed (approves 5_000 + fee and pays).
+    it('call() refuses a paymentRequired above maxAmount before approving', async () => {
+      const approve = vi.fn().mockResolvedValue({ Ok: 1n });
+      const paidMethod = vi
+        .fn()
+        .mockResolvedValue({ paymentRequired: [{ amount: 5_000n, nonce }] });
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: cid,
+          autoPayment: true,
+          ledger: cid,
+          actorFactory: mockActorFactory({ paidMethod }),
+          ledgerActorFactory: () => ({ icrc2_approve: approve }),
+        }),
+      );
+      await expect(
+        client.call('paidMethod', [[]], undefined, { maxAmount: 4_999n }),
+      ).rejects.toThrow('above maxAmount');
+      expect(approve).not.toHaveBeenCalled();
+      expect(paidMethod).toHaveBeenCalledOnce(); // no paid retry
+    });
+
+    // Fails on: submitServiceRequest's checkCeiling removed. A 0 quote must not mean "unlimited".
+    it('submitServiceRequest with maxAmount 0n refuses any payment before approving', async () => {
+      const approve = vi.fn().mockResolvedValue({ Ok: 1n });
+      const submit = vi.fn().mockResolvedValue({ paymentRequired: [{ amount: 50n, nonce }] });
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: cid,
+          autoPayment: true,
+          ledger: cid,
+          actorFactory: mockActorFactory({ submitServiceRequest: submit }),
+          ledgerActorFactory: () => ({ icrc2_approve: approve }),
+        }),
+      );
+      const err = await client
+        .submitServiceRequest('svc', new Uint8Array([1]), { maxAmount: 0n })
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(Ic402Error);
+      expect(err.paymentNotSent).toBe(true);
+      expect(approve).not.toHaveBeenCalled();
+      expect(submit).toHaveBeenCalledOnce();
+    });
+
+    // Fails on: the ceiling compared with >= (an amount equal to the confirmed one refused), or
+    // paidAmount taken from anything but the requirement the SDK approved.
+    it('submitServiceRequest pays an amount equal to maxAmount and reports it as paidAmount', async () => {
+      const approve = vi.fn().mockResolvedValue({ Ok: 1n });
+      const submit = vi
+        .fn()
+        .mockResolvedValueOnce({ paymentRequired: [{ amount: 50n, nonce }] })
+        .mockResolvedValueOnce({ ok: { jobId: 'job-9' } });
+      const client = new Ic402Client(
+        makeConfig({
+          canisterId: cid,
+          autoPayment: true,
+          ledger: cid,
+          approvalFeeBuffer: 10n,
+          actorFactory: mockActorFactory({ submitServiceRequest: submit }),
+          ledgerActorFactory: () => ({ icrc2_approve: approve }),
+        }),
+      );
+      const r = await client.submitServiceRequest('svc', new Uint8Array([1]), { maxAmount: 50n });
+      expect(r).toEqual({ jobId: 'job-9', paidAmount: 50n });
+      expect(approve.mock.calls[0]![0].amount).toBe(60n); // amount + fee, the fee on top
+    });
+  });
+
+  // 2.22.0 (I5): the MCP releases a spend reservation only on errors raised BEFORE the paying call.
+  describe('paymentNotSent marks refusals before the paying call (I5)', () => {
+    const cid = 'aaaaa-aa';
+    const nonce = new Uint8Array(32).fill(7);
+    const intent = {
+      suggestedDeposit: 10_000n,
+      costPerCall: [500n],
+      minDeposit: [],
+      network: 'icp:1',
+      token: 'tok',
+      recipient: 'r',
+      expiry: 0n,
+      description: [],
+    };
+
+    // Fails on: submitServiceRequest's approve #Err thrown without paymentNotSent; the unpaid
+    // request's {error} thrown without it; a post-payment {error} thrown WITH it.
+    it('submitServiceRequest: approve #Err and an unpaid refusal are not-sent; a paid error is not', async () => {
+      const make = (submit: unknown, approveResult: unknown) =>
+        new Ic402Client(
+          makeConfig({
+            canisterId: cid,
+            autoPayment: true,
+            ledger: cid,
+            actorFactory: mockActorFactory({ submitServiceRequest: submit }),
+            ledgerActorFactory: () => ({
+              icrc2_approve: vi.fn().mockResolvedValue(approveResult),
+            }),
+          }),
+        );
+      const required = { paymentRequired: [{ amount: 50n, nonce }] };
+
+      const approveErr = await make(vi.fn().mockResolvedValue(required), {
+        Err: { InsufficientFunds: null },
+      })
+        .submitServiceRequest('svc', new Uint8Array([1]))
+        .catch((e) => e);
+      expect(approveErr.paymentNotSent).toBe(true);
+
+      const unpaid = await make(vi.fn().mockResolvedValue({ error: 'Service disabled' }), {
+        Ok: 1n,
+      })
+        .submitServiceRequest('svc', new Uint8Array([1]))
+        .catch((e) => e);
+      expect(unpaid.paymentNotSent).toBe(true);
+
+      const paidSubmit = vi
+        .fn()
+        .mockResolvedValueOnce(required)
+        .mockResolvedValueOnce({ error: 'Payment expired' });
+      const paid = await make(paidSubmit, { Ok: 1n })
+        .submitServiceRequest('svc', new Uint8Array([1]))
+        .catch((e) => e);
+      expect(paid).toBeInstanceOf(Ic402Error);
+      expect(paid.paymentNotSent).toBe(false);
+    });
+
+    // Fails on: openSession's approve #Err thrown as a plain Error (no paymentNotSent).
+    it('openSession: approve #Err is not-sent; an openSession #err after it is not', async () => {
+      const make = (approveResult: unknown, openSession: unknown) =>
+        new Ic402Client(
+          makeConfig({
+            canisterId: cid,
+            autoPayment: true,
+            ledger: cid,
+            approvalFeeBuffer: 0n,
+            actorFactory: mockActorFactory({ requestSession: async () => intent, openSession }),
+            ledgerActorFactory: () => ({
+              icrc2_approve: vi.fn().mockResolvedValue(approveResult),
+            }),
+          }),
+        );
+      const approveErr = await make({ Err: { TemporarilyUnavailable: null } }, vi.fn())
+        .openSession(undefined, testSigner)
+        .catch((e) => e);
+      expect(approveErr).toBeInstanceOf(Ic402Error);
+      expect(approveErr.paymentNotSent).toBe(true);
+
+      const openErr = await make({ Ok: 1n }, async () => ({ err: 'Insufficient allowance' }))
+        .openSession(undefined, testSigner)
+        .catch((e) => e);
+      expect(openErr.paymentNotSent).toBe(false);
+    });
+  });
+
+  // 2.22.0 (I6): after paying, call() never hands back a non-ok answer as a plain value.
+  describe('call() after payment (I6)', () => {
+    const cid = 'aaaaa-aa';
+    const nonce = new Uint8Array(32).fill(7);
+    const paying = (retryAnswer: unknown, approve = vi.fn().mockResolvedValue({ Ok: 1n })) =>
+      new Ic402Client(
+        makeConfig({
+          canisterId: cid,
+          autoPayment: true,
+          ledger: cid,
+          actorFactory: mockActorFactory({
+            paidMethod: async (optSig: unknown[]) =>
+              optSig.length > 0 ? retryAnswer : { paymentRequired: [{ amount: 10n, nonce }] },
+          }),
+          ledgerActorFactory: () => ({ icrc2_approve: approve }),
+        }),
+      );
+
+    // Fails on: the post-payment {error} branch removed (the error came back as a value).
+    it('throws a post-payment {error}, fundsMoved when the canister says the payment moved', async () => {
+      const err = await paying({
+        error:
+          'Settlement pending — do NOT retry payment with a new nonce: ledger call rejected after it may have run',
+      })
+        .call('paidMethod', [[]])
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(Ic402Error);
+      expect(err.fundsMoved).toBe(true);
+    });
+
+    // Fails on: the post-payment {paymentRequired} branch removed (a fresh 402 came back as a value).
+    it('throws on a fresh paymentRequired after paying, and pays only once', async () => {
+      const approve = vi.fn().mockResolvedValue({ Ok: 1n });
+      const err = await paying({ paymentRequired: [{ amount: 10n, nonce }] }, approve)
+        .call('paidMethod', [[]])
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(Ic402Error);
+      expect(err.kind).toBe('settlement_failed');
+      expect(approve).toHaveBeenCalledOnce();
+    });
+  });
+
+  // 2.22.0 (C2 follow-up): the canister answers a payment whose settlement is merely in flight with
+  // #policyDenied("…already in progress — retry this same payment…"). Retryable with the same
+  // payment; neither funds-moved nor a refusal before payment (the MCP keeps its reservation).
+  // Fails on: settleError not recognising the in-progress text (kind sign_failed, retryable false).
+  it('a settlement already in progress is retryable, not fundsMoved, not paymentNotSent', async () => {
+    const nonce = new Uint8Array(32).fill(7);
+    const submit = vi
+      .fn()
+      .mockResolvedValueOnce({ paymentRequired: [{ amount: 50n, nonce }] })
+      .mockResolvedValueOnce({
+        error:
+          'Policy: A settlement with this payment is already in progress — retry this same payment in a few seconds; do not pay with a new nonce.',
+      });
+    const client = new Ic402Client(
+      makeConfig({
+        canisterId: 'aaaaa-aa',
+        autoPayment: true,
+        ledger: 'aaaaa-aa',
+        actorFactory: mockActorFactory({ submitServiceRequest: submit }),
+        ledgerActorFactory: () => ({ icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }) }),
+      }),
+    );
+    const err = await client.submitServiceRequest('svc', new Uint8Array([1])).catch((e) => e);
+    expect(err).toBeInstanceOf(Ic402Error);
+    expect(err.retryable).toBe(true);
+    expect(err.fundsMoved).toBe(false);
+    expect(err.paymentNotSent).toBe(false);
   });
 
   // Option C — the settle boundary tags Ic402Error.fundsMoved when the canister marks the payment as

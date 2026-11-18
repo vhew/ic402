@@ -1,10 +1,11 @@
 /// Candid-mirror probe for the EVM-RPC canister surface — NOT a mops test
 /// (deliberately no `.test.mo` suffix so `mops test` skips it).
 ///
-/// A minimal actor whose public methods are EXACTLY EvmRpc.EvmRpcCanister's four
+/// A minimal actor whose public methods are EXACTLY EvmRpc.EvmRpcCanister's five
 /// methods (the only EVM-RPC methods ic402's Motoko ever calls, all via
 /// EvmSender/EvmVerify: eth_getTransactionReceipt, eth_getTransactionCount,
-/// eth_sendRawTransaction, eth_feeHistory), typed with the repo's mirror types.
+/// eth_sendRawTransaction, eth_feeHistory, and since 2.22.0 eth_call), typed with
+/// the repo's mirror types.
 /// Compiling this file with `moc --idl` emits the mirror's .did, which
 /// scripts/check-candid-mirrors.sh compares against the vendored official
 /// evm_rpc.did @ v2.8.0 (test/fixtures/official/) via a pinned `didc check`.
@@ -28,6 +29,9 @@ persistent actor EvmRpcProbe {
     #Consistent(#Ok(#NonceTooLow));
   };
   public shared func eth_feeHistory(_s : EvmRpc.RpcServices, _c : ?EvmRpc.RpcConfig, _args : EvmRpc.FeeHistoryArgs) : async EvmRpc.MultiFeeHistoryResult {
+    #Consistent(#Err(#ProviderError(#NoPermission)));
+  };
+  public shared func eth_call(_s : EvmRpc.RpcServices, _c : ?EvmRpc.RpcConfig, _args : EvmRpc.CallArgs) : async EvmRpc.MultiCallResult {
     #Consistent(#Err(#ProviderError(#NoPermission)));
   };
 };

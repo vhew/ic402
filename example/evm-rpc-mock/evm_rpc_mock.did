@@ -3,6 +3,24 @@ type ValidationError =
    Custom: text;
    InvalidHex: text;
  };
+type TransactionRequest = 
+ record {
+   accessList: opt vec AccessListEntry;
+   blobVersionedHashes: opt vec text;
+   blobs: opt vec text;
+   chainId: opt nat;
+   from: opt text;
+   gas: opt nat;
+   gasPrice: opt nat;
+   input: opt text;
+   maxFeePerBlobGas: opt nat;
+   maxFeePerGas: opt nat;
+   maxPriorityFeePerGas: opt nat;
+   nonce: opt nat;
+   to: opt text;
+   "type": opt text;
+   value: opt nat;
+ };
 type TransactionReceipt = 
  record {
    blockHash: text;
@@ -31,6 +49,13 @@ type SendRawTransactionResult =
  variant {
    Err: RpcError;
    Ok: SendRawTransactionStatus;
+ };
+type SendMode = 
+ variant {
+   insufficientFunds;
+   nonceTooHigh;
+   nonceTooLow;
+   ok;
  };
 type RpcServices = 
  variant {
@@ -87,6 +112,8 @@ type RejectionCode =
 type ReceiptMode = 
  variant {
    confirmed;
+   error;
+   inconsistent;
    pendingThenConfirmed: nat;
    reverted;
  };
@@ -131,6 +158,14 @@ type MultiFeeHistoryResult =
    Inconsistent: vec record {
                        RpcService;
                        FeeHistoryResult;
+                     };
+ };
+type MultiCallResult = 
+ variant {
+   Consistent: CallResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       CallResult;
                      };
  };
 type LogEntry = 
@@ -190,6 +225,7 @@ type FeeMode =
  variant {
    consistent;
    inconsistentOutlier;
+   unavailable;
  };
 type FeeHistoryResult = 
  variant {
@@ -234,6 +270,16 @@ type ConsensusStrategy =
                 total: opt nat8;
               };
  };
+type CallResult = 
+ variant {
+   Err: RpcError;
+   Ok: text;
+ };
+type CallArgs = 
+ record {
+   block: opt BlockTag;
+   transaction: TransactionRequest;
+ };
 type BlockTag = 
  variant {
    Earliest;
@@ -242,6 +288,17 @@ type BlockTag =
    Number: nat;
    Pending;
    Safe;
+ };
+type AuthStateMode = 
+ variant {
+   error;
+   unused;
+   used;
+ };
+type AccessListEntry = 
+ record {
+   address: text;
+   storageKeys: vec text;
  };
 /// ============================================================================
 /// evm-rpc-mock — a hermetic TEST DOUBLE for the DFINITY EVM RPC canister.
@@ -268,24 +325,45 @@ type BlockTag =
 ///   setReceiptMode(#reverted)                receipts report status=0 (mined, reverted)
 ///   setReceiptMode(#pendingThenConfirmed n)  first n receipt polls => null (not yet
 ///                                            mined → caller parks); poll n+1 => status=1
+///   setReceiptMode(#inconsistent)            providers disagree (one null, one mined) — no
+///                                            answer (2.22.0 round 2)
+///   setReceiptMode(#error)                   every provider errors — no answer
 ///   setFeeMode(#consistent)                  one agreed base fee
 ///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
 ///                                            so the caller's robust-median fee logic runs
+///   setFeeMode(#unavailable)                 every provider errors → the send refuses
+///                                            BEFORE broadcasting (2.22.0)
+///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds)
+///                                            how eth_sendRawTransaction answers
+///   setPendingNonce(?n)                      pin eth_getTransactionCount(#Pending) at n;
+///                                            null (default) = advance by one per call
+///   setLatestNonce(n)                        eth_getTransactionCount(#Latest) — the mined
+///                                            count (default 0: nothing ever mined)
+///   setAuthStateMode(#unused | #used | #error)
+///                                            eth_call answer (the library's only eth_call
+///                                            is EIP-3009 authorizationState)
 /// ============================================================================
 service : {
+  eth_call: (_services: RpcServices, _config: opt RpcConfig, _args:
+   CallArgs) -> (MultiCallResult);
   eth_feeHistory: (_services: RpcServices, _config: opt RpcConfig, _args:
    FeeHistoryArgs) -> (MultiFeeHistoryResult);
   eth_getTransactionCount: (_services: RpcServices, _config: opt RpcConfig,
-   _args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
+   args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
   eth_getTransactionReceipt: (_services: RpcServices, _config: opt RpcConfig,
    txHash: text) -> (MultiGetTransactionReceiptResult);
   eth_sendRawTransaction: (_services: RpcServices, _config: opt RpcConfig,
    rawTx: text) -> (MultiSendRawTransactionResult);
+  getEthCalls: () -> (nat) query;
   getReceiptPolls: () -> (nat) query;
   getSentTxs: () -> (vec text) query;
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   reset: () -> ();
   sentTxCount: () -> (nat) query;
+  setAuthStateMode: (m: AuthStateMode) -> ();
   setFeeMode: (m: FeeMode) -> ();
+  setLatestNonce: (n: nat) -> ();
+  setPendingNonce: (n: opt nat) -> ();
   setReceiptMode: (m: ReceiptMode) -> ();
+  setSendMode: (m: SendMode) -> ();
 }

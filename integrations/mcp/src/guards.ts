@@ -154,11 +154,71 @@ export function isToolAllowed(
   return true;
 }
 
+/**
+ * 2.22.0 (I8, owner decision D3): where the server connects and as whom. Fixed by the OPERATOR at
+ * startup (env / config file); `configure` may change them only under allowSecurityChanges.
+ */
+export interface ConnectionConfig {
+  host: string;
+  canisterId?: string;
+  identityPem?: string;
+}
+
+/** The replica host used when the operator sets none (a local replica, as before 2.22.0). */
+export const DEFAULT_HOST = 'http://localhost:4944';
+
 export interface OperatorConfig {
   security: SecurityConfig;
+  connection: ConnectionConfig;
   allowSecurityChanges: boolean;
   allowDangerousTools: boolean;
   allowAdminTools: boolean;
+}
+
+/**
+ * 2.22.0 (I8/D3): resolve the connection from a `configure` request. Like the security knobs
+ * (resolveSecurityConfig), a requested host / canisterId / identityPem that differs from the
+ * operator's value is IGNORED (and reported) unless the operator set allowSecurityChanges — a
+ * prompt-injected model cannot point the server at another replica, canister or key file.
+ */
+export function resolveConnection(
+  base: ConnectionConfig,
+  req: Partial<ConnectionConfig>,
+  allowSecurityChanges: boolean,
+): { config: ConnectionConfig; ignored: string[] } {
+  const config: ConnectionConfig = { ...base };
+  const ignored: string[] = [];
+  for (const key of ['host', 'canisterId', 'identityPem'] as const) {
+    const v = req[key];
+    if (v === undefined || v === '' || v === base[key]) continue;
+    if (allowSecurityChanges) config[key] = v;
+    else ignored.push(key);
+  }
+  return { config, ignored };
+}
+
+/**
+ * 2.22.0 (I8/D3): a tool's per-call `canisterId` may only name the configured canister unless the
+ * operator set allowSecurityChanges — otherwise the pinned canister could be bypassed per call
+ * (e.g. open_session approving an attacker's canister as the spender). Throws on refusal.
+ */
+export function resolveTargetCanister(
+  requested: string | undefined,
+  configured: string | null,
+  allowSecurityChanges: boolean,
+): string {
+  if (requested === undefined || requested === configured) {
+    if (!configured) throw new Error('No canister ID. Call "configure" first.');
+    return configured;
+  }
+  if (!allowSecurityChanges) {
+    throw new Error(
+      `canisterId "${requested}" refused: this server is fixed to canister ${configured ?? '(none)'} ` +
+        `by its operator. Omit canisterId (the operator can allow other canisters with ` +
+        `IC402_MCP_ALLOW_SECURITY_CHANGES=1).`,
+    );
+  }
+  return requested;
 }
 
 /**
@@ -191,7 +251,17 @@ export function resolveOperatorConfig(
     }
   };
 
+  const pickText = (fileKey: string, envKey: string): string | undefined => {
+    const raw = env[envKey] !== undefined ? env[envKey] : f[fileKey];
+    return typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : undefined;
+  };
+
   return {
+    connection: {
+      host: pickText('host', 'IC402_MCP_HOST') ?? DEFAULT_HOST,
+      canisterId: pickText('canisterId', 'IC402_MCP_CANISTER_ID'),
+      identityPem: pickText('identityPem', 'ICP_IDENTITY_PEM'),
+    },
     security: {
       localDev: pickBool('localDev', 'IC402_MCP_LOCAL_DEV'),
       autoPayment: pickBool('autoPayment', 'IC402_MCP_AUTO_PAYMENT'),
@@ -262,11 +332,12 @@ export const CALL_BLOCK_SUBSTRINGS = [
   'end',
 ];
 
-// M16 (posture note): `getContent` is dual-mode — a read-only 402 challenge fetch with no
-// PaymentSignature, but a SETTLING update when a signature is passed. It is the only content-
-// purchase entry point over MCP, and there is no dedicated capped/confirmed purchase tool, so it
-// stays reachable via the get-prefix fallback below. Settlement pays the operator's own canister
-// (C-1), and spend caps are outbound-signing-only; a future `buy_content` tool is the right fix.
+// M16 / I12 (posture note): `getContent` (and getAssetContent / getExternalContent) is dual-mode —
+// a 402 challenge with no PaymentSignature, but a SETTLING update when a signature is passed: it
+// spends an ICRC-2 allowance the payer already granted, with no spend cap and no confirmation. It
+// is the only content-purchase entry point over MCP (the demo buys content through it), so it stays
+// reachable via the get-prefix fallback below, and the `call` tool description says so instead of
+// claiming "no funds moved". A dedicated capped/confirmed `buy_content` tool is the right fix.
 
 /** Decide whether a method name may be called through the generic (uncapped, unconfirmed) `call`
  *  tool. Order: allowlist (authoritative) → substring blocklist → read-only name-prefix fallback. */
@@ -289,4 +360,149 @@ export function isCallMethodAllowed(method: string): { ok: boolean; reason?: str
     ok: false,
     reason: `Method "${method}" is not on the read-only allowlist. The generic "call" tool only permits query/read methods; use a dedicated tool for state-changing or signing operations.`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// fetch_x402 payment terms (I3)
+// ---------------------------------------------------------------------------
+
+/**
+ * 2.22.0 (I3): the only asset fetch_x402 pays in, per chain — USDC on the five supported chains
+ * (mainnet values from example/main.mo, testnet values from scripts/patch-local.sh). The spend caps
+ * count 6-decimal USDC units; a 402 naming any other token on a chain is refused.
+ */
+export const X402_USDC_BY_CHAIN: Readonly<Record<number, string>> = {
+  8453: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base
+  1: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // Ethereum
+  43114: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', // Avalanche C-Chain
+  10: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', // Optimism
+  42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', // Arbitrum One
+  84532: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', // Base Sepolia
+  11155111: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', // Ethereum Sepolia
+  43113: '0x5425890298aed601595a70AB815c96711a31Bc65', // Avalanche Fuji
+  11155420: '0x5fd84259d66Cd46123540766Be93DFE6D43130D7', // Optimism Sepolia
+  421614: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // Arbitrum Sepolia
+};
+
+export function isAllowedX402Asset(chainId: number, asset: string): boolean {
+  const usdc = X402_USDC_BY_CHAIN[chainId];
+  return usdc !== undefined && usdc.toLowerCase() === asset.toLowerCase();
+}
+
+/** The payment terms of an x402 proposal (what the human confirms). */
+export interface X402Terms {
+  amount: bigint;
+  recipient: string;
+  asset: string;
+  chain: number;
+}
+
+/**
+ * 2.22.0 (I3): fetch_x402 with confirm:true re-probes the URL; it may sign only the terms the human
+ * confirmed. Returns null when the fresh probe's terms equal the confirmed ones (addresses compared
+ * case-insensitively), else the refusal text. Missing confirmed terms are a refusal too.
+ */
+export function x402TermsMismatch(
+  confirmed: { amount?: string; recipient?: string; asset?: string; chain?: number },
+  fresh: X402Terms,
+): string | null {
+  const { amount, recipient, asset, chain } = confirmed;
+  if (
+    amount === undefined ||
+    recipient === undefined ||
+    asset === undefined ||
+    chain === undefined
+  ) {
+    return (
+      'confirm:true must repeat the proposal: pass amount, recipient, asset and chain exactly as the ' +
+      'confirm:false call returned them. Nothing was signed.'
+    );
+  }
+  let confirmedAmount: bigint;
+  try {
+    confirmedAmount = parseAtomicAmount(amount, 'amount');
+  } catch (e) {
+    return `${e instanceof Error ? e.message : String(e)}. Nothing was signed.`;
+  }
+  const diffs: string[] = [];
+  if (confirmedAmount !== fresh.amount) diffs.push(`amount ${confirmedAmount} → ${fresh.amount}`);
+  if (recipient.toLowerCase() !== fresh.recipient.toLowerCase())
+    diffs.push(`recipient ${recipient} → ${fresh.recipient}`);
+  if (asset.toLowerCase() !== fresh.asset.toLowerCase())
+    diffs.push(`asset ${asset} → ${fresh.asset}`);
+  if (chain !== fresh.chain) diffs.push(`chain ${chain} → ${fresh.chain}`);
+  if (diffs.length === 0) return null;
+  return (
+    `The server's payment terms changed since the confirmed proposal (${diffs.join('; ')}). ` +
+    'Nothing was signed. Re-run with confirm:false and have the human review the new proposal.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ICRC-2 payment cost (fee accounting)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ledger fee @ic402/client uses when the ledger actor has no icrc1_fee (Ic402Client.approvalFor);
+ * the MCP's fallback when no ledger is configured.
+ */
+export const LEGACY_LEDGER_FEE = 100_000n;
+
+/**
+ * 2.22.0: what an ICRC-2 auto-payment of `amount` takes from the payer's account — the amount, the
+ * transfer fee icrc2_transfer_from charges on top (the SDK approves amount + fee), and, when the
+ * payment includes an icrc2_approve call, that call's own fee. The spend caps and the human
+ * confirmation count this; before 2.22.0 they counted the bare amount and missed the fees.
+ */
+export function icrc2PaymentCost(amount: bigint, ledgerFee: bigint, approves: boolean): bigint {
+  return amount + ledgerFee + (approves ? ledgerFee : 0n);
+}
+
+/**
+ * 2.22.0: submit_request / open_session with confirm:true must repeat the amount the human
+ * confirmed (from the proposal's confirmWith) and pay it only if the canister still asks exactly
+ * that — the same binding fetch_x402 applies to its terms. Returns null when `confirmed` equals
+ * `fresh`, else the refusal (a missing or malformed amount is refused too).
+ */
+export function confirmedAmountMismatch(
+  field: string,
+  confirmed: string | undefined,
+  fresh: bigint,
+): string | null {
+  if (confirmed === undefined) {
+    return (
+      `confirm:true must repeat the proposal: pass ${field} exactly as confirmWith returned it. ` +
+      'Nothing was paid.'
+    );
+  }
+  let value: bigint;
+  try {
+    value = parseAtomicAmount(confirmed, field);
+  } catch (e) {
+    return `${e instanceof Error ? e.message : String(e)}. Nothing was paid.`;
+  }
+  if (value === fresh) return null;
+  return (
+    `The canister now asks ${fresh}, not the confirmed ${field} ${value}. Nothing was paid. ` +
+    'Re-run with confirm:false and have the human review the new proposal.'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spend-reservation release (I5)
+// ---------------------------------------------------------------------------
+
+/**
+ * 2.22.0 (I5): a confirm-time spend reservation is released ONLY when the error proves the paying
+ * call was never sent — @ic402/client sets Ic402Error.paymentNotSent for a refusal before it (price
+ * above maxAmount, approve #Err, missing config, the canister refusing the unpaid request). Any other
+ * error — a transport timeout or reject after the paying call went out, a post-payment error, a
+ * funds-moved error — keeps the reservation: the payment may have moved
+ * (docs/decisions/settled-then-job-failed.md, Option C). Duck-typed so this module stays free of the
+ * client import.
+ */
+export function reservationReleasable(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const flags = e as { paymentNotSent?: unknown; fundsMoved?: unknown };
+  return flags.paymentNotSent === true && flags.fundsMoved !== true;
 }

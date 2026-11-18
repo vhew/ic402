@@ -7,14 +7,13 @@
 ///   - G1: a refund that fails after a successful settle ends #closed with lastActivityAt
 ///     refreshed (the remainder is in escrow; recoverEscrow needs the record for a full 24 h) and,
 ///     since 2.17.4, the daily reservation released.
-///   - B3: forceResolveSession landing while the close is suspended at an await does not make
-///     the close release the daily reservation a second time; the close's transfers still run.
+///   - B3: forceResolveSession during a close suspended at an await is refused (2.22.0; it used to
+///     finalize the live close); the close's transfers run and it releases the daily reservation once.
 ///   - 2.20.0: a ledger reject on the settle has an UNKNOWN outcome, so the session stays
 ///     #closing (#settlementPending) and nothing re-closes it; reconcileSession reads the escrow
 ///     balance and reopens it (nothing paid) or closes it with the remainder owed (paid).
 ///   - B1: recoverEscrow does pay out once a session is #closed.
-///   - 2.17.4: a refund the ledger REJECTS ends #closed and recoverable, like a refused one; a
-///     force landing during a failing refund does not release the daily reservation twice.
+///   - 2.17.4: a refund the ledger REJECTS ends #closed and recoverable, like a refused one.
 ///   - B2: the expiry sweep handles ledger rejects without throwing: a refund reject ends #closed,
 ///     and (2.20.0) a settle reject leaves #closing for reconcileSession. Since 2.17.4 no ICP ledger
 ///     reject makes the close throw, so the sweep's catch arm is reached only by a rejected
@@ -87,7 +86,7 @@ func mk(consumed : Nat) : (Sessions.Sessions, Policy.Engine) {
     id = "sess-1"; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed;
     remaining = 50_000 - consumed; voucherCount = 0; status = #open; openedAt = 0; lastActivityAt = STALE;
     lastSequence = 0; lastCumulativeAmount = consumed; subaccount = Blob.fromArray([]); network = "icp:1";
-    token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
+    token = Principal.toText(ledgerP); recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
   }]);
   policy.recordSpend(payerP, 100_000);
   (m, policy);
@@ -104,7 +103,7 @@ func mkExpired() : Sessions.Sessions {
     id; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 1_000;
     remaining = 49_000; voucherCount = 0; status = #open; openedAt = 0; lastActivityAt = 0;
     lastSequence = 0; lastCumulativeAmount = 1_000; subaccount = Blob.fromArray([]); network = "icp:1";
-    token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = ?1; evmDeposit = null;
+    token = Principal.toText(ledgerP); recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = ?1; evmDeposit = null;
   };
   m.loadStable([s("sess-1"), s("sess-2")]);
   m;
@@ -160,45 +159,24 @@ await suite("an ICP close against the ledger", func() : async () {
   });
 });
 
-await suite("forceResolveSession landing on a LIVE ICP close (B3)", func() : async () {
+await suite("forceResolveSession during a LIVE ICP close (B3; refused since 2.22.0)", func() : async () {
 
-  await test("during the fee await: transfers still run, daily released exactly once", func() : async () {
-    // Mutation: drop the `status == #closing` guard around the final #closed + releaseDaily —
-    // daily is released twice (2_000, not 51_000).
-    await ledger.script(40, 0, 1_000, 1_000);
-    let (m, policy) = mk(1_000);
-    let f = m.closeSessionInternal("sess-1");
-    await untilClosing(m);
-    force(m);
-    switch (await f) { case (#ok(_)) {}; case (_) { assert false } };
-    assert session(m).status == #closed;
-    assert (await ledger.transferCalls()) == 2; // settle and refund both ran
-    assert policy.getDailySpendAmount(payerP) == 51_000;
-  });
-
-  await test("during a successful settle: refund still runs, daily released exactly once", func() : async () {
-    // Mutation: as above (daily 2_000, not 51_000).
-    await ledger.script(0, 40, 1_000, 1_000);
+  await test("refused while the close is in flight; the close then completes and releases daily once", func() : async () {
+    // Mutation: drop the icpClosesInFlight term from forceResolveSession's in-flight check — the
+    // force finalizes the live close (before 2.22.0 a close that then failed reopened the
+    // finalized session; a refund that then failed left its remainder with no refundOwed entry).
+    await ledger.script(0, 40, 1_000, 1_000); // park the close inside its settle transfer
     let (m, policy) = mk(1_000);
     let f = m.closeSessionInternal("sess-1");
     await untilTransferring(1);
-    force(m);
+    switch (m.forceResolveSession("sess-1")) {
+      case (#err(msg)) { assert Text.contains(msg, #text "still in flight") };
+      case (#ok) { assert false };
+    };
+    assert session(m).status == #closing;
     switch (await f) { case (#ok(_)) {}; case (_) { assert false } };
     assert session(m).status == #closed;
-    assert (await ledger.transferCalls()) == 2;
-    assert policy.getDailySpendAmount(payerP) == 51_000;
-  });
-
-  await test("during a refund that then fails: #closed, daily released exactly once (2.17.4)", func() : async () {
-    // Mutation: drop the `status == #closing` guard in the refund-failure arm — daily is released
-    // twice (2_000, not 51_000).
-    await ledger.script(0, 40, 2, 1_000); // the refund (transfer 2) is parked, then refused
-    let (m, policy) = mk(1_000);
-    let f = m.closeSessionInternal("sess-1");
-    await untilTransferring(2);
-    force(m);
-    switch (await f) { case (#settlementFailed(_)) {}; case (_) { assert false } };
-    assert session(m).status == #closed;
+    assert (await ledger.transferCalls()) == 2; // settle and refund both ran
     assert policy.getDailySpendAmount(payerP) == 51_000;
   });
 });
@@ -220,9 +198,10 @@ await suite("ledger rejects and recovery", func() : async () {
 
   await test("recoverEscrow pays out once the session is #closed", func() : async () {
     // Mutation: refuse #closed too in recoverEscrow — the payer could never recover a remainder.
-    await ledger.script(0, 0, 1_000, 1_000);
+    await ledger.script(0, 0, 2, 1_000); // the refund (transfer 2) fails: the remainder is owed
     let (m, _) = mk(1_000);
-    switch (await m.closeSessionInternal("sess-1")) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+    await ledger.script(0, 0, 1_000, 1_000);
     switch (await m.recoverEscrow(payerP, ledger, "sess-1", 1)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
   });
 
@@ -375,5 +354,53 @@ await suite("2.20.0: reconcileSession resolves an ICP close left #closing", func
     switch (await r) { case (#err(_)) {}; case (#ok(_)) { assert false } };
     assert session(m).status == #closed;
     assert policy.getDailySpendAmount(payerP) == 51_000; // released once, by the force
+  });
+});
+
+/// One ICP session (consumed 1_000) in `status` whose stored token is `token`.
+func mkToken(status : Types.SessionStatus, token : Text) : Sessions.Sessions {
+  let m = Sessions.Sessions(
+    canisterP,
+    { recipient = { owner = canisterP; subaccount = null }; tokens = [{ ledger = ledgerP; symbol = "TKN"; decimals = 8 }]; evmChains = []; evmRpcCanister = null; ecdsaKeyName = null; nonceExpirySeconds = null },
+    Policy.Engine(), Escrow.EscrowManager(canisterP), EvmEscrow.EvmEscrowManager(), null, { get = func() : ?Text { null } },
+  );
+  m.loadStable([{
+    id = "sess-1"; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 1_000;
+    remaining = 49_000; voucherCount = 1; status; openedAt = 0; lastActivityAt = STALE;
+    lastSequence = 1; lastCumulativeAmount = 1_000; subaccount = Blob.fromArray([]); network = "icp:1";
+    token; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
+  }]);
+  m;
+};
+
+// A ledger principal this config does not list (after a token config change, the session's own).
+let UNLISTED = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+
+await suite("2.22.0: a session token that no longer resolves fails closed", func() : async () {
+
+  await test("a close is refused before the ledger, and the session stays #open", func() : async () {
+    // Mutation: fall back to config.tokens[0] again in closeIcpSession — the close settles and
+    // refunds on that ledger, which after a token config change is not the one holding the escrow.
+    await ledger.script(0, 0, 1_000, 1_000);
+    let m = mkToken(#open, UNLISTED);
+    switch (await m.closeSessionInternal("sess-1")) {
+      case (#settlementFailed(msg)) { assert Text.contains(msg, #text "does not resolve") };
+      case (_) { assert false };
+    };
+    assert session(m).status == #open;
+    assert (await ledger.transferCalls()) == 0;
+  });
+
+  await test("reconcileSession is refused before any ledger query, and the session stays #closing", func() : async () {
+    // Mutation: fall back to config.tokens[0] again in reconcileIcpClose — it reads THAT ledger's
+    // balance for this escrow and acts on it (here 50_000, so it reopens the session; a 0 would have
+    // closed it as "settle landed").
+    await ledger.script(0, 0, 1_000, 1_000);
+    let m = mkToken(#closing, UNLISTED);
+    switch (await m.reconcileSession("sess-1")) {
+      case (#err(msg)) { assert Text.contains(msg, #text "does not resolve") };
+      case (#ok(_)) { assert false };
+    };
+    assert session(m).status == #closing;
   });
 });

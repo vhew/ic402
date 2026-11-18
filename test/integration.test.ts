@@ -261,6 +261,47 @@ describe('ic402 integration', () => {
       }
     });
 
+    // S2 (2.22.0). Fails on: sessionQuery serving any increase again (the delta-1 voucher answers
+    // ok, so a client pays 1 per query against an advertised costPerCall of 500); refusing the
+    // short voucher WITHOUT the trap, i.e. after it is consumed (the same sequence at the full
+    // price is then #invalidSequence).
+    it('S2: a voucher paying less than costPerCall is refused and left unconsumed', async () => {
+      if (skip) return;
+      const cost: bigint = (await actor.requestSession()).costPerCall[0];
+      expect(cost).toBe(500n);
+      const key = Ed25519KeyIdentity.generate();
+      const deposit = 50_000n;
+      await approveExact(deposit);
+      const opened = await actor.openSession(
+        { maxDeposit: deposit, autoClose: true, idleTimeout: [] },
+        {
+          ...icpSig({ nonce: new Uint8Array(32) }, ''),
+          publicKey: [new Uint8Array(key.getPublicKey().toRaw())],
+        },
+      );
+      expect(opened).toHaveProperty('ok');
+      const id: string = opened.ok.id;
+      const v = (cumulativeAmount: bigint, sequence: bigint) => ({
+        sessionId: id,
+        cumulativeAmount,
+        sequence,
+        signature: zeroSig,
+      });
+      const asKey = await actorAs(key);
+      try {
+        await expect(asKey.sessionQuery(v(1n, 1n), 'q')).rejects.toThrow(/per-call price/);
+        expect(await asKey.sessionQuery(v(cost, 1n), 'q')).toHaveProperty('ok');
+        await expect(asKey.sessionQuery(v(2n * cost - 1n, 2n), 'q')).rejects.toThrow(
+          /per-call price/,
+        );
+        expect(await asKey.sessionQuery(v(2n * cost, 2n), 'q')).toHaveProperty('ok');
+        // More than the price is the payer's choice and is accepted.
+        expect(await asKey.sessionQuery(v(4n * cost, 3n), 'q')).toHaveProperty('ok');
+      } finally {
+        await actor.endSession(id); // frees the payer's one session slot
+      }
+    });
+
     // I2. Fails on: search back to gate.settle (the stranger's settle spends the payer's allowance).
     it("I2: a stranger naming the payer on a Candid path is refused before the ledger, even with the payer's allowance standing", async () => {
       if (skip) return;
@@ -660,6 +701,64 @@ describe('ic402 integration', () => {
       expect(result.ok.pricingKind).toBe('Exact');
     });
 
+    // 2.22.0: the service routes settled with expectedAmount = null, so settle took whatever the
+    // nonce was minted for: a 1,000-unit search nonce bought a 10,500 service (operator paid 0).
+    it('rejects a search nonce redeemed at a service (cross-resource underpayment)', async () => {
+      if (skip) return;
+      const searchReq = await actor.search('service underpay probe', []);
+      const icpReq = searchReq.paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      expect(BigInt(icpReq.amount)).toBe(1_000n);
+      await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: 100_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      const caller = await agent.getPrincipal();
+      const cheapSig: PaymentSignatureArg = {
+        scheme: icpReq.scheme,
+        network: icpReq.network,
+        signature: new Uint8Array(0),
+        publicKey: [],
+        asset: [],
+        sender: caller.toText(),
+        nonce: icpReq.nonce,
+        authorization: [],
+      };
+      const result = await actor.submitServiceRequest(
+        testSvcId,
+        new TextEncoder().encode('underpay'),
+        [cheapSig],
+      );
+      // Refused before settling: no funds move and no job is created.
+      expect(result).toHaveProperty('error');
+      expect(String(result.error)).toContain('does not match the resource price');
+    });
+
+    it('registerService refuses an unknown verification method (2.22.0)', async () => {
+      if (skip) return;
+      // It used to register the service as AutoSettle (operator paid on submit).
+      const result = await actor.registerService(
+        'Typo Service',
+        'misspelt verification',
+        { Async: null },
+        { Exact: 500n },
+        'BuyerConfrim:300',
+        [],
+        [],
+        { Poll: null },
+        300n,
+      );
+      expect(result).toHaveProperty('err');
+      expect(String(result.err)).toContain('Unknown verification method');
+    });
+
     it('quoteServiceRequest errors for a missing service', async () => {
       if (skip) return;
       const result = await actor.quoteServiceRequest('no-such-service');
@@ -730,6 +829,9 @@ describe('ic402 integration', () => {
       const submitted = await actor.submitServiceRequest(testSvcId, params, [paymentSig]);
       expect(submitted).toHaveProperty('ok');
       const jobId = submitted.ok.jobId;
+      // 2.22.0: the job record is for its buyer, operator and controllers; a stranger gets none.
+      expect((await actor.getJob(jobId)).length).toBe(1);
+      expect(await (await actorAs()).getJob(jobId)).toEqual([]);
       // The job is #Pending, so the job sweep must be at its working cadence: example/main.mo arms
       // it right before gate.settle (createJobFromReceipt is synchronous and cannot). Armed but not
       // active means that call site was dropped, and the job's expiry would wait for the hourly poll.
@@ -745,6 +847,8 @@ describe('ic402 integration', () => {
       const status = await actor.getJobStatus(jobId);
       expect(status.length).toBe(1);
       expect(status[0]).toHaveProperty('Settled');
+      expect((await actor.getJobResult(jobId)).length).toBe(1);
+      expect(await (await actorAs()).getJobResult(jobId)).toEqual([]);
     });
   });
 
@@ -1073,6 +1177,81 @@ describe('ic402 integration', () => {
       await actor.deleteContent('http-test');
     });
 
+    // I7 (2.22.0). Fails on: httpContentRefusal without its chunked check (multi-chunk content is
+    // sold over HTTP, then answered with no grant to fetch the chunks with) or without its
+    // completeness check (an unfinished upload is sold, then "Read failed"); getContent without
+    // its completeness check (the paid call settles before failing: the payer's balance drops).
+    it('I7: multi-chunk content over HTTP and unfinished uploads are refused before any payment', async () => {
+      if (skip) return;
+      const run = Date.now().toString(36);
+      const [whole, chunked, partial] = ['whole', 'chunked', 'partial'].map(
+        (k) => `i7-${k}-${run}`,
+      );
+      const enc = (t: string) => new TextEncoder().encode(t);
+      // The store refuses writes until its seed timer has run (see 'upload and list content').
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await actor.uploadContent(whole, 'text/plain', enc('whole'));
+          break;
+        } catch (e) {
+          if (attempt === 9) throw e;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+      try {
+        expect(await actor.uploadContentInit(chunked, 'text/plain', 4n, 2n)).toHaveProperty('ok');
+        expect(await actor.uploadContentChunk(chunked, 0n, enc('ab'))).toHaveProperty('ok');
+        expect(await actor.uploadContentChunk(chunked, 1n, enc('cd'))).toHaveProperty('ok');
+        expect(await actor.uploadContentInit(partial, 'text/plain', 4n, 1n)).toHaveProperty('ok');
+
+        const get = (id: string) => fetch(`http://${exampleId}.raw.localhost:4944/content/${id}`);
+        const chunkedRes = await get(chunked);
+        expect(chunkedRes.status).toBe(501);
+        expect((await chunkedRes.json()).error).toMatch(/getContent/);
+        const partialRes = await get(partial);
+        expect(partialRes.status).toBe(503);
+        expect((await partialRes.json()).error).toMatch(/upload incomplete/);
+        expect((await get(whole)).status).toBe(402); // complete single-chunk content is still sold
+
+        // Candid: refused at the quote, and with a live payment in hand (a 5000 nonce minted for
+        // `whole`, approved) refused before the settle, so the payer's balance does not move.
+        expect(String((await actor.getContent(partial, [])).error)).toMatch(/upload incomplete/);
+        const req = (await actor.getContent(whole, [])).paymentRequired.find(
+          (r: { network: string }) => r.network === 'icp:1',
+        );
+        const approved = await ledger.icrc2_approve({
+          spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+          amount: BigInt(req.amount) + 10_000n,
+          fee: [],
+          memo: [],
+          from_subaccount: [],
+          created_at_time: [],
+          expected_allowance: [],
+          expires_at: [],
+        });
+        expect(approved).toHaveProperty('Ok');
+        const payer = await agent.getPrincipal();
+        const account = { owner: payer, subaccount: [] };
+        const sig: PaymentSignatureArg = {
+          scheme: req.scheme,
+          network: req.network,
+          signature: new Uint8Array(0),
+          publicKey: [],
+          asset: [],
+          sender: payer.toText(),
+          nonce: req.nonce,
+          authorization: [],
+        };
+        const before: bigint = await ledger.icrc1_balance_of(account);
+        expect(String((await actor.getContent(partial, [sig])).error)).toMatch(/upload incomplete/);
+        expect(await ledger.icrc1_balance_of(account)).toBe(before);
+        // The same payment still buys content that can be delivered.
+        expect(await actor.getContent(whole, [sig])).toHaveProperty('ok');
+      } finally {
+        for (const id of [whole, chunked, partial]) await actor.deleteContent(id);
+      }
+    });
+
     it('/search returns 402', async () => {
       if (skip) return;
       const response = await fetch(`http://${exampleId}.raw.localhost:4944/search?q=test`);
@@ -1187,6 +1366,55 @@ describe('ic402 integration', () => {
       expect(res.status).toBe(402);
       const body = await res.json();
       expect(body.error).toContain('PAYMENT-SIGNATURE');
+    });
+
+    // A paid HTTP /search on the ICP rail (allowance-authenticated): mint a nonce, approve it, and
+    // send the legacy X-PAYMENT JSON that `header` builds from the nonce (hex) and the payer.
+    async function paidHttpSearch(q: string, header: (nonce: string, payer: string) => string) {
+      const req = (await actor.search('i10', [])).paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
+      );
+      const approved = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: BigInt(req.amount) + 10_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approved).toHaveProperty('Ok');
+      const payer = (await agent.getPrincipal()).toText();
+      const nonce = Buffer.from(req.nonce).toString('hex');
+      return fetch(`${raw()}/search?q=${q}`, { headers: { 'x-payment': header(nonce, payer) } });
+    }
+
+    // I10a (2.22.0). Fails on: extractJsonField requiring `"key":"` with no whitespace again
+    // (Python's json.dumps writes `"key": "value"`, and every paid route answered it 400).
+    it('I10a: an X-PAYMENT header spaced like Python json.dumps settles', async () => {
+      if (skip) return;
+      const res = await paidHttpSearch(
+        'spaced',
+        (nonce, payer) =>
+          `{"scheme": "exact", "network": "icp:1", "signature": "00", "sender": "${payer}", "nonce": "${nonce}"}`,
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).results).toContain('Query: spaced');
+    });
+
+    // I10b (2.22.0). Fails on: /search interpolating `q` into its JSON unescaped (the body
+    // `"Query: x\y"` is not JSON: `\y` is no escape). fetch keeps a backslash in the query raw,
+    // and the canister does not percent-decode `q`.
+    it('I10b: /search escapes the caller-supplied q in its JSON body', async () => {
+      if (skip) return;
+      const res = await paidHttpSearch(
+        'x\\y',
+        (nonce, payer) =>
+          `{"scheme":"exact","network":"icp:1","signature":"00","sender":"${payer}","nonce":"${nonce}"}`,
+      );
+      expect(res.status).toBe(200);
+      expect(JSON.parse(await res.text()).results).toContain('Query: x\\y');
     });
 
     it('GET /supported advertises the v2 EVM kinds + signer', async () => {

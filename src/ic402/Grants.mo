@@ -18,6 +18,15 @@ import Debug "mo:base/Debug";
 
 module {
 
+  /// 2.22.0: how long a revocation is kept (gcRevokedGrants), and so the longest grant lifetime
+  /// issueGrant gives: a revoked grant must expire before its revocation is forgotten.
+  public let MAX_GRANT_TTL_NS : Int = 604_800_000_000_000; // 7 days in nanoseconds
+
+  /// 2.22.0: whether a grant id or content id can go into the grant HMAC. The HMAC message joins
+  /// the fields with '|', so a field containing '|' could be split another way: a grant for
+  /// content "a|b" would also verify as grant "<id>|a" for content "b".
+  public func grantFieldOk(field : Text) : Bool { not Text.contains(field, #char '|') };
+
   /// HMAC-based access grant manager for content delivery tokens.
   public class Grants(canisterPrincipal : Principal) {
 
@@ -35,6 +44,10 @@ module {
       let seedBytes = Utils.natToBytesBE(hmacSeed);
       Blob.toArray(SHA256.fromArray(#sha256, Array.append(principalBytes, seedBytes)));
     };
+
+    /// 2.22.0: whether issueGrant can issue: the HMAC seed is set (initHmacSeed, or restored by
+    /// loadStable). Once true it stays true.
+    public func grantsReady() : Bool { hmacSeedInitialized };
 
     /// Initialize HMAC seed from randomness. Call once on first deployment.
     /// Returns true if the seed was initialized, false if already set (from stable state or prior call).
@@ -73,6 +86,10 @@ module {
 
     /// Issue an access grant after successful payment.
     /// Traps with descriptive message if HMAC seed has not been initialized.
+    /// 2.22.0: also traps if contentRef.id contains '|' (see grantFieldOk). A trap after a payment
+    /// settled leaves the payer charged with nothing delivered, so check both BEFORE settling:
+    /// grantsReady(), and that the content id has no '|'. A TTL above MAX_GRANT_TTL_NS (7 days)
+    /// is capped to it.
     public func issueGrant(
       contentRef : Types.ContentRef,
       grantee : Principal,
@@ -83,10 +100,13 @@ module {
       if (not hmacSeedInitialized) {
         Debug.trap("ic402: issueGrant() called before HMAC seed initialized. Ensure startTimers() was called after deployment.");
       };
+      if (not grantFieldOk(contentRef.id)) {
+        Debug.trap("ic402: issueGrant() refuses a content id containing '|' (the grant HMAC joins its fields with '|'). Check content ids before settling.");
+      };
       grantCounter += 1;
       let grantId = "grant-" # Nat.toText(grantCounter);
       let now = Time.now();
-      let expiresAt = now + ttlNanos;
+      let expiresAt = now + Int.min(ttlNanos, MAX_GRANT_TTL_NS);
       let hmac = computeGrantHmac(grantId, contentRef.id, grantee, expiresAt);
 
       {
@@ -107,6 +127,10 @@ module {
     public func verifyGrant(caller : Principal, grant : Types.AccessGrant) : Types.AccessGrantResult {
       if (not Principal.equal(caller, grant.grantee)) {
         return #invalidGrant("Caller is not the grantee of grant " # grant.grantId);
+      };
+      // 2.22.0: issueGrant never puts '|' in either field, so a grant with one is a re-split.
+      if (not grantFieldOk(grant.grantId) or not grantFieldOk(grant.contentRef.id)) {
+        return #invalidGrant("Grant " # grant.grantId # " has a '|' in its id or content id");
       };
 
       switch (revokedGrants.get(grant.grantId)) {
@@ -138,13 +162,14 @@ module {
     };
 
     /// M-1: Remove revoked grants older than 7 days to prevent unbounded growth.
-    /// Call from a recurring timer (e.g., hourly via Gateway.startTimers).
+    /// Call from a recurring timer (e.g., hourly via Gateway.startTimers). 2.22.0: issueGrant caps
+    /// a grant's lifetime at the same 7 days, so a revocation outlives the grant it revokes.
     public func gcRevokedGrants() { ignore gcRevokedGrantsUpTo(revokedGrants.size()) };
 
     /// gcRevokedGrants, removing at most `limit` stale entries. `more` is true when stale entries
     /// remain because the limit stopped it. No trap path (2.19.0, for Gateway.runMaintenance).
     public func gcRevokedGrantsUpTo(limit : Nat) : { removed : Nat; more : Bool } {
-      let cutoff = Time.now() - 7 * 24 * 60 * 60 * 1_000_000_000; // 7 days in nanoseconds
+      let cutoff = Time.now() - MAX_GRANT_TTL_NS; // 7 days
       // Collect first, then delete: a HashMap must not change while it is being iterated.
       let ids = Buffer.Buffer<Text>(0);
       var more = false;
