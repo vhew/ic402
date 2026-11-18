@@ -508,3 +508,20 @@ await suite("round 2: the EVM rail follows the receipt's network", func() : asyn
     assert reg.getEvmRail(c) == null;
   });
 });
+
+await suite("round 2: a dispute after the dispute window has closed", func() : async () {
+
+  await test("is refused, on both entry points; inside the window, or with no window, it is accepted", func() : async () {
+    // Mutation: drop the window check from disputeJob or from disputeJobEvm — a buyer disputes
+    // a result the window has already accepted (and, at expiresAt, is refunded for it).
+    let sig = Array.tabulate<Nat8>(65, func(_) { 1 });
+    let closed = mk([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
+    assert closed.disputeJob(buyerP, "job-1", "late") == #err("Dispute window has closed: the result was accepted");
+    assert closed.disputeJobEvm("job-1", sig, "late") == #err("Dispute window has closed: the result was accepted");
+    assert status(closed) == ?#Submitted;
+    let open = mk([buyerConfirm(3600)], [job("job-1", "svc-bc", #Submitted, ?0, FAR)]);
+    assert open.disputeJob(buyerP, "job-1", "in time") == #ok;
+    let none = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
+    assert none.disputeJob(buyerP, "job-1", "no window") == #ok;
+  });
+});

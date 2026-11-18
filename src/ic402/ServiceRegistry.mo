@@ -729,6 +729,13 @@ module {
     };
     let NOT_BUYER_CONFIRM = "Job's service does not use BuyerConfirm verification";
 
+    // 2.22.0: a dispute must come within the service's dispute window (when it has one): once the
+    // window has closed the job is the operator's, and the sweep pays it at the next tick.
+    func disputeWindowClosed(job : Types.Job) : Bool {
+      switch (disputeWindowEnd(job)) { case (?windowEnd) { Time.now() > windowEnd }; case (null) { false } };
+    };
+    let DISPUTE_WINDOW_CLOSED = "Dispute window has closed: the result was accepted";
+
     /// Buyer confirms a result (for BuyerConfirm verification).
     public func confirmJob(buyer : Principal, jobId : Text) : async { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
@@ -751,6 +758,7 @@ module {
       if (job.buyer != Principal.toText(buyer)) return #err("Not the buyer");
       if (job.status != #Submitted) return #err("Job not in submitted status");
       if (notBuyerConfirm(job)) return #err(NOT_BUYER_CONFIRM);
+      if (disputeWindowClosed(job)) return #err(DISPUTE_WINDOW_CLOSED);
       jobs.put(jobId, { job with status = #Disputed });
       // M-6: Disputed jobs are resolved via resolveDispute() or auto-refunded by
       // expireJobs() once past the timeout — escrow is never locked permanently.
@@ -826,6 +834,7 @@ module {
       };
       if (job.status != #Submitted) return #err("Job not in submitted status");
       if (notBuyerConfirm(job)) return #err(NOT_BUYER_CONFIRM);
+      if (disputeWindowClosed(job)) return #err(DISPUTE_WINDOW_CLOSED);
       if (not authorizeEvmBuyer(job, "dispute", jobId, signature)) {
         return #err("Signature does not authorize this job's EVM buyer");
       };
