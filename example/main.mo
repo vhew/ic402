@@ -749,6 +749,16 @@ persistent actor KnowledgeBase {
     await gate.closeSession(msg.caller, sessionId);
   };
 
+  // Payer recovery: a closed ICP session that left the payer's remainder in its escrow (a refund
+  // leg that failed, a reconcileSession that found the settle landed, or a forceResolveSession) is
+  // owed it — health().sessions.refundOwed counts them, and those close/reconcile messages tell the
+  // payer to call this. Only the session's payer can (the library checks the caller), and the total
+  // is capped at what is owed less the ledger's fee per recovery. ckUSDC is this example's only ICP
+  // ledger; the library refuses it unless it is the session's own.
+  public shared(msg) func recoverEscrow(sessionId : Text, amount : Nat) : async { #ok : Nat; #err : Text } {
+    await gate.recoverEscrow(msg.caller, actor (CKUSDC), sessionId, amount);
+  };
+
   // ═══════════════════════════════════════════════════════════════════════
   // OPTIONAL: Encrypted Content Store
   //
@@ -1522,6 +1532,14 @@ persistent actor KnowledgeBase {
   public shared(msg) func forceResolveSession(sessionId : Text) : async { #ok; #err : Text } {
     requireController(msg.caller);
     gate.forceResolveSession(sessionId);
+  };
+
+  // Controller-only: drop an owed-refund entry (health().sessions.refundOwed) whose escrow is in
+  // fact empty — a refund the close reported as failed that had landed. Check the escrow balance
+  // first: afterwards recoverEscrow refuses the session. Moves no funds.
+  public shared(msg) func clearRefundOwed(sessionId : Text) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    gate.clearRefundOwed(sessionId);
   };
 
   // Recovery (controller-only): reconcile a session left in #closing. EVM: CONFIRM-ONLY re-poll of

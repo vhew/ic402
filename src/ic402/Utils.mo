@@ -467,6 +467,22 @@ module {
     };
     null;
   };
+
+  /// 2.22.0: the ledger holding a STORED ICP session's escrow (close, reconcileSession,
+  /// recoverEscrow), which may predate 2.22.0. Not findLedger: before 2.22.0 openSession pulled the
+  /// deposit on tokens[0] for every token that was not a configured ledger's principal text (a
+  /// symbol included), and since 2.22.0 it stores a symbol-matched token as its ledger's principal
+  /// text. So: a configured ledger's principal text → that ledger; text that IS a principal but no
+  /// configured ledger's → null (the token config changed under the session, so tokens[0] is not
+  /// where its escrow is: fail closed); anything else ("icp:*", a symbol, other text) → tokens[0],
+  /// where 2.21.0 put it (null if no token is configured).
+  public func findSessionLedger(tokens : [Types.TokenConfig], stored : Text) : ?Types.TokenConfig {
+    for (t in tokens.values()) {
+      if (Principal.toText(t.ledger) == stored) return ?t;
+    };
+    if (principalFromText(stored) != null or tokens.size() == 0) return null;
+    ?tokens[0];
+  };
   // ── Derivation-path cache keys ──
 
   /// Lowercase hex, NO `0x` prefix. Deliberately not `EvmUtils.bytesToHex`, which prefixes:
