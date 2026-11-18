@@ -130,6 +130,24 @@ function pubkeyToEvmAddress(compressedHex: string): string | null {
 }
 
 /**
+ * 2.22.0: the MCP's value-moving tools pay only terms the human confirmed. Call with confirm:false
+ * (the proposal), then repeat the call with the proposal's confirmWith values and confirm:true.
+ * Anything other than a proposal (a free result, an error) is returned as is.
+ */
+async function twoPhase(
+  call: (args: Record<string, unknown>) => Promise<unknown>,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
+  const first = (await call({ ...args, confirm: false })) as Record<string, unknown> | null;
+  if (first?.status !== 'confirmation_required') return first;
+  return (await call({
+    ...args,
+    ...(first.confirmWith as Record<string, unknown>),
+    confirm: true,
+  })) as Record<string, unknown> | null;
+}
+
+/**
  * Call an MCP tool and render the result using standard ic402 status/error format.
  * All ic402 MCP tools return `{ status: 'ok'|'free'|'error', ... }`.
  * This function handles display so individual steps don't interpret errors.
@@ -1079,10 +1097,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         await mcpCallAndRender(client, 'list_services', {});
 
         section('Submit request');
-        info('Buyer submits request with x402 payment...');
+        info('Buyer submits request with x402 payment (proposal, then confirm)...');
         let jobId = '';
-        const submitResult = await mcpCallAndRender(client, 'submit_request', {
-          confirm: true,
+        const submitResult = await twoPhase((a) => mcpCallAndRender(client, 'submit_request', a), {
           serviceId: svcId,
           params: 'Hello, ic402 services!',
         });
@@ -1188,8 +1205,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
             info('');
             info('Buyer submits request: "what is the square root of 25?"');
             const inputBytes = Array.from(Buffer.from(ZK_INPUT, 'hex'));
-            const zkSubmit = await mcpCallAndRender(client, 'submit_request', {
-              confirm: true,
+            const zkSubmit = await twoPhase((a) => mcpCallAndRender(client, 'submit_request', a), {
               serviceId: zkSvcId,
               params: String.fromCharCode(...inputBytes),
             });
@@ -1708,10 +1724,9 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
 
         info('');
         info('Opening session with ICP ckUSDC...');
-        const session = (await mcpCall(client, 'open_session', { confirm: true })) as Record<
-          string,
-          unknown
-        >;
+        // Proposal (confirm:false), then confirm:true with the proposed deposit (confirmWith).
+        const session = ((await twoPhase((a) => mcpCall(client, 'open_session', a), {})) ??
+          {}) as Record<string, unknown>;
         const sessionId = session.sessionId as string;
 
         if (!sessionId) {
