@@ -87,8 +87,9 @@ module {
     /// ledger reject still throws to the caller. The body's only trap source is Candid-decoding a
     /// ledger reply that is not an ICRC-1 TransferResult: inline, that trap rolls back the CALLER's
     /// message instead of surfacing to it as a reject — an ICP close then rests in #closing
-    /// (forceResolveSession), as a malformed icrc1_fee reply already did, where it used to revert to
-    /// #open (settle) or end #closed + refundOwed (refund). Identical for any conformant ledger.
+    /// (reconcileSession; forceResolveSession only if that cannot resolve it), as a malformed
+    /// icrc1_fee reply already did, where it used to revert to #open (settle) or end #closed +
+    /// refundOwed (refund). Identical for any conformant ledger.
     public func settleCore(
       ledger : Types.LedgerActor,
       subaccount : Blob,

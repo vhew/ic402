@@ -7,14 +7,19 @@
 /// deleted the record, stranding the remainder for good. Now:
 ///   - sessionCounts().refundOwed counts it, from either close path (the payer's or the sweep's);
 ///   - recoverEscrow clears it once one fee or less is left (a partial recovery does not);
-///   - a forceResolveSession that lands during the close leaves it untracked (the operator owns it);
 ///   - gcClosedSessions keeps the record while it is owed;
 ///   - refundOwedToStable / loadRefundOwed carry it across an upgrade without touching StableSession.
+/// 2.22.0: the entry is the payer's whole claim on an ICP escrow:
+///   - forceResolveSession writes one (deposited − consumed, fee 0), and recoverEscrow pays only
+///     against an entry, never more than it in total, one recovery at a time;
+///   - recoverEscrow uses the session's own ledger and refuses any other;
+///   - clearRefundOwed drops an entry whose escrow is in fact empty;
+///   - gcClosedSessions deletes #closed records only, never an #expired one.
 ///
 /// The fake ledger is an in-file `persistent actor` (as in test/closeledger.test.mo): it answers
 /// icrc1_fee with 10_000, and transfer number `errAt` with #Err / number `rejectAt` with a reject
-/// (1-based; 0 = never), after parking each transfer for `hops` yields. Each test names the mutation
-/// that turns it red.
+/// (1-based; 0 = never), after parking each transfer for `hops` yields. `paid` sums the amounts of the
+/// transfers it answered #Ok. Each test names the mutation that turns it red.
 import Sessions "../src/ic402/Sessions";
 import Types "../src/ic402/Types";
 import Policy "../src/ic402/Policy";
@@ -23,26 +28,37 @@ import EvmEscrow "../src/ic402/EvmEscrow";
 import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Error "mo:base/Error";
+import Text "mo:base/Text";
 import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
 let payerP = Principal.fromText("2vxsx-fae");
 
 let ledger = persistent actor {
-  var errAt = 0; var rejectAt = 0; var hops = 0; var transfers = 0;
-  public func script(e : Nat, r : Nat, h : Nat) : async () { errAt := e; rejectAt := r; hops := h; transfers := 0 };
+  var errAt = 0; var rejectAt = 0; var hops = 0; var transfers = 0; var paid = 0;
+  public func script(e : Nat, r : Nat, h : Nat) : async () { errAt := e; rejectAt := r; hops := h; transfers := 0; paid := 0 };
   public func transferCalls() : async Nat { transfers };
+  public func paidTotal() : async Nat { paid };
   public func icrc1_fee() : async Nat { 10_000 };
-  public func icrc1_transfer(_ : Types.TransferArg) : async Types.TransferResult {
+  public func icrc1_transfer(arg : Types.TransferArg) : async Types.TransferResult {
     transfers += 1;
     let n = transfers;
     var i = 0; while (i < hops) { await async {}; i += 1 };
     if (n == rejectAt) { throw Error.reject("transfer rejected") };
-    if (n == errAt) { #Err(#TemporarilyUnavailable) } else { #Ok(n) };
+    if (n == errAt) { #Err(#TemporarilyUnavailable) } else { paid += arg.amount; #Ok(n) };
   };
   public func icrc2_transfer_from(_ : Types.TransferFromArg) : async Types.TransferFromResult { #Ok(1) };
 };
 let ledgerP = Principal.fromActor(ledger);
+
+/// A second ledger, not this session's: any transfer it is asked for is counted.
+let otherLedger = persistent actor {
+  var transfers = 0;
+  public func transferCalls() : async Nat { transfers };
+  public func icrc1_fee() : async Nat { 10_000 };
+  public func icrc1_transfer(_ : Types.TransferArg) : async Types.TransferResult { transfers += 1; #Ok(transfers) };
+  public func icrc2_transfer_from(_ : Types.TransferFromArg) : async Types.TransferFromResult { #Ok(1) };
+};
 
 /// A session record: deposited 50_000, consumed 1_000 (so a close settles 1_000 + a 10_000 fee and
 /// leaves 39_000 in escrow, of which the refund tries to send 29_000).
@@ -50,7 +66,7 @@ func stable_(id : Text, status : Types.SessionStatus, lastActivityAt : Int, idle
   id; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 1_000;
   remaining = 49_000; voucherCount = 1; status; openedAt = 0; lastActivityAt;
   lastSequence = 1; lastCumulativeAmount = 1_000; subaccount = Blob.fromArray([]); network = "icp:1";
-  token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout; evmDeposit = null;
+  token = Principal.toText(ledgerP); recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout; evmDeposit = null;
 };
 
 func mk(data : [Types.StableSession]) : Sessions.Sessions {
@@ -139,21 +155,92 @@ await suite("recoverEscrow settles an owed refund (2.18.0)", func() : async () {
   });
 });
 
-await suite("a forceResolveSession during the close leaves it untracked (2.18.0)", func() : async () {
+/// Close `m`'s #open "sess-1" with its refund failing: owed { escrow = 39_000; fee = 10_000 }.
+func makeOwing(m : Sessions.Sessions) : async () {
+  await ledger.script(2, 0, 0);
+  switch (await m.closeSessionInternal("sess-1")) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+  await ledger.script(0, 0, 0);
+};
 
-  await test("the operator forces the session while its refund is in flight; the refund then fails", func() : async () {
-    // Mutation: record the owed refund outside the `status == #closing` guard — a force that landed
-    // during the close (whose payer may already have recovered the escrow) gets an entry that could
-    // then never clear.
-    await ledger.script(2, 0, 40); // the refund (transfer 2) is parked, then refused
-    let m = mk([stable_("sess-1", #open, 7, null)]);
-    let f = m.closeSessionInternal("sess-1");
-    var n = 0; while ((await ledger.transferCalls()) < 2 and n < 200) { await async {}; n += 1 };
-    assert (await ledger.transferCalls()) == 2;
+func refusedWith(r : { #ok : Nat; #err : Text }, prefix : Text) {
+  switch (r) { case (#err(msg)) { assert Text.startsWith(msg, #text prefix) }; case (#ok(_)) { assert false } };
+};
+
+await suite("2.22.0: recoverEscrow is bounded by the refundOwed entry", func() : async () {
+
+  await test("a forced ICP session is owed deposited − consumed, and repeated recoverEscrow cannot exceed it", func() : async () {
+    // Mutations: drop the refundOwed.put in forceResolveSession — the entry is missing and the payer
+    // of a forced session cannot recover at all; or cap a recovery at deposited − consumed only (the
+    // pre-2.22.0 per-call cap, dropping the entry term) — the first call pays 49_000 out of an escrow
+    // that, when the settle never landed, still holds the recipient's 1_000 share too. The entry,
+    // less one fee for the recovery's own transfer, bounds the total at 39_000; a second call finds
+    // nothing owed.
+    let m = mk([stable_("sess-1", #closing, 7, null)]);
     switch (m.forceResolveSession("sess-1")) { case (#ok) {}; case (#err(_)) { assert false } };
-    switch (await f) { case (#settlementFailed(_)) {}; case (_) { assert false } };
-    assert m.sessionCounts().closed == 1;
+    assert m.refundOwedToStable() == [{ sessionId = "sess-1"; escrow = 49_000; fee = 0 }];
+    await ledger.script(0, 0, 0);
+    switch (await m.recoverEscrow(payerP, ledger, "sess-1", 49_000)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 49_000), "Nothing is owed");
+    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 1), "Nothing is owed");
+    assert (await ledger.paidTotal()) == 39_000;
     assert owed(m) == 0;
+  });
+
+  await test("a session with no entry (a clean close) has nothing to recover", func() : async () {
+    // Mutation: drop the entry check at the top of recoverEscrow — the call goes on to the ledger
+    // (a fee query) before it is refused, with a different reason.
+    await ledger.script(0, 0, 0);
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    switch (await m.closeSessionInternal("sess-1")) { case (#ok(_)) {}; case (_) { assert false } };
+    await ledger.script(0, 0, 0);
+    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 1), "Nothing is owed on this session: its close");
+    assert (await ledger.transferCalls()) == 0;
+  });
+
+  await test("two recoveries at once cannot both be paid from one entry", func() : async () {
+    // Mutation: drop the recoveriesInFlight check — both calls read the entry (39_000) before either
+    // reduces it and both are paid 29_000.
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    await ledger.script(0, 0, 40); // park each recovery transfer
+    let a = m.recoverEscrow(payerP, ledger, "sess-1", 29_000);
+    let b = m.recoverEscrow(payerP, ledger, "sess-1", 29_000);
+    let ra = await a;
+    let rb = await b;
+    var paidCalls = 0; var refusedCalls = 0;
+    for (r in [ra, rb].vals()) {
+      switch (r) {
+        case (#ok(_)) { paidCalls += 1 };
+        case (#err(msg)) { if (Text.contains(msg, #text "already in flight")) { refusedCalls += 1 } };
+      };
+    };
+    assert paidCalls == 1 and refusedCalls == 1;
+    assert (await ledger.paidTotal()) == 29_000;
+  });
+
+  await test("a ledger other than the session's is refused, and neither ledger is asked to pay", func() : async () {
+    // Mutation: drop the ledger-mismatch check — the call is paid (on the session's own ledger,
+    // which recoverEscrow now resolves itself) instead of being refused.
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    refusedWith(await m.recoverEscrow(payerP, otherLedger, "sess-1", 1_000), "Wrong ledger");
+    assert (await otherLedger.transferCalls()) == 0;
+    assert (await ledger.transferCalls()) == 0;
+    assert owed(m) == 1;
+  });
+});
+
+await suite("2.22.0: clearRefundOwed", func() : async () {
+
+  await test("drops the entry: the count returns to 0 and recoverEscrow then refuses", func() : async () {
+    // Mutation: make clearRefundOwed answer #ok without deleting — the count stays 1.
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    assert owed(m) == 1;
+    switch (m.clearRefundOwed("sess-1")) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert owed(m) == 0;
+    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 1_000), "Nothing is owed");
+    switch (m.clearRefundOwed("sess-1")) { case (#err(_)) {}; case (#ok) { assert false } };
   });
 });
 
@@ -172,6 +259,17 @@ await suite("an owed record outlives the GC and an upgrade (2.18.0)", func() : a
     assert not exists(m, "sess-clean");
     assert exists(m, "sess-owed");
     assert owed(m) == 1;
+  });
+
+  await test("gcClosedSessions never deletes an #expired session (2.22.0)", func() : async () {
+    // Mutation: GC #expired records again (`s.status == #closed or s.status == #expired`) — the
+    // aged #expired record, whose close has not finished, is deleted with its escrow's only key.
+    // The aged #closed record is the control (see the test above).
+    let aged : Int = -25 * 60 * 60 * 1_000_000_000;
+    let m = mk([stable_("sess-expired", #expired, aged, null), stable_("sess-clean", #closed, aged, null)]);
+    m.gcClosedSessions();
+    assert not exists(m, "sess-clean");
+    assert exists(m, "sess-expired");
   });
 
   await test("refundOwedToStable / loadRefundOwed carry the count across an upgrade", func() : async () {

@@ -90,7 +90,8 @@ module {
   /// - Persist `toStable()` in preupgrade and restore with `loadStable()` in postupgrade;
   ///   check `Ic402.checkSchemaVersion` against your persisted version BEFORE loadStable.
   /// - 2.18.0: persist `refundOwedToStable()` in its own stable variable and restore it with
-  ///   `loadRefundOwed()` after loadStable (owed ICP refunds; not part of toStable()).
+  ///   `loadRefundOwed()` after loadStable (owed ICP refunds; not part of toStable()). Required
+  ///   since 2.22.0: recoverEscrow pays only against these entries.
   /// - EVM rails are unavailable until the async tECDSA address derivation completes —
   ///   poll `isEvmReady()`.
   public class Gateway(config : Types.Config, selfPrincipal : Principal) {
@@ -1250,6 +1251,9 @@ module {
     /// M-8: Recover funds from an escrow subaccount.
     /// H-5: Always refunds to payer, caps at unconsumed amount. Accepts #closed only (2.17.3):
     /// #closing/#expired are refused while a close is in progress (recovery race).
+    /// 2.22.0: pays only against the session's refundOwed entry and never more than it in total (see
+    /// Sessions.recoverEscrow); `ledger` must be the session's own ledger (it is resolved from the
+    /// session's token; any other is refused), so forwarding a caller-chosen ledger is harmless.
     /// ICP-ESCROW ONLY: refunds from the session's ICRC-1 escrow subaccount. EVM session
     /// deposits live in the canister's shared EVM pool and are NOT recoverable here — use
     /// reconcileSession / reconcileEvmDeposit (or an operator sweep) for EVM.
@@ -1559,8 +1563,10 @@ module {
 
     /// Observability (NEW-4): session status counts (parked #closing sessions are the watch
     /// metric — a deposit whose close broadcast but hasn't confirmed).
-    /// `refundOwed` (2.18.0) counts closed ICP sessions whose refund leg failed and that the payer has
-    /// not yet emptied with recoverEscrow; their records are kept past the 24h GC until then.
+    /// `refundOwed` (2.18.0) counts closed ICP sessions that left payer funds in escrow (a failed refund
+    /// leg; also reconcileSession and, since 2.22.0, forceResolveSession) and that the payer has not yet
+    /// emptied with recoverEscrow; their records are kept past the 24h GC until then (clearRefundOwed
+    /// drops one whose escrow is in fact empty).
     public func sessionCounts() : {
       total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat;
     } {
@@ -1569,12 +1575,17 @@ module {
 
     /// 2.18.0: the owed refunds behind sessionCounts().refundOwed. Persist them in their OWN stable
     /// variable (they are not in toStable(), so StableGatewayState is unchanged) and restore them with
-    /// loadRefundOwed after loadStable. Unpersisted, the count restarts at 0 on upgrade and the records
-    /// become GC-eligible again (the pre-2.18 behaviour).
+    /// loadRefundOwed after loadStable. 2.22.0: REQUIRED — recoverEscrow pays an ICP session only
+    /// against its entry, so entries an upgrade drops leave those remainders with no in-band way out.
     public func refundOwedToStable() : [Types.RefundOwed] { sessionsMgr.refundOwedToStable() };
 
     /// Restore the owed refunds saved by refundOwedToStable (call after loadStable).
     public func loadRefundOwed(data : [Types.RefundOwed]) { sessionsMgr.loadRefundOwed(data) };
+
+    /// 2.22.0: drop a session's owed-refund entry whose escrow is in fact empty (a refund reported as
+    /// failed that had landed), so sessionCounts().refundOwed can return to 0. See
+    /// Sessions.clearRefundOwed. Moves no funds. Controller-gate it at the consumer.
+    public func clearRefundOwed(sessionId : Text) : { #ok; #err : Text } { sessionsMgr.clearRefundOwed(sessionId) };
 
     /// Opt-in (default OFF): require an ICP-rail session's Ed25519 voucher key to BE the caller's
     /// own IC identity key (self-authenticating principal check), so the session opener and its
@@ -1627,6 +1638,9 @@ module {
 
     /// Operator escape hatch: force a session stuck in #closing to a terminal state so it's
     /// GC-eligible (state assertion only — moves no funds). Controller-gate at the consumer.
+    /// 2.22.0: refused while a close of the session is in flight; an ICP session forced records
+    /// deposited − consumed as owed to the payer (see Sessions.forceResolveSession). For ICP, call
+    /// reconcileSession first.
     public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
       sessionsMgr.forceResolveSession(sessionId);
     };
@@ -1735,8 +1749,9 @@ module {
 
     /// Restore all gateway state from stable storage. Call from postupgrade, AFTER checking
     /// Ic402.checkSchemaVersion(persisted) — a schema mismatch should branch to a migration,
-    /// not decode blindly. Sessions restored while in #closing have no parked tx hash
-    /// (transient); resolve them via forceResolveSession + out-of-band reconciliation.
+    /// not decode blindly. An ICP session restored #closing is resolved with reconcileSession (it
+    /// reads the escrow). An EVM one has no parked tx hash after an upgrade (transient): resolve it
+    /// via forceResolveSession + out-of-band reconciliation.
     public func loadStable(data : Types.StableGatewayState) {
       nonceManager.loadStable(data.nonces);
       policy.loadStable(data.policy);
