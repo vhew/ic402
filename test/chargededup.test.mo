@@ -106,6 +106,12 @@ func pay(gate : Gateway.Gateway, sig : Types.PaymentSignature, price : ?Nat) : a
 
 func isPending(r : Types.PaymentResult) : Bool { switch (r) { case (#settlementPending(_)) { true }; case (_) { false } } };
 
+func dailyHeld(gate : Gateway.Gateway) : Nat {
+  var total = 0;
+  for ((_, v) in gate.toStable().policy.dailySpendEntries.values()) { total += v };
+  total;
+};
+
 await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplication", func() : async () {
 
   await test("charged, then rejected: re-submitting the same payment gives the receipt, and the payer is charged once", func() : async () {
@@ -278,16 +284,15 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
   });
 
   await test("a re-submit while the first attempt is still in flight sends nothing", func() : async () {
-    // Mutations: store the first attempt's transfer available (setPending) instead of in flight —
-    // the re-submit sends it while the first is still out; or (2.22.0) answer a lock that is in
-    // flight as pending — the re-submit must be told the settlement is in progress
-    // (#policyDenied), since nothing is known to have moved yet.
+    // Mutation: store the first attempt's transfer available (setPending) instead of in flight —
+    // the re-submit sends it while the first is still out. (2.22.0: the first attempt is the same
+    // payer's, so the re-submit is told pending, not "busy": the first may be charging it.)
     await ledger.script(REJECT);
     await ledger.setHops(3);
     let (gate, sig) = setup(true);
     let first = gate.settleFrom(payerP, sig, ?5_000);
     var n = 0; while ((await ledger.stats()).calls == 0 and n < 50) { await async {}; n += 1 };
-    switch (await pay(gate, sig, ?5_000)) { case (#policyDenied(_)) {}; case (_) { assert false } }; // the first is in flight
+    assert isPending(await pay(gate, sig, ?5_000)); // the first is in flight
     assert (await ledger.stats()).calls == 1;
     assert isPending(await first);
     await ledger.setHops(0);
@@ -343,6 +348,19 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     await ledger.setMode(OK);
     assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()) == { calls = 2; charged = 0 };
+  });
+
+  await test("a pending settleFrom charge keeps the payer's daily reservation, and its receipt counts once", func() : async () {
+    // Mutation: release the reservation on the pending path whatever the caller (drop `if (not
+    // payerIsCaller)`) — the re-submit then issues a receipt against no reservation, and the
+    // payer's maxPerDay never sees the charge.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    assert dailyHeld(gate) == 5_000;
+    await ledger.setMode(OK);
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    assert dailyHeld(gate) == 5_000;
   });
 
   await test("the fee query fails: nothing is sent, and the nonce is free for a retry", func() : async () {

@@ -280,6 +280,26 @@ suite("NonceManager", func() {
     assert not mgr.outcomeIsUnknown(n); // a new attempt: in flight again
   });
 
+  test("2.22.0: a lock's holder needs the lock and leaves with it", func() {
+    // Mutations: record a holder without a lock; or let unlock / consumeLocked keep it (a stale
+    // holder would outlive its lock in the map).
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let expiry = Time.now() + 300_000_000_000;
+    let a = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    let b = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    mgr.setHolder(a, "icp:p"); // not locked: ignored
+    assert not mgr.heldBy(a, "icp:p");
+    ignore mgr.lock(a, testNetwork, testToken);
+    ignore mgr.lock(b, testNetwork, testToken);
+    mgr.setHolder(a, "icp:p");
+    mgr.setHolder(b, "icp:p");
+    assert mgr.heldBy(a, "icp:p") and not mgr.heldBy(a, "icp:q");
+    mgr.unlock(a);
+    mgr.consumeLocked(b);
+    assert not mgr.heldBy(a, "icp:p");
+    assert not mgr.heldBy(b, "icp:p");
+  });
+
   test("2.22.0: the clean-up keeps a nonce whose settlement is in flight until 24 h past its expiry", func() {
     // Mutations: retain only nonces with a stored transfer, as in 2.21.0 — the clean-up running
     // during a setLedgerDedup charge's fee query drops the lock, the transfer stored after the
