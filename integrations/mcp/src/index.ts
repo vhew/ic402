@@ -9,6 +9,7 @@ import {
   Ic402Client,
   Ic402Error,
   settlementError402,
+  paidRequestError,
   classifyNetworkError,
   findPaymentOption,
   applyVerbatimAccepted,
@@ -22,6 +23,7 @@ import {
   safeFetch,
   assertResolvedHostIsPublic,
   probeChallenge,
+  sendPaidRequest,
   readTextCapped,
   shouldFetchRootKey,
 } from './security.js';
@@ -33,6 +35,7 @@ import {
   resolveTargetCanister,
   isAllowedX402Asset,
   x402TermsMismatch,
+  confirmedAmountMismatch,
   reservationReleasable,
   icrc2PaymentCost,
   LEGACY_LEDGER_FEE,
@@ -639,8 +642,9 @@ server.tool(
   'open_session',
   'Open a streaming micropayment session by escrowing a deposit — this MOVES FUNDS. Two-phase: ' +
     'with confirm:false (default) it returns a confirmation_required proposal ' +
-    '(amount/recipient/asset/chain) and does nothing; re-invoke with confirm:true only after ' +
-    'the human approves. ICP path: ICRC-2 escrow via the ledger set in configure. EVM path: ' +
+    '(amount/recipient/asset/chain) and does nothing; re-invoke with confirm:true plus the ' +
+    "proposal's confirmWith values (including maxDeposit) only after the human approves. ICP " +
+    'path: ICRC-2 escrow via the ledger set in configure. EVM path: ' +
     'pass evmTxHash proving an on-chain USDC deposit, or an EIP-3009 authorization for the ' +
     'canister to pull the deposit, plus evmNetwork/evmSender/evmToken/evmRecipient. The deposit ' +
     'plus the ICP ledger fees is checked against and counted toward the spend caps. Returns ' +
@@ -655,7 +659,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Escrow deposit in ATOMIC token units as a decimal integer string (e.g. "1000000" = 1.00 USDC at 6 decimals). Omit to use the canister\'s suggestedDeposit from request_session.',
+        'Escrow deposit in ATOMIC token units as a decimal integer string (e.g. "1000000" = 1.00 USDC at 6 decimals). Omit it on the confirm:false call to propose the canister\'s suggestedDeposit; the confirm:true call must pass the proposal\'s confirmWith.maxDeposit.',
       ),
     evmTxHash: z
       .string()
@@ -747,6 +751,12 @@ server.tool(
     const approves = !isEvm && securityConfig.autoPayment && configuredLedger !== null;
     const ledgerFee = isEvm ? 0n : await ledgerFeeAtomic(LEGACY_LEDGER_FEE);
     const costAtomic = isEvm ? depositAtomic : icrc2PaymentCost(depositAtomic, ledgerFee, approves);
+    // 2.22.0: confirm:true pays only the confirmed deposit — it must carry it as maxDeposit (from
+    // confirmWith), never a fresh suggestedDeposit the human did not see.
+    if (confirm) {
+      const refusal = confirmedAmountMismatch('maxDeposit', maxDeposit, depositAtomic);
+      if (refusal) return errorResult(new Ic402Error('no_match', refusal));
+    }
     const gate = requireConfirmation({
       action: 'open_session',
       confirm,
@@ -758,6 +768,16 @@ server.tool(
         ? 'Escrow deposit for a streaming micropayment session'
         : `Escrow deposit ${depositAtomic} for a streaming micropayment session, plus ledger fees ` +
           `${costAtomic - depositAtomic} (transfer${approves ? ' + approve' : ''}): ${costAtomic} leaves the wallet`,
+      confirmWith: {
+        ...(canisterId !== undefined ? { canisterId } : {}),
+        maxDeposit: depositAtomic.toString(),
+        ...(evmTxHash !== undefined ? { evmTxHash } : {}),
+        ...(evmNetwork !== undefined ? { evmNetwork } : {}),
+        ...(evmSender !== undefined ? { evmSender } : {}),
+        ...(evmToken !== undefined ? { evmToken } : {}),
+        ...(evmRecipient !== undefined ? { evmRecipient } : {}),
+        ...(authorization !== undefined ? { authorization } : {}),
+      },
     });
     if (gate) return gate;
 
@@ -1333,25 +1353,17 @@ server.tool(
       // is kept now that signing succeeded — a later retry failure does not un-count the payment,
       // matching the prior commit-after-sign semantics).
 
-      // 3. Retry with payment header (client-side HTTP, 15s timeout)
-      const retryController = new AbortController();
-      const retryTimeout = setTimeout(() => retryController.abort(), 15_000);
-      let paidResponse: Response;
-      try {
-        paidResponse = await safeFetch(
-          safeUrl,
-          {
-            headers: { 'X-Payment': headerToSend, 'Payment-Signature': headerToSend },
-            signal: retryController.signal,
-          },
-          ssrfOpts(),
-        );
-      } finally {
-        clearTimeout(retryTimeout);
-      }
-      const body = await readTextCapped(paidResponse); // I11: bounded read
+      // 3. Retry with payment header (client-side HTTP, 15s timeout, capped body). 2.22.0: a failure
+      // from here on is possibly paid (fundsMoved, not retryable) — a retry signs a second payment.
+      const paid = await sendPaidRequest(
+        safeUrl,
+        { 'X-Payment': headerToSend, 'Payment-Signature': headerToSend },
+        ssrfOpts(),
+      );
+      if (paid.kind === 'possiblyPaid') return errorResult(paidRequestError(paid.error));
+      const body = paid.body;
 
-      if (paidResponse.ok) {
+      if (paid.ok) {
         return {
           content: [
             {
@@ -1359,7 +1371,7 @@ server.tool(
               text: JSON.stringify(
                 {
                   status: 'ok',
-                  code: paidResponse.status,
+                  code: paid.status,
                   body,
                   paidAmount: serialize(signed.paidAmount),
                 },
@@ -1370,13 +1382,14 @@ server.tool(
           ],
         };
       }
-      if (paidResponse.status === 402) {
+      if (paid.status === 402) {
         // 2.20.0: a `settlement_pending` 402 (outcome unknown) becomes an error with
         // fundsMoved = true, which errorResult shows the agent: do not pay again.
         return errorResult(settlementError402(body));
       }
+      // 2.22.0: any other status after paying gives no verdict on the payment: possibly paid.
       return errorResult(
-        new Ic402Error('http_error', `HTTP ${paidResponse.status}: ${body.slice(0, 200)}`),
+        new Ic402Error('http_error', `HTTP ${paid.status}: ${body.slice(0, 200)}`, undefined, true),
       );
     } catch (e) {
       return errorResult(e);
@@ -1497,8 +1510,10 @@ server.tool(
     'service requires BOTH operator-enabled autoPayment AND ' +
     'confirm:true. With confirm:false it returns a confirmation_required proposal whose amount ' +
     'is what leaves the wallet (price + canister fee + the ledger transfer and approve fees) — ' +
-    'the amount the spend caps are checked against. Returns {jobId} (plus paidAmount and ' +
-    'totalCost when paid); poll the result with get_job_result.',
+    'the amount the spend caps are checked against. The confirm:true call must repeat the ' +
+    "proposal's confirmWith values (including the charge as amount) and is refused if the " +
+    'canister now asks more or less. Returns {jobId} (plus paidAmount and totalCost when ' +
+    'paid); poll the result with get_job_result.',
   {
     serviceId: z.string().describe('ID of the service to request (see list_services).'),
     params: z
@@ -1511,8 +1526,14 @@ server.tool(
       .describe(
         'Two-phase gate for paid services: false (default) returns the cost for review (price + canister fee + ledger transfer and approve fees); true approves and pays it. Ignored for free services. Only pass true after the human approves.',
       ),
+    amount: z
+      .string()
+      .optional()
+      .describe(
+        "confirm:true only: the canister charge from the proposal's confirmWith (price + canister fee), exactly as returned. Refused if the canister now asks a different amount.",
+      ),
   },
-  async ({ serviceId, params, confirm }) => {
+  async ({ serviceId, params, confirm, amount }) => {
     const c = requireClient();
     const cid = defaultCanisterId;
     if (!cid) throw new Error('No canister ID.');
@@ -1583,6 +1604,13 @@ server.tool(
         });
       }
 
+      // 2.22.0: confirm:true pays only the charge the human confirmed (carried from confirmWith); it
+      // is also the SDK ceiling below.
+      if (confirm) {
+        const refusal = confirmedAmountMismatch('amount', amount, amountAtomic);
+        if (refusal) return errorResult(new Ic402Error('no_match', refusal));
+      }
+
       // H12 + H13: cap + confirmation before any auto-approval/payment.
       const gate = requireConfirmation({
         action: 'submit_request',
@@ -1593,6 +1621,7 @@ server.tool(
           `Auto-pay ${amountAtomic} (price ${price} + fee ${fee}) for service "${serviceId}" on ` +
           `canister ${cid}, plus ledger fees ${costAtomic - amountAtomic} (transfer + approve): ` +
           `${costAtomic} leaves the wallet`,
+        confirmWith: { serviceId, params, amount: amountAtomic.toString() },
       });
       if (gate) return gate;
       // Gate passed → the cost is now reserved against the cumulative cap; record it so the catch

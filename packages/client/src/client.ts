@@ -26,7 +26,7 @@ import { signVoucher, type VoucherSigner } from './voucher.js';
 import {
   Ic402Error,
   settlementError402,
-  classifyNetworkError,
+  paidRequestError,
   probeX402 as probeX402Url,
   createEvmClient,
   getEvmNonce,
@@ -112,10 +112,10 @@ export interface SessionHandle {
 const FUNDS_MOVED_MARKER = 'do NOT retry payment';
 
 /**
- * 2.22.0: the canister's answer when a settlement with the SAME payment is still running ("A
- * settlement with this payment is already in progress — retry this same payment in a few seconds;
- * do not pay with a new nonce."). Not funds-moved, and not a refusal that frees the payer to pay
- * anew: it is retryable with the same payment only.
+ * 2.22.0: the canister's busy answer ("A settlement with this payment is already in progress —
+ * retry this same payment in a few seconds; …"). It is returned when another caller's attempt with
+ * this payment is running, so the caller's funds did not move through that attempt: transient and
+ * not funds-moved. Retrying the same payment is preferred; a new payment is also safe.
  */
 const SETTLE_IN_PROGRESS_MARKER = 'retry this same payment';
 
@@ -692,16 +692,28 @@ export class Ic402Client {
       headers.set('Payment-Signature', headerToSend);
       response = await fetch(url, { ...init, headers });
     } catch (e) {
-      return { status: 'error', error: classifyNetworkError(e) };
+      // 2.22.0: the payment header may have reached the server: possibly paid, not retryable.
+      return { status: 'error', error: paidRequestError(e) };
     }
 
-    const body = await response.text();
+    let body: string;
+    try {
+      body = await response.text();
+    } catch (e) {
+      return { status: 'error', error: paidRequestError(e) };
+    }
     if (response.ok)
       return { status: 'ok', code: response.status, body, paidAmount: signed.paidAmount };
     if (response.status === 402) return { status: 'error', error: settlementError402(body) };
+    // 2.22.0: any other status after paying gives no verdict on the payment: possibly paid.
     return {
       status: 'error',
-      error: new Ic402Error('http_error', `HTTP ${response.status}: ${body.slice(0, 200)}`),
+      error: new Ic402Error(
+        'http_error',
+        `HTTP ${response.status}: ${body.slice(0, 200)}`,
+        undefined,
+        true,
+      ),
     };
   }
 

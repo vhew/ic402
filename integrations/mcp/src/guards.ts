@@ -458,6 +458,36 @@ export function icrc2PaymentCost(amount: bigint, ledgerFee: bigint, approves: bo
   return amount + ledgerFee + (approves ? ledgerFee : 0n);
 }
 
+/**
+ * 2.22.0: submit_request / open_session with confirm:true must repeat the amount the human
+ * confirmed (from the proposal's confirmWith) and pay it only if the canister still asks exactly
+ * that — the same binding fetch_x402 applies to its terms. Returns null when `confirmed` equals
+ * `fresh`, else the refusal (a missing or malformed amount is refused too).
+ */
+export function confirmedAmountMismatch(
+  field: string,
+  confirmed: string | undefined,
+  fresh: bigint,
+): string | null {
+  if (confirmed === undefined) {
+    return (
+      `confirm:true must repeat the proposal: pass ${field} exactly as confirmWith returned it. ` +
+      'Nothing was paid.'
+    );
+  }
+  let value: bigint;
+  try {
+    value = parseAtomicAmount(confirmed, field);
+  } catch (e) {
+    return `${e instanceof Error ? e.message : String(e)}. Nothing was paid.`;
+  }
+  if (value === fresh) return null;
+  return (
+    `The canister now asks ${fresh}, not the confirmed ${field} ${value}. Nothing was paid. ` +
+    'Re-run with confirm:false and have the human review the new proposal.'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Spend-reservation release (I5)
 // ---------------------------------------------------------------------------

@@ -309,6 +309,35 @@ export async function probeChallenge(
 }
 
 /**
+ * 2.22.0: the outcome of the PAID x402 request. `possiblyPaid` is any failure once the request
+ * carrying the signed payment header was attempted — a network error, the timeout, a refused
+ * redirect hop, an oversized or unreadable body: the server may have settled the authorization, so
+ * the caller must not offer a retry (that would sign a second one).
+ */
+export type PaidRequestOutcome =
+  | { kind: 'response'; status: number; ok: boolean; body: string }
+  | { kind: 'possiblyPaid'; error: unknown };
+
+/** Send the paid request through safeFetch (15 s timeout, capped body); never throws. */
+export async function sendPaidRequest(
+  raw: string,
+  headers: Record<string, string>,
+  opts: SafeFetchOptions,
+): Promise<PaidRequestOutcome> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const resp = await safeFetch(raw, { headers, signal: controller.signal }, opts);
+    const body = await readTextCapped(resp);
+    return { kind: 'response', status: resp.status, ok: resp.ok, body };
+  } catch (error) {
+    return { kind: 'possiblyPaid', error };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * 2.22.0 (I8): fetch the replica's root key only for local development against an EXACT local
  * host — `localhost`, `127.0.0.1` or `[::1]`, any port. A substring test trusted
  * `https://localhost.evil.example`; a fetched root key lets that host forge every response.

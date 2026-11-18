@@ -5,6 +5,7 @@ import {
   assertResolvedHostIsPublic,
   isPrivateIpv6,
   probeChallenge,
+  sendPaidRequest,
   readTextCapped,
   shouldFetchRootKey,
 } from '../integrations/mcp/src/security';
@@ -277,5 +278,44 @@ describe('shouldFetchRootKey (I8)', () => {
     expect(shouldFetchRootKey('http://localhost@evil.example', true)).toBe(false);
     expect(shouldFetchRootKey('https://icp-api.io', true)).toBe(false);
     expect(shouldFetchRootKey('not a url', true)).toBe(false);
+  });
+});
+
+// 2.22.0: the PAID x402 request. Any failure once it was attempted is possibly paid — the MCP must
+// not report it as a plain (retryable) error.
+describe('sendPaidRequest (possibly paid after send)', () => {
+  const PUBLIC_LOOKUP = async () => [{ address: '93.184.216.34', family: 4 }];
+  const send = (fetchImpl: (url: string, init?: RequestInit) => Promise<Response>) =>
+    sendPaidRequest(
+      'https://pay.example/',
+      { 'X-Payment': 'h' },
+      { localDev: false, lookupImpl: PUBLIC_LOOKUP, fetchImpl },
+    );
+
+  // Fails on: sendPaidRequest letting the error escape (the caller then reported kind "unknown",
+  // with no possibly-paid hint, for a timeout or an oversized paid body).
+  it('a network error, an abort or an oversized body comes back possiblyPaid', async () => {
+    const outcomes = [
+      await send(async () => {
+        throw new Error('fetch failed');
+      }),
+      await send(async () => {
+        throw new DOMException('This operation was aborted', 'AbortError');
+      }),
+      await send(
+        async () => new Response('x', { status: 200, headers: { 'content-length': '999999999' } }),
+      ),
+    ];
+    for (const o of outcomes) expect(o.kind).toBe('possiblyPaid');
+  });
+
+  it('passes the payment header and returns the response', async () => {
+    let header: string | null = null;
+    const o = await send(async (_url, init) => {
+      header = new Headers(init?.headers).get('X-Payment');
+      return new Response('content', { status: 200 });
+    });
+    expect(header).toBe('h');
+    expect(o).toEqual({ kind: 'response', status: 200, ok: true, body: 'content' });
   });
 });

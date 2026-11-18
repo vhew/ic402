@@ -55,6 +55,22 @@ export function isSettlementPendingBody(body: string): boolean {
   }
 }
 
+/**
+ * 2.22.0: the Ic402Error for a failure AFTER the paid x402 request went out with the signed payment
+ * header — a network error, a timeout, an unreadable or oversized body. The server may have settled
+ * the authorization, so it is not retryable and carries fundsMoved: paying again signs a second
+ * authorization.
+ */
+export function paidRequestError(e: unknown): Ic402Error {
+  const msg = e instanceof Error ? e.message : String(e);
+  return new Ic402Error(
+    'not_confirmed',
+    `The paid request failed after the signed payment was sent, so it may have settled — do NOT retry payment until you have checked: ${msg}`,
+    e,
+    true,
+  );
+}
+
 /** The Ic402Error for a 402 paid-request response (fundsMoved when settlement is pending). */
 export function settlementError402(body: string): Ic402Error {
   return new Ic402Error(
@@ -501,21 +517,31 @@ export async function fetchX402(
     headers.set('Payment-Signature', headerToSend);
     response = await fetch(url, { ...init, headers });
   } catch (e) {
-    return { status: 'error', error: classifyNetworkError(e) };
+    // 2.22.0: the payment header may have reached the server: possibly paid, not retryable.
+    return { status: 'error', error: paidRequestError(e) };
   }
 
-  const body = await response.text();
+  let body: string;
+  try {
+    body = await response.text();
+  } catch (e) {
+    return { status: 'error', error: paidRequestError(e) };
+  }
   if (response.ok) {
     return { status: 'ok', code: response.status, body, paidAmount: signed.paidAmount };
   }
   if (response.status === 402) {
     return { status: 'error', error: settlementError402(body) };
   }
+  // 2.22.0: any other status after paying gives no verdict on the payment: possibly paid.
   return {
     status: 'error',
-    error: new Ic402Error('http_error', `HTTP ${response.status}: ${body.slice(0, 200)}`, {
-      code: response.status,
-    }),
+    error: new Ic402Error(
+      'http_error',
+      `HTTP ${response.status}: ${body.slice(0, 200)}`,
+      { code: response.status },
+      true,
+    ),
   };
 }
 
