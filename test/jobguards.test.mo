@@ -398,9 +398,10 @@ await suite("round 2: reverted EVM payments are never sent again", func() : asyn
     assert parkedHash(reg) == null;
   });
 
-  await test("an operator payment that reverts is recorded on the #Verified job; later ticks send nothing", func() : async () {
-    // Mutation: settleJob's #reverted arm rolls back to a plain #Verified (no record) — the sweep
-    // re-drives the job and broadcasts the payment again every tick.
+  await test("an operator payment that reverts is recorded on the #Verified job; later ticks send nothing, after an upgrade too", func() : async () {
+    // Mutation: settleJob's #reverted arm rolls back to a plain #Verified (no record), or the sweep
+    // ignores the record — the payment is broadcast again: at once, or after the next upgrade
+    // (which clears the sweep's transient give-up count; the record on the job is what persists).
     evmPlay([#reverted]);
     let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
     ignore await reg.expireJobs();
@@ -408,6 +409,12 @@ await suite("round 2: reverted EVM payments are never sent again", func() : asyn
     assert parkedHash(reg) == ?"0xbad";
     await sweeps(reg, 2);
     assert evmCalls == 1;
+    let upgraded = mk([], []);
+    upgraded.loadStable(reg.toStable());
+    upgraded.setEvmTransfer(evmHook);
+    await sweeps(upgraded, 2);
+    assert evmCalls == 1;
+    assert parkedHash(upgraded) == ?"0xbad";
   });
 
   await test("a controller's resolveDispute sends it again and drops the record of the revert", func() : async () {

@@ -1090,19 +1090,21 @@ persistent actor KnowledgeBase {
     registry.buyerActionMessage(action, jobId);
   };
 
-  public func confirmJobEvm(jobId : Text, signature : Blob) : async { #ok; #err : Text } {
+  func evmBuyerAdmit() : ?Text {
     switch (gate.facilitatorAdmit()) {
-      case (#ok) {};
-      case (#throttled or #lowCycles) { return #err("Busy: signature checks are rate limited — retry shortly") };
+      case (#ok) { null };
+      case (#throttled) { ?"Rate limited: signature checks share the facilitator's admission limit — retry shortly" };
+      case (#lowCycles) { ?"The canister's cycles are below the facilitator floor — try again later" };
     };
+  };
+
+  public func confirmJobEvm(jobId : Text, signature : Blob) : async { #ok; #err : Text } {
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
     await registry.confirmJobEvm(jobId, Blob.toArray(signature));
   };
 
   public func disputeJobEvm(jobId : Text, signature : Blob, reason : Text) : async { #ok; #err : Text } {
-    switch (gate.facilitatorAdmit()) {
-      case (#ok) {};
-      case (#throttled or #lowCycles) { return #err("Busy: signature checks are rate limited — retry shortly") };
-    };
+    switch (evmBuyerAdmit()) { case (?refusal) { return #err(refusal) }; case (null) {} };
     registry.disputeJobEvm(jobId, Blob.toArray(signature), reason);
   };
 
