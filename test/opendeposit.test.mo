@@ -49,7 +49,7 @@ func parked() : (Sessions.Sessions, Policy.Engine) {
     id = "sess-1"; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 0;
     remaining = 50_000; voucherCount = 0; status = #closing; openedAt = 0; lastActivityAt = 0;
     lastSequence = 0; lastCumulativeAmount = 0; subaccount = escrowSub; network = "icp:1";
-    token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
+    token = Principal.toText(ledgerP); recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
   }]);
   policy.recordSpend(payerP, 50_000);
   (m, policy);

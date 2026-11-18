@@ -9,6 +9,7 @@ import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
+import Int "mo:base/Int";
 import Nat64 "mo:base/Nat64";
 import Text "mo:base/Text";
 import HashMap "mo:base/HashMap";
@@ -103,6 +104,18 @@ module {
     };
   };
 
+  /// 2.22.0: the idle timeout a new session gets. The client's own value may only shorten the
+  /// operator's: with a policy sessionIdleTimeout set, the session gets the smaller of the two (a
+  /// client could otherwise keep an idle session, and its deposit and concurrency slot, open past
+  /// the operator's limit). No client value inherits the policy's; no policy value keeps the client's.
+  public func effectiveIdleTimeout(client : ?Int, policyTimeout : ?Int) : ?Int {
+    switch (client, policyTimeout) {
+      case (?c, ?p) { ?Int.min(c, p) };
+      case (?c, null) { ?c };
+      case (null, p) { p };
+    };
+  };
+
   /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
   public class Sessions(
     canisterPrincipal : Principal,
@@ -120,6 +133,9 @@ module {
     // (Types.RefundOwed). Reported by sessionCounts().refundOwed, and gcClosedSessions keeps their record
     // (it is what authorizes recoverEscrow) until the payer has recovered. Kept outside StableSession so
     // no stored type changes: persisted through refundOwedToStable / loadRefundOwed.
+    // 2.22.0: every ICP path that ends #closed with payer funds left in escrow writes one (the close's
+    // failed refund, reconcileSession, forceResolveSession), and recoverEscrow pays an ICP session only
+    // against its entry, never more than it: the entry is the payer's whole claim on the escrow.
     var refundOwed = HashMap.HashMap<Text, { escrow : Nat; fee : Nat }>(8, Text.equal, Text.hash);
     // Recovery: a session whose EVM close settle/refund parked (#pending) records the parked leg
     // + tx hash here so reconcileSession can re-poll it confirm-only. Transient (not in
@@ -132,6 +148,14 @@ module {
     // an upgrade and the set is empty afterwards. A close that traps after an await still runs the
     // `finally` and clears its entry; a trap before the first await rolls the entry back with it.
     let icpClosesInFlight = HashMap.HashMap<Text, ()>(8, Text.equal, Text.hash);
+    // 2.22.0: the same for EVM closes, which park #closing between their sends. reconcileSession and
+    // forceResolveSession refuse while one is in flight: a force landing mid-close let a close that
+    // then failed before broadcast reopen the finalized session. Transient for the same reason.
+    let evmClosesInFlight = HashMap.HashMap<Text, ()>(8, Text.equal, Text.hash);
+    // 2.22.0: recoverEscrow calls between their awaits. One recovery per session at a time, so two
+    // concurrent calls cannot both be capped by the same refundOwed entry before either has reduced
+    // it. Transient for the same reason as icpClosesInFlight.
+    let recoveriesInFlight = HashMap.HashMap<Text, ()>(8, Text.equal, Text.hash);
     // Per-caller lock to prevent concurrent openSession TOCTOU.
     // Stores timestamp so stale locks (from failed async calls) auto-expire after 5 minutes.
     let sessionOpenLocks = HashMap.HashMap<Principal, Int>(8, Principal.equal, Principal.hash);
@@ -209,11 +233,14 @@ module {
       { owner = config.recipient.owner; subaccount = config.recipient.subaccount };
     };
 
-    /// Count active (open) sessions for a caller.
+    /// Count active sessions for a caller (for maxConcurrentSessions). 2.22.0: an ICP session parked
+    /// #closing with nothing consumed counts too: it is a deposit parked at open, which
+    /// reconcileSession may open, so leaving it out let the payer open another meanwhile and end up
+    /// over the limit.
     func activeSessionCount(caller : Principal) : Nat {
       var count = 0;
       for ((_, s) in sessions.entries()) {
-        if (Principal.equal(s.payer, caller) and s.status == #open) {
+        if (Principal.equal(s.payer, caller) and (s.status == #open or (s.status == #closing and s.consumed == 0 and not isEvmNetwork(s.network)))) {
           count += 1;
         };
       };
@@ -338,14 +365,15 @@ module {
       let sessionId = nextSessionId();
       let subaccount = escrowManager.deriveSubaccount(sessionId);
 
-      // Find ledger
+      // Find ledger. 2.22.0: the intent's token must resolve, no fallback to tokens[0]. A close and
+      // reconcileSession resolve the stored token the same way and refuse when it does not, so a
+      // session opened on a fallback ledger could never close.
       let tokenConfig = switch (findLedger(intent.token)) {
         case (?tc) { tc };
         case (null) {
-          switch (config.tokens.size()) {
-            case (0) { sessionOpenLocks.delete(caller); return #err(#tokenNotAccepted("No accepted token configured")) };
-            case (_) { config.tokens[0] };
-          };
+          sessionOpenLocks.delete(caller);
+          if (config.tokens.size() == 0) { return #err(#tokenNotAccepted("No accepted token configured")) };
+          return #err(#tokenNotAccepted("Session token " # intent.token # " is not a configured ledger: use the ledger's principal text (or the network, e.g. \"icp:1\") as the intent's token. Nothing moved."));
         };
       };
 
@@ -399,10 +427,7 @@ module {
           recipient = intent.recipient;
           autoClose = clientConfig.autoClose;
           maxDuration = effectivePolicy.maxSessionDuration;
-          idleTimeout = switch (clientConfig.idleTimeout) {
-            case (?t) { ?t };
-            case (null) { effectivePolicy.sessionIdleTimeout };
-          };
+          idleTimeout = effectiveIdleTimeout(clientConfig.idleTimeout, effectivePolicy.sessionIdleTimeout);
           evmDeposit = null; // ICP session
         };
       };
@@ -779,10 +804,7 @@ module {
         recipient = intent.recipient;
         autoClose = clientConfig.autoClose;
         maxDuration = effectivePolicy.maxSessionDuration;
-        idleTimeout = switch (clientConfig.idleTimeout) {
-          case (?t) { ?t };
-          case (null) { effectivePolicy.sessionIdleTimeout };
-        };
+        idleTimeout = effectiveIdleTimeout(clientConfig.idleTimeout, effectivePolicy.sessionIdleTimeout);
         evmDeposit = ?{
           txHash = depositTxHash;
           chainId;
@@ -941,6 +963,8 @@ module {
     /// session is still marked #closed and
     /// #settlementFailed("Refund leg failed/rejected (session marked #closed): …") is returned —
     /// the remainder stays in the escrow subaccount and is recoverable via recoverEscrow.
+    /// 2.22.0: a session token that no longer resolves to a configured ledger is refused before
+    /// anything moves (#settlementFailed; the session is left #open), never closed on tokens[0].
     ///
     /// EVM: finalizes ONLY on confirmed transfers. #settlementPending → the session is PARKED
     /// in #closing with the tx hash recorded; recover with reconcileSession (confirm-only —
@@ -962,8 +986,10 @@ module {
       // As a self-call they did not: two closes queued together both passed the guard, and the
       // one that then failed before broadcast (the single-flight send lock) reopened the session
       // while the other was paying, so a further close paid the refund again from the shared pool.
+      // 2.22.0: marked in evmClosesInFlight for its duration, as ICP closes are in icpClosesInFlight.
       if (isEvmNetwork(session.network)) {
-        return await* closeEvmSessionInternal(session);
+        evmClosesInFlight.put(sessionId, ());
+        return try { await* closeEvmSessionInternal(session) } finally { evmClosesInFlight.delete(sessionId) };
       };
 
       icpClosesInFlight.put(sessionId, ());
@@ -972,20 +998,21 @@ module {
 
     // The ICP leg of closeSessionInternal, run with the session marked in icpClosesInFlight.
     func closeIcpSession(session : Types.InternalSessionState) : async* Types.PaymentResult {
-      // H-4: Setting #closing BEFORE any async operations freezes session.consumed —
-      // consumeVoucher rejects vouchers when status != #open, preventing TOCTOU on arithmetic.
-      session.status := #closing;
-
-      // Find ledger
+      // Find the session's ledger. 2.22.0: no fallback to config.tokens[0] — after a token config
+      // change that is a different ledger than the one holding this escrow. Refused before anything
+      // moves; the session is left #open (as a failed fee query leaves it) for a close once the
+      // token is configured again.
       let tokenConfig = switch (findLedger(session.token)) {
         case (?tc) { tc };
         case (null) {
-          switch (config.tokens.size()) {
-            case (0) { return #settlementFailed("No token configured") };
-            case (_) { config.tokens[0] };
-          };
+          session.status := #open;
+          return #settlementFailed("Session token " # session.token # " does not resolve to a configured ledger — nothing moved; the session stays open. Configure that ledger again (its principal text) and close it then.");
         };
       };
+
+      // H-4: Setting #closing BEFORE any async operations freezes session.consumed —
+      // consumeVoucher rejects vouchers when status != #open, preventing TOCTOU on arithmetic.
+      session.status := #closing;
 
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
 
@@ -1057,7 +1084,8 @@ module {
         switch (refundResult) {
           case (#err(msg)) {
             // The refund failed — mark closed anyway, releasing the daily reservation like any
-            // terminal close (unless a forceResolveSession during the awaits already did both).
+            // terminal close. (The status guard is defensive: since 2.22.0 forceResolveSession refuses
+            // a close in flight, so nothing else moves the session during these awaits.)
             // G1: the remainder is still in escrow, so measure GC retention from now.
             if (session.status == #closing) {
               session.status := #closed;
@@ -1065,9 +1093,8 @@ module {
                 policy.releaseDaily(session.payer, session.spendDay, session.deposited - session.consumed);
               };
               // 2.18.0: record the owed remainder (the computed escrow balance, never a ledger query) so
-              // it is reported and its record outlives the 24h GC until the payer recovers it. Not when a
-              // forceResolveSession landed during the awaits: the operator owns that session, and the
-              // payer may already have recovered the escrow this figure describes.
+              // it is reported and its record outlives the 24h GC until the payer recovers it; since
+              // 2.22.0 it is also what recoverEscrow pays against.
               refundOwed.put(session.id, { escrow = escrowBalance; fee });
             };
             session.lastActivityAt := Time.now();
@@ -1082,8 +1109,8 @@ module {
       // calling in, and ending in #expired again let a later re-close through the guard above; its
       // settle then failed on the drained escrow and reverted the session to #open, where the sweep
       // retried it forever. End in #closed so any re-close is refused.
-      // 2.17.3: unless a forceResolveSession during the awaits already did both (it moves no funds,
-      // so the transfers above still ran) — releasing the daily reservation twice over-credited it.
+      // 2.17.3: guarded so a forceResolveSession during the awaits could not make it release the
+      // daily reservation twice; since 2.22.0 the force refuses a close in flight, so it is defensive.
       if (session.status == #closing) {
         session.status := #closed;
         // M-9 (v2): Credit the unused deposit back against the daily limit (the full
@@ -1186,7 +1213,7 @@ module {
           // `await*`, not `await closeExpiredSessions()`: a call to a local `async` function is a
           // message the canister sends itself, and every message pays the base fee (2.17.5).
           let _results = await* sweepExpiredSessions();
-          // H-1: Remove closed/expired sessions older than 24h to prevent unbounded map growth
+          // H-1: Remove #closed sessions older than 24h to prevent unbounded map growth
           gcClosedSessions();
           // ── ATOMIC TAIL — do NOT introduce an `await` below this line. ──
           // Motoko commits state at each await, so a session opened by another message DURING the
@@ -1318,14 +1345,15 @@ module {
       Array.freeze(resultBuf);
     };
 
-    /// H-1: Remove closed/expired sessions older than the retention period from memory.
     /// Observability (NEW-4): counts of sessions by status. `closing` is the parked count — an EVM
     /// close that broadcast a settle/refund but hasn't confirmed, an ICP close whose settle was
     /// rejected with an unknown outcome (2.20.0), or an ICP open whose deposit was (2.21.0); a
     /// non-zero, non-decreasing `closing` means a deposit is parked and needs reconcileSession.
-    /// `refundOwed` (2.18.0): closed ICP sessions whose refund leg failed and that the payer has not yet
-    /// emptied with recoverEscrow — counted in `closed` too. A non-zero, non-decreasing value is a payer
-    /// to contact; the records behind it are refundOwedToStable().
+    /// `refundOwed` (2.18.0): closed ICP sessions that left payer funds in escrow (a failed refund leg;
+    /// since 2.20.0 a reconcileSession, since 2.22.0 a forceResolveSession) and that the payer has not
+    /// yet emptied with recoverEscrow — counted in `closed` too. A non-zero, non-decreasing value is a
+    /// payer to contact; the records behind it are refundOwedToStable(). One whose escrow is in fact
+    /// empty (the "failed" refund landed) never clears by itself: clearRefundOwed.
     public func sessionCounts() : {
       total : Nat; open : Nat; closing : Nat; closed : Nat; expired : Nat; refundOwed : Nat;
     } {
@@ -1365,12 +1393,14 @@ module {
     /// operator reconciles the funds out-of-band. Releases the session's canister-side reservations
     /// and forces it to #closed so GC can reclaim it. The consumer MUST gate this on
     /// Principal.isController.
-    /// 2.20.0, ICP: try reconcileSession first. Forcing an ICP session whose settle never landed
-    /// strands the recipient's `consumed` share in the escrow subaccount: recoverEscrow returns at
-    /// most deposited − consumed to the payer, and no library call moves the rest.
-    /// 2.17.3: forcing a LIVE ICP close (between its awaits) no longer double-credits the daily
-    /// limit when that close then succeeds; its transfers still run. If its settle fails, the
-    /// close reopens the session as before.
+    /// 2.22.0: refused while a close of the session is in flight (ICP or EVM), as reconcileSession
+    /// is; call again once it returns. Forcing a live close let a close that then failed reopen the
+    /// finalized session.
+    /// 2.20.0, ICP: try reconcileSession first. 2.22.0: forcing an ICP session records what its close
+    /// would leave the payer as owed (Types.RefundOwed): deposited − consumed, with `fee` 0 because
+    /// this call cannot ask the ledger. recoverEscrow then pays the payer at most that in total, each
+    /// recovery also paying the ledger's current fee out of it. If the settle never landed, the
+    /// recipient's `consumed` share stays in the escrow subaccount: no library call moves it.
     public func forceResolveSession(sessionId : Text) : { #ok; #err : Text } {
       switch (sessions.get(sessionId)) {
         case (null) { #err("Session not found") };
@@ -1378,7 +1408,15 @@ module {
           if (s.status != #closing) {
             return #err("Session is not stuck in #closing (status: " # debug_show (s.status) # ")");
           };
+          if (icpClosesInFlight.get(sessionId) != null or evmClosesInFlight.get(sessionId) != null) {
+            return #err("A close of this session is still in flight — call again once it returns");
+          };
           finalizeClosedSession(s);
+          // The remainder as closeIcpSession computes it (deposited − settled − settle fee, settled =
+          // consumed) with the fee unknown: never a balance query (anyone can pay into an escrow).
+          if (not isEvmNetwork(s.network) and s.deposited > s.consumed) {
+            refundOwed.put(sessionId, { escrow = s.deposited - s.consumed; fee = 0 });
+          };
           #ok;
         };
       };
@@ -1405,12 +1443,14 @@ module {
     /// Sound because the subaccount is this session's alone and only this canister moves funds out
     /// of it: a transfer in can only raise the balance, and if that makes a landed settle read as
     /// "did not land", the second settle is paid out of the transfer, not the payer's share.
-    /// Refused while a close of the session is in flight. A failed balance or fee query leaves the
-    /// session #closing; call again once the ledger is reachable.
+    /// Refused while a close of the session is in flight (2.22.0: EVM too). A failed balance or fee
+    /// query leaves the session #closing; call again once the ledger is reachable. 2.22.0: so does a
+    /// session token that no longer resolves to a configured ledger (no fallback to tokens[0]).
     public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
       let session = switch (sessions.get(sessionId)) { case (null) { return #err("Session not found") }; case (?s) { s } };
       if (session.status != #closing) return #err("Session is not parked in #closing (status: " # debug_show (session.status) # ")");
       if (not isEvmNetwork(session.network)) return await* reconcileIcpClose(session);
+      if (evmClosesInFlight.get(sessionId) != null) return #err("A close of this session is still in flight — call again once it returns");
       let parked = switch (closeParkedTxs.get(sessionId)) { case (null) { return #err("Session is #closing but has no parked tx — use forceResolveSession") }; case (?p) { p } };
       let deposit = switch (session.evmDeposit) { case (null) { return #err("Session has no EVM deposit data") }; case (?d) { d } };
       let sender = switch (evmSender) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
@@ -1438,9 +1478,11 @@ module {
     func reconcileIcpClose(session : Types.InternalSessionState) : async* { #ok : Text; #err : Text } {
       let id = session.id;
       if (icpClosesInFlight.get(id) != null) return #err("A close of this session is still in flight — call again once it returns");
+      // 2.22.0: the session's own ledger or nothing. A fallback to tokens[0] after a token config
+      // change read another ledger's balance (0) and closed the session as "settle landed".
       let tokenConfig = switch (findLedger(session.token)) {
         case (?tc) { tc };
-        case (null) { if (config.tokens.size() == 0) { return #err("No token configured") } else { config.tokens[0] } };
+        case (null) { return #err("Session token " # session.token # " does not resolve to a configured ledger; the session stays #closing — configure that ledger again (its principal text) and call again") };
       };
       let ledger : actor {
         icrc1_balance_of : (Types.Account) -> async Nat;
@@ -1537,7 +1579,10 @@ module {
       };
     };
 
-    /// Called after closeExpiredSessions to prevent unbounded HashMap growth.
+    /// H-1: remove #closed sessions idle past the 24h retention period (called after
+    /// closeExpiredSessions) to prevent unbounded HashMap growth. 2.22.0: #closed only. An #expired
+    /// session is one whose close has not finished (the sweep marks it just before closing it, and a
+    /// close that was not delivered reverts it to #open): deleting it deleted its escrow's only key.
     public func gcClosedSessions() {
       let retentionNanos = 24 * 60 * 60 * 1_000_000_000; // 24 hours
       let now = Time.now();
@@ -1547,7 +1592,7 @@ module {
           func((id, s)) {
             // 2.18.0: a session still owed a refund keeps its record — deleting it would leave the
             // remainder in escrow with no way left to recover it.
-            (s.status == #closed or s.status == #expired) and (now - s.lastActivityAt > retentionNanos)
+            s.status == #closed and (now - s.lastActivityAt > retentionNanos)
             and refundOwed.get(id) == null;
           },
         )
@@ -1702,6 +1747,13 @@ module {
     /// H-5: Hardened — always refunds to payer, caps at unconsumed amount,
     /// and only allows recovery for sessions in #closed status (2.17.3: a recovery landing during a
     /// close in progress drained the escrow under its settle, which failed and reopened the session).
+    /// 2.22.0: pays only against the session's refundOwed entry (sessionCounts().refundOwed): no entry,
+    /// nothing to recover. Each recovery is capped at the entry less the ledger's current fee and
+    /// reduces the entry by the amount plus that fee, so the payer's total never exceeds what the close
+    /// (or reconcileSession / forceResolveSession) left the payer — before, the cap was per call
+    /// and a forced session's escrow could be drained of the recipient's share by repeated calls. One
+    /// recovery per session at a time. The ledger is the session's own (resolved from its token);
+    /// `ledger` is kept for compatibility and must be that ledger, or the call is refused.
     public func recoverEscrow(
       caller : Principal,
       ledger : Types.LedgerActor,
@@ -1724,33 +1776,75 @@ module {
               return #err("Cannot recover escrow while a close is in progress (" # debug_show (session.status) # ") — close an #expired session with closeSession; a session resting in #closing needs the controller's reconcileSession first (it reads the escrow and reopens or closes the session)");
             };
           };
-          // H-5: Cap recovery amount to unconsumed portion
-          let maxRecoverable = Utils.satSub(session.deposited, session.consumed);
-          let cappedAmount = if (amount > maxRecoverable) { maxRecoverable } else { amount };
-          if (cappedAmount == 0) {
-            return #err("No recoverable funds: deposit fully consumed");
+          if (refundOwed.get(sessionId) == null) {
+            return #err("Nothing is owed on this session: its close left no remainder in escrow (or it has been recovered already). EVM sessions are never recoverable here.");
           };
-          // H-5: Always refund to the payer's own account (no arbitrary recipient)
-          let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
-          let subaccount = escrowManager.deriveSubaccount(sessionId);
-          let result = await* escrowManager.refundCore(ledger, subaccount, payerAccount, cappedAmount);
-          // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
-          // `owed.fee` is the fee at the close; if the ledger fee has changed since, the figure is off
-          // by the difference (documented in Types.RefundOwed).
-          switch (result, refundOwed.get(sessionId)) {
-            case (#ok(_), ?owed) {
-              let left = Utils.satSub(owed.escrow, cappedAmount + owed.fee);
-              if (left <= owed.fee) { refundOwed.delete(sessionId) } else {
-                refundOwed.put(sessionId, { owed with escrow = left });
-              };
+          // 2.22.0: the session's own ledger, never a caller-chosen canister.
+          let tokenConfig = switch (findLedger(session.token)) {
+            case (?tc) { tc };
+            case (null) {
+              return #err("Session token " # session.token # " does not resolve to a configured ledger — configure that ledger again (its principal text) and retry");
             };
-            case (_, _) {};
           };
-          result;
+          if (not Principal.equal(Principal.fromActor(ledger), tokenConfig.ledger)) {
+            return #err("Wrong ledger: this session's escrow is on " # Principal.toText(tokenConfig.ledger) # ", not " # Principal.toText(Principal.fromActor(ledger)));
+          };
+          if (recoveriesInFlight.get(sessionId) != null) {
+            return #err("A recovery of this session is already in flight — call again once it returns");
+          };
+          recoveriesInFlight.put(sessionId, ());
+          try { await* recoverOwed(session, tokenConfig.ledger, amount) } finally { recoveriesInFlight.delete(sessionId) };
         };
         case (null) {
           return #err("Session not found: cannot authorize escrow recovery without session record");
         };
+      };
+    };
+
+    // recoverEscrow's transfer, run with the session marked in recoveriesInFlight.
+    func recoverOwed(session : Types.InternalSessionState, ledgerP : Principal, amount : Nat) : async* { #ok : Nat; #err : Text } {
+      let ledger : Types.LedgerActor = actor (Principal.toText(ledgerP));
+      // The fee this recovery pays, out of the payer's remainder. The entry's own `fee` is the close's
+      // (0 for a forced session, which could not ask the ledger), so the current one is used.
+      let fee = try { await ledger.icrc1_fee() } catch (e) {
+        return #err("Fee query failed (icrc1_fee): " # Error.message(e) # " — nothing moved; retry once the ledger is reachable");
+      };
+      let owed = switch (refundOwed.get(session.id)) {
+        case (?o) { o };
+        case (null) { return #err("Nothing is owed on this session any more (the entry was cleared)") };
+      };
+      // H-5: Cap recovery amount to unconsumed portion, and (2.22.0) to what the entry still owes
+      let maxRecoverable = Nat.min(Utils.satSub(session.deposited, session.consumed), Utils.satSub(owed.escrow, fee));
+      let cappedAmount = if (amount > maxRecoverable) { maxRecoverable } else { amount };
+      if (cappedAmount == 0) {
+        return #err("No recoverable funds: deposit fully consumed");
+      };
+      // H-5: Always refund to the payer's own account (no arbitrary recipient)
+      let payerAccount : Types.Account = { owner = session.payer; subaccount = null };
+      let subaccount = escrowManager.deriveSubaccount(session.id);
+      let result = await* escrowManager.refundCore(ledger, subaccount, payerAccount, cappedAmount);
+      // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
+      switch (result, refundOwed.get(session.id)) {
+        case (#ok(_), ?o) {
+          let left = Utils.satSub(o.escrow, cappedAmount + fee);
+          if (left <= fee) { refundOwed.delete(session.id) } else {
+            refundOwed.put(session.id, { o with escrow = left });
+          };
+        };
+        case (_, _) {};
+      };
+      result;
+    };
+
+    /// 2.22.0: drop a session's refundOwed entry — for one whose escrow is in fact empty (the refund
+    /// the close reported as failed had landed: a reject with an unknown outcome), which otherwise
+    /// stays in sessionCounts().refundOwed and keeps its record from the GC for good. Check the escrow
+    /// balance first: once the entry is gone recoverEscrow refuses the session, and its record is
+    /// GC-eligible. Moves no funds. The consumer MUST gate this on Principal.isController.
+    public func clearRefundOwed(sessionId : Text) : { #ok; #err : Text } {
+      switch (refundOwed.get(sessionId)) {
+        case (null) { #err("No refund is owed on session " # sessionId) };
+        case (?_) { refundOwed.delete(sessionId); #ok };
       };
     };
 
@@ -1759,8 +1853,8 @@ module {
     /// 2.18.0: the owed refunds (see sessionCounts().refundOwed), for persistence across upgrades and as
     /// the list behind the count. They are deliberately not in toStable(), so no stored type changed:
     /// keep them in their own stable variable and pass them back to loadRefundOwed after loadStable.
-    /// If you do not persist them, the count restarts at 0 after an upgrade and those records become
-    /// GC-eligible again (the behaviour before 2.18.0).
+    /// 2.22.0: persisting them is REQUIRED — recoverEscrow pays an ICP session only against its entry,
+    /// so an upgrade that drops them leaves those payers' remainders in escrow with no in-band way out.
     public func refundOwedToStable() : [Types.RefundOwed] {
       Iter.toArray(
         Iter.map<(Text, { escrow : Nat; fee : Nat }), Types.RefundOwed>(
