@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Release tooling
+
+- **The release's mops step no longer fails on a registry reject after a publish that landed.**
+  For v2.21.0, the registry's `finishPublish` answered IC0406 "Timeout expired" and the version was
+  published anyway, but the job went red. `scripts/publish-mops.sh` now:
+  - skips a version already on mops, so a re-run is safe;
+  - after an error, checks the registry before failing, and retries once.
+
+  Its `--self-test` (7 cases, against a stub `mops`) runs in CI's `verify-scripts`.
+
+### Docs
+
+- `Gateway.openSession`'s doc comment now describes the ICP behaviour from 2.21.0. A failed fee
+  query refuses the open. A deposit rejected with an unknown outcome returns `#settlementPending`
+  with the session parked `#closing`, so a session does exist. Before, it described only the EVM
+  case, where none exists.
+
 ## v2.21.0 — 2026-11-18
 
 Minor — **ICP payments whose ledger call ends with an unknown outcome: a stopped ledger is refused

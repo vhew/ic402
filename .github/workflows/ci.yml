@@ -147,6 +147,10 @@ jobs:
       # (including a whitespace variant) rather than having decayed into a green no-op.
       - run: bash scripts/check-derivation-paths.sh
       - run: bash scripts/check-derivation-paths.sh --self-test
+      # The release's mops step (scripts/publish-mops.sh) must not go red on a registry reject
+      # after a publish that landed, and must not report success when nothing landed. Its
+      # self-test drives every branch against a stub mops; nothing is published.
+      - run: bash scripts/publish-mops.sh --self-test
 
   # B0: the example canister must stay INSTALLABLE on the IC. moc unrolls SHA-256
   # (mo:sha2) into >2000 Wasm locals in one function, over the IC's per-function install

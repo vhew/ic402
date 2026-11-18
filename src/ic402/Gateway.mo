@@ -1151,6 +1151,10 @@ module {
     ///
     /// EVM: may return #err(#settlementPending(...)): the deposit tx was broadcast but not
     /// confirmed — NO session exists; the deposit is tracked for reconcileEvmDeposit(txHash).
+    /// ICP (2.21.0): the ledger's fee is queried first; if that fails the open is refused with
+    /// #settlementFailed and nothing moves. If the deposit call is then rejected with an unknown
+    /// outcome, returns #err(#settlementPending(...)) and the session EXISTS, parked #closing with
+    /// nothing consumed; the controller resolves it with reconcileSession.
     /// A per-caller open lock (auto-expiring after 5 min) rejects concurrent opens with
     /// #policyDenied.
     public func openSession(

@@ -56,7 +56,10 @@ extra to do for the stable contract.
    - creates the GitHub Release from the version's CHANGELOG entry;
    - publishes `@ic402/client` and `@ic402/mcp` to npm by **trusted publishing** (GitHub OIDC,
      with provenance) — no npm token on any machine;
-   - publishes `ic402` to mops with the `release` environment's `MOPS_IDENTITY_PEM` secret.
+   - publishes `ic402` to mops with the `release` environment's `MOPS_IDENTITY_PEM` secret, through
+     `scripts/publish-mops.sh`. A reject from the mops registry does not prove the publish failed
+     (v2.21.0's timed out and landed), so the script checks the registry before failing and
+     retries once.
 
    Each publish skips a version its registry already has, so re-running the workflow is safe. The
    one-time setup (npm trusted publishers, the `release` environment) is described in the header of
