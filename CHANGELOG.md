@@ -75,6 +75,31 @@ change. Two behaviour changes integrators see: ICP `openSession` can now return
   - storing the transfer whatever the setting breaks the three tests that pin "off is 2.20.0";
   - a `takePending` that keeps the record also breaks the `#TooOld`/`#BadFee` tests, which rely on it.
 
+### Interop: viem accepts colon-namespaced EIP-712 names again
+
+- **What changed:** viem 2.57.17 (wevm/viem#5403) accepts struct names such as Hyperliquid's
+  `HyperliquidTransaction:Withdraw` again, after 2.57.12–2.57.16 refused them. It hashes them
+  context-free, so its digest now equals ic402's byte-for-byte. That holds even on a types map that
+  also holds a struct named the first segment, where viem ≤ 2.57.11 computed a different digest.
+  Checked against viem 2.57.17 and 2.57.19.
+- **Effect:** none on ic402's encoder or on `@ic402/client`, which never hashes typed data with viem.
+  The `EIP712Domain:` first-segment rejection stays, because verifiers on viem ≤ 2.57.11 still
+  disagree on that name. Its error message no longer claims current viem refuses colon names.
+- **Test:** the drift alarm in `packages/client/test/eip712-colon-interop.test.ts` now pins viem's
+  agreement on all three shapes. It fails on viem 2.57.11 (wrong digest) and 2.57.13 (refusal).
+- **Dependencies:** `viem` 2.57.17, `@x402/core` 2.30.0, `vitest` 5.1.0, `cborg` 6.2.1, `eslint` 10.14.0,
+  `@types/node` 26.6.6 (Dependabot PR #50).
+
+### Tooling and docs
+
+- **`scripts/setup.sh` no longer deletes other projects' local-network files.** Its cleanup removed
+  every icp-cli port descriptor on the machine and the shared cached pocket-ic. Another project's
+  running network then lost track of itself. It now removes only descriptors whose `project-dir` is
+  this checkout, and skips the pocket-ic purge while any network is running from that cache.
+- **`RELEASING.md`** describes the publish as it works: pushing the tag runs `release.yml`, which
+  publishes to npm by trusted publishing and to mops. The manual `npm publish` / per-repo token steps
+  (replaced in July 2026) and the `integrations/mcp/README.md` version step are gone.
+
 ### Docs
 
 - `docs/recovery-runbook.md` §7: the parked deposit, and the re-submit resolution with its limits.

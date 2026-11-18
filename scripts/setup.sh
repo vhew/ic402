@@ -159,16 +159,29 @@ if [ -d "$PROJECT_ROOT/.icp/cache" ]; then
   rm -rf "$PROJECT_ROOT/.icp/cache"
 fi
 
-# Clean icp-cli global caches (port descriptors + pocket-ic NNS state)
+# Clean icp-cli global caches (port descriptors + pocket-ic NNS state). These directories are
+# SHARED by every project on this machine, so only touch what is ours: another project's port
+# descriptor, or the pocket-ic binary its running network was launched from, is not ours to delete.
 ICP_CACHE_DIR="$HOME/Library/Caches/org.dfinity.icp-cli"
 ICP_SUPPORT_DIR="$HOME/Library/Application Support/org.dfinity.icp-cli"
 if [ -d "$ICP_CACHE_DIR/port-descriptors" ]; then
-  echo "  Cleaning stale port descriptors..."
-  rm -f "$ICP_CACHE_DIR/port-descriptors"/*.json "$ICP_CACHE_DIR/port-descriptors"/*.lock
+  PROJECT_ROOT_REAL="$(cd "$PROJECT_ROOT" && pwd -P)"
+  for desc in "$ICP_CACHE_DIR/port-descriptors"/*.json; do
+    [ -f "$desc" ] || continue
+    owner="$(node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))["project-dir"] || "")) } catch {}' "$desc")"
+    if [ "$owner" = "$PROJECT_ROOT" ] || [ "$owner" = "$PROJECT_ROOT_REAL" ]; then
+      echo "  Cleaning stale port descriptor $(basename "$desc")..."
+      rm -f "$desc" "${desc%.json}.lock"
+    fi
+  done
 fi
 if [ -d "$ICP_SUPPORT_DIR/pkg" ]; then
-  echo "  Purging cached pocket-ic (forces fresh NNS)..."
-  rm -rf "$ICP_SUPPORT_DIR/pkg"
+  if pgrep -f "$ICP_SUPPORT_DIR/pkg/" >/dev/null 2>&1; then
+    echo "  Keeping cached pocket-ic: a local network (possibly another project's) is running from it."
+  else
+    echo "  Purging cached pocket-ic (forces fresh NNS)..."
+    rm -rf "$ICP_SUPPORT_DIR/pkg"
+  fi
 fi
 
 icp network start --background 2>&1 || true  # may fail on cycles seeding but replica still starts
