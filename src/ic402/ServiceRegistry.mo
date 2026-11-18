@@ -1177,7 +1177,7 @@ module {
       let n = if (final) { MAX_AUTO_ATTEMPTS } else { (switch (payoutFailures.get(id)) { case (?k) { k }; case (null) { 0 } }) + 1 };
       payoutFailures.put(id, n);
       if (n >= MAX_AUTO_ATTEMPTS) {
-        Debug.print("ic402 job " # id # ": " # what # " failed (" # e # "); nothing moved. The sweep will not try again until the next upgrade; the job is left as it is for a controller.");
+        Debug.print("ic402 job " # id # ": " # what # " failed (" # e # "); nothing moved, and the sweep will not try it again on its own. The job is left as it is for a controller.");
       };
     };
 
