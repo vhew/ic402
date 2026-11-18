@@ -172,6 +172,28 @@ suite("ContentStore", func() {
     };
   });
 
+  // I7 (2.22.0): the example refuses payment for content it cannot deliver yet. Red if
+  // isComplete ignores empty chunk slots (a half-uploaded entry reads complete) or answers
+  // ?true/?false for an unknown id.
+  test("isComplete: unknown, put, and a chunked upload until its last chunk lands", func() {
+    let store = ContentStore.ContentStore(testPrincipal);
+    ignore store.initExternalSeed(testSeed);
+    assert(store.isComplete("nonexistent") == null);
+    ignore store.put("whole", "text/plain", Text.encodeUtf8("all at once"));
+    assert(store.isComplete("whole") == ?true);
+    ignore store.put("empty", "text/plain", Blob.fromArray([]));
+    assert(store.isComplete("empty") == ?true);
+
+    ignore store.putChunkedInit("parts", "text/plain", 6, 2);
+    assert(store.isComplete("parts") == ?false);
+    assert(store.get("parts") == null); // what the example would have served after payment
+    ignore store.putChunk("parts", 1, Text.encodeUtf8("lo"));
+    assert(store.isComplete("parts") == ?false);
+    // An empty chunk still stores a 16-byte tag, so it counts as uploaded.
+    ignore store.putChunk("parts", 0, Blob.fromArray([]));
+    assert(store.isComplete("parts") == ?true);
+  });
+
   test("stable state roundtrip", func() {
     let store1 = ContentStore.ContentStore(testPrincipal);
     ignore store1.initExternalSeed(testSeed);

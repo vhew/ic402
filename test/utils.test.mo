@@ -122,6 +122,47 @@ suite("Utils", func() {
       let result = Utils.extractJsonField(json, "data");
       assert(result == "a\"b\\c\nd\te");
     });
+
+    // I10 (2.22.0). Red if keyColonEnd stops skipping whitespace between the key and the colon
+    // (both readers share it).
+    test("I10: whitespace before the colon is insignificant", func() {
+      let json = "{\"name\" :\"alice\",\"age\"\t\r\n: 30}";
+      assert(Utils.extractJsonField(json, "name") == "alice");
+      assert(Utils.extractJsonNatField(json, "age") == 30);
+      // A spaced key is an occurrence like any other: the first one still wins.
+      assert(Utils.extractJsonField("{\"nonce\" :\"first\",\"nonce\":\"second\"}", "nonce") == "first");
+    });
+
+    // I10 (2.22.0). Python's json.dumps writes `"key": "value"`. Red if extractJsonField stops
+    // skipping whitespace after the colon, or extractJsonNatField skips only spaces there again.
+    test("I10: whitespace after the colon is insignificant", func() {
+      let json = "{\"scheme\": \"exact\", \"network\":\n\t \"icp:1\", \"value\":\n\t\"1000\", \"validBefore\": 17}";
+      assert(Utils.extractJsonField(json, "scheme") == "exact");
+      assert(Utils.extractJsonField(json, "network") == "icp:1");
+      assert(Utils.extractJsonNatField(json, "value") == 1000);
+      assert(Utils.extractJsonNatField(json, "validBefore") == 17);
+    });
+
+    // I10 (2.22.0): tolerating whitespace loosens nothing else. Red if isJsonWs accepts more
+    // than JSON's four whitespace characters (e.g. Char.isWhitespace, which takes form feed), or
+    // keyColonEnd stops requiring the colon (the field name as a VALUE then matches).
+    test("I10: only JSON whitespace is tolerated between key, colon and value", func() {
+      assert(Utils.extractJsonField("{\"name\" x: \"a\"}", "name") == "");
+      assert(Utils.extractJsonField("{\"name\"\u{0c}: \"a\"}", "name") == "");
+      assert(Utils.extractJsonField("{\"name\":\u{0c}\"a\"}", "name") == "");
+      assert(Utils.extractJsonNatField("{\"age\"\u{0c}: 30}", "age") == 0);
+      assert(Utils.extractJsonField("{\"a\": \"nonce\" , \"b\": \"x\"}", "nonce") == "");
+    });
+
+    // I10 (2.22.0): the rewrite keeps the old scan semantics on compact JSON. Red if the string
+    // reader takes a key whose value is not a string (it skipped those before).
+    test("I10: first occurrence wins, nested keys count, non-string values are skipped, as before", func() {
+      assert(Utils.extractJsonField("{\"nonce\":\"first\",\"nonce\":\"second\"}", "nonce") == "first");
+      assert(Utils.extractJsonNatField("{\"value\":\"abc\",\"value\":\"7\"}", "value") == 0);
+      assert(Utils.extractJsonField("{\"outer\":{\"nonce\":\"inner\"},\"nonce\":\"top\"}", "nonce") == "inner");
+      assert(Utils.extractJsonField("{\"nonce\":5,\"nonce\":\"s\"}", "nonce") == "s");
+      assert(Utils.extractJsonField("{\"name\":\"", "name") == "");
+    });
   });
 
   // ── escapeJsonString ──
@@ -150,6 +191,20 @@ suite("Utils", func() {
 
     test("clean string passthrough", func() {
       assert(Utils.escapeJsonString("hello world") == "hello world");
+    });
+
+    // I10 (2.22.0). JSON forbids raw U+0000-U+001F in a string. Red if the `n < 32` branch is
+    // dropped (the controls pass through raw) or narrowed.
+    test("I10: escapes every other control character as u00XX", func() {
+      assert(Utils.escapeJsonString("\u{0}") == "\\u0000");
+      assert(Utils.escapeJsonString("\u{1}") == "\\u0001");
+      assert(Utils.escapeJsonString("\u{8}") == "\\u0008");
+      assert(Utils.escapeJsonString("\u{c}") == "\\u000c");
+      assert(Utils.escapeJsonString("\u{1b}") == "\\u001b");
+      assert(Utils.escapeJsonString("\u{1f}") == "\\u001f");
+      assert(Utils.escapeJsonString("a\u{0}b\nc") == "a\\u0000b\\nc");
+      // Space and DEL are not control characters JSON forbids.
+      assert(Utils.escapeJsonString(" \u{7f}") == " \u{7f}");
     });
   });
 
