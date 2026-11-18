@@ -114,6 +114,19 @@ module {
     Principal.fromBlob(Blob.fromArray(Array.subArray(hash, 0, 29)));
   };
 
+  /// 2.22.0: who pays a charge, compared between two settles of one server nonce: the ICP
+  /// `sender` text as given, or the EVM authorization's `from` as its decoded bytes (so 0x, 0X,
+  /// bare hex and any letter case are one payer). Comparing the ICP text raw is safe: an attempt
+  /// still in flight has passed Utils.principalFromText, which accepts only a principal's one
+  /// canonical spelling, so a different text is never the same payer (and is itself refused).
+  public func chargePayerKey(signature : Types.PaymentSignature) : Text {
+    if (not Utils.isEvmNetwork(signature.network)) { return "icp:" # signature.sender };
+    switch (signature.authorization) {
+      case (?a) { "evm:" # EvmUtils.bytesToHex(EvmUtils.hexToBytes(a.from)) };
+      case (null) { "evm:" };
+    };
+  };
+
   /// Entries runMaintenance removes from each map per call, at most.
   public let maintenanceCapPerMap : Nat = 10_000;
 
@@ -751,13 +764,15 @@ module {
     /// the system raised before the ledger ran is still #settlementFailed (nonce unlocked).
     /// 2.21.0, with setLedgerDedup on: a pending ICP charge made through settleFrom is resolved by
     /// the payer calling settleFrom again with the SAME payment (one receipt, never a second charge).
-    /// 2.22.0: a payment whose nonce another settle still holds IN FLIGHT gets #policyDenied("A
-    /// settlement with this payment is already in progress — …"): nothing is known to have moved;
-    /// retry the same payment shortly. #settlementPending now means only the unknown outcome above
-    /// (including any lock restored by loadStable). A pending ICP charge made over `settle` (HTTP)
-    /// releases the named sender's daily reservation; one made through settleFrom keeps it.
-    /// The clean-up also keeps a nonce whose settlement is still in flight for 24 hours past its
-    /// expiry.
+    /// 2.22.0: a payment whose nonce another settle for a DIFFERENT payer still holds in flight
+    /// gets #policyDenied("A settlement with this payment is already in progress — …"): nothing of
+    /// this payer's is known to have moved; retry the same payment shortly. #settlementPending
+    /// means the unknown outcome above (including any lock restored by loadStable), or a settle for
+    /// the SAME payer (ICP sender; EVM authorization `from`) still in flight — a client's re-send
+    /// must not pay again while its first attempt may be pulling the funds. A pending ICP charge
+    /// made over `settle` (HTTP) releases the named sender's daily reservation; one made through
+    /// settleFrom keeps it. The clean-up also keeps a nonce whose settlement is still in flight for
+    /// 24 hours past its expiry.
     ///
     /// Multi-token (v2.5.0): the EVM verify + on-chain execution key off `signature.asset`
     /// (the EIP-712 verifyingContract the payer signed for); `asset = null` falls back to the
@@ -822,8 +837,10 @@ module {
               };
               // 2.22.0: in flight is not "funds may have moved". Nonces are predictable and not bound
               // to a payer, so the attempt holding the lock may be anyone's (an HTTP settle naming
-              // any sender, or another principal's settleFrom); until it returns, answer "busy".
-              if (not nonceManager.outcomeIsUnknown(signature.nonce)) {
+              // any sender, or another principal's settleFrom); until it returns, answer "busy" —
+              // unless that attempt names this same payer: it may be moving this payer's funds right
+              // now (a client's re-send after a timeout), so that is pending, as before 2.22.0.
+              if (not nonceManager.outcomeIsUnknown(signature.nonce) and not nonceManager.heldBy(signature.nonce, chargePayerKey(signature))) {
                 return #policyDenied("A settlement with this payment is already in progress — retry this same payment in a few seconds; do not pay with a new nonce.");
               };
               return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew.");
@@ -831,6 +848,7 @@ module {
             return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.");
           };
           case (?a) {
+            nonceManager.setHolder(signature.nonce, chargePayerKey(signature)); // 2.22.0
             switch (expectedAmount) {
               case (?e) {
                 if (a != e) {
@@ -965,12 +983,15 @@ module {
         // 2.22.0 (E5): never broadcast one authorization twice — a second broadcast can only
         // revert, at the canister's gas, holding the send lock. Claimed here, synchronously with
         // every check above, so two concurrent settles of it cannot both send. Pending, not failed:
-        // the earlier broadcast may have paid. A server nonce, if any, stays locked (as on pending).
+        // the earlier broadcast may have paid.
         let authKey = sender.broadcastAuthorizations.key(chainId, tokenAddr, fromBytes, authNonceBytes);
         switch (sender.broadcastAuthorizations.claim(authKey, authz.validBefore, nowSeconds)) {
           case (#seen(prior)) {
-            // The lock (if any) is no longer in flight: a retry must hear "pending", not "busy".
-            nonceManager.markOutcomeUnknown(signature.nonce);
+            // 2.22.0: this call's server nonce, if any, was locked by this call and nothing of it
+            // moved, so it is unlocked. Marking it "outcome unknown" let anyone replay one of his
+            // own broadcast authorizations with a victim's fresh nonce and leave it pending. (A
+            // retry with the broadcast's own nonce never gets here: that nonce is still locked.)
+            nonceManager.unlock(signature.nonce);
             return #settlementPending(EvmSender.alreadyBroadcastText(prior));
           };
           case (#ok) {};
@@ -984,14 +1005,24 @@ module {
         let evmSpendDay = policy.currentDay();
         policy.recordSpend(evmSender, amount);
 
-        let execResult = await sender.executeTransferWithAuthorization(
-          chainId, tokenAddr,
-          fromBytes,
-          EvmUtils.hexToBytes(authz.to),
-          authz.value, authz.validAfter, authz.validBefore,
-          authNonceBytes,
-          authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
-        );
+        // 2.22.0: each await below is in `try`. Untried, a reject left the nonce locked as if in
+        // flight ("busy" for a day), the authorization claimed and the daily reservation held.
+        let execResult = try {
+          await sender.executeTransferWithAuthorization(
+            chainId, tokenAddr,
+            fromBytes,
+            EvmUtils.hexToBytes(authz.to),
+            authz.value, authz.validAfter, authz.validBefore,
+            authNonceBytes,
+            authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
+          );
+        } catch (e) {
+          // The send may or may not have broadcast: keep the authorization claimed (never send it
+          // twice) and the nonce locked, now with an unknown outcome.
+          policy.releaseDaily(evmSender, evmSpendDay, amount);
+          nonceManager.markOutcomeUnknown(signature.nonce);
+          return #settlementPending("EIP-3009 broadcast call rejected (" # debug_show (Error.code(e)) # "): the transfer may or may not have been broadcast — NOT final: do not deliver value. Do not re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused. " # Error.message(e));
+        };
 
         // Extract the broadcast tx hash. #maybeSent (ambiguous broadcast — post-dispatch error /
         // inconsistent RPC / nonce-too-high) carries a hash and MAY still mine, so route it into the
@@ -1012,7 +1043,11 @@ module {
         // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the transfer actually
         // mined (status == 1) before issuing a receipt; an on-chain revert (insufficient balance,
         // reused token nonce, paused token) must not yield a "paid" receipt.
-        switch (await sender.confirmTransaction(chainId, txHash, 4)) {
+        // A rejected confirm call is "confirmation unavailable" (#err): the tx was broadcast.
+        let confirmation = try { await sender.confirmTransaction(chainId, txHash, 4) } catch (e) {
+          #err(Error.message(e));
+        };
+        switch (confirmation) {
           case (#confirmed) {
             nonceManager.consumeLocked(signature.nonce);
             policy.recordRateHit(evmSender); // I6: the settle succeeded — now it counts
@@ -1035,7 +1070,11 @@ module {
             // 2.22.0 (E7): THIS tx reverting does not mean no funds moved. transferWithAuthorization
             // can be submitted by anyone, so an earlier attempt or a mempool copier may have
             // executed the same authorization first — and then ours reverts. Ask the token.
-            switch (await sender.authorizationState(chainId, tokenAddr, fromBytes, authNonceBytes)) {
+            // A rejected check is "could not be checked" (#unknown); the reservation is released.
+            let authState = try { await sender.authorizationState(chainId, tokenAddr, fromBytes, authNonceBytes) } catch (e) {
+              #unknown(Error.message(e));
+            };
+            switch (authState) {
               case (#unused) {
                 nonceManager.unlock(signature.nonce);
                 return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") and the authorization is still unused on chain — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, or token paused. Fix the cause and re-sign a fresh authorization.");

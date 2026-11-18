@@ -5,9 +5,11 @@
 ///    nonce: an HTTP `settle` naming any sender, or a `settleFrom` as himself. Until 2.22.0 that
 ///    attempt's lock made the real payer's concurrent settle answer #settlementPending ("…its
 ///    outcome is unknown — do NOT pay again"), which clients report as funds moved. Now a lock
-///    whose attempt is still in flight answers #policyDenied ("already in progress — retry");
-///    #settlementPending is kept for an attempt that ended with an unknown outcome, and for every
-///    lock restored by loadStable.
+///    whose attempt is still in flight for ANOTHER payer answers #policyDenied ("already in
+///    progress — retry"); #settlementPending is kept for an attempt that ended with an unknown
+///    outcome, for every lock restored by loadStable, and for an attempt in flight for the SAME
+///    payer (it may be pulling this payer's funds: a client's re-send after a timeout must not
+///    be told to pay again).
 /// 2. Over HTTP the sender is only claimed, so the daily reservation of a charge that ends pending
 ///    there is released: junk settles during a ledger outage cannot fill a payer's maxPerDay.
 /// 3. Principal.fromText traps on malformed text and try/catch does not catch traps, so an HTTP
@@ -101,6 +103,46 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     switch (await junk) { case (#insufficientFunds(_)) {}; case (_) { assert false } };
     await ledger.setMode(OK);
     switch (await gate.settleFrom(payerP, sig, ?5_000)) { case (#ok(r)) { assert r.sender == payer }; case (_) { assert false } };
+  });
+
+  await test("the payer's own duplicate while its first settle is in flight is pending, and sends nothing", func() : async () {
+    // Mutation: answer every in-flight lock as busy (drop the heldBy check) — over HTTP that is
+    // `unexpected_settle_error`, which the SDK reports as nothing moved, so a client re-sending
+    // after a timeout pays anew while its first attempt is pulling the funds.
+    await ledger.script(OK, 3);
+    let gate = Gateway.Gateway(config, canisterP);
+    let sig = payment(gate);
+    let first = gate.settle(sig, ?5_000); // HTTP, names the payer
+    await untilLedgerCalled();
+    assert isPending(await gate.settle(sig, ?5_000)); // the HTTP re-send
+    assert isPending(await gate.settleFrom(payerP, sig, ?5_000)); // the payer's own Candid call
+    assert (await ledger.pullCalls()) == 1;
+    switch (await first) { case (#ok(_)) {}; case (_) { assert false } };
+  });
+
+  await test("chargePayerKey: one EVM payer whatever the hex spelling; ICP is the sender text", func() : async () {
+    // Mutation: key EVM payers on the `from` text as given — a re-send that spells the payer's
+    // address in another case (or without 0x) is told "busy", and pays anew.
+    let addr = "0x52908400098527886E0F7030069857D2E4169EE7";
+    func evm(from : Text) : Types.PaymentSignature {
+      {
+        scheme = "exact"; network = "eip155:8453"; signature = Blob.fromArray([]); publicKey = null;
+        asset = null; sender = ""; nonce = Blob.fromArray([1]);
+        authorization = ?{
+          from; to = addr; value = 1; validAfter = 0; validBefore = 1; nonce = Blob.fromArray([]);
+          v = 27; r = Blob.fromArray([]); s = Blob.fromArray([]);
+        };
+      };
+    };
+    let k = Gateway.chargePayerKey(evm(addr));
+    assert Gateway.chargePayerKey(evm("0x52908400098527886e0f7030069857d2e4169ee7")) == k;
+    assert Gateway.chargePayerKey(evm("0X52908400098527886E0F7030069857D2E4169EE7")) == k;
+    assert Gateway.chargePayerKey(evm("52908400098527886e0f7030069857d2e4169ee7")) == k;
+    assert Gateway.chargePayerKey(evm("0x52908400098527886e0f7030069857d2e4169ee8")) != k;
+    let gate = Gateway.Gateway(config, canisterP);
+    let sig = payment(gate);
+    assert Gateway.chargePayerKey(sig) == Gateway.chargePayerKey({ sig with sender = payer });
+    assert Gateway.chargePayerKey(sig) != Gateway.chargePayerKey({ sig with sender = stranger });
   });
 
   await test("after loadStable, a restored lock answers pending: nothing is in flight across an upgrade", func() : async () {

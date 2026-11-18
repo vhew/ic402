@@ -102,6 +102,19 @@ module {
     /// still being in flight. False for a nonce that is not locked.
     public func outcomeIsUnknown(nonce : Blob) : Bool { outcomeUnknown.get(nonce) != null };
 
+    // 2.22.0: the payer of the attempt holding each lock (Gateway's payer key). Lets a settle that
+    // finds the nonce in flight tell the same payer's duplicate (its funds may be moving) from
+    // anyone else's. Transient, like `outcomeUnknown`, and cleared with it.
+    var holders = HashMap.HashMap<Blob, Text>(4, Blob.equal, Blob.hash);
+
+    /// 2.22.0: record the payer of the attempt that just took the lock. Ignored unless locked.
+    public func setHolder(nonce : Blob, payerKey : Text) {
+      if (locked.get(nonce) != null) { holders.put(nonce, payerKey) };
+    };
+
+    /// 2.22.0: whether the attempt holding the lock recorded this payer. False when not locked.
+    public func heldBy(nonce : Blob, payerKey : Text) : Bool { holders.get(nonce) == ?payerKey };
+
     /// 2.21.0: store a charge's transfer as in flight, before the first attempt's await: the
     /// clean-up keeps the nonce, and takePending refuses it. Ignored unless the nonce is locked.
     public func setInFlight(nonce : Blob, charge : PendingCharge) {
@@ -189,6 +202,7 @@ module {
       pending.delete(nonce);
       inFlight.delete(nonce);
       outcomeUnknown.delete(nonce);
+      holders.delete(nonce);
     };
 
     /// Unlock a nonce (call after failed settlement, allowing client retry).
@@ -197,6 +211,7 @@ module {
       pending.delete(nonce);
       inFlight.delete(nonce);
       outcomeUnknown.delete(nonce);
+      holders.delete(nonce);
     };
 
     /// 2.20.0: whether a nonce is locked, i.e. a settlement with it is in flight or ended with an
@@ -242,6 +257,7 @@ module {
         pending.delete(nonce);
         inFlight.delete(nonce);
         outcomeUnknown.delete(nonce);
+        holders.delete(nonce);
       };
       // M-5: Compact the insertion-order ring so it tracks only live nonces.
       let compacted = Buffer.Buffer<Blob>(nonces.size());
@@ -279,6 +295,7 @@ module {
       pending := HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash); // transient
       inFlight := HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
       outcomeUnknown := HashMap.HashMap<Blob, Bool>(4, Blob.equal, Blob.hash);
+      holders := HashMap.HashMap<Blob, Text>(4, Blob.equal, Blob.hash);
       // C-1: Restore locked nonces if present. 2.22.0: each with an unknown outcome — nothing that
       // took the lock before the upgrade is still in flight (see `outcomeUnknown`).
       switch (data.lockedNonces) {
