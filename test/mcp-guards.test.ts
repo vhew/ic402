@@ -8,6 +8,7 @@ import {
   isAllowedX402Asset,
   x402TermsMismatch,
   reservationReleasable,
+  icrc2PaymentCost,
   isToolAllowed,
   isCallMethodAllowed,
   resolveOperatorConfig,
@@ -343,5 +344,18 @@ describe('reservationReleasable (I5)', () => {
     expect(reservationReleasable(err({ fundsMoved: true }))).toBe(false);
     expect(reservationReleasable(err({ fundsMoved: true, paymentNotSent: true }))).toBe(false);
     expect(reservationReleasable(undefined)).toBe(false);
+  });
+});
+
+// 2.22.0: the spend caps and the confirmation count what leaves the wallet, not the bare charge.
+describe('icrc2PaymentCost (fee accounting)', () => {
+  // Fails on: the transfer fee or the approve fee left out (the pre-2.22 cap counted the bare
+  // amount, so every ICP payment spent two ledger fees the cap never saw).
+  it('adds the transfer fee, and the approve fee when the payment approves', () => {
+    // submit_request: canister charge 10_100 (price 100 + its fee 10_000), ckUSDC fee 10_000
+    expect(icrc2PaymentCost(10_100n, 10_000n, true)).toBe(30_100n);
+    // a session deposit pulled from an allowance the payer granted elsewhere (no approve here)
+    expect(icrc2PaymentCost(50_000n, 10_000n, false)).toBe(60_000n);
+    expect(icrc2PaymentCost(0n, 0n, true)).toBe(0n);
   });
 });

@@ -34,6 +34,8 @@ import {
   isAllowedX402Asset,
   x402TermsMismatch,
   reservationReleasable,
+  icrc2PaymentCost,
+  LEGACY_LEDGER_FEE,
   isToolAllowed,
   isCallMethodAllowed,
   resolveOperatorConfig,
@@ -50,6 +52,7 @@ let client: Ic402Client | null = null;
 let agent: HttpAgent | null = null;
 let defaultCanisterId: string | null = null;
 let agentHost: string | null = null; // 2.17.0: per-session agents (open_session) reuse it
+let configuredLedger: string | null = null; // the ICRC-2 ledger set by configure (fee accounting)
 const activeSessions = new Map<string, SessionHandle>();
 
 // ---------------------------------------------------------------------------
@@ -267,6 +270,15 @@ function ledgerActorFactory(ledgerCanisterId: string) {
     agent: requireAgent(),
     canisterId: ledgerCanisterId,
   });
+}
+
+/**
+ * 2.22.0: the ledger fee the SDK adds to an ICRC-2 approval — icrc1_fee() of the configured ledger,
+ * queried the way Ic402Client.approvalFor queries it. `fallback` when no ledger is configured.
+ */
+async function ledgerFeeAtomic(fallback: bigint): Promise<bigint> {
+  if (!configuredLedger) return fallback;
+  return BigInt(String(await ledgerActorFactory(configuredLedger).icrc1_fee()));
 }
 
 /** Serialize a value for JSON, handling bigint, Uint8Array, and Error instances. */
@@ -517,6 +529,7 @@ server.tool(
       ledger: ledger ?? undefined,
       ledgerActorFactory: ledger ? ledgerActorFactory : undefined,
     });
+    configuredLedger = ledger ?? null;
 
     return {
       content: [
@@ -630,8 +643,9 @@ server.tool(
     'the human approves. ICP path: ICRC-2 escrow via the ledger set in configure. EVM path: ' +
     'pass evmTxHash proving an on-chain USDC deposit, or an EIP-3009 authorization for the ' +
     'canister to pull the deposit, plus evmNetwork/evmSender/evmToken/evmRecipient. The deposit ' +
-    'is checked against and counted toward the spend caps. Returns {sessionId, deposited, ' +
-    'remaining}; use sessionId with session_query, get_session, and close_session.',
+    'plus the ICP ledger fees is checked against and counted toward the spend caps. Returns ' +
+    '{sessionId, deposited, remaining, totalCost}; use sessionId with session_query, ' +
+    'get_session, and close_session.',
   {
     canisterId: z
       .string()
@@ -726,14 +740,24 @@ server.tool(
       const suggested = intent.suggestedDeposit ?? intent.maxDeposit ?? 0n;
       depositAtomic = BigInt(String(suggested));
     }
+    // 2.22.0: the caps and the confirmation count what leaves the wallet. An ICP deposit also pays
+    // the ledger's transfer fee, plus the approve fee when the SDK approves (autoPayment + ledger,
+    // as Ic402Client.openSession decides). An EVM deposit pays no ICRC-2 fee.
+    const isEvm = Boolean(evmTxHash || authorization);
+    const approves = !isEvm && securityConfig.autoPayment && configuredLedger !== null;
+    const ledgerFee = isEvm ? 0n : await ledgerFeeAtomic(LEGACY_LEDGER_FEE);
+    const costAtomic = isEvm ? depositAtomic : icrc2PaymentCost(depositAtomic, ledgerFee, approves);
     const gate = requireConfirmation({
       action: 'open_session',
       confirm,
-      amountAtomic: depositAtomic,
+      amountAtomic: costAtomic,
       recipient: evmRecipient ?? cid,
       asset: evmToken,
       chain: evmNetwork,
-      note: 'Escrow deposit for a streaming micropayment session',
+      note: isEvm
+        ? 'Escrow deposit for a streaming micropayment session'
+        : `Escrow deposit ${depositAtomic} for a streaming micropayment session, plus ledger fees ` +
+          `${costAtomic - depositAtomic} (transfer${approves ? ' + approve' : ''}): ${costAtomic} leaves the wallet`,
     });
     if (gate) return gate;
 
@@ -788,7 +812,7 @@ server.tool(
           Actor.createActor(exampleIdlFactory, { agent: voucherAgent, canisterId: id }),
       };
     } catch (e) {
-      refundSpend(depositAtomic); // nothing was sent
+      refundSpend(costAtomic); // nothing was sent
       return errorResult(e);
     }
 
@@ -808,6 +832,11 @@ server.tool(
                 sessionId: session.id,
                 deposited: session.deposited.toString(),
                 remaining: session.remaining.toString(),
+                // What left the wallet: the deposit plus the ledger fees (ICP).
+                totalCost: (isEvm
+                  ? session.deposited
+                  : icrc2PaymentCost(session.deposited, ledgerFee, approves)
+                ).toString(),
               },
               null,
               2,
@@ -816,7 +845,7 @@ server.tool(
         ],
       };
     } catch (e) {
-      if (reservationReleasable(e)) refundSpend(depositAtomic);
+      if (reservationReleasable(e)) refundSpend(costAtomic);
       return errorResult(e);
     }
   },
@@ -1466,9 +1495,10 @@ server.tool(
     'is quoted via a read-only query first; a total of 0 (free or session-billed) submits ' +
     'immediately and pays nothing (refused if the canister then demands payment); a paid ' +
     'service requires BOTH operator-enabled autoPayment AND ' +
-    'confirm:true. With confirm:false it returns a confirmation_required proposal with the ' +
-    'exact total (price + ledger fee) — the amount the spend caps are checked against. Returns ' +
-    '{jobId} (plus paidAmount when paid); poll the result with get_job_result.',
+    'confirm:true. With confirm:false it returns a confirmation_required proposal whose amount ' +
+    'is what leaves the wallet (price + canister fee + the ledger transfer and approve fees) — ' +
+    'the amount the spend caps are checked against. Returns {jobId} (plus paidAmount and ' +
+    'totalCost when paid); poll the result with get_job_result.',
   {
     serviceId: z.string().describe('ID of the service to request (see list_services).'),
     params: z
@@ -1479,7 +1509,7 @@ server.tool(
       .boolean()
       .default(false)
       .describe(
-        'Two-phase gate for paid services: false (default) returns the quoted total for review; true approves and pays it (price + ledger fee). Ignored for free services. Only pass true after the human approves.',
+        'Two-phase gate for paid services: false (default) returns the cost for review (price + canister fee + ledger transfer and approve fees); true approves and pays it. Ignored for free services. Only pass true after the human approves.',
       ),
   },
   async ({ serviceId, params, confirm }) => {
@@ -1520,8 +1550,7 @@ server.tool(
       if (!q.enabled) {
         return errorResult(new Ic402Error('unknown', `Service "${serviceId}" is disabled`));
       }
-      // A1: the buyer actually pays price + ledger fee. Cap-check and commit against the TOTAL
-      // (what really moves), not the bare service price, so the spend guard isn't under-counting.
+      // A1: the canister charges price + its fee (`total`); the ledger fees are added below.
       const price = BigInt(String(q.amount));
       const fee = BigInt(String(q.fee ?? 0n));
       const amountAtomic = BigInt(String(q.total ?? price + fee));
@@ -1534,6 +1563,12 @@ server.tool(
         return textResult({ status: 'ok', jobId: result.jobId });
       }
 
+      // 2.22.0: the caps and the confirmation count what leaves the wallet — the canister's charge
+      // (price + its fee) plus the ledger's transfer fee the SDK approves on top and the approve
+      // call's own fee. The SDK ceiling stays the canister's charge (amountAtomic).
+      const ledgerFee = await ledgerFeeAtomic(fee);
+      const costAtomic = icrc2PaymentCost(amountAtomic, ledgerFee, true);
+
       // Paid: H12 auto-payment must be opt-in.
       if (!securityConfig.autoPayment) {
         return textResult({
@@ -1542,6 +1577,7 @@ server.tool(
           amount: amountAtomic.toString(),
           price: price.toString(),
           fee: fee.toString(),
+          totalCost: costAtomic.toString(),
           instruction:
             'This service requires payment (price + ledger fee). Auto-payment is disabled. Re-run "configure" with autoPayment:true to enable it, then re-invoke with confirm:true.',
         });
@@ -1551,14 +1587,17 @@ server.tool(
       const gate = requireConfirmation({
         action: 'submit_request',
         confirm,
-        amountAtomic,
+        amountAtomic: costAtomic,
         recipient: cid,
-        note: `Auto-pay ${amountAtomic} (price ${price} + ledger fee ${fee}) for service "${serviceId}" on canister ${cid}`,
+        note:
+          `Auto-pay ${amountAtomic} (price ${price} + fee ${fee}) for service "${serviceId}" on ` +
+          `canister ${cid}, plus ledger fees ${costAtomic - amountAtomic} (transfer + approve): ` +
+          `${costAtomic} leaves the wallet`,
       });
       if (gate) return gate;
-      // Gate passed → the amount is now reserved against the cumulative cap; record it so the catch
+      // Gate passed → the cost is now reserved against the cumulative cap; record it so the catch
       // can release it on a no-money-moved failure (and ONLY then — pre-gate throws leave it 0).
-      reservedAmount = amountAtomic;
+      reservedAmount = costAtomic;
 
       // Confirmed and within caps — the client performs the single probe + approve + pay. 2.22.0
       // (M4): the confirmed (and reserved) total is the SDK's ceiling, so the update call's
@@ -1569,6 +1608,11 @@ server.tool(
         jobId: result.jobId,
         // What the SDK actually approved and paid, not the quote.
         paidAmount: (result.paidAmount ?? 0n).toString(),
+        // What left the wallet: that payment plus the ledger fees.
+        totalCost: (result.paidAmount === undefined
+          ? 0n
+          : icrc2PaymentCost(result.paidAmount, ledgerFee, true)
+        ).toString(),
       });
     } catch (e) {
       // 2.22.0 (I5): release the confirm-time reservation ONLY when the SDK proves no payment was
