@@ -440,6 +440,9 @@ it. A job still waiting keeps the sweep at its 60 s cadence. To act sooner, fix 
 **A controller refund that fails (2.22.0).** It puts the job back as it was, except that a
 `#Verified` job comes back `#Disputed`: you chose the refund, so the sweep must not pay the
 operator; it refunds a `#Disputed` job at `expiresAt`, and `resolveDispute` accepts it again.
+A refund that cannot work as configured ("Refund unavailable: …" — no transfer hook or chain, or a
+buyer with no refundable rail) is the exception: nothing could ever move the job again, so it stays
+`#Settling`. Nothing moved; refund the buyer by hand, then `resolveJob(jobId, #Refunded)`.
 
 **A transfer that reverted on-chain is never sent again automatically (2.22.0).** Whatever made it
 revert would most likely do so again, and each try signs and pays gas. `health().jobs.parked`
