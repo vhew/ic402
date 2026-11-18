@@ -29,6 +29,7 @@ import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
 import Text "mo:base/Text";
 import Error "mo:base/Error";
+import EvmSender "../src/ic402/EvmSender";
 import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
@@ -336,12 +337,13 @@ await suite("M10: registerService and settlement time", func() : async () {
 // ── 2.22.0 round 2: what the sweep retries on its own ──────────────────────────────────────
 //
 // A refund or operator payment that fails definitively (an ICP ledger #Err, an EVM send refused
-// before broadcast) is retried by later ticks, at most MAX_AUTO_ATTEMPTS (5) times. One that no
-// retry can fix (no hook, no payout address, …) is not retried. One that REVERTED on-chain is
-// never sent again: the reverted tx is recorded on the job. A #Verified job — left by a failed
-// settle — is now settled by the sweep too (before, only a controller could move it).
+// before broadcast) is retried at each later tick, MAX_AUTO_ATTEMPTS (5) times in all, then at
+// most once an hour (round 3: of the job's age). One that no retry can fix as things are (no hook,
+// no payout address, …) goes straight to the hourly retry. One that REVERTED on-chain is never
+// sent again: the reverted tx is recorded on the job. A #Verified job — left by a failed settle —
+// is now settled by the sweep too (before, only a controller could move it).
 
-type EvmOutcome = { #confirmed; #reverted; #pending; #err };
+type EvmOutcome = { #confirmed; #reverted; #pending; #err; #busy };
 var evmScript : [EvmOutcome] = [#confirmed];
 var evmCalls = 0;
 func evmPlay(seq : [EvmOutcome]) { evmScript := seq; evmCalls := 0 };
@@ -353,6 +355,7 @@ func evmHook(_ : Nat, _ : Text, _ : Text, _ : Nat) : async { #confirmed : Text; 
     case (#reverted) { #reverted("0xbad") };
     case (#pending) { #pending("0xwait") };
     case (#err) { #err("rpc down before broadcast") };
+    case (#busy) { #err(EvmSender.SEND_BUSY) };
   };
 };
 
@@ -432,8 +435,8 @@ await suite("round 2: reverted EVM payments are never sent again", func() : asyn
 
 await suite("round 2: bounded retries of definite failures", func() : async () {
 
-  await test("a refund that keeps failing (#Err) is tried 5 times, then left as it was for a controller", func() : async () {
-    // Mutation: drop the give-up check on the refund path — one ledger call per tick, forever.
+  await test("a refund that keeps failing (#Err) is tried 5 times, then not again within the hour", func() : async () {
+    // Mutation: drop the backoff check on the refund path — one ledger call per tick, forever.
     await ledger.script([#err]);
     let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)]);
     await sweeps(reg, 7);
@@ -456,8 +459,8 @@ await suite("round 2: bounded retries of definite failures", func() : async () {
     assert (await ledger.transferCalls()) == 2;
   });
 
-  await test("an operator payment that keeps failing is tried 5 times, then left #Verified", func() : async () {
-    // Mutation: drop the give-up check on the settle path — one payment attempt per tick, forever.
+  await test("an operator payment that keeps failing is tried 5 times, then not again within the hour", func() : async () {
+    // Mutation: drop the backoff check on the settle path — one payment attempt per tick, forever.
     evmPlay([#err]);
     let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
     await sweeps(reg, 7);
@@ -467,11 +470,11 @@ await suite("round 2: bounded retries of definite failures", func() : async () {
   });
 });
 
-await suite("round 2: failures no retry can fix are not retried", func() : async () {
+await suite("round 2: failures no retry can fix go straight to the hourly retry", func() : async () {
 
-  await test("a settle with no operator payout address is not retried, even once one is set", func() : async () {
-    // Mutation: count it as a transient failure — the next tick tries again (here it then pays;
-    // with the cause unfixed it would fail every tick). A controller re-drives with resolveDispute.
+  await test("a settle with no operator payout address is not retried within the hour, even once one is set", func() : async () {
+    // Mutation: count it as an ordinary failure — the next tick tries again (here it then pays;
+    // with the cause unfixed it would fail at every tick, 5 times). A controller can resolveDispute.
     evmPlay([#confirmed]);
     let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], false, true);
     ignore await reg.expireJobs();
@@ -483,8 +486,8 @@ await suite("round 2: failures no retry can fix are not retried", func() : async
     assert status(reg) == ?#Settled;
   });
 
-  await test("a refund with no transfer hook is not retried, even once one is wired", func() : async () {
-    // Mutation: count it as a transient failure — the next tick tries again.
+  await test("a refund with no transfer hook is not retried within the hour, even once one is wired", func() : async () {
+    // Mutation: count it as an ordinary failure — the next tick tries again.
     evmPlay([#confirmed]);
     let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, false);
     ignore await reg.expireJobs();
@@ -530,5 +533,129 @@ await suite("round 2: a dispute after the dispute window has closed", func() : a
     assert open.disputeJob(buyerP, "job-1", "in time") == #ok;
     let none = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)]);
     assert none.disputeJob(buyerP, "job-1", "no window") == #ok;
+  });
+});
+
+// ── 2.22.0 round 3 ──────────────────────────────────────────────────────────────────────────
+
+let HOUR : Int = 3_600 * SEC;
+
+/// The jobs of `reg`, each `older` nanoseconds older (createdAt moved back): the sweep's backoff
+/// counts hours of a job's age, and Time.now() is a constant under mo:test (measured: 42).
+func aged(reg : ServiceRegistry.ServiceRegistry, older : Int) {
+  let s = reg.toStable();
+  reg.loadStable({ s with jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with createdAt = j.createdAt - older }) }) });
+};
+
+await suite("round 3: the sweep backs off instead of giving up", func() : async () {
+
+  await test("a #Pending job's refund fails 5 times, waits out the hour, then is tried once more", func() : async () {
+    // Mutation: give up for good after the 5th failure (the round-2 behaviour) — the job is never
+    // tried again, and nothing but an upgrade or a controller can move it.
+    await ledger.script([#err]);
+    let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Pending, null, -1)]);
+    await sweeps(reg, 7);
+    assert (await ledger.transferCalls()) == 5;
+    aged(reg, HOUR); // an hour later
+    await sweeps(reg, 3);
+    assert (await ledger.transferCalls()) == 6; // once in that hour
+    assert status(reg) == ?#Pending;
+  });
+
+  await test("a busy EVM sender is not counted as a failure, for a settle or a refund", func() : async () {
+    // Mutation: count SEND_BUSY as a payment failure (on either path) — after 5 busy ticks the job
+    // waits an hour, though nothing was ever tried.
+    evmPlay([#busy, #busy, #busy, #busy, #busy, #busy, #confirmed]);
+    let settle = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    await sweeps(settle, 7);
+    assert status(settle) == ?#Settled;
+    evmPlay([#busy, #busy, #busy, #busy, #busy, #busy, #confirmed]);
+    let refund = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    await sweeps(refund, 7);
+    assert status(refund) == ?#Refunded;
+  });
+});
+
+await suite("round 3: resolveDispute(true) on an expired job the sweep could not refund", func() : async () {
+
+  await test("refunds an expired #Pending job; refuses one not yet expired, and refuses to settle one", func() : async () {
+    // Mutation: drop #Pending/#Assigned/#Computing from resolveDispute, or its expiry or
+    // refund-only condition — the job is stuck, refunded early, or paid to an operator who never
+    // did the work.
+    await ledger.script([#ok]);
+    let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Pending, null, -1), job("job-2", "svc-bc", #Assigned, null, FAR)]);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    switch (await reg.resolveDispute("job-2", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert reg.getJobStatus("job-2") == ?#Assigned;
+    assert (await ledger.transferCalls()) == 0;
+    switch (await reg.resolveDispute("job-1", true)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Refunded;
+  });
+
+  await test("resets the sweep's backoff: after a failed controller refund the next tick tries again", func() : async () {
+    // Mutation: resolveDispute leaves the failure count — the sweep keeps waiting out the hour.
+    await ledger.script([#err]);
+    let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Pending, null, -1)]);
+    await sweeps(reg, 5);
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Pending;
+    assert (await ledger.transferCalls()) == 6;
+    ignore await reg.expireJobs();
+    assert (await ledger.transferCalls()) == 7;
+  });
+});
+
+await suite("round 3: a controller's refund that fails stays a refund", func() : async () {
+
+  await test("a #Verified job whose controller refund fails comes back #Disputed; the sweep does not pay the operator", func() : async () {
+    // Mutation: restore it as #Verified — the next tick pays the operator, against the
+    // controller's decision to refund.
+    await ledger.script([#err, #ok]);
+    let reg = mk([buyerConfirm(0)], [job("job-1", "svc-bc", #Verified, ?0, FAR)]);
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Disputed;
+    ignore await reg.expireJobs();
+    assert status(reg) == ?#Disputed;
+    assert (await ledger.transferCalls()) == 1;
+  });
+
+  await test("a controller refund that reverts is parked #Expired with its tx; the sweep sends nothing", func() : async () {
+    // Mutation: treat the revert like any failure (restore the job) — the job is past expiresAt,
+    // so the next tick sends the refund that just reverted again.
+    evmPlay([#reverted, #confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert status(reg) == ?#Expired;
+    assert parkedHash(reg) == ?"0xbad";
+    await sweeps(reg, 2);
+    assert evmCalls == 1;
+    switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
+  });
+
+  await test("a controller refund that succeeds drops the record of a reverted operator payment", func() : async () {
+    // Mutation: write #Refunded from the job as read (record kept) — the refunded job still
+    // carries the reverted tx: counted as parked, and never GC'd.
+    evmPlay([#reverted, #confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Submitted, ?0, FAR)], true, true);
+    switch (await reg.resolveDispute("job-1", false)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert parkedHash(reg) == ?"0xbad";
+    switch (await reg.resolveDispute("job-1", true)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Refunded;
+    assert parkedHash(reg) == null;
+  });
+});
+
+await suite("round 3: a principal recorded on the EVM rail", func() : async () {
+
+  await test("is not sent to the EVM hook as an address: the refund is #unavailable", func() : async () {
+    // Mutation: drop the 20-byte check — the hook is called with a principal as `to` (an #err,
+    // retried as if it might work).
+    evmPlay([#confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    let s = reg.toStable();
+    reg.loadStable({ s with jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with buyer = Principal.toText(buyerP) }) }) });
+    await sweeps(reg, 2);
+    assert evmCalls == 0;
+    assert status(reg) == ?#Disputed;
   });
 });
