@@ -103,14 +103,23 @@ module {
     #insufficientFunds : Text;
     #invalidSignature : Text;
     #expired : Text;
+    // Refused by policy (access, rate or spending limits, a nonce bound to another price). 2.22.0:
+    // also the "busy" answer, #policyDenied("A settlement with this payment is already in progress
+    // — retry this same payment …"): another settle of the same payment is still in flight and
+    // nothing is known to have moved. Retry the SAME payment shortly; never pay with a new nonce.
     #policyDenied : Text;
     #tokenNotAccepted : Text;
     #networkNotSupported : Text;
     #settlementFailed : Text;
-    // H-1 (v2): EVM transfer was broadcast but not yet confirmed on-chain.
-    // The payment is NOT final — do not deliver value. The bound nonce is kept
-    // locked (the nonce clean-up removes it some time after expiry) so the same challenge is not
-    // re-broadcast.
+    // H-1 (v2): funds MAY have moved, on either rail; the outcome is not known yet. No receipt is
+    // issued: do not deliver value, and do NOT take a new payment (the payer may have been
+    // charged; with setLedgerDedup, the payer's settleFrom of the SAME payment resolves it). ICP
+    // (2.20.0): a ledger call rejected after it may have run. EVM: a transfer broadcast but not
+    // confirmed, and (2.22.0) one that reverted while the authorization reads used or unreadable,
+    // or an authorization this canister already broadcast. Session opens and closes return it too,
+    // for a deposit or a close leg in that state. On a charge the bound nonce stays locked (the
+    // nonce clean-up removes it some time after expiry) so the same payment is not replayed.
+    // Resolve it by checking the ledger or chain (docs/recovery-runbook.md).
     #settlementPending : Text;
     #reputationTooLow : Nat;
     #depositBelowMinimum : Nat;
@@ -139,7 +148,9 @@ module {
   public type SessionConfig = {
     maxDeposit : Nat;
     autoClose : Bool;
-    /// NANOSECONDS; null = inherit the effective policy's sessionIdleTimeout.
+    /// NANOSECONDS; null = inherit the effective policy's sessionIdleTimeout. 2.22.0: a value can
+    /// only shorten the policy's — with a policy sessionIdleTimeout set, the session gets the smaller
+    /// of the two; with none set, the client's value applies.
     idleTimeout : ?Int;
   };
 
@@ -319,11 +330,18 @@ module {
   /// recoverEscrow can move it. `escrow` is the balance the close left there (computed from the close,
   /// not queried — an escrow subaccount is derivable, and anyone can top it up); `fee` is the ledger fee
   /// at the close. 2.20.0: reconcileSession also writes one, after an unknown settle reject it finds
-  /// landed, with `escrow` computed the same way (not the balance it queried). recoverEscrow subtracts each recovery plus `fee` and clears the entry once one fee or
-  /// less is left; if the ledger's fee changes before recovery, the figure is off by the difference, so
-  /// recover the full balance − current fee in one call. Persist these in their own stable variable (Gateway.refundOwedToStable /
-  /// loadRefundOwed): they are deliberately not part of StableSession or StableGatewayState. This
-  /// record's shape is itself stored by consumers, so it must not change.
+  /// landed, with `escrow` computed the same way (not the balance it queried). 2.22.0:
+  /// forceResolveSession writes one for an ICP session too, `escrow` = deposited − consumed and
+  /// `fee` = 0, since it cannot ask the ledger (one settle fee more than the escrow holds if the
+  /// settle had landed).
+  /// 2.22.0: the entry is the BOUND on recoverEscrow: no entry, nothing to recover; each recovery is
+  /// capped at `escrow` less the ledger's CURRENT fee (not `fee`, which is informational) and at
+  /// deposited − consumed, and subtracts the amount plus that current fee; the entry is cleared once
+  /// one fee or less is left. clearRefundOwed drops an entry whose escrow is in fact empty.
+  /// Persisting these is therefore REQUIRED: keep them in their own stable variable
+  /// (Gateway.refundOwedToStable / loadRefundOwed); an upgrade that drops them leaves those payers
+  /// with no in-band recovery. They are deliberately not part of StableSession or
+  /// StableGatewayState. This record's shape is itself stored by consumers, so it must not change.
   public type RefundOwed = { sessionId : Text; escrow : Nat; fee : Nat };
 
   /// Stable storage format for sessions (canister upgrades).
@@ -627,7 +645,12 @@ module {
     // the result string — e.g. the √25 demo).
     #ZkGroth16 : { verificationKey : Blob; verifierCanister : Principal; bindResult : Bool };
     #HashMatch;                              // sha256(result) must match buyer-provided hash
-    #BuyerConfirm : { disputeWindowSeconds : Nat }; // buyer approves or disputes
+    // Buyer approves (confirmJob) or disputes (disputeJob). 2.22.0 (D1): with disputeWindowSeconds
+    // > 0, a #Submitted job that the buyer neither confirms nor disputes by completedAt +
+    // disputeWindowSeconds is settled to the operator by the expiry sweep, and is not refunded at
+    // expiresAt while the window runs. A disputed job is still refunded at expiry unless resolved.
+    // 0 = no auto-settle: a silent buyer is refunded at expiresAt (the pre-2.22.0 behaviour).
+    #BuyerConfirm : { disputeWindowSeconds : Nat };
     #AutoSettle;                             // trust the operator (reputation-gated)
   };
 

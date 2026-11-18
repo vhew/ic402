@@ -51,7 +51,7 @@ persistent actor MyService {
   };
 
   var stableGateway : ?Ic402.StableGatewayState = null;
-  var stableRefundOwed : [Ic402.RefundOwed] = []; // 2.18.0: owed refunds, kept outside the gateway snapshot
+  var stableRefundOwed : [Ic402.RefundOwed] = []; // owed refunds, kept outside the gateway snapshot (required since 2.22.0)
   do {
     switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
     gate.loadRefundOwed(stableRefundOwed);
@@ -197,7 +197,7 @@ pnpm demo           # interactive walkthrough (10 steps)
 
 | Command | Covers |
 |---------|--------|
-| `mops test` | Motoko unit suites (16: gateway, sessions, escrow, serviceregistry, evmverify, evmsender, evmescrow, evmaddress, evmutils, eip712, nonce, policy, grant, contentstore, httphandler, utils) |
+| `mops test` | Motoko unit suites (41, one per `test/*.test.mo`: gateway, sessions, escrow, serviceregistry, the EVM rail, nonce, policy, grant, contentstore, httphandler, utils, and the per-release guard suites) |
 | `pnpm test:client` | TypeScript client SDK (`@ic402/client`, vitest) |
 | `pnpm exec vitest run` | Root vitest — MCP guards + SSRF/security units (source-imported), plus the integration suite |
 | `pnpm test:integration` | Replica-backed end-to-end (needs `pnpm setup:local`) |
@@ -230,8 +230,8 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `sessionExpiryTimerArmed()` | Whether the session sweep is ticking (`false` on an idle canister is the expected steady state) |
 | `setSessionExpiryIntervalSeconds<system>(n)` | Sweep cadence, default 60s — bounds expiry latency and how long a stale session holds pool/concurrency capacity |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
-| `sessionCounts()` | Session counts by status, plus `refundOwed` (2.18.0): closed ICP sessions whose refund leg failed and that the payer has not yet emptied with `recoverEscrow`. Their records are kept past the 24h GC until then |
-| `refundOwedToStable()` / `loadRefundOwed(data)` | 2.18.0: the owed refunds behind `refundOwed`. Persist them in **their own** stable variable (they are not in `toStable()`), restoring after `loadStable`; unpersisted, the count restarts at 0 on upgrade and those records become GC-eligible again |
+| `sessionCounts()` | Session counts by status, plus `refundOwed` (2.18.0): closed ICP sessions that left the payer a remainder in escrow (a failed refund leg; also `reconcileSession` and, since 2.22.0, `forceResolveSession`) and that the payer has not yet emptied with `recoverEscrow`. Their records are kept past the 24h GC until then |
+| `refundOwedToStable()` / `loadRefundOwed(data)` | 2.18.0: the owed refunds behind `refundOwed`. Persist them in **their own** stable variable (they are not in `toStable()`), restoring after `loadStable`. **Required since 2.22.0:** `recoverEscrow` pays only against an entry (never more than it in total), so entries an upgrade drops leave those payers with no in-band recovery |
 
 ### ServiceRegistry (optional)
 

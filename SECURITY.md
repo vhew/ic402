@@ -5,15 +5,16 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.21.1.** The posture and open-items sections below are a snapshot from
-> v2.2.3, the last full review of this file. Security-relevant changes since then are in
-> [`CHANGELOG.md`](CHANGELOG.md):
+> **Current release: v2.22.0**, a security release: three high-severity fixes and about forty
+> medium and low ones, all found by a whole-library adversarial review. Read its upgrade notes in
+> [`CHANGELOG.md`](CHANGELOG.md) before upgrading; several fixes change behaviour. Earlier
+> security-relevant releases since v2.2.3:
 > - 2.17.0: caller-authenticated sessions and `settleFrom`;
 > - 2.20.0: an ICP ledger reject with an unknown outcome is no longer treated as "not paid";
-> - 2.21.0: such payments can be resolved in-band;
-> - 2.21.1: three high-severity fixes (the canister as payer, EVM close race, ambiguous EVM sends).
+> - 2.21.0: such payments can be resolved in-band.
 >
-> The current model is [`docs/security-model.md`](docs/security-model.md).
+> The current model is [`docs/security-model.md`](docs/security-model.md). The open-items section
+> below is a snapshot from v2.2.3.
 
 > **Status at v2.2.3 (snapshot).** The blockers tracked for a real-funds deploy are cleared —
 > B0/B2/B3/B4 done, B1 waived (single-operator state-dropping fresh deploy) — and the
@@ -29,7 +30,8 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.21.x | ✅ | Current: 2.21.1. 2.21.0 lacks the 2.21.1 security fixes; upgrade. |
+| 2.22.x | ✅ | Current. |
+| 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |
 | < 2.0.0 | ❌ | Unmaintained. Pre-remediation; contains the Critical findings in `AUDIT.md`. Do not deploy. |
@@ -40,7 +42,25 @@ deployment is to upgrade.
 
 ## Security posture / remediation status
 
-The full-codebase audit ([`AUDIT.md`](AUDIT.md)) confirmed 51 findings (5 Critical, ~14
+How each release is reviewed:
+
+- **Adversarial review before every release.** Reviewers attack the release looking for theft,
+  double-pay, fund loss and authorization bypass. Every finding is confirmed or refuted against
+  the source before anything is fixed. For 2.22.0 the review covered the whole library, not only
+  the release's changes.
+- **Mutation-verified tests.** Each fix is pinned by tests. The fixes are then mutated one at a
+  time, with each test run in isolation, and every mutation must turn at least one test red.
+  Paths the Motoko interpreter cannot reach (timers, tECDSA, traps, real EVM broadcasts) are
+  covered by review and by the replica-backed suites.
+- **CI gates.** Every push and pull request runs the Motoko unit suites, the TypeScript client,
+  MCP and security units, a replica-backed end-to-end suite and a hermetic EVM-outbound suite (both
+  fail hard when their fixture is missing), the stable-schema compatibility check, the Candid
+  mirrors of the ledger and EVM-RPC interfaces, the WASM-locals install gate, and source gates,
+  most with a self-test proving they still catch what they guard.
+- **Private reporting.** Vulnerabilities are reported and fixed privately, and the advisory is
+  published after the fixed release ([Reporting a vulnerability](#reporting-a-vulnerability)).
+
+History: the full-codebase audit ([`AUDIT.md`](AUDIT.md)) confirmed 51 findings (5 Critical, ~14
 High, 11 Medium, plus Low/Info). **All Critical (C1–C5), High (H1–H14), and Medium
 (M1–M11) findings were fixed in v2.0.0** (`c7e4307`); see `AUDIT.md` → "Remediation
 status" and [`CHANGELOG.md`](CHANGELOG.md) → v2.0.0. A **v2.0.0 re-audit** (`40e561f`)
@@ -64,28 +84,30 @@ exercised on the inbound settlement path:
 
 - **C-1 — recipient binding.** EIP-3009 settlement requires `authorization.to` to equal
   the canister's own derived EVM address before any signature verification or broadcast,
-  in **both** the charge path (`src/ic402/Gateway.mo:561-569`) and the session-open path
-  (`src/ic402/Sessions.mo:403-416`). This closes the self-transfer payment-bypass /
+  in **both** the charge path (`Gateway.settleCore`) and the session-open path
+  (`Sessions.openEvmSession`). This closes the self-transfer payment-bypass /
   treasury-drain that was the audit's highest-priority finding.
 - **`value == amount` (exact-EVM).** The exact-EVM scheme rejects an authorization whose
   `value` is not exactly the required amount, not merely `>=` it
-  (`src/ic402/Gateway.mo:573-576`) — a v1-style overpayment is rejected.
+  (`Gateway.settleCore`) — a v1-style overpayment is rejected.
 - **EIP-712 verify before broadcast.** The EIP-3009 signature is recovered and verified
   locally (`Eip712.verifyAuthorization`) **before** any on-chain outcall
-  (`src/ic402/Gateway.mo:600-618`, then `executeTransferWithAuthorization` at `:634`), so
-  an invalid signature never costs a broadcast.
+  (`executeTransferWithAuthorization`), so an invalid signature never costs a broadcast.
 - **H-4 — synchronous daily spend recording.** The daily spend is recorded synchronously
-  *before* the value-moving `await`: the charge path captures `policy.currentDay()` then
-  calls `policy.recordSpend(...)` (`src/ic402/Gateway.mo:631-632`) before the
-  `executeTransferWithAuthorization` await (`:634`), with `policy.releaseDaily(caller, day,
-  amount)` rollback against the captured day-bucket on failure (`:646`); the session-open
-  path mirrors this (`Sessions.mo:331`/`:597`, rollback at `:791`/`:916`/`:1045`).
-  Concurrent charges can no longer each pass a stale limit check.
-- **S-3 / terminal close.** Session close sets `#closing` *before* any async operation
-  (ICP `src/ic402/Sessions.mo:718`, EVM `:952`) and finalizes `#closed` only on a confirmed
-  transfer; a failed/ambiguous transfer is parked in `#closing` for recovery and never
-  re-broadcast (`Sessions.mo:972-1025`, finalize at `:1040`, confirm-only recovery
-  `reconcileSession` at `:900`). This prevents double-settle / double-refund.
+  *before* the value-moving `await`: the charge path (`Gateway.settleCore`) captures
+  `policy.currentDay()` then calls `policy.recordSpend(...)` before the transfer await, with
+  `policy.releaseDaily(caller, day, amount)` rollback against the captured day-bucket on
+  failure. Concurrent charges can no longer each pass a stale limit check. The session-open
+  path (`Sessions.openSession`) checks the limit before the deposit and records the deposit
+  once it has landed.
+- **S-3 / terminal close.** Session close sets `#closing` *before* any async operation, in
+  the same message as its re-close guard (`Sessions.closeSessionInternal`; for EVM since
+  2.22.0), and finalizes `#closed` only on a confirmed transfer; a failed/ambiguous transfer is
+  parked in `#closing` for recovery and never re-broadcast (confirm-only recovery:
+  `reconcileSession`). This prevents double-settle / double-refund.
+- **The canister is never the payer (2.22.0).** `settle` and `settleFrom` refuse the canister's
+  own principal as the paying `sender`, and a session deposit refuses the canister's own account
+  (`Gateway.settleCore`, `Escrow.depositCore`).
 
 Cryptographic primitives reviewed sound: EIP-712 recovery, constant-time byte comparison,
 and AEAD with constant-time tag comparison (`src/ic402/ContentStore.mo`). The residual
@@ -149,7 +171,9 @@ Not blockers, but recommended before treating it as battle-tested:
   that re-resolves each hop and rejects private/internal IPs (`integrations/mcp/src/security.ts`),
   restriction of the generic `call` tool to a read-only/query allowlist, and a `confirm`
   gate on every money-moving/signing tool (`integrations/mcp/src/index.ts`; admin-tool
-  gating in `integrations/mcp/src/guards.ts`). **Caveat:** the `confirm`
+  gating in `integrations/mcp/src/guards.ts`). Since 2.22.0 the canister, host and identity
+  are set only by the operator; the LLM cannot change them unless the operator sets
+  `IC402_MCP_ALLOW_SECURITY_CHANGES=1`. **Caveat:** the `confirm`
   flag is in-band — a confirmation an LLM can itself set is not equivalent to
   human-in-the-loop. Treat the MCP server's identity as a hot wallet, cap it, and keep the
   state-changing admin tools at their default-DENIED setting for an unattended agent — opt
