@@ -120,6 +120,20 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     switch (await first) { case (#ok(_)) {}; case (_) { assert false } };
   });
 
+  await test("after another payer's settle ends with an unknown reject, this payer hears pending, not 'busy' forever", func() : async () {
+    // Mutation: drop markOutcomeUnknown in the ICP reject catch — the lock still names the other
+    // payer, so this payer is told to "retry this same payment in a few seconds" until the lock
+    // is cleaned up 24 h past expiry, although nothing is in flight any more.
+    await ledger.setMode(REJECT);
+    let gate = Gateway.Gateway(config, canisterP);
+    let sig = payment(gate);
+    assert isPending(await gate.settle({ sig with sender = stranger }, ?5_000)); // HTTP, unknown outcome
+    let r = await gate.settleFrom(payerP, sig, ?5_000);
+    assert isPending(r);
+    assert not isBusy(r);
+    await ledger.setMode(OK);
+  });
+
   await test("chargePayerKey: one EVM payer whatever the hex spelling; ICP is the sender text", func() : async () {
     // Mutation: key EVM payers on the `from` text as given — a re-send that spells the payer's
     // address in another case (or without 0x) is told "busy", and pays anew.

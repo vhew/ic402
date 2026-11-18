@@ -374,7 +374,7 @@ not published; they ship here.
 
 ### Tests
 
-- 866 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
+- 867 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
   `evmrail`, `sessiontoken`.
 - More than 150 mutations across the Motoko fixes, each test run in isolation. Each turns at least
   one test red, except paths the interpreter cannot reach: timers, tECDSA, traps, and real EVM
