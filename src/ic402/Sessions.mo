@@ -82,8 +82,9 @@ module {
   };
   /// Pure decision for reconciling a parked EVM session-close leg: finalize only on a #confirmed
   /// leg (see the golden rules above), otherwise stay parked.
-  /// 2.22.0 (F1): #dropped — the parked tx can never land (its nonce was used by another tx) —
-  /// is REPORTED, not acted on: the session stays parked and the operator resolves it.
+  /// 2.22.0 (F1): #dropped — the parked tx appears not to have landed (no receipt, and its nonce
+  /// was used by another tx) — is REPORTED, not acted on: the session stays parked and the
+  /// operator verifies on chain before forcing. Providers can lag, so it is never proof.
   public func sessionReconcileDecision(
     outcome : { #confirmed; #reverted; #pending; #dropped : Text; #err : Text },
     leg : { #Settle; #Refund },
@@ -96,7 +97,7 @@ module {
           case (#Settle) { "the consumed amount to the recipient and the remainder to the payer" };
           case (#Refund) { "the remainder to the payer" };
         };
-        #stay("Parked " # (switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } }) # " tx can never land (" # why # ") — it moved no funds. Verify on a block explorer, then forceResolveSession and sweepEvm what is owed: " # owed);
+        #stay("Parked " # (switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } }) # " tx appears not to have landed (" # why # ") — verify on chain before forcing. Only if a block explorer shows it never landed: forceResolveSession, then sweepEvm what is owed: " # owed);
       };
       case (#reverted) { #stay("Parked close tx reverted on-chain; no funds moved — use forceResolveSession") };
       case (#err(e)) { #stay("Confirm RPC failed — stay parked: " # e) };
@@ -786,9 +787,11 @@ module {
           authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
         );
       } catch (e) {
-        ignore evmEscrowManager.deallocate(sessionId); // H3: release the reservation — no funds moved.
+        // H3: no session — release the reservation. Round 2: whether the call broadcast is unknown
+        // (the E5 claim is kept for that reason), so this is pending, not "failed, nothing moved".
+        ignore evmEscrowManager.deallocate(sessionId);
         sessionOpenLocks.delete(caller);
-        return #err(#settlementFailed("EIP-3009 execution failed: " # Error.message(e)));
+        return #err(#settlementPending("EIP-3009 deposit call failed and whether it was broadcast is unknown: " # Error.message(e) # ". No session was created. The deposit may still land — do NOT re-sign; this authorization will not be broadcast again. The operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
       };
 
       let depositTxHash = switch (execResult) {
@@ -1520,7 +1523,7 @@ module {
       let parked = switch (closeParkedTxs.get(sessionId)) { case (null) { return #err("Session is #closing but has no parked tx — use forceResolveSession") }; case (?p) { p } };
       let deposit = switch (session.evmDeposit) { case (null) { return #err("Session has no EVM deposit data") }; case (?d) { d } };
       let sender = switch (evmSenderSource()) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
-      // 2.22.0 (F1): reconcileTransaction also reports a parked tx that can never land (#dropped).
+      // 2.22.0 (F1): reconcileTransaction also reports a parked tx that appears not to have landed (#dropped).
       let outcome = await sender.reconcileTransaction(deposit.chainId, parked.txHash, 1);
       // Re-fetch after the await: a concurrent transition may have moved the session.
       let s2 = switch (sessions.get(sessionId)) { case (null) { return #err("Session vanished during reconcile") }; case (?s) { s } };
@@ -1643,19 +1646,20 @@ module {
         case (#reverted) { #reverted }; // deposit never landed — nothing to refund; stays dropped
         case (#pending) { pendingEvmDeposits.put(txHash, dep); #stillPending };
         case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("receipt poll failed: " # e) };
-        // 2.22.0 (F1): this tx can never land. Nothing arrived THROUGH it, but its authorization
-        // can still be submitted by anyone until validBefore — so drop the entry (as #reverted)
-        // only when the token says the authorization is unused; otherwise keep it and report.
+        // 2.22.0 (F1): an agreed "no receipt" after another tx took this tx's nonce — it appears
+        // not to have landed. Nothing arrived THROUGH it, but its authorization can still be
+        // submitted by anyone until validBefore — so drop the entry (as #reverted) only when the
+        // token says the authorization is unused; otherwise keep it and report.
         case (#dropped(why)) {
           switch (await sender.authorizationState(dep.chainId, dep.token, EvmUtils.hexToBytes(dep.payerEvmAddress), Blob.toArray(dep.authNonce))) {
             case (#unused) { #reverted };
             case (#used) {
               pendingEvmDeposits.put(txHash, dep);
-              #err("deposit tx can never land (" # why # "), but its authorization is used on chain: another transaction executed it or the payer cancelled it — verify on chain and, if the deposit arrived, return it with sweepEvm");
+              #err("deposit tx appears not to have landed (" # why # "), but its authorization is used on chain: another transaction executed it or the payer cancelled it — verify on chain and, if the deposit arrived, return it with sweepEvm");
             };
             case (#unknown(e)) {
               pendingEvmDeposits.put(txHash, dep);
-              #err("deposit tx can never land (" # why # "); whether its authorization was executed by another transaction could not be checked (" # e # ") — retry reconcile");
+              #err("deposit tx appears not to have landed (" # why # "); whether its authorization was executed by another transaction could not be checked (" # e # ") — retry reconcile");
             };
           };
         };

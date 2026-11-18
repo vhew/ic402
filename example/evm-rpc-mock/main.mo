@@ -23,6 +23,9 @@
 ///   setReceiptMode(#reverted)                receipts report status=0 (mined, reverted)
 ///   setReceiptMode(#pendingThenConfirmed n)  first n receipt polls => null (not yet
 ///                                            mined → caller parks); poll n+1 => status=1
+///   setReceiptMode(#inconsistent)            providers disagree (one null, one mined) — no
+///                                            answer (2.22.0 round 2)
+///   setReceiptMode(#error)                   every provider errors — no answer
 ///   setFeeMode(#consistent)                  one agreed base fee
 ///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
 ///                                            so the caller's robust-median fee logic runs
@@ -49,6 +52,10 @@ persistent actor EvmRpcMock {
     #confirmed;
     #reverted;
     #pendingThenConfirmed : Nat;
+    // 2.22.0 round 2: receipt reads that give NO answer — a mined tx read during provider lag or
+    // an outage looks like this, and must never be reported as "not landed".
+    #inconsistent;
+    #error;
   };
 
   public type FeeMode = {
@@ -177,6 +184,13 @@ persistent actor EvmRpcMock {
           #Consistent(#Ok(null));
         };
       };
+      case (#inconsistent) {
+        #Inconsistent([
+          (#EthSepolia(#Sepolia), #Ok(null)),
+          (#EthSepolia(#Ankr), #Ok(?receipt(txHash, 1))),
+        ]);
+      };
+      case (#error) { #Consistent(#Err(#ProviderError(#NoPermission))) };
     };
   };
 

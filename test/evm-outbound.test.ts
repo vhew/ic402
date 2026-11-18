@@ -44,6 +44,11 @@ const exampleIdl = () =>
     sweepEvm: IDL.Func([IDL.Nat, IDL.Text, IDL.Text, IDL.Nat], [sweepResult], []),
     // 2.22.0: controller-only recovery endpoints, also absent from the public client IDL.
     reconcileSession: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Text, err: IDL.Text })], []),
+    setGatewayDerivationPath: IDL.Func(
+      [IDL.Vec(IDL.Vec(IDL.Nat8))],
+      [IDL.Variant({ ok: IDL.Null, err: IDL.Text })],
+      [],
+    ),
     listPendingEvmDeposits: IDL.Func([], [IDL.Vec(PendingDeposit)], ['query']),
     reconcileEvmDeposit: IDL.Func(
       [IDL.Text],
@@ -64,6 +69,8 @@ const ReceiptMode = IDL.Variant({
   confirmed: IDL.Null,
   reverted: IDL.Null,
   pendingThenConfirmed: IDL.Nat,
+  inconsistent: IDL.Null,
+  error: IDL.Null,
 });
 const FeeMode = IDL.Variant({
   consistent: IDL.Null,
@@ -426,7 +433,92 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted'); // dropped
   });
 
-  it('2.22.0 (F1): reconcileSession reports a parked close tx that can never land', async () => {
+  it('round 2 (F1): a receipt read that gives NO answer is never reported dropped', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    expect(await full.openSession(sessionCfg, await evmSessionSig(50_000n))).toHaveProperty('err');
+    const txHash = '0x' + '1'.padStart(64, '0');
+    await mock.setLatestNonce(1_000_000n); // the nonce IS taken…
+    // …but providers disagree, or error: a mined deposit read during lag looks like this. Before
+    // round 2 both were "dropped" and, with the authorization read as unused, the tracker of a
+    // deposit that may have landed was deleted.
+    await mock.setReceiptMode({ inconsistent: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('stillPending');
+    await mock.setReceiptMode({ error: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('stillPending');
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n }); // an agreed "no receipt"
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted');
+  });
+
+  it('round 2 (F1): a dropped deposit whose authorization is used, or unreadable, is kept and reported', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    expect(await full.openSession(sessionCfg, await evmSessionSig(50_000n))).toHaveProperty('err');
+    const txHash = '0x' + '1'.padStart(64, '0');
+    await mock.setLatestNonce(1_000_000n);
+    await mock.setAuthStateMode({ used: null }); // another tx executed it (or it was cancelled)
+    const used = await example.reconcileEvmDeposit(txHash);
+    expect(used.err).toContain('used on chain');
+    const deps: { txHash: string }[] = await example.listPendingEvmDeposits();
+    expect(deps.map((d) => d.txHash)).toContain(txHash); // still tracked
+    await mock.setAuthStateMode({ error: null });
+    const unknown = await example.reconcileEvmDeposit(txHash);
+    expect(unknown.err).toContain('could not be checked');
+    await mock.setAuthStateMode({ unused: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted'); // clean up
+  });
+
+  it('round 2 (E5): the guard is kept when the transfer reverted — a replay is not broadcast', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ reverted: null }); // authorization still unused (mock default)
+    const body = await settleBody(1000n);
+    expect((await postSettle(body)).success).toBe(false);
+    expect((await postSettle(body)).success).toBe(false);
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('round 2 (E5): the guard is kept on a maybe-sent broadcast — a replay is not broadcast', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSendMode({ nonceTooHigh: null });
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    const body = await settleBody(1000n);
+    expect((await postSettle(body)).success).toBe(false);
+    expect((await postSettle(body)).success).toBe(false);
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('round 2 (E7, E5): a reverted session deposit — pending if the authorization is used, failed if unused, never re-broadcast', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ reverted: null });
+    await mock.setAuthStateMode({ used: null });
+    const used = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(used.err).toContain('Settlement pending');
+    await mock.setAuthStateMode({ unused: null });
+    const sig = await evmSessionSig(50_000n);
+    const unused = await full.openSession(sessionCfg, sig);
+    expect(unused.err).toContain('Settlement failed');
+    const sent = await mock.sentTxCount();
+    const replay = await full.openSession(sessionCfg, sig);
+    expect(replay.err).toContain('already broadcast');
+    expect(await mock.sentTxCount()).toBe(sent);
+  });
+
+  it('round 2: re-applying the current derivation path keeps the sender — its guard survives', async () => {
+    if (skip) return;
+    await mock.reset();
+    const body = await settleBody(1000n);
+    expect((await postSettle(body)).success).toBe(true);
+    expect(await example.setGatewayDerivationPath([])).toHaveProperty('ok');
+    await postSettle(body); // a rebuilt sender would have forgotten it and broadcast again
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('2.22.0 (F1): reconcileSession reports a parked close tx that appears not to have landed', async () => {
     if (skip) return;
     await mock.reset();
     const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
@@ -438,6 +530,7 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     expect(still.err).toContain('still pending');
     await mock.setLatestNonce(1_000_000n);
     const dead = await example.reconcileSession(opened.ok.id);
-    expect(dead.err).toContain('can never land');
+    expect(dead.err).toContain('appears not to have landed');
+    expect(dead.err).toContain('verify on chain before forcing');
   });
 });

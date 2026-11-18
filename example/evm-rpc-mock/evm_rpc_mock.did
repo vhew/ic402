@@ -112,6 +112,8 @@ type RejectionCode =
 type ReceiptMode = 
  variant {
    confirmed;
+   error;
+   inconsistent;
    pendingThenConfirmed: nat;
    reverted;
  };
@@ -323,6 +325,9 @@ type AccessListEntry =
 ///   setReceiptMode(#reverted)                receipts report status=0 (mined, reverted)
 ///   setReceiptMode(#pendingThenConfirmed n)  first n receipt polls => null (not yet
 ///                                            mined → caller parks); poll n+1 => status=1
+///   setReceiptMode(#inconsistent)            providers disagree (one null, one mined) — no
+///                                            answer (2.22.0 round 2)
+///   setReceiptMode(#error)                   every provider errors — no answer
 ///   setFeeMode(#consistent)                  one agreed base fee
 ///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
 ///                                            so the caller's robust-median fee logic runs

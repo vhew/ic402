@@ -76,6 +76,25 @@ module {
   /// exists for this tx's hash, it was another one, and this tx can never be included.
   public func txNonceConsumed(txNonce : Nat, latestNonce : Nat) : Bool { latestNonce > txNonce };
 
+  /// 2.22.0 (F1, round 2): the verdict of reconcileTransaction's LAST receipt read, taken after
+  /// the account's count passed the tx's nonce. Only an explicit, agreed "no receipt"
+  /// (#Consistent(#Ok(null))) is #dropped. Providers that disagree, an RPC error, or a receipt
+  /// without a status are NO answer — #pending — because a mined tx read during provider lag
+  /// looks exactly like that, and reporting it dropped invites a second payout.
+  public func finalReceiptVerdict(r : EvmRpc.MultiGetTransactionReceiptResult) : { #confirmed; #reverted; #pending; #dropped } {
+    switch (r) {
+      case (#Consistent(#Ok(null))) { #dropped };
+      case (#Consistent(#Ok(?receipt))) {
+        switch (receipt.status) {
+          case (?1) { #confirmed };
+          case (?0) { #reverted };
+          case (_) { #pending };
+        };
+      };
+      case (_) { #pending };
+    };
+  };
+
   // ── EIP-3009 authorizationState (2.22.0, E7) ──
 
   /// What `authorizationState(authorizer, nonce)` says about an EIP-3009 authorization: #used
@@ -300,7 +319,7 @@ module {
     public let broadcastAuthorizations : AuthorizationGuard = AuthorizationGuard();
 
     // 2.22.0 (F1): the account nonce each tx this sender signed was sent with, by lower-case tx
-    // hash, so reconcileTransaction can tell a tx that can never land from one still pending.
+    // hash, so reconcileTransaction can tell a tx whose nonce another tx took from one still pending.
     // Bounded: the oldest of BROADCAST_NONCE_CAP entries is overwritten. Transient — after an
     // upgrade (or a setEvmDerivationPath rebuild) reconcile falls back to "still pending".
     let BROADCAST_NONCE_CAP : Nat = 10_000;
@@ -757,11 +776,12 @@ module {
 
     /// 2.22.0 (F1): confirm-only reconcile of a tx this sender broadcast. As confirmTransaction,
     /// plus #dropped: no receipt, and the account's mined-transaction count (#Latest) has passed
-    /// the nonce the tx was signed with — another transaction took that nonce, so this one can
-    /// never land and moved no funds. Checked in that order and the receipt polled once more after
-    /// the count, so a tx mined in between is not reported dropped. A lagging provider pair can
-    /// still answer "no receipt" for a mined tx, so callers REPORT #dropped and leave the decision
-    /// to an operator. Without a remembered nonce (another instance's tx, or after an upgrade) the
+    /// the nonce the tx was signed with — another transaction took that nonce, so this one
+    /// appears not to have landed. Checked in that order and the receipt read once more after the
+    /// count, so a tx mined in between is not reported dropped; that last read must be an explicit,
+    /// agreed "no receipt" (finalReceiptVerdict) — no answer stays #pending. A lagging provider
+    /// pair can still agree on "no receipt" for a mined tx, so callers REPORT #dropped and leave
+    /// the decision to an operator, who verifies on chain first. Without a remembered nonce (another instance's tx, or after an upgrade) the
     /// answer stays #pending. Never broadcasts.
     public func reconcileTransaction(
       chainId : Nat,
@@ -789,12 +809,18 @@ module {
             };
           } catch (_) { return #pending };
           if (not txNonceConsumed(n, latest)) { return #pending };
-          switch (await confirmTransaction(chainId, txHash, 1)) {
+          // Round 2: one explicit read, not confirmTransaction — that folds "no answer" (providers
+          // disagreeing, an RPC error, a status-less receipt) into #pending, which was then
+          // reported as dropped.
+          let last = try {
+            await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
+          } catch (_) { return #pending };
+          switch (finalReceiptVerdict(last)) {
             case (#confirmed) { #confirmed };
             case (#reverted) { #reverted };
-            case (#err(e)) { #err(e) };
-            case (#pending) {
-              #dropped("no receipt, and the account has mined " # Nat.toText(latest) # " transactions — nonce " # Nat.toText(n) # " was used by another transaction, so this one can never land");
+            case (#pending) { #pending };
+            case (#dropped) {
+              #dropped("no receipt for this tx, and the account has mined " # Nat.toText(latest) # " transactions — nonce " # Nat.toText(n) # " was used by another transaction");
             };
           };
         };
