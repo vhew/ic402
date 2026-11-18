@@ -834,7 +834,12 @@ module {
       // H-1 (v2): Confirm the deposit transfer actually mined before crediting an
       // escrow allocation. Otherwise a reverted/never-mined deposit would still
       // open a funded session whose refund is drawn from the canister's balance.
-      switch (await sender.confirmTransaction(chainId, depositTxHash, 4)) {
+      // 2.22.0: a rejected confirm call is "confirmation unavailable" (#err), as in Gateway.settleCore:
+      // the deposit was broadcast, so it must be tracked, not left with the open lock held.
+      let depositConfirmation = try { await sender.confirmTransaction(chainId, depositTxHash, 4) } catch (e) {
+        #err(Error.message(e));
+      };
+      switch (depositConfirmation) {
         case (#confirmed) {};
         case (#reverted) {
           // H3: no session — release the reservation. 2.22.0 (E7): THIS tx reverting does not mean
@@ -842,7 +847,11 @@ module {
           // executed it first. Ask the token before answering.
           ignore evmEscrowManager.deallocate(sessionId);
           sessionOpenLocks.delete(caller);
-          switch (await sender.authorizationState(chainId, intent.token, fromBytes, authNonceBytes)) {
+          // A rejected check is "could not be checked" (#unknown), as in Gateway.settleCore.
+          let depositAuthState = try { await sender.authorizationState(chainId, intent.token, fromBytes, authNonceBytes) } catch (e) {
+            #unknown(Error.message(e));
+          };
+          switch (depositAuthState) {
             case (#unused) { return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")")) };
             case (#used) {
               return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, but the deposit authorization is already used on chain: another transaction executed it (anyone can submit it) or the payer cancelled it. The deposit may be in the canister's pool; no session was created. Do NOT re-sign — the operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
@@ -1098,7 +1107,7 @@ module {
         case (?tc) { tc };
         case (null) {
           session.status := #open;
-          return #settlementFailed("Session token " # session.token # " does not resolve to a configured ledger — nothing moved; the session stays open. Configure that ledger again (its principal text) and close it then.");
+          return #settlementFailed("Session token " # session.token # " does not resolve to a configured ledger — nothing moved; the session stays open. Either that ledger was removed from the configuration (configure it again, then close), or the session was opened before 2.22.0 with an unconfigured token and its escrow is on the ledger that was then first in the configuration. Check which ledger holds the session's escrow before changing the configuration.");
         };
       };
 
@@ -1576,7 +1585,7 @@ module {
       // "settle landed".
       let tokenConfig = switch (findSessionLedger(session.token)) {
         case (?tc) { tc };
-        case (null) { return #err("Session token " # session.token # " does not resolve to a configured ledger; the session stays #closing — configure that ledger again (its principal text) and call again") };
+        case (null) { return #err("Session token " # session.token # " does not resolve to a configured ledger; the session stays #closing. Either that ledger was removed from the configuration (configure it again, then call again), or the session was opened before 2.22.0 with an unconfigured token and its escrow is on the ledger that was then first in the configuration. Check which ledger holds the session's escrow before changing the configuration.") };
       };
       let ledger : actor {
         icrc1_balance_of : (Types.Account) -> async Nat;
@@ -1902,7 +1911,7 @@ module {
           let tokenConfig = switch (findSessionLedger(session.token)) {
             case (?tc) { tc };
             case (null) {
-              return #err("Session token " # session.token # " does not resolve to a configured ledger — configure that ledger again (its principal text) and retry");
+              return #err("Session token " # session.token # " does not resolve to a configured ledger. Either that ledger was removed from the configuration (configure it again, then retry), or the session was opened before 2.22.0 with an unconfigured token and its escrow is on the ledger that was then first in the configuration. Check which ledger holds the session's escrow before changing the configuration.");
             };
           };
           if (not Principal.equal(Principal.fromActor(ledger), tokenConfig.ledger)) {
