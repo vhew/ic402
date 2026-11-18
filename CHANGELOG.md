@@ -244,7 +244,9 @@ not published; they ship here.
 - A controller refund of a `#Verified` job that fails comes back `#Disputed`, not `#Verified`, now
   that the sweep settles `#Verified` jobs: the sweep refunds a `#Disputed` job at `expiresAt` and
   never pays its operator, and `resolveDispute` accepts it again. A controller refund that reverts
-  on-chain (any status) parks the job `#Expired` with the tx: pay by hand, then `resolveJob`.
+  on-chain (any status) parks the job `#Expired` with the tx: pay by hand, then `resolveJob`. A
+  controller refund that cannot work as configured (no hook or chain, a buyer with no refundable
+  rail) leaves the job `#Settling`: refund the buyer by hand, then `resolveJob(jobId, #Refunded)`.
 - The sweep now settles a `#Verified` job: one whose window ended, or one an earlier failed settle
   left (not one carrying a reverted payment). Before, only a controller could move the latter.
 - A dispute filed after a window above 0 had closed was accepted. It is now refused ("Dispute window
@@ -350,7 +352,6 @@ not published; they ship here.
 ### Known residuals
 
 - The EVM authorization claims, and the other new in-memory sets, are lost on upgrade.
-- An `icp:*` session token always resolves to the first configured ledger.
 - Grants issued before 2.22.0 with a TTL over 7 days can outlive their revocation.
 - A recovery whose ledger call is rejected with an unknown outcome leaves the refund-owed entry
   unchanged.
@@ -366,10 +367,14 @@ not published; they ship here.
 - The SDK and the MCP server treat any failure once the paid x402 request was attempted as possibly
   paid, including a refusal before the request left the process and a non-402 4xx/5xx. This is
   conservative, and the MCP's spend caps bound it.
+- An `Upto` job's remainder refund that finds the EVM sender busy (another send took the
+  single-flight lock between the operator payment and the refund) is not retried: the job ends
+  `#Settled` and the remainder stays in the pool. This predates 2.22.0; the settle's error text
+  reports it.
 
 ### Tests
 
-- 865 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
+- 866 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
   `evmrail`, `sessiontoken`.
 - More than 150 mutations across the Motoko fixes, each test run in isolation. Each turns at least
   one test red, except paths the interpreter cannot reach: timers, tECDSA, traps, and real EVM
