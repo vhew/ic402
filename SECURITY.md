@@ -5,7 +5,16 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Status (v2.2.3).** The blockers tracked for a real-funds deploy are cleared —
+> **Current release: v2.21.0.** The posture and open-items sections below are a snapshot from
+> v2.2.3, the last full review of this file. Security-relevant changes since then are in
+> [`CHANGELOG.md`](CHANGELOG.md):
+> - 2.17.0: caller-authenticated sessions and `settleFrom`;
+> - 2.20.0: an ICP ledger reject with an unknown outcome is no longer treated as "not paid";
+> - 2.21.0: such payments can be resolved in-band.
+>
+> The current model is [`docs/security-model.md`](docs/security-model.md).
+
+> **Status at v2.2.3 (snapshot).** The blockers tracked for a real-funds deploy are cleared —
 > B0/B2/B3/B4 done, B1 waived (single-operator state-dropping fresh deploy) — and the
 > composed-system security pass (SEC-0, plus SEC-1..4) is complete; see
 > [`docs/production-readiness.md`](docs/production-readiness.md) (the source of truth) and
@@ -19,9 +28,9 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.2.x | ✅ | Current. SEC-0..4 closed, EVM-outbound CI-gated, x402 v2, EVM/marketplace settlement, self-hosted facilitator. |
-| 2.1.x | ⚠️ | Superseded by 2.2.x; upgrade when practical. |
-| 2.0.x | ⚠️ | Security release (audit remediation). Superseded; upgrade. |
+| 2.21.x | ✅ | Current. |
+| 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
+| 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |
 | < 2.0.0 | ❌ | Unmaintained. Pre-remediation; contains the Critical findings in `AUDIT.md`. Do not deploy. |
 
 Security fixes land on the current minor series. There is no long-term-support branch for
@@ -184,13 +193,23 @@ in `prebuilt.sha256`.
 Please report security vulnerabilities **privately**. Do not open a public issue, PR, or
 discussion for a security report.
 
-- **Preferred:** open a GitHub private security advisory:
-  <https://github.com/vhew/ic402/security/advisories/new>
+- **Preferred:** GitHub private vulnerability reporting. On the repository's **Security** tab,
+  open **Advisories** and click **Report a vulnerability**, or go straight to
+  <https://github.com/vhew/ic402/security/advisories/new>. The report becomes a private draft
+  advisory that only the maintainer and you can see.
 - **Security contact:** [developer@engramx.ai](mailto:developer@engramx.ai)
 
 Please include: the affected version/commit, the module and `file:line` if known, a
 description of the impact (especially any money-theft or fund-loss path), and a proof of
 concept or reproduction steps if you have one. We aim to acknowledge a report promptly and
-will coordinate a fix and disclosure timeline with you. Given the financial nature of this
+will coordinate a fix and disclosure timeline with you.
+
+What happens next:
+- **Fix:** the fix is developed privately and released to npm and mops.
+- **Advisory:** then the advisory is published with the affected and fixed versions, crediting
+  you.
+- **Consumers:** Motoko/mops consumers do not get automated advisory alerts, so known consumers
+  are told directly.
+- **Disclosure:** please keep the details private until the advisory is published. Given the financial nature of this
 library, reports touching the settlement, facilitator, escrow, content-encryption, or MCP
 signing paths are treated as highest priority.
