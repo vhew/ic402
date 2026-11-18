@@ -367,6 +367,7 @@ type AccessGrant =
 ///   4. OPTIONAL: EVM remote signer (canister signs, client broadcasts)
 ///   5. OPTIONAL: ERC-8004 identity metadata
 service : {
+  buyerActionMessage: (action: text, jobId: text) -> (text) query;
   claimJob: (jobId: text) -> (variant {
                                 err: text;
                                 ok;
@@ -375,6 +376,10 @@ service : {
                                   err: text;
                                   ok;
                                 });
+  confirmJobEvm: (jobId: text, signature: blob) -> (variant {
+                                                      err: text;
+                                                      ok;
+                                                    });
   deleteContent: (id: text) -> (ContentStoreResult);
   /// Derive the gateway's inbound EVM recipient under an explicit path.
   /// 
@@ -395,6 +400,11 @@ service : {
                                                 err: text;
                                                 ok;
                                               });
+  disputeJobEvm: (jobId: text, signature: blob, reason: text) ->
+   (variant {
+      err: text;
+      ok;
+    });
   /// True iff `signature` (64 bytes, R ‖ S) is a valid Ed25519 signature of `message` under the
   /// raw 32-byte `publicKey`. False for anything malformed.
   ed25519Verify: (signature: blob, message: blob, publicKey: blob) ->
