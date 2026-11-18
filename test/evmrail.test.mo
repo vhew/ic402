@@ -377,7 +377,7 @@ await suite("E7: authorizationState", func() : async () {
   });
 });
 
-await suite("F1: a parked tx that can never land", func() : async () {
+await suite("F1: a parked tx that appears not to have landed", func() : async () {
 
   await test("txNonceConsumed: only a mined count past the tx's nonce", func() : async () {
     // Mutation: `latestNonce >= txNonce` (a count equal to the nonce means it is still unused).
@@ -388,9 +388,28 @@ await suite("F1: a parked tx that can never land", func() : async () {
   await test("reconcile decision: a dropped leg is reported and stays parked, naming what is owed", func() : async () {
     // Mutation: finalize (or settleDoneRefundOwed) on #dropped.
     switch (Sessions.sessionReconcileDecision(#dropped("nonce 3 was used"), #Refund, 10)) {
-      case (#stay(m)) { assert Text.contains(m, #text "can never land") and Text.contains(m, #text "remainder to the payer") };
+      case (#stay(m)) {
+        assert Text.contains(m, #text "appears not to have landed") and Text.contains(m, #text "verify on chain before forcing");
+        assert Text.contains(m, #text "remainder to the payer");
+      };
       case (_) { assert false };
     };
+  });
+
+  await test("round 2: only an agreed 'no receipt' is dropped — disagreement, an RPC error or a status-less receipt is no answer", func() : async () {
+    // Mutation: finalReceiptVerdict maps anything but a mined receipt to #dropped (what
+    // confirmTransaction's #pending fold did before round 2).
+    let mined : EvmRpc.TransactionReceipt = {
+      to = null; status = ?1; root = null; transactionHash = "0x01"; blockNumber = 1; from = signer; logs = [];
+      blockHash = "0x02"; transactionIndex = 0; effectiveGasPrice = 1; logsBloom = "0x"; contractAddress = null;
+      gasUsed = 1; cumulativeGasUsed = 1;
+    };
+    assert EvmSender.finalReceiptVerdict(#Consistent(#Ok(null))) == #dropped;
+    assert EvmSender.finalReceiptVerdict(#Consistent(#Ok(?mined))) == #confirmed;
+    assert EvmSender.finalReceiptVerdict(#Consistent(#Ok(?{ mined with status = ?0 }))) == #reverted;
+    assert EvmSender.finalReceiptVerdict(#Consistent(#Ok(?{ mined with status = null }))) == #pending;
+    assert EvmSender.finalReceiptVerdict(#Consistent(#Err(#ProviderError(#NoPermission)))) == #pending;
+    assert EvmSender.finalReceiptVerdict(#Inconsistent([(#EthSepolia(#Ankr), #Ok(null)), (#EthSepolia(#Sepolia), #Ok(?mined))])) == #pending;
   });
 
   await test("reconcileTransaction without a remembered nonce stays pending (no receipt)", func() : async () {

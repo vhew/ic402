@@ -204,6 +204,12 @@ module {
         };
         case (null) {};
       };
+      // 2.22.0: re-applying the CURRENT path (as a consumer does after every upgrade) keeps the
+      // sender. Rebuilding it dropped its single-flight send lock mid-send (two sends could then
+      // pick one nonce), its broadcast-authorization guard and its sent-tx nonce memory.
+      if (pathsEqual(derivationPath, evmDerivationPath)) {
+        switch (evmSenderInst) { case (?_) { return #ok }; case (null) {} };
+      };
       evmDerivationPath := derivationPath;
       evmSenderInst := switch (config.ecdsaKeyName) {
         case (?keyName) {
