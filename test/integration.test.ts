@@ -416,9 +416,14 @@ describe('ic402 integration', () => {
       expect(await ledger.icrc1_balance_of(account)).toBe(before - BigInt(req.amount) - fee);
     }, 120_000);
 
-    // Fails on: openSession not catching the deposit reject (the call throws, no session record);
-    // the parked session not #closing; reconcileSession recording the empty escrow as owed.
-    it('2.21.0 a stopped ledger: an unknown deposit parks the session, and reconcileSession closes it with nothing owed', async () => {
+    // 2.21.0: openSession asks the ledger for its fee before pulling the deposit, so a stopped
+    // ledger refuses the open cleanly: nothing moves and nothing is parked. (A deposit rejected
+    // AFTER a fee query that succeeded parks the session; no test can reach that window — the
+    // replica cannot stop the ledger between the two calls, and the interpreter cannot run a
+    // successful openSession — so it is covered by review, and test/opendeposit.test.mo pins its
+    // reconcile.) Fails on: the fee query dropped (the open parks a session); a failed fee query
+    // keeping the open lock (the retry is refused as "already in progress").
+    it('2.21.0 a stopped ledger: a session open is refused before the deposit, and nothing is parked', async () => {
       if (skip) return;
       const key = Ed25519KeyIdentity.generate();
       const deposit = 50_000n;
@@ -427,24 +432,23 @@ describe('ic402 integration', () => {
       const before: bigint = await ledger.icrc1_balance_of(account);
       const counts = async () => (await actor.health()).sessions; // controller-only
       const closingBefore: bigint = (await counts()).closing;
-      const opened = await whileLedgerStopped(() =>
+      const open = () =>
         actor.openSession(
           { maxDeposit: deposit, autoClose: true, idleTimeout: [] },
           {
             ...icpSig({ nonce: new Uint8Array(32) }, ''),
             publicKey: [new Uint8Array(key.getPublicKey().toRaw())],
           },
-        ),
+        );
+      const refused = await whileLedgerStopped(open);
+      expect(String(refused.err)).toMatch(
+        /Settlement failed: Ledger fee query failed before the deposit/,
       );
-      const text = String(opened.err);
-      expect(text).toMatch(/do NOT retry payment/);
-      const id = /Session (\S+) is parked #closing/.exec(text)?.[1];
-      expect(id).toBeDefined();
-      expect((await counts()).closing).toBe(closingBefore + 1n);
-      const reconciled = await actor.reconcileSession(id!);
-      expect(String(reconciled.ok)).toMatch(/nothing is owed/);
       expect((await counts()).closing).toBe(closingBefore);
       expect(await ledger.icrc1_balance_of(account)).toBe(before); // the deposit never moved
+      const opened = await open(); // the ledger is back; the open lock was released
+      expect(opened).toHaveProperty('ok');
+      await actor.endSession(opened.ok.id); // frees the payer's session slot
     }, 120_000);
   });
 

@@ -166,7 +166,7 @@ jobs:
       - run: mops install
       - run: bash scripts/build-example.sh /tmp/example.wasm
 
-  # B4: the integration suite (test/integration.test.ts, 50 cases) exercises the canister
+  # B4: the integration suite (test/integration.test.ts, 60 cases) exercises the canister
   # END-TO-END, but every case is gated `if (skip) return` and SILENTLY PASSES (counts as passed,
   # not skipped) when no replica is reachable — so the plain `test-ts` vitest run can't catch a
   # money-path regression. This job deploys a REAL local replica via `pnpm setup:local` and runs

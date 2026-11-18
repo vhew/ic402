@@ -19,6 +19,12 @@ module {
 
   let MAX_NONCES : Nat = 10_000;
 
+  /// 2.21.0: how long past its expiry the clean-up keeps a nonce that holds a stored pending
+  /// transfer: the ledger's 24-hour deduplication window, its 60 s permitted drift, and a margin.
+  /// Until then the payer's re-submit can still be decided by the ledger; after it the ledger
+  /// answers #TooOld anyway.
+  public let PENDING_RETENTION_NS : Int = 86_700_000_000_000; // (24 h + 5 min) in nanoseconds
+
   /// 2.21.0: the exact ICRC-2 transfer a pending ICP charge sent (Gateway.setLedgerDedup), kept so
   /// a re-submit of the same payment can send it again and let the ledger's deduplication decide.
   public type PendingCharge = {
@@ -160,13 +166,18 @@ module {
       };
     };
 
-    /// Remove expired nonces and their locks.
+    /// Remove expired nonces and their locks. 2.21.0: a nonce holding a stored pending transfer is
+    /// kept until PENDING_RETENTION_NS past its expiry. Only an authenticated payer's charge whose
+    /// transfer, sent after a successful fee query, was rejected with an unknown outcome can store
+    /// one (Gateway.settleFrom), so a caller cannot create them at will to fill the table.
     public func gcExpired() {
       let now = Time.now();
       let toRemove = Iter.toArray(
         Iter.filter<(Blob, (Int, Nat, Text, Text))>(
           nonces.entries(),
-          func((_, (expiry, _, _, _))) { now > expiry },
+          func((nonce, (expiry, _, _, _))) {
+            if (pending.get(nonce) != null) { now > expiry + PENDING_RETENTION_NS } else { now > expiry };
+          },
         )
       );
       for ((nonce, _) in toRemove.values()) {

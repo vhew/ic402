@@ -271,7 +271,7 @@ persistent actor KnowledgeBase {
           // M13: an EVM transfer was BROADCAST but not yet confirmed. Do NOT re-challenge with a
           // fresh #paymentRequired — that discards the pending tx and invites a double-payment for
           // a transfer that may still mine. Surface the pending state (with the tx hash) instead.
-          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment with a new nonce: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
       };
@@ -678,7 +678,7 @@ persistent actor KnowledgeBase {
       case (#err(#policyDenied(r))) { #err("Policy: " # r) };
       case (#err(#depositBelowMinimum(min))) { #err("Min deposit: " # Nat.toText(min)) };
       case (#err(#settlementFailed(r))) { #err("Settlement failed: " # r) };
-      case (#err(#settlementPending(r))) { #err("Settlement pending — do NOT retry payment: " # r) };
+      case (#err(#settlementPending(r))) { #err("Settlement pending — do NOT retry payment with a new nonce: " # r) };
       case (#err(#networkNotSupported(r))) { #err("Network not supported: " # r) };
       case (#err(#expired(r))) { #err("Expired: " # r) };
       case (#err(#tokenNotAccepted(r))) { #err("Token not accepted: " # r) };
@@ -781,7 +781,7 @@ persistent actor KnowledgeBase {
           case (#expired(r)) { #error("Expired: " # r) };
           case (#insufficientFunds(r)) { #error("Funds: " # r) };
           // M13: broadcast-but-unconfirmed — surface the pending tx, don't re-challenge (see search).
-          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment with a new nonce: " # r) };
           case (_) { #paymentRequired(gate.requireAll(amount)) };
         };
       };
@@ -971,7 +971,7 @@ persistent actor KnowledgeBase {
           // that reads as "retry" and invites a double-payment for a tx that may still mine. Mirror
           // the search/serve/open-session paths (main.mo:250, :735, :632) and surface the pending
           // state with its tx hash so the caller re-polls instead of re-paying.
-          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment: " # r) };
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment with a new nonce: " # r) };
           // No wildcard: handle every PaymentResult variant explicitly so moc's exhaustiveness check
           // fails the build if a new variant is added — the guard that keeps #settlementPending (and
           // the reject arms below) from being silently swallowed as a flat "settlement failed" again.

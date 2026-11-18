@@ -37,9 +37,10 @@ export type Ic402ErrorKind =
  * `settlement_pending`: the canister could not tell whether the payment moved (an EVM broadcast not
  * yet confirmed, or an ICP ledger call rejected after it may have run). The caller must not pay
  * again or refund a spend reservation; the resulting Ic402Error carries `fundsMoved = true`.
- * 2.21.0: on an ICP canister with `setLedgerDedup` on, re-sending the SAME payment (same nonce and
- * sender) resolves it through the ledger's deduplication, with one receipt. A NEW payment is still
- * wrong. The SDK does not re-send automatically.
+ * 2.21.0: an HTTP payment that is pending stays pending (the canister keeps nothing to re-send for
+ * HTTP payers). On a canister with `setLedgerDedup` on, a payment made through its Candid
+ * `settleFrom` is resolved by calling `settleFrom` again with the SAME payment. A NEW payment is
+ * still wrong either way. The SDK does not re-send automatically.
  */
 export function isSettlementPendingBody(body: string): boolean {
   try {

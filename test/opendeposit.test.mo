@@ -21,13 +21,15 @@ import { test; suite } "mo:test/async";
 
 let canisterP = Principal.fromText("aaaaa-aa");
 let payerP = Principal.fromText("2vxsx-fae");
+let escrowSub = Blob.fromArray([7, 7, 7, 7]); // the parked session's escrow subaccount
 
 /// Answers icrc1_balance_of with the scripted escrow balance; counts transfers (there must be none).
 let ledger = persistent actor {
-  var balance = 0; var transfers = 0;
-  public func script(b : Nat) : async () { balance := b; transfers := 0 };
+  var balance = 0; var transfers = 0; var queried : ?Types.Account = null;
+  public func script(b : Nat) : async () { balance := b; transfers := 0; queried := null };
   public func transferCalls() : async Nat { transfers };
-  public func icrc1_balance_of(_ : Types.Account) : async Nat { balance };
+  public func lastQueried() : async ?Types.Account { queried };
+  public func icrc1_balance_of(a : Types.Account) : async Nat { queried := ?a; balance };
   public func icrc1_fee() : async Nat { 10_000 };
   public func icrc1_transfer(_ : Types.TransferArg) : async Types.TransferResult { transfers += 1; #Ok(transfers) };
   public func icrc2_transfer_from(_ : Types.TransferFromArg) : async Types.TransferFromResult { transfers += 1; #Ok(transfers) };
@@ -46,7 +48,7 @@ func parked() : (Sessions.Sessions, Policy.Engine) {
   m.loadStable([{
     id = "sess-1"; payer = payerP; payerPublicKey = Blob.fromArray([]); deposited = 50_000; consumed = 0;
     remaining = 50_000; voucherCount = 0; status = #closing; openedAt = 0; lastActivityAt = 0;
-    lastSequence = 0; lastCumulativeAmount = 0; subaccount = Blob.fromArray([]); network = "icp:1";
+    lastSequence = 0; lastCumulativeAmount = 0; subaccount = escrowSub; network = "icp:1";
     token = "TKN"; recipient = Principal.toText(canisterP); autoClose = false; maxDuration = null; idleTimeout = null; evmDeposit = null;
   }]);
   policy.recordSpend(payerP, 50_000);
@@ -71,6 +73,7 @@ await suite("2.21.0: reconcileSession resolves a deposit parked at open", func()
       case (#err(_)) { assert false };
     };
     assert status(m) == #open;
+    assert (await ledger.lastQueried()) == ?{ owner = canisterP; subaccount = ?escrowSub }; // this session's escrow
     assert policy.getDailySpendAmount(payerP) == 50_000;
     assert owedCount(m) == 0;
     assert (await ledger.transferCalls()) == 0;

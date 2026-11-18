@@ -109,7 +109,8 @@ module {
     #settlementFailed : Text;
     // H-1 (v2): EVM transfer was broadcast but not yet confirmed on-chain.
     // The payment is NOT final — do not deliver value. The bound nonce is kept
-    // locked (and GC'd at expiry) so the same challenge is not re-broadcast.
+    // locked (the nonce clean-up removes it some time after expiry) so the same challenge is not
+    // re-broadcast.
     #settlementPending : Text;
     #reputationTooLow : Nat;
     #depositBelowMinimum : Nat;

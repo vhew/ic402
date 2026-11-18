@@ -1,6 +1,7 @@
 /// Motoko unit tests for NonceManager.
 import Nonce "../src/ic402/Nonce";
 import Principal "mo:base/Principal";
+import Blob "mo:base/Blob";
 import Time "mo:base/Time";
 import { test; suite } "mo:test";
 
@@ -196,6 +197,35 @@ suite("NonceManager", func() {
     mgr.setPending(nonce, charge);
     assert(mgr.takePending(nonce) == ?charge);
     assert(mgr.takePending(nonce) == null);
+  });
+
+  test("2.21.0: the clean-up keeps a locked nonce with a stored transfer until 24 h past its expiry", func() {
+    // Mutations: no retention (the payer's re-submit after the clean-up is told to pay with a
+    // fresh nonce); or retention for every locked nonce (locks without a stored transfer, which
+    // anyone can create over HTTP, would pile up for a day).
+    let now = Time.now();
+    let SEC : Int = 1_000_000_000;
+    let a = Blob.fromArray([1]); // expired 1 s ago, stored transfer: kept
+    let b = Blob.fromArray([2]); // expired 25 h ago, stored transfer: removed
+    let c = Blob.fromArray([3]); // expired 1 s ago, no stored transfer: removed
+    let mgr = Nonce.NonceManager(testPrincipal);
+    mgr.loadStable({
+      nonces = [
+        (a, (now - SEC, testAmount, testNetwork, testToken)),
+        (b, (now - 25 * 3600 * SEC, testAmount, testNetwork, testToken)),
+        (c, (now - SEC, testAmount, testNetwork, testToken)),
+      ];
+      counter = 0;
+      lockedNonces = ?[a, b, c];
+    });
+    mgr.setPending(a, charge);
+    mgr.setPending(b, charge);
+    mgr.gcExpired();
+    assert(mgr.isLocked(a));
+    assert(mgr.takePending(a) == ?charge);
+    assert(not mgr.isLocked(b));
+    assert(mgr.takePending(b) == null);
+    assert(not mgr.isLocked(c));
   });
 
   test("2.21.0: unlock and consumeLocked drop the pending charge with the lock", func() {

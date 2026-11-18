@@ -5,7 +5,13 @@
 /// #settlementPending, with the nonce locked. With the switch on, the charge carries the ledger fee,
 /// the nonce as memo and a created_at_time. Re-submitting the same payment sends that exact
 /// transfer again, and the ledger's answer decides: #Ok (the first had not landed) or #Duplicate
-/// (it had) both give one receipt.
+/// (it had) both give one receipt. Only a charge made through settleFrom (the caller is the payer)
+/// keeps its transfer, and only settleFrom re-sends it: over `settle` (HTTP) `sender` is only a
+/// claim, so nothing is stored or resolved there.
+///
+/// Limit: the interpreter's clock never moves, so no test here can tell a re-send that reuses the
+/// stored created_at_time from one that takes a fresh one. The re-send passing `p.args` unchanged
+/// is pinned by review; what is pinned here is that it reuses the fee (one fee query).
 ///
 /// The fake ledger is an in-file `persistent actor` (as in test/settlereject.test.mo). It
 /// deduplicates the way DFINITY's ledgers do when `dedups` is on: an identical argument record
@@ -33,11 +39,11 @@ let ANSWER_ERR = 3; // answer `errAnswer`, commit nothing
 /// counting the call and before answering. `charged` sums committed amounts.
 let ledger = persistent actor {
   var mode = 0; var hops = 0; var errAnswer : Types.TransferFromError = #TemporarilyUnavailable;
-  var calls = 0; var charged = 0; var blocks = 0; var feeReject = false;
+  var calls = 0; var charged = 0; var blocks = 0; var feeReject = false; var feeCalls = 0;
   var seen : [(Text, Nat)] = [];
   var lastArgs : ?Types.TransferFromArg = null;
   public func script(m : Nat) : async () {
-    mode := m; hops := 0; calls := 0; charged := 0; blocks := 0; seen := []; lastArgs := null; feeReject := false;
+    mode := m; hops := 0; calls := 0; charged := 0; blocks := 0; seen := []; lastArgs := null; feeReject := false; feeCalls := 0;
   };
   public func setMode(m : Nat) : async () { mode := m };
   public func setHops(h : Nat) : async () { hops := h };
@@ -45,7 +51,9 @@ let ledger = persistent actor {
   public func setFeeReject(b : Bool) : async () { feeReject := b };
   public func stats() : async { calls : Nat; charged : Nat } { { calls; charged } };
   public func last() : async ?Types.TransferFromArg { lastArgs };
+  public func feeQueries() : async Nat { feeCalls };
   public func icrc1_fee() : async Nat {
+    feeCalls += 1;
     if (feeReject) { throw Error.reject("fee query rejected") };
     10_000;
   };
@@ -89,32 +97,39 @@ func setup(dedup : Bool) : (Gateway.Gateway, Types.PaymentSignature) {
   });
 };
 
+let payerP = Principal.fromText(payer);
+
+/// The payer's own Candid settle: the only path that stores and re-sends a pending charge.
+func pay(gate : Gateway.Gateway, sig : Types.PaymentSignature, price : ?Nat) : async Types.PaymentResult {
+  await gate.settleFrom(payerP, sig, price);
+};
+
 func isPending(r : Types.PaymentResult) : Bool { switch (r) { case (#settlementPending(_)) { true }; case (_) { false } } };
 
 await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplication", func() : async () {
 
   await test("charged, then rejected: re-submitting the same payment gives the receipt, and the payer is charged once", func() : async () {
-    // Mutations: answer #Duplicate as still pending; or re-send the transfer with fresh fields
-    // (a new created_at_time, or none) instead of the stored record — the ledger takes it as a
-    // new transfer and charges again.
+    // Mutations: answer #Duplicate as still pending; re-send without created_at_time (the ledger
+    // takes it as a new transfer and charges again); or re-query the fee for the re-send.
     await ledger.script(COMMIT_THEN_REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    switch (await gate.settle(sig, ?5_000)) {
+    switch (await pay(gate, sig, ?5_000)) {
       case (#ok(r)) { assert r.txHash == ?"1"; assert r.amount == 5_000 }; // the first transfer's block
       case (_) { assert false };
     };
     assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
+    assert (await ledger.feeQueries()) == 1; // the re-send reuses the stored fee
   });
 
   await test("rejected before it was charged: the re-submit charges it once", func() : async () {
     // Mutation: treat #Ok on the re-send as still pending (only #Duplicate resolves).
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
     assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
   });
 
@@ -123,10 +138,10 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // reads as pending forever.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    ignore await gate.settle(sig, ?5_000);
+    ignore await pay(gate, sig, ?5_000);
     await ledger.setMode(OK);
-    ignore await gate.settle(sig, ?5_000);
-    switch (await gate.settle(sig, ?5_000)) { case (#expired(_)) {}; case (_) { assert false } };
+    ignore await pay(gate, sig, ?5_000);
+    switch (await pay(gate, sig, ?5_000)) { case (#expired(_)) {}; case (_) { assert false } };
     assert (await ledger.stats()).calls == 2;
   });
 
@@ -135,7 +150,7 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // the re-send), or `memo = null` (two equal charges in one round would share a key).
     await ledger.script(OK);
     let (gate, sig) = setup(true);
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
     switch (await ledger.last()) {
       case (?a) {
         assert a.fee == ?10_000;
@@ -150,13 +165,13 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // Mutations: store the transfer whatever the switch says; or send the dedup fields when off.
     await ledger.script(COMMIT_THEN_REJECT);
     let (gate, sig) = setup(false);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     switch (await ledger.last()) {
       case (?a) { assert a.fee == null and a.memo == null and a.created_at_time == null };
       case (null) { assert false };
     };
     await ledger.setMode(OK);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()) == { calls = 1; charged = 5_000 };
   });
 
@@ -167,36 +182,99 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     await ledger.script(COMMIT_THEN_REJECT);
     await ledger.setHops(3);
     let (gate, sig) = setup(false);
-    let first = gate.settle(sig, ?5_000);
+    let first = gate.settleFrom(payerP, sig, ?5_000);
     var n = 0; while ((await ledger.stats()).calls == 0 and n < 50) { await async {}; n += 1 };
     gate.setLedgerDedup(true); // the transfer call is in flight
     assert isPending(await first);
     await ledger.setHops(0);
     await ledger.setMode(OK);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()) == { calls = 1; charged = 5_000 };
   });
 
-  await test("a re-submit naming another sender sends nothing; the payer's own re-submit still resolves", func() : async () {
-    // Mutation: drop the sender comparison — the stranger's re-submit sends the payer's transfer
-    // and collects the receipt for it.
+  await test("another principal's settleFrom with the nonce sends nothing; the payer's own still resolves", func() : async () {
+    // Mutation: drop the sender comparison — the other principal's settleFrom sends the payer's
+    // transfer and collects the receipt for it.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    assert isPending(await gate.settle({ sig with sender = "aaaaa-aa" }, ?5_000));
+    assert isPending(await gate.settleFrom(canisterP, { sig with sender = "aaaaa-aa" }, ?5_000));
     assert (await ledger.stats()).calls == 1;
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(r)) { assert r.sender == payer }; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(r)) { assert r.sender == payer }; case (_) { assert false } };
   });
 
   await test("a re-submit at another price sends nothing", func() : async () {
     // Mutation: drop the expectedAmount comparison.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    await ledger.setMode(OK);
+    assert isPending(await pay(gate, sig, ?6_000));
+    assert (await ledger.stats()).calls == 1;
+  });
+
+  await test("HTTP: a charge made through settle stores nothing, so even the payer's settleFrom cannot re-send it", func() : async () {
+    // Mutation: store the transfer whatever the path — an HTTP request naming any payer would leave
+    // a transfer that a later settleFrom re-sends.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
     assert isPending(await gate.settle(sig, ?5_000));
     await ledger.setMode(OK);
-    assert isPending(await gate.settle(sig, ?6_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()).calls == 1;
+  });
+
+  await test("HTTP: a settle naming the payer never re-sends a settleFrom charge; the payer's settleFrom does", func() : async () {
+    // Mutation: resolve on any path — whoever presents the nonce and names the payer over HTTP
+    // collects the receipt for the payer's transfer.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    await ledger.setMode(OK);
+    assert isPending(await gate.settle(sig, ?5_000));
+    assert (await ledger.stats()).calls == 1;
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
+  });
+
+  await test("a re-submit on another network sends nothing", func() : async () {
+    // Mutation: drop the network comparison.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    await ledger.setMode(OK);
+    assert isPending(await pay(gate, { sig with network = "icp:2" }, ?5_000));
+    assert (await ledger.stats()).calls == 1;
+  });
+
+  await test("a re-submit with no price (expectedAmount = null) resolves at the nonce's bound amount", func() : async () {
+    // Mutation: treat a null expectedAmount as a mismatch — a consumer that relies on the bound
+    // amount could never resolve its pending charges.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    await ledger.setMode(OK);
+    switch (await pay(gate, sig, null)) { case (#ok(r)) { assert r.amount == 5_000 }; case (_) { assert false } };
+    assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
+  });
+
+  await test("two re-submits at once: the transfer is re-sent once, one receipt", func() : async () {
+    // Mutation: put the stored transfer back before the re-send's await instead of after — the
+    // second re-submit re-sends it too, and both get a receipt.
+    await ledger.script(REJECT);
+    let (gate, sig) = setup(true);
+    assert isPending(await pay(gate, sig, ?5_000));
+    await ledger.setMode(OK);
+    await ledger.setHops(3);
+    let a = gate.settleFrom(payerP, sig, ?5_000);
+    let b = gate.settleFrom(payerP, sig, ?5_000);
+    let ra = await a;
+    let rb = await b;
+    var receipts = 0;
+    for (r in [ra, rb].vals()) { switch (r) { case (#ok(_)) { receipts += 1 }; case (_) { assert isPending(r) } } };
+    assert receipts == 1;
+    assert (await ledger.stats()) == { calls = 2; charged = 5_000 };
   });
 
   await test("a re-send that is itself rejected stays pending, and a later re-submit resolves", func() : async () {
@@ -204,10 +282,10 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // re-submit answers pending without trying.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
-    assert isPending(await gate.settle(sig, ?5_000)); // the ledger is still stopped
+    assert isPending(await pay(gate, sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000)); // the ledger is still stopped
     await ledger.setMode(OK);
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
     assert (await ledger.stats()) == { calls = 3; charged = 5_000 };
   });
 
@@ -215,11 +293,11 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // Mutation: do not store the transfer again in the catch-all #Err arm.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setErr(#InsufficientAllowance({ allowance = 0 }));
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
     assert (await ledger.stats()) == { calls = 3; charged = 5_000 };
   });
 
@@ -228,11 +306,11 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // cannot decide anything); or unlock the nonce (the next re-submit starts a NEW charge).
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setErr(#TooOld);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()) == { calls = 2; charged = 0 };
   });
 
@@ -240,11 +318,11 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     // Mutation: keep the stored transfer after #BadFee.
     await ledger.script(REJECT);
     let (gate, sig) = setup(true);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setErr(#BadFee({ expected_fee = 20_000 }));
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     await ledger.setMode(OK);
-    assert isPending(await gate.settle(sig, ?5_000));
+    assert isPending(await pay(gate, sig, ?5_000));
     assert (await ledger.stats()) == { calls = 2; charged = 0 };
   });
 
@@ -254,9 +332,9 @@ await suite("2.21.0: a pending ICP charge resolves through the ledger's deduplic
     await ledger.script(OK);
     await ledger.setFeeReject(true);
     let (gate, sig) = setup(true);
-    switch (await gate.settle(sig, ?5_000)) { case (#settlementFailed(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#settlementFailed(_)) {}; case (_) { assert false } };
     assert (await ledger.stats()).calls == 0;
     await ledger.setFeeReject(false);
-    switch (await gate.settle(sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
+    switch (await pay(gate, sig, ?5_000)) { case (#ok(_)) {}; case (_) { assert false } };
   });
 });
