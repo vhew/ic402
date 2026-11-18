@@ -109,7 +109,7 @@ Approvals replace the allowance, so two payments from one identity in flight at 
 
 | Method | Description |
 |--------|-------------|
-| `call(method: string, args: unknown[], canisterId?: string): Promise<unknown>` | Call a paid method with auto-402 handling. The method's **last argument must be the `opt PaymentSignature`** — pass `[]` and the client retries with the signature in that slot. Unwraps `{ ok }` variants. |
+| `call(method: string, args: unknown[], canisterId?: string, options?: { maxAmount?: bigint }): Promise<unknown>` | Call a paid method with auto-402 handling. The method's **last argument must be the `opt PaymentSignature`** — pass `[]` and the client retries with the signature in that slot. Unwraps `{ ok }` variants. `maxAmount` (2.22.0) is the most this call may pay, in atomic units, excluding the ledger fee that is approved on top: a `paymentRequired` above it throws before anything is approved. After paying, an `{ error }` answer or a fresh `paymentRequired` throws an `Ic402Error` instead of being returned. |
 | `openSession(sessionConfig: Partial<SessionPreferences> \| undefined, signer: VoucherSigner, canisterId?: string): Promise<SessionHandle>` | Open a streaming session (`signer` is required since 2.17.0; it throws without one): fetch `requestSession()` intent → ICRC-2 approve the deposit, `min(suggestedDeposit, maxDeposit)` + fee (ICP, when `autoPayment`) → `openSession` on the canister. EVM sessions: pass `evmNetwork`/`evmSender`/`authorization` (and optionally `evmTxHash`/`evmToken`/`evmRecipient`) in `sessionConfig`. |
 | `fetchContent(delivery: ContentDelivery, options?: { canisterId?: string; actorFactory?: (id: string) => any }): Promise<Uint8Array>` | Fetch paid content for any `DeliveryMethod`: `inline`, `httpUrl`, `assetCanister`, or chunked `canisterQuery` (needs `options`). |
 | `fetchX402(url: string, options?: { init?: RequestInit; chainId?: number }): Promise<FetchX402Result>` | Buy from an external x402 API: probe → the canister signs the EIP-3009 header (`signX402Payment`) → retry with `X-Payment`. Requires an `eip155:*` network or explicit `chainId`. |
@@ -117,7 +117,7 @@ Approvals replace the allowance, so two payments from one identity in flight at 
 | `sendErc20Transfer(tokenAddress: string, recipient: string, amount: bigint, rpcUrl?: string): Promise<{ txHash: string }>` | Canister signs an ERC-20 transfer, client broadcasts. |
 | `sendEthTransfer(recipient: string, amountWei: bigint, rpcUrl?: string): Promise<{ txHash: string }>` | Canister signs a native transfer, client broadcasts. |
 | `listServices(): Promise<ServiceDefinition[]>` | Marketplace service discovery. |
-| `submitServiceRequest(serviceId: string, params: Uint8Array): Promise<{ jobId: string }>` | Create a paid job, auto-handling the x402 payment. |
+| `submitServiceRequest(serviceId: string, params: Uint8Array, options?: { maxAmount?: bigint }): Promise<{ jobId: string; paidAmount?: bigint }>` | Create a paid job, auto-handling the x402 payment. `maxAmount` (2.22.0) works as in `call`; pass `0n` to submit only if the service is free. When the call paid, `paidAmount` is the amount it approved and paid (the ledger fee is extra). `paidAmount` is a `bigint`, so `JSON.stringify` of a paid result throws without a replacer. |
 | `pollJobResult(jobId: string, maxAttempts = 30, intervalMs = 2000): Promise<Job>` | Poll until the job settles/verifies (throws on dispute/expiry/refund). |
 | `disputeJob(jobId: string, reason: string): Promise<void>` | Dispute a job result (`BuyerConfirm` verification). |
 | `discoverAgents(query): Promise<Array<{...}>>` | **Stub** — returns `[]` until ERC-8004 registries carry real agent data. |
@@ -167,12 +167,23 @@ The signatures this SDK constructs internally (`call`, `submitServiceRequest`, `
 
 ### Errors
 
-Failed EVM/x402 flows throw or return `Ic402Error` — `{ kind: Ic402ErrorKind; retryable: boolean; detail?: unknown }`, where `retryable` is true for `transient` and `nonce_error`:
+Failed EVM/x402 flows throw or return `Ic402Error` — `{ kind: Ic402ErrorKind; retryable: boolean; detail?: unknown; fundsMoved: boolean; paymentNotSent: boolean }`, where `retryable` is true for `transient` and `nonce_error`.
+
+Two flags tell a caller whether money may have moved. Check them before you pay again or release a spend budget:
+
+| Flag | Set when | What to do |
+|------|----------|------------|
+| `fundsMoved` | The canister says the payment already settled or was broadcast (its error carries "do NOT retry payment": settled then failed, or a settlement still pending). | Do not pay again and do not release the budget. Check the ledger or chain; the payment may complete. |
+| `paymentNotSent` (2.22.0) | The client stopped before it sent the paying call: the price was above `maxAmount`, autoPayment or the ledger was not configured, the ledger answered the approve with `#Err`, or the canister refused the unpaid request. | Nothing was paid. You may release the budget and pay again later. |
+| neither | The paying call may have been sent: a timeout or reject after it, or a canister error after payment. | Treat as possibly paid: keep the budget. Do not pay with a new nonce until you know the first payment did not settle. |
+
+A settlement of the same payment that is still running comes back as `transient` (retryable) with both flags false. It is retryable only with that same payment, never with a new one.
+
 
 | `Ic402ErrorKind` | Meaning |
 |------------------|---------|
 | `transient` | Network timeout / RPC rate limit — safe to retry |
-| `no_match` | No payment option for the requested chain in the 402 |
+| `no_match` | No payment option for the requested chain in the 402, or the price is above `maxAmount` |
 | `sign_failed` | Canister refused to sign (policy, frozen, …) |
 | `settlement_failed` | Server rejected the signed payment |
 | `broadcast_failed` | EVM RPC rejected the transaction |
