@@ -372,13 +372,64 @@ module {
         return #err(#invalidSignature("Session public key is not the caller's own identity key (its Ed25519 self-authenticating principal does not match the caller) — this canister requires caller-bound sessions. Sign vouchers with the same raw Ed25519 key the caller authenticates with; Internet Identity delegations and secp256k1/P-256 identities cannot satisfy this check."));
       };
 
-      // Execute deposit via escrow
-      let depositResult = await escrowManager.deposit(
-        ledger,
-        { owner = caller; subaccount = null },
-        deposit,
-        subaccount,
-      );
+      // The session record, for a normal open and for a deposit parked by an unknown reject.
+      func sessionRecord(status : Types.SessionStatus, effectivePolicy : Policy.SpendingPolicy) : Types.InternalSessionState {
+        let now = Time.now();
+        {
+          id = sessionId;
+          payer = caller;
+          payerPublicKey = sessionPublicKey;
+          deposited = deposit;
+          spendDay = policy.currentDay();
+          var consumed = 0;
+          var remaining = deposit;
+          var voucherCount = 0;
+          var status = status;
+          openedAt = now;
+          var lastActivityAt = now;
+          var lastSequence = 0;
+          var lastCumulativeAmount = 0;
+          subaccount;
+          network = intent.network;
+          token = intent.token;
+          recipient = intent.recipient;
+          autoClose = clientConfig.autoClose;
+          maxDuration = effectivePolicy.maxSessionDuration;
+          idleTimeout = switch (clientConfig.idleTimeout) {
+            case (?t) { ?t };
+            case (null) { effectivePolicy.sessionIdleTimeout };
+          };
+          evmDeposit = null; // ICP session
+        };
+      };
+
+      // Execute deposit via escrow. Inline (`await*`, 2.21.0), so a ledger reject arrives here with
+      // the ledger's own reject code.
+      let depositResult = try {
+        await* escrowManager.depositCore(
+          ledger,
+          { owner = caller; subaccount = null },
+          deposit,
+          subaccount,
+        );
+      } catch (e) {
+        if (Utils.rejectedBeforeExecution(Error.code(e))) {
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementFailed("Deposit call failed before the ledger ran (nothing moved; safe to retry): " # Error.message(e)));
+        };
+        // 2.21.0: any other reject leaves the deposit's outcome UNKNOWN: it may be in this session's
+        // escrow. Before, the reject escaped openSession and no session record existed, so a deposit
+        // that had landed could not be recovered in-band. Park the session #closing with nothing
+        // consumed: vouchers and closes refuse it, the expiry sweep skips it, and reconcileSession
+        // reads the escrow balance to decide (the deposit is there: reopen; it is not: close, with
+        // nothing owed). The daily reservation is held until then, as for an open session.
+        let parked = sessionRecord(#closing, policy.getEffectivePolicy(caller));
+        sessions.put(sessionId, parked);
+        armExpiryTimer<system>();
+        policy.recordSpend(caller, deposit);
+        sessionOpenLocks.delete(caller);
+        return #err(#settlementPending("Deposit rejected (" # debug_show (Error.code(e)) # "): its outcome is UNKNOWN — it may be in escrow. Session " # sessionId # " is parked #closing. Once the ledger is reachable, the canister's controller runs reconcileSession(\"" # sessionId # "\"): it reads the escrow balance and either opens the session (the deposit landed) or closes it with nothing owed (it did not). Do not open another session for this deposit meanwhile. " # Error.message(e)));
+      };
 
       switch (depositResult) {
         case (#err(msg)) { sessionOpenLocks.delete(caller); return #err(#settlementFailed(msg)) };
@@ -410,33 +461,7 @@ module {
       };
 
       // (Ed25519 public key was validated above, before the on-chain deposit.)
-      let now = Time.now();
-      let session : Types.InternalSessionState = {
-        id = sessionId;
-        payer = caller;
-        payerPublicKey = sessionPublicKey;
-        deposited = deposit;
-        spendDay = policy.currentDay();
-        var consumed = 0;
-        var remaining = deposit;
-        var voucherCount = 0;
-        var status = #open;
-        openedAt = now;
-        var lastActivityAt = now;
-        var lastSequence = 0;
-        var lastCumulativeAmount = 0;
-        subaccount;
-        network = intent.network;
-        token = intent.token;
-        recipient = intent.recipient;
-        autoClose = clientConfig.autoClose;
-        maxDuration = effectivePolicy.maxSessionDuration;
-        idleTimeout = switch (clientConfig.idleTimeout) {
-          case (?t) { ?t };
-          case (null) { effectivePolicy.sessionIdleTimeout };
-        };
-        evmDeposit = null; // ICP session
-      };
+      let session = sessionRecord(#open, effectivePolicy);
 
       sessions.put(sessionId, session);
       // Self-arming expiry: this is a session-CREATING path, so it owns an arm site (see the
@@ -1414,9 +1439,20 @@ module {
       if (balance >= s2.deposited) {
         s2.status := #open;
         s2.lastActivityAt := Time.now();
+        if (s2.consumed == 0) {
+          // 2.21.0: a deposit parked by an unknown reject at open (nothing consumed, no settle sent).
+          return #ok("Escrow holds the full deposit (" # Nat.toText(balance) # " >= " # Nat.toText(s2.deposited) # "): the deposit landed. Session opened.");
+        };
         #ok("Escrow still holds the full deposit (" # Nat.toText(balance) # " >= " # Nat.toText(s2.deposited) # "): the settle did not land. Session reopened — close it again (or let the expiry sweep).");
       } else {
         finalizeClosedSession(s2); // #closed + releaseDaily (shared with forceResolveSession)
+        // 2.21.0: a close sends a settle only when something was consumed, so with nothing consumed
+        // the escrow is short because the deposit never arrived (a deposit parked at open), or
+        // because a refund already left. Nothing is owed either way; recording the escrow as owed
+        // would point recoverEscrow at funds that are not there.
+        if (s2.consumed == 0) {
+          return #ok("The escrow holds " # Nat.toText(balance) # " of " # Nat.toText(s2.deposited) # " and nothing was consumed: the deposit did not land (or its refund already did). Session #closed; nothing is owed.");
+        };
         // The owed remainder is computed as the close computes it, not taken from `balance`: anyone
         // can transfer into an escrow subaccount (Types.RefundOwed). The query only decided above
         // whether the settle landed.

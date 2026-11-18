@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
+import { execSync } from 'node:child_process';
 import {
   createLocalAgent,
   createExampleActor,
@@ -376,6 +377,75 @@ describe('ic402 integration', () => {
         await actor.endSession(id); // refused once settled; closes it if the test failed early
       }
     }, 150_000);
+
+    // 2.21.0: the realistic unknown outcome — a ledger stopped (mid-upgrade) rejects with
+    // CANISTER_ERROR, which cannot be told apart from a trap after the transfer committed. The
+    // local ckUSDC ledger is stopped with the icp CLI (the deployer identity controls it) and
+    // always restarted. The example runs with setLedgerDedup(true).
+    const ledgerCmd = (verb: 'stop' | 'start') =>
+      execSync(`icp canister ${verb} ckusdc_ledger -e local`, { stdio: 'pipe' });
+    async function whileLedgerStopped<T>(fn: () => Promise<T>): Promise<T> {
+      ledgerCmd('stop');
+      try {
+        return await fn();
+      } finally {
+        ledgerCmd('start');
+      }
+    }
+
+    // With setLedgerDedup on, a charge first asks the ledger for its fee. A stopped ledger fails
+    // that query, which moves nothing, so the charge is refused cleanly (a fresh 402) instead of
+    // going pending, and the same payment settles once the ledger is back. The re-send of a pending
+    // charge (a reject after the fee query) is covered by test/chargededup.test.mo.
+    // Fails on: a fee-query failure keeping the nonce locked (the retry reads as pending); the
+    // receipt path not consuming the nonce (the third submit is not refused).
+    it('2.21.0 a stopped ledger: the charge is refused before any transfer, and the same payment then settles once', async () => {
+      if (skip) return;
+      const payer = await agent.getPrincipal();
+      const req = await icpReqFor('stopped-ledger');
+      const fee = await approveExact(BigInt(req.amount));
+      const sig = icpSig(req, payer.toText());
+      const account = { owner: payer, subaccount: [] };
+      const before: bigint = await ledger.icrc1_balance_of(account);
+      const refused = await whileLedgerStopped(() => actor.search('stopped-ledger', [sig]));
+      expect(refused).toHaveProperty('paymentRequired'); // nothing moved: not a pending charge
+      expect(await ledger.icrc1_balance_of(account)).toBe(before);
+      expect(await actor.search('stopped-ledger', [sig])).toHaveProperty('ok');
+      expect(await ledger.icrc1_balance_of(account)).toBe(before - BigInt(req.amount) - fee);
+      expect(await actor.search('stopped-ledger', [sig])).not.toHaveProperty('ok');
+      expect(await ledger.icrc1_balance_of(account)).toBe(before - BigInt(req.amount) - fee);
+    }, 120_000);
+
+    // Fails on: openSession not catching the deposit reject (the call throws, no session record);
+    // the parked session not #closing; reconcileSession recording the empty escrow as owed.
+    it('2.21.0 a stopped ledger: an unknown deposit parks the session, and reconcileSession closes it with nothing owed', async () => {
+      if (skip) return;
+      const key = Ed25519KeyIdentity.generate();
+      const deposit = 50_000n;
+      await approveExact(deposit);
+      const account = { owner: await agent.getPrincipal(), subaccount: [] };
+      const before: bigint = await ledger.icrc1_balance_of(account);
+      const counts = async () => (await actor.health()).sessions; // controller-only
+      const closingBefore: bigint = (await counts()).closing;
+      const opened = await whileLedgerStopped(() =>
+        actor.openSession(
+          { maxDeposit: deposit, autoClose: true, idleTimeout: [] },
+          {
+            ...icpSig({ nonce: new Uint8Array(32) }, ''),
+            publicKey: [new Uint8Array(key.getPublicKey().toRaw())],
+          },
+        ),
+      );
+      const text = String(opened.err);
+      expect(text).toMatch(/do NOT retry payment/);
+      const id = /Session (\S+) is parked #closing/.exec(text)?.[1];
+      expect(id).toBeDefined();
+      expect((await counts()).closing).toBe(closingBefore + 1n);
+      const reconciled = await actor.reconcileSession(id!);
+      expect(String(reconciled.ok)).toMatch(/nothing is owed/);
+      expect((await counts()).closing).toBe(closingBefore);
+      expect(await ledger.icrc1_balance_of(account)).toBe(before); // the deposit never moved
+    }, 120_000);
   });
 
   // ── Content ──

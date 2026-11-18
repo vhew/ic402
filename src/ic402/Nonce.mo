@@ -19,6 +19,14 @@ module {
 
   let MAX_NONCES : Nat = 10_000;
 
+  /// 2.21.0: the exact ICRC-2 transfer a pending ICP charge sent (Gateway.setLedgerDedup), kept so
+  /// a re-submit of the same payment can send it again and let the ledger's deduplication decide.
+  public type PendingCharge = {
+    ledger : Principal;
+    network : Text;
+    args : Types.TransferFromArg;
+  };
+
   /// Deterministic nonce generator with lock/consume/unlock replay protection.
   public class NonceManager(canisterPrincipal : Principal) {
 
@@ -59,6 +67,22 @@ module {
       insertionOrder.add(nonce);
       nonce;
     };
+
+    // 2.21.0: the transfer of each pending ICP charge, by nonce (Gateway.setLedgerDedup). Transient:
+    // after an upgrade a pending charge answers #settlementPending, as in 2.20.0. An entry never
+    // outlives its nonce's lock: setPending requires the lock, and consumeLocked, unlock and
+    // gcExpired delete the entry with it.
+    var pending = HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash);
+
+    /// 2.21.0: remember the transfer of a charge whose outcome is unknown. Ignored unless the nonce
+    /// is locked.
+    public func setPending(nonce : Blob, charge : PendingCharge) {
+      if (locked.get(nonce) != null) pending.put(nonce, charge);
+    };
+
+    /// 2.21.0: remove and return the pending transfer for `nonce`. The caller removes it BEFORE it
+    /// re-sends the transfer, so a second re-submit arriving meanwhile finds none and sends nothing.
+    public func takePending(nonce : Blob) : ?PendingCharge { pending.remove(nonce) };
 
     // M-5: Evict the oldest unlocked nonce. Returns false if none can be evicted
     // (all remaining are locked — bounded by concurrent in-flight settlements).
@@ -114,11 +138,13 @@ module {
     public func consumeLocked(nonce : Blob) {
       nonces.delete(nonce);
       locked.delete(nonce);
+      pending.delete(nonce);
     };
 
     /// Unlock a nonce (call after failed settlement, allowing client retry).
     public func unlock(nonce : Blob) {
       locked.delete(nonce);
+      pending.delete(nonce);
     };
 
     /// 2.20.0: whether a nonce is locked, i.e. a settlement with it is in flight or ended with an
@@ -146,6 +172,7 @@ module {
       for ((nonce, _) in toRemove.values()) {
         nonces.delete(nonce);
         locked.delete(nonce);
+        pending.delete(nonce);
       };
       // M-5: Compact the insertion-order ring so it tracks only live nonces.
       let compacted = Buffer.Buffer<Blob>(nonces.size());
@@ -180,6 +207,7 @@ module {
       // Order is approximate after an upgrade, which only affects eviction order.
       insertionOrder := Buffer.Buffer<Blob>(nonces.size());
       for ((nonce, _) in nonces.entries()) { insertionOrder.add(nonce) };
+      pending := HashMap.HashMap<Blob, PendingCharge>(4, Blob.equal, Blob.hash); // transient
       // C-1: Restore locked nonces if present
       switch (data.lockedNonces) {
         case (?locks) {

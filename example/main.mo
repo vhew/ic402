@@ -137,6 +137,11 @@ persistent actor KnowledgeBase {
     // session call needs the ~415M-cycle Ed25519 check. Older SDKs get #invalidSignature from
     // sessionQuery. Library default is ON (compatibility); transient — re-applied here on upgrade.
     gate.setSignedVoucherFallback(false);
+    // 2.21.0: the one ledger this example takes is ckUSDC (locally, DFINITY's ICRC-1 ledger build),
+    // which deduplicates on created_at_time + memo, so a pending ICP charge can be resolved
+    // by re-submitting the same payment. Turn this on ONLY for ledgers that deduplicate — on any
+    // other, the re-submit charges twice. Transient — re-applied here on upgrade.
+    gate.setLedgerDedup(true);
   };
 
   // Start background timers (session expiry, EVM address derivation)

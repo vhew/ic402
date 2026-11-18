@@ -173,4 +173,44 @@ suite("NonceManager", func() {
     let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
     assert(nonce.size() == 32);
   });
+
+  // 2.21.0: the stored transfer of a pending ICP charge (Gateway.setLedgerDedup).
+  let charge : Nonce.PendingCharge = {
+    ledger = testPrincipal;
+    network = testNetwork;
+    args = {
+      spender_subaccount = null; from = { owner = testPrincipal; subaccount = null };
+      to = { owner = testPrincipal; subaccount = null }; amount = testAmount; fee = ?10_000;
+      memo = null; created_at_time = ?1;
+    };
+  };
+
+  test("2.21.0: a pending charge is stored only under a lock, and taken exactly once", func() {
+    // Mutations: let takePending leave the record in place (two concurrent re-submits would both
+    // re-send the transfer); or store it without a lock (a record could outlive its nonce).
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
+    mgr.setPending(nonce, charge); // not locked yet: ignored
+    assert(mgr.takePending(nonce) == null);
+    ignore mgr.lock(nonce, testNetwork, testToken);
+    mgr.setPending(nonce, charge);
+    assert(mgr.takePending(nonce) == ?charge);
+    assert(mgr.takePending(nonce) == null);
+  });
+
+  test("2.21.0: unlock and consumeLocked drop the pending charge with the lock", func() {
+    // Mutation: drop the `pending.delete` from unlock or consumeLocked.
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let expiry = Time.now() + 300_000_000_000;
+    let a = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    let b = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    ignore mgr.lock(a, testNetwork, testToken);
+    ignore mgr.lock(b, testNetwork, testToken);
+    mgr.setPending(a, charge);
+    mgr.setPending(b, charge);
+    mgr.unlock(a);
+    mgr.consumeLocked(b);
+    assert(mgr.takePending(a) == null);
+    assert(mgr.takePending(b) == null);
+  });
 });

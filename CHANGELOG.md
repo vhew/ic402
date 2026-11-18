@@ -1,5 +1,86 @@
 # Changelog
 
+## v2.21.0 — 2026-11-18
+
+Minor — **an ICP payment whose ledger call ends with an unknown outcome can now be resolved in-band.**
+2.20.0 stopped treating such a reject as "not paid", but left two gaps: a pending charge could only be
+resolved by checking the ledger by hand, and a rejected session-open deposit escaped `openSession`
+with no session record. No stored-state change (`STABLE_SCHEMA_VERSION` stays 1) and no `example.did`
+change. Two behaviour changes integrators see: ICP `openSession` can now return
+`#err(#settlementPending)`, and, with the new setting on, re-submitting a pending payment resolves it.
+
+### Added
+
+- **`Gateway.setLedgerDedup(on)`** (default **off**; transient, set it at init) and
+  `ledgerDedupEnabled()`. With it on, an ICP charge queries `icrc1_fee` and sends that fee, the payment
+  nonce as memo and a `created_at_time`, and a charge rejected with an unknown outcome keeps its
+  transfer. Re-submitting the **same** payment re-sends that transfer unchanged, and the ledger's
+  deduplication decides: `#Duplicate` (it was charged) or `#Ok` (charged now). Either way the payer
+  gets exactly one receipt.
+  - Only the same payer, network and price can trigger the re-send. The stored transfer is taken
+    before the await, so two concurrent re-submits send it once.
+  - `#TooOld` (the ledger's 24-hour window passed) and `#BadFee` (its fee changed) leave the charge
+    pending and stop further re-sends. Other errors and rejects leave it pending and re-sendable.
+  - The fee is explicit because the ICP ledger's deduplication key holds the fee it charges. With
+    `fee = null`, a fee change between the attempts would turn the re-send into a second transfer.
+    Explicit, it is `#BadFee`, which both DFINITY ledgers check before deduplication. Verified
+    against dfinity/ic `0dc067ae`.
+  - **Turn it on only for ledgers that deduplicate** on `created_at_time` + `memo`. DFINITY's ICP and
+    ICRC-1 ledgers do. ICRC-1 makes deduplication a SHOULD and no ledger API declares it, so this is
+    the operator's declaration; on a ledger that does not deduplicate, a re-submit charges twice. The
+    ledger's memo limit must be at least 32 bytes.
+  - A fee-query failure moves nothing, so it is `#settlementFailed` with the nonce unlocked. In
+    practice a stopped ledger now fails a charge cleanly here, before any transfer, instead of
+    leaving it pending.
+  - The stored transfer is transient: after an upgrade a pending charge behaves as in 2.20.0.
+- **`Escrow.depositCore`** (`async*`): the deposit run inline, so the ledger's reject code reaches the
+  caller.
+
+### Changed
+
+- **ICP `openSession`: a deposit reject with an unknown outcome parks the session.** Rejects raised
+  before the ledger ran are still `#settlementFailed` (nothing moved). Any other reject now records the
+  session `#closing` with nothing consumed and the daily reservation held, and returns
+  `#err(#settlementPending("Deposit rejected (…) … Session <id> is parked #closing …"))`. Vouchers,
+  closes and the expiry sweep leave it alone. The controller's `reconcileSession` reads the escrow: the
+  full deposit opens the session; anything less closes it with the daily reservation released.
+  Before, the reject escaped `openSession`, and a deposit that had landed had no session record.
+- **`reconcileSession` (ICP): a short escrow with nothing consumed owes nothing.** A close sends a
+  settle only when something was consumed, so the escrow is short because the deposit never arrived
+  (or a refund already left). It used to record `deposited − fee` as owed regardless.
+- `example/main.mo` turns `setLedgerDedup(true)` on: its one ledger, ckUSDC, is a DFINITY ledger.
+
+### Corrected
+
+- **A locked nonce is not freed when it expires.** 2.20.0's messages, comments and runbook said it
+  was. Only the nonce clean-up removes it, and that runs once the nonce table holds 10,000 entries.
+  Fixed in `Gateway.mo` and the docs. The behaviour is unchanged: freeing a pending nonce would
+  reopen the double payment 2.20.0 closed.
+
+### Tests
+
+- `test/chargededup.test.mo` (13): the resolution against a fake ledger that deduplicates as
+  DFINITY's do. It covers charged-then-rejected, rejected-before-charge, the receipt consuming the
+  nonce, the fields sent, the setting off (exactly 2.20.0), the setting flipped mid-call, another
+  sender or price, re-sends rejected or refused, `#TooOld`, `#BadFee`, and a failed fee query.
+- `test/opendeposit.test.mo` (2): reconciling a parked deposit, landed and not landed. `test/nonce.test.mo`
+  (+2): the stored transfer needs the lock, is taken once, and goes with the lock.
+- `test/integration.test.ts` (+2, replica): the local ckUSDC ledger is **stopped** with the icp CLI.
+  A charge is refused before any transfer and the same payment then settles once. A session open
+  parks, and `reconcileSession` closes it with nothing owed. `openSession` arms the expiry timer, which
+  the Motoko interpreter cannot run, so the parking is tested only here.
+- Mutation check: 24 mutations, each test run in isolation. 21 turn exactly one test red. Three turn
+  more, by design:
+  - treating the re-send's `#Ok` as pending breaks five tests, because every resolution goes through it;
+  - storing the transfer whatever the setting breaks the three tests that pin "off is 2.20.0";
+  - a `takePending` that keeps the record also breaks the `#TooOld`/`#BadFee` tests, which rely on it.
+
+### Docs
+
+- `docs/recovery-runbook.md` §7: the parked deposit, and the re-submit resolution with its limits.
+- `docs/security-model.md` §2b and `docs/fund-safety-invariants.md`: the operator declaration, and a
+  new invariant (DEDUP-RESEND-IS-VERBATIM).
+
 ## v2.20.0 — 2026-11-04
 
 Minor — **an ICP payment whose ledger call is rejected with an unknown outcome is no longer treated as

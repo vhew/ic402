@@ -283,10 +283,11 @@ citation set for every partial.
 
 | Invariant | Rail | Statement (short) | Site | Status |
 |---|---|---|---|---|
-| NONCE-EXPIRY | both | Lockable only while now ≤ expiry; gc removes nonce+lock | `Nonce.mo:100-102,133-144` | enforced |
+| NONCE-EXPIRY | both | Lockable only while now ≤ expiry; gc removes nonce+lock (gc runs only once the table holds 10,000 nonces, so a locked nonce can outlive its expiry; 2.21.0 note) | `Nonce.mo:100-102,133-144` | enforced |
 | EIP3009-TIME-WINDOW | EVM | now ∈ [validAfter, validBefore] before processing | `Gateway.mo:580-582` | enforced |
 | EVM-PAYER-PRINCIPAL-IS-POLICY-ONLY | EVM | evm-derived principal for policy buckets only, not auth | `Gateway.mo:584-591` | enforced |
-| UNKNOWN-LEDGER-REJECT-IS-NOT-UNPAID | ICP | A ledger reject not raised before execution never unlocks/retries: settle → #settlementPending (nonce locked); close settle leg → #closing until reconcileSession reads the escrow (2.20.0) | `Utils.rejectedBeforeExecution`, `Gateway.settleCore`, `Sessions.closeIcpSession` / `reconcileIcpClose` | enforced |
+| UNKNOWN-LEDGER-REJECT-IS-NOT-UNPAID | ICP | A ledger reject not raised before execution never unlocks/retries: settle → #settlementPending (nonce locked); close settle leg → #closing until reconcileSession reads the escrow (2.20.0); session-open deposit → session parked #closing, consumed 0, until reconcileSession reads the escrow, and a short escrow with nothing consumed owes nothing (2.21.0) | `Utils.rejectedBeforeExecution`, `Gateway.settleCore`, `Sessions.openSession` / `closeIcpSession` / `reconcileIcpClose` | enforced |
+| DEDUP-RESEND-IS-VERBATIM | ICP | With setLedgerDedup on, a pending charge is resolved only by re-sending the stored transfer unchanged, only for the same payer, network and price, and only #Ok/#Duplicate issue a receipt; the stored transfer is taken before the await, so concurrent re-submits send it once; whether to store is decided from the setting read before the awaits (2.21.0) | `Gateway.resolvePendingCharge`, `Nonce.takePending` / `setPending` | enforced (operator must declare a deduplicating ledger) |
 | VERIFY-IS-READONLY-AND-MATCHES-SETTLE | EVM | verifyPayment mutates no state; same checks as settle | `Gateway.mo:403-472` | enforced |
 | EIP3009-SIG-MATCHES-CHAIN | EVM | A payment signature passes only in a form USDC accepts: low s, v 27/28 (or 0/1), Ethereum's ecrecover (2.18.2) | `Eip712.recoverAuthorizationSigner`, `EvmAddress.ecRecoverEvm` | enforced |
 | RECEIPT-ID-UNIQUENESS | both | Monotonic `rcpt-N`, persisted across upgrades | `Gateway.mo:189-192,1112,1131` | **partial** |
