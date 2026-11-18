@@ -464,6 +464,49 @@ describe('Ic402Client', () => {
       }
     });
 
+    // 2.22.0: after the paid request is sent, a failure is possibly paid — fundsMoved, not
+    // retryable (a retry signs a second authorization).
+    // Fails on: the paid-request catch using classifyNetworkError (transient, retryable), the
+    // body-read failure escaping, or a non-402 status after paying without fundsMoved.
+    it('a failure after the paid request is sent is possibly paid, never retryable', async () => {
+      const challenge = JSON.stringify({
+        accepts: [{ network: 'eip155:84532', payTo: '0xR', amount: '100', asset: '0xUSDC' }],
+      });
+      const actor = {
+        signX402Payment: vi.fn().mockResolvedValue({
+          ok: { header: 'h', paidAmount: 100n, authorization: {} },
+        }),
+      };
+      const client = new Ic402Client(
+        makeConfig({ network: 'eip155:84532', actorFactory: mockActorFactory(actor) }),
+      );
+      const broken = new ReadableStream({
+        start(c) {
+          c.error(new Error('connection reset'));
+        },
+      });
+      for (const answer of [
+        async () => {
+          throw new Error('The operation was aborted due to timeout');
+        },
+        async () => new Response(broken, { status: 200 }),
+        async () => new Response('upstream error', { status: 502 }),
+      ]) {
+        let n = 0;
+        globalThis.fetch = vi
+          .fn()
+          .mockImplementation(async () =>
+            ++n === 1 ? new Response(challenge, { status: 402 }) : answer(),
+          );
+        const r = await client.fetchX402('https://example.com/paid');
+        expect(r.status).toBe('error');
+        if (r.status === 'error') {
+          expect(r.error.fundsMoved).toBe(true);
+          expect(r.error.retryable).toBe(false);
+        }
+      }
+    });
+
     it('returns sign_failed when actor returns err', async () => {
       const paymentBody = JSON.stringify({
         accepts: [

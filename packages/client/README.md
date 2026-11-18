@@ -173,11 +173,11 @@ Two flags tell a caller whether money may have moved. Check them before you pay 
 
 | Flag | Set when | What to do |
 |------|----------|------------|
-| `fundsMoved` | The canister says the payment already settled or was broadcast (its error carries "do NOT retry payment": settled then failed, or a settlement still pending). | Do not pay again and do not release the budget. Check the ledger or chain; the payment may complete. |
+| `fundsMoved` | The canister says the payment already settled or was broadcast (its error carries "do NOT retry payment": settled then failed, or a settlement still pending), or an x402 paid request failed after the signed payment was sent (network error, timeout, unreadable body, a non-402 status — 2.22.0). | Do not pay again and do not release the budget. Check the ledger or chain; the payment may complete. |
 | `paymentNotSent` (2.22.0) | The client stopped before it sent the paying call: the price was above `maxAmount`, autoPayment or the ledger was not configured, the ledger answered the approve with `#Err`, or the canister refused the unpaid request. | Nothing was paid. You may release the budget and pay again later. |
 | neither | The paying call may have been sent: a timeout or reject after it, or a canister error after payment. | Treat as possibly paid: keep the budget. Do not pay with a new nonce until you know the first payment did not settle. |
 
-A settlement of the same payment that is still running comes back as `transient` (retryable) with both flags false. It is retryable only with that same payment, never with a new one.
+The canister's busy answer ("already in progress — retry this same payment") comes back as `transient` (retryable) with both flags false: another caller's attempt with that payment is running, and your funds did not move through it. Retrying the same payment is preferred; a new payment is also safe.
 
 
 | `Ic402ErrorKind` | Meaning |
@@ -196,7 +196,7 @@ A settlement of the same payment that is still running comes back as `transient`
 
 ### Lower-level exports
 
-For building custom flows, the pieces behind `fetchX402`/`registerAgent` are exported directly: `probeX402`, `fetchX402` (function form taking a `signPayment` callback), `findPaymentOption`, `applyVerbatimAccepted`, `classifyNetworkError`, `createEvmClient`, `getEvmNonce`, `getFeeData`, `broadcastTransaction`, `pollReceipt`, `parseAgentRegisteredEvent`, `registerAgent` (function form), plus the `exampleIdlFactory` Candid IDL and the full type surface (`PaymentRequirement`, `PaymentReceipt`, `SessionIntent`, `SessionState`, `Voucher`, `ContentDelivery`, `Eip3009Authorization`, `X402PaymentRequirement`, `SignedTransaction`, `SignedAuthorization`, `SignedTypedData`, `ServiceDefinition`, `Job`, `PaymentOption`, `FetchX402Result`, `ProbeResult`, …).
+For building custom flows, the pieces behind `fetchX402`/`registerAgent` are exported directly: `probeX402`, `fetchX402` (function form taking a `signPayment` callback), `findPaymentOption`, `applyVerbatimAccepted`, `classifyNetworkError`, `paidRequestError` (2.22.0: the possibly-paid error for a failure after a paid request was sent), `createEvmClient`, `getEvmNonce`, `getFeeData`, `broadcastTransaction`, `pollReceipt`, `parseAgentRegisteredEvent`, `registerAgent` (function form), plus the `exampleIdlFactory` Candid IDL and the full type surface (`PaymentRequirement`, `PaymentReceipt`, `SessionIntent`, `SessionState`, `Voucher`, `ContentDelivery`, `Eip3009Authorization`, `X402PaymentRequirement`, `SignedTransaction`, `SignedAuthorization`, `SignedTypedData`, `ServiceDefinition`, `Job`, `PaymentOption`, `FetchX402Result`, `ProbeResult`, …).
 
 ## Requirements
 

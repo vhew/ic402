@@ -48,6 +48,7 @@ export {
   Ic402Error,
   isSettlementPendingBody,
   settlementError402,
+  paidRequestError,
   classifyNetworkError,
   findPaymentOption,
   applyVerbatimAccepted,

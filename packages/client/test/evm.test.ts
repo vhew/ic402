@@ -6,6 +6,7 @@ import {
   probeX402,
   isSettlementPendingBody,
   settlementError402,
+  fetchX402,
 } from '../src/evm.js';
 
 describe('probeX402 redirect re-validation (S2)', () => {
@@ -520,5 +521,67 @@ describe('settlement_pending 402 (2.20.0)', () => {
     expect(e.fundsMoved).toBe(true);
     expect(e.retryable).toBe(false);
     expect(settlementError402(failed).fundsMoved).toBe(false);
+  });
+});
+
+// 2.22.0: once the paid request has gone out with the signed header, a failure gives no verdict on
+// the payment — the server may have settled it. Possibly paid: fundsMoved, never retryable (a retry
+// would sign a second authorization).
+describe('fetchX402 (function form): failures after the paid request is sent', () => {
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const challenge = JSON.stringify({
+    accepts: [{ network: 'eip155:84532', payTo: '0xRecipient', amount: '100', asset: '0xUSDC' }],
+  });
+  const sign = async () => ({
+    header: 'signed-header',
+    paidAmount: 100n,
+    authorization: {
+      from: '0xa',
+      to: '0xb',
+      value: 100n,
+      validAfter: 0n,
+      validBefore: 1n,
+      nonce: '0x',
+      signature: '0x',
+    },
+  });
+  const paidAnswer = async (answer: () => Promise<Response>) => {
+    let n = 0;
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementation(async () =>
+        ++n === 1 ? new Response(challenge, { status: 402 }) : answer(),
+      );
+    return fetchX402('https://example.com/paid', 84532, sign);
+  };
+
+  // Fails on: the paid-request catch classifying the error as a (retryable) network error, the
+  // body-read failure escaping, or a non-402 status after paying carrying no fundsMoved.
+  it('a network error, an unreadable body or a non-402 status is possibly paid', async () => {
+    const broken = new ReadableStream({
+      start(c) {
+        c.error(new Error('connection reset'));
+      },
+    });
+    for (const answer of [
+      async () => {
+        throw new Error('fetch failed: ETIMEDOUT');
+      },
+      async () => new Response(broken, { status: 200 }),
+      async () => new Response('upstream error', { status: 500 }),
+    ]) {
+      const r = await paidAnswer(answer);
+      expect(r.status).toBe('error');
+      if (r.status === 'error') {
+        expect(r.error.fundsMoved).toBe(true);
+        expect(r.error.retryable).toBe(false);
+      }
+    }
   });
 });
