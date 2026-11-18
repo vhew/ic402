@@ -29,6 +29,7 @@ import Char "mo:base/Char";
 import Nat32 "mo:base/Nat32";
 import EvmAddress "EvmAddress";
 import EvmUtils "EvmUtils";
+import EvmSender "EvmSender";
 
 module {
 
@@ -150,11 +151,13 @@ module {
     //                pays gas). The message is the pre-2.22.0 #err text.
     //   #err         definite, nothing moved, and a retry may succeed (an ICP ledger #Err, or an
     //                EVM send refused before broadcast).
+    //   #busy        the EVM sender's single-flight lock (EvmSender.SEND_BUSY): nothing was tried,
+    //                and it clears in seconds — retried, but not counted as a payment failure.
     //   #unavailable definite, nothing moved, and no retry can succeed until something is set up
     //                (no transfer hook, an unparseable chain, no payout address, no token, a buyer
-    //                with no rail).
+    //                with no rail, an EVM-rail buyer that is not a 20-byte address).
     type TxRef = { txHash : Text; chainId : Nat; token : Text };
-    type Payout = { #ok; #pending : TxRef; #reverted : (Text, TxRef); #err : Text; #unavailable : Text };
+    type Payout = { #ok; #pending : TxRef; #reverted : (Text, TxRef); #err : Text; #busy : Text; #unavailable : Text };
 
     /// 1a: settle `cost` to the job's operator on the rail it was paid on. ICP jobs pay the
     /// operator principal from the pool; EVM jobs pay the operator's registered EVM payout
@@ -172,7 +175,7 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM settle to operator reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { #err("EVM settle to operator: " # e) };
+                case (#err(e)) { if (EvmSender.isSendBusy(e)) { #busy("EVM settle to operator: " # e) } else { #err("EVM settle to operator: " # e) } };
               };
             };
             case (?_, _, null) { #unavailable("operator has no registered EVM payout address (call setEvmPayout)") };
@@ -197,10 +200,15 @@ module {
     /// 1a: refund `amount` to the job's buyer on the rail it paid on. ICP buyers via the
     /// ckUSDC pool; EVM buyers via an on-chain tECDSA transfer to their 0x address (the
     /// injected hook). Fixes the EVM-buyer refund stranding (S14) and the refund half of the
-    /// cross-rail flaw (C3).
+    /// cross-rail flaw (C3). 2.22.0: a job on the EVM rail (its receipt's network is eip155:)
+    /// whose buyer is not a 20-byte address — a consumer that recorded a principal — cannot be
+    /// refunded on-chain: #unavailable, without calling the hook.
     func refundOnRail(jobId : Text, job : Types.Job, amount : Nat) : async Payout {
       switch (evmJobRail.get(jobId)) {
         case (?rail) {
+          if (EvmUtils.hexToBytes(job.buyer).size() != 20) {
+            return #unavailable("EVM refund unavailable: buyer " # job.buyer # " is not a 20-byte EVM address");
+          };
           switch (evmTransfer, parseChainId(rail.network)) {
             case (?transfer, ?chainId) {
               // B2: finalize only on #confirmed (see settleToOperator).
@@ -208,7 +216,7 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM refund reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { #err("EVM refund: " # e) };
+                case (#err(e)) { if (EvmSender.isSendBusy(e)) { #busy("EVM refund: " # e) } else { #err("EVM refund: " # e) } };
               };
             };
             case (_, _) { #unavailable("EVM refund unavailable (no transfer hook / unparseable chain)") };
@@ -443,6 +451,10 @@ module {
     /// the settled-then-no-job strand (docs/decisions/settled-then-job-failed.md, Option A invariant).
     /// The svc lookup is total: a service can be disabled but never deleted, so a validated caller
     /// always finds it; the null branch falls back to a 0 timeout rather than trapping.
+    /// 2.22.0: the job goes on the EVM rail when the receipt's network is `eip155:…`, whatever the
+    /// buyer's spelling. Pass the payer's EVM address as `buyer` for such a receipt: a buyer that
+    /// is not a 20-byte address (a principal, say) cannot be refunded on-chain — its refunds come
+    /// back #unavailable and wait for a controller.
     public func createJobFromReceipt(buyer : Text, serviceId : Text, params : Blob, receipt : Types.PaymentReceipt, callback : ?Text) : Text {
       let timeout = switch (services.get(serviceId)) { case (?s) { s.timeout }; case (null) { 0 } };
       jobCounter += 1;
@@ -852,6 +864,14 @@ module {
     /// 2.22.0: that includes a #Verified job whose operator payment reverted on-chain (it carries
     /// the reverted tx, and the expiry sweep does not retry it): this call is the controller's
     /// decision to send again, so the record of the reverted tx is dropped.
+    /// 2.22.0: a #Pending, #Assigned or #Computing job past its expiresAt can be refunded here
+    /// too (refundBuyer = true only) — the controller's "refund now" for a job whose expiry refund
+    /// the sweep keeps failing. This call also resets the sweep's retry count for the job.
+    /// A refund that fails puts the job back as it was, except: a #Verified job comes back
+    /// #Disputed (the controller chose the refund, so the sweep must not pay the operator — it
+    /// refunds a #Disputed job at expiresAt), and a refund that REVERTED on-chain parks the job
+    /// #Expired with the reverted tx, never sent again automatically (pay the buyer by hand, then
+    /// resolveJob).
     public func resolveDispute(jobId : Text, refundBuyer : Bool) : async { #ok; #err : Text } {
       let job = switch (jobs.get(jobId)) {
         case (null) { return #err("Job not found") };
@@ -859,10 +879,18 @@ module {
       };
       switch (job.status) {
         case (#Submitted or #Disputed or #Verified) {};
+        case (#Pending or #Assigned or #Computing) {
+          if (not refundBuyer or Time.now() <= job.expiresAt) {
+            return #err("Job (status: " # debug_show (job.status) # ") can only be refunded, and only once past its expiry");
+          };
+        };
         case (_) { return #err("Job is not in a resolvable state (status: " # debug_show(job.status) # ")") };
       };
-      // A resolvable job carries a parked tx only as the record of a reverted payment (nothing
-      // moved). Forward writes drop it; a failed refund restores `job` as it was, record included.
+      payoutFailures.delete(jobId);
+      // A resolvable job carries a parked tx only as the record of a reverted operator payment
+      // (a #Verified job; nothing moved). Every write below drops it: it only stops the sweep
+      // re-sending that payment, and after this call the job is either finished, back to a status
+      // the sweep never settles (a failed refund), or being settled again by the controller.
       let fresh = { job with parkedTx = null };
       if (refundBuyer) {
         // H-5 (v2): reserve a non-resolvable interim status SYNCHRONOUSLY before the await so
@@ -886,12 +914,18 @@ module {
             jobs.put(jobId, { job with status = #Settling; parkedTx = ?{ txHash = p.txHash; leg = #Refund; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
             #err("Refund pending (parked in #Settling — reconcileJob to finalize): tx " # p.txHash);
           };
-          case (#err(e) or #unavailable(e) or #reverted(e, _)) {
+          case (#reverted(e, tx)) {
+            // 2.22.0: as in the expiry sweep, a reverted refund is not sent again automatically.
+            parkRevertedRefund(jobId, fresh, tx, e);
+            #err("Refund failed: " # e);
+          };
+          case (#err(e) or #busy(e) or #unavailable(e)) {
             // Revert to its prior status (no funds moved) — but only if the job is still ours. A
             // controller's resolveJob during the await made it terminal; reverting from the
             // pre-await snapshot would bring it back as #Submitted/#Disputed/#Verified, to be
-            // refunded or settled a second time (2.17.6).
-            revertIfSettling(jobId, job);
+            // refunded or settled a second time (2.17.6). 2.22.0: a #Verified job comes back
+            // #Disputed, so the sweep does not pay the operator against the controller's refund.
+            revertIfSettling(jobId, { fresh with status = if (job.status == #Verified) { #Disputed } else { job.status } });
             #err("Refund failed: " # e);
           };
         };
@@ -905,6 +939,16 @@ module {
     // resolveJob made it terminal during the await (2.17.6).
     func revertIfSettling(jobId : Text, back : Types.Job) {
       switch (jobs.get(jobId)) { case (?j2) { if (j2.status == #Settling) jobs.put(jobId, back) }; case (null) {} };
+    };
+
+    // 2.22.0 (resolveDispute, which reserved the job #Settling): a refund that reverted on-chain
+    // (nothing moved) is never sent again automatically:
+    // the job is parked #Expired carrying the reverted tx (leg #Refund) — terminal, so no sweep,
+    // buyer or operator acts on it, and not GC'd while it carries the tx. A controller pays the
+    // buyer by hand and closes it with resolveJob (reconcileJob reports the revert).
+    func parkRevertedRefund(jobId : Text, job : Types.Job, tx : TxRef, e : Text) {
+      revertIfSettling(jobId, { job with status = #Expired; completedAt = ?Time.now(); parkedTx = ?{ txHash = tx.txHash; leg = #Refund; chainId = tx.chainId; token = tx.token; parkedAt = Time.now() } });
+      Debug.print("ic402 job " # jobId # ": refund " # e # "; not sent again — the job is parked #Expired: pay the buyer by hand, then resolveJob.");
     };
 
     // 2.19.1: whether `jobId` is still the #Settling job this message reserved. A controller's
@@ -927,11 +971,18 @@ module {
       #err(msg);
     };
 
-    // settleJob's outcome. 2.22.0: #noRetry is a failure the expiry sweep must not retry on its
-    // own — a structural one (Payout #unavailable), or an operator payment that reverted on-chain.
-    type SettleResult = { #ok; #err : Text; #noRetry : Text };
+    // settleJob's outcome, for the expiry sweep's retry rules (2.22.0). Only #failed and
+    // #noRetry are failures of the operator payment itself:
+    //   #failed   definite, nothing moved, a retry may succeed (Payout #err) — counted.
+    //   #noRetry  definite, nothing moved, a retry cannot succeed as things are (#unavailable), or
+    //             it reverted on-chain — counted as final.
+    //   #err      anything else: the job was not #Verified (a concurrent settle won), the payment
+    //             is pending or done (a remainder refund failed, a controller resolved the job),
+    //             or the EVM sender was busy — not counted.
+    // The public callers see #err for all of them, with the texts they had before.
+    type SettleResult = { #ok; #err : Text; #failed : Text; #noRetry : Text };
     func asResult(r : SettleResult) : { #ok; #err : Text } {
-      switch (r) { case (#ok) { #ok }; case (#err(e) or #noRetry(e)) { #err(e) } };
+      switch (r) { case (#ok) { #ok }; case (#err(e) or #failed(e) or #noRetry(e)) { #err(e) } };
     };
 
     /// Settle a verified job: pay the operator (and refund the Upto remainder to
@@ -965,6 +1016,10 @@ module {
           // Roll back for retry (no funds moved) — unless a controller's resolveJob made the job
           // terminal during the await: back in #Verified it would wait for a controller's
           // resolveDispute to settle or refund it a second time (2.17.6).
+          revertIfSettling(jobId, { job with status = #Verified });
+          return #failed("Settlement failed: " # e);
+        };
+        case (#busy(e)) {
           revertIfSettling(jobId, { job with status = #Verified });
           return #err("Settlement failed: " # e);
         };
@@ -1002,7 +1057,7 @@ module {
       let refundAmount = Utils.satSub(serviceAmount, cost + fee);
       if (refundAmount > 0) {
         switch (await refundOnRail(jobId, job, refundAmount)) {
-          case (#err(e) or #unavailable(e) or #reverted(e, _)) {
+          case (#err(e) or #busy(e) or #unavailable(e) or #reverted(e, _)) {
             if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "The operator was paid; the buyer's Upto remainder (" # Nat.toText(refundAmount) # ") was NOT refunded: " # e);
             jobs.put(jobId, { job with status = #Settled; completedAt = ?Time.now() });
             return #err("Operator paid but buyer remainder refund failed: " # e);
@@ -1144,10 +1199,11 @@ module {
     /// Call this from a recurring timer (e.g., every 60 seconds).
     /// 2.22.0: a #Submitted job of a #BuyerConfirm service whose dispute window has ended is
     /// settled to the operator instead (see disputeWindowEnd), and so is a #Verified job an earlier
-    /// settle left behind. A refund or payment that fails definitively is retried by later calls,
-    /// at most 5 times; one no retry can fix (no hook, no payout address, …) is not retried; one
-    /// that reverted on-chain is never sent again (the job carries the reverted tx, for a
-    /// controller). Returns the jobs this call refunded, or left #Expired with a pending refund
+    /// settle left behind. A refund or payment that fails definitively is retried at each later
+    /// call, 5 times in all, then at most once an hour; one no retry can fix as things are (no
+    /// hook, no payout address, …) goes straight to the hourly retry; one that reverted on-chain is
+    /// never sent again (the job carries the reverted tx, for a controller). A busy EVM sender is
+    /// retried at the next call, uncounted. Returns the jobs this call refunded, or left #Expired with a pending refund
     /// parked on them.
     public func expireJobs() : async [Text] { await* expireJobsCore() };
 
@@ -1168,26 +1224,37 @@ module {
       };
     };
 
-    // 2.22.0: definite payout failures per job, counted for the sweep's automatic retries. After
-    // MAX_AUTO_ATTEMPTS (or at once, for a failure no retry can fix) the sweep leaves the job as
-    // it is for a controller, and says so in the canister log. Kept out of stable state: an
-    // upgrade clears it, which grants each job another MAX_AUTO_ATTEMPTS — bounded, and an upgrade
-    // is when a missing hook or a fixed configuration takes effect. A payment that reverted
-    // on-chain is never retried at all; that is recorded on the job itself (its parkedTx).
+    // 2.22.0: definite payment failures per job, for the sweep's automatic retries. The sweep
+    // retries a failed refund or operator payment at every tick, MAX_AUTO_ATTEMPTS times in all,
+    // then at most once an hour; a failure no retry can fix as things are (#unavailable) goes
+    // straight to the hourly retry. The hour is the hour of the job's age ((now - createdAt) / 1h),
+    // a clock taken from the job itself. Kept out of stable state: an upgrade clears it (each job
+    // starts over at MAX_AUTO_ATTEMPTS — bounded), and so does a controller's resolveDispute. A
+    // payment that reverted on-chain is never retried at all; that is recorded on the job (parkedTx).
     let MAX_AUTO_ATTEMPTS : Nat = 5;
-    let payoutFailures = HashMap.HashMap<Text, Nat>(8, Text.equal, Text.hash);
+    let HOUR_NANOS : Int = 3_600_000_000_000;
+    type RetryState = { failures : Nat; hour : Int };
+    let payoutFailures = HashMap.HashMap<Text, RetryState>(8, Text.equal, Text.hash);
 
-    func sweepGaveUp(id : Text) : Bool {
-      switch (payoutFailures.get(id)) { case (?n) { n >= MAX_AUTO_ATTEMPTS }; case (null) { false } };
+    func ageHour(job : Types.Job, now : Int) : Int { (now - job.createdAt) / HOUR_NANOS };
+
+    // Whether the sweep may try this job's refund or payment now.
+    func sweepMayTry(id : Text, job : Types.Job, now : Int) : Bool {
+      switch (payoutFailures.get(id)) {
+        case (null) { true };
+        case (?r) { r.failures < MAX_AUTO_ATTEMPTS or ageHour(job, now) > r.hour };
+      };
     };
 
-    // Count one definite failure (`final`: one no retry can fix). Logs once, when the sweep stops.
-    func notePayoutFailure(id : Text, what : Text, final : Bool, e : Text) {
-      let n = if (final) { MAX_AUTO_ATTEMPTS } else { (switch (payoutFailures.get(id)) { case (?k) { k }; case (null) { 0 } }) + 1 };
-      payoutFailures.put(id, n);
-      if (n >= MAX_AUTO_ATTEMPTS) {
-        Debug.print("ic402 job " # id # ": " # what # " failed (" # e # "); nothing moved, and the sweep will not try it again on its own. The job is left as it is for a controller.");
-      };
+    // Count one definite failure (`final`: one no retry can fix as things are) and log it.
+    func notePayoutFailure(id : Text, job : Types.Job, now : Int, what : Text, final : Bool, e : Text) {
+      let prev = switch (payoutFailures.get(id)) { case (?r) { r.failures }; case (null) { 0 } };
+      let n = if (final) { Nat.max(prev + 1, MAX_AUTO_ATTEMPTS) } else { prev + 1 };
+      payoutFailures.put(id, { failures = n; hour = ageHour(job, now) });
+      Debug.print("ic402 job " # id # ": " # what # " failed (" # e # "); nothing moved. " # (
+        if (n < MAX_AUTO_ATTEMPTS) { "The sweep tries again at its next tick (" # Nat.toText(n) # " of " # Nat.toText(MAX_AUTO_ATTEMPTS) # ")." }
+        else { "The sweep tries again at most once an hour; a controller can act sooner." }
+      ));
     };
 
     func expireJobsCore() : async* [Text] {
@@ -1214,14 +1281,15 @@ module {
         };
         // 2.22.0: settle a #Verified job — one whose window just ended, or one an earlier settle
         // left #Verified (a failed operator payment; before, only a controller could move it).
-        // Not one carrying a parked tx (its payment reverted on-chain), nor one the sweep gave up.
+        // Not one carrying a parked tx (its payment reverted on-chain), nor one in its backoff.
         if (job.status == #Verified) {
-          if (job.parkedTx == null and not sweepGaveUp(id)) {
+          if (job.parkedTx == null and sweepMayTry(id, job, now)) {
             try {
               switch (await settleJob(id)) {
                 case (#ok) { payoutFailures.delete(id) };
-                case (#err(e)) { notePayoutFailure(id, "settle to the operator", false, e) };
-                case (#noRetry(e)) { notePayoutFailure(id, "settle to the operator", true, e) };
+                case (#failed(e)) { notePayoutFailure(id, job, now, "settle to the operator", false, e) };
+                case (#noRetry(e)) { notePayoutFailure(id, job, now, "settle to the operator", true, e) };
+                case (#err(e)) { Debug.print("ic402 job " # id # ": settle to the operator: " # e) };
               };
             } catch (e) {
               // A ledger reject leaves the job #Settling (settleJob), for a controller to check
@@ -1237,7 +1305,7 @@ module {
           case (#Pending or #Assigned or #Computing or #Submitted or #Disputed) { now > job.expiresAt };
           case (_) { false };
         };
-        if (timedOut and not sweepGaveUp(id)) {
+        if (timedOut and sweepMayTry(id, job, now)) {
           jobs.put(id, { job with status = #Expired; completedAt = ?now });
 
           // 1a/A1: refund the buyer on the rail it paid on — ICP from the pool, or on-chain to a
@@ -1263,6 +1331,7 @@ module {
               jobs.put(id, { job with status = #Expired; completedAt = ?now; parkedTx = ?{ txHash = p.txHash; leg = #Refund; chainId = p.chainId; token = p.token; parkedAt = Time.now() } });
               expired.add(id);
               payoutFailures.delete(id);
+              Debug.print("ic402 job " # id # ": expiry refund pending (tx " # p.txHash # "), parked #Expired for reconcileJob.");
             };
             case (#reverted(e, tx)) {
               // 2.22.0: mined and reverted — nothing moved, and it is not sent again. The job stays
@@ -1275,15 +1344,20 @@ module {
             };
             case (#err(e)) {
               // 2.22.0: definite — no funds moved. Put the job back as it was so a later tick
-              // retries the refund, up to MAX_AUTO_ATTEMPTS. Before, it stayed #Expired with the
-              // refund owed, and was GC'd.
+              // retries the refund (see sweepMayTry). Before, it stayed #Expired with the refund
+              // owed, and was GC'd.
               switch (jobs.get(id)) { case (?j2) { if (j2.status == #Expired) jobs.put(id, job) }; case (null) {} };
-              notePayoutFailure(id, "expiry refund", false, e);
+              notePayoutFailure(id, job, now, "expiry refund", false, e);
             };
             case (#unavailable(e)) {
-              // Nothing moved, and no retry can succeed as things are: put it back, do not retry.
+              // Nothing moved, and no retry can succeed as things are: put it back; hourly retry.
               switch (jobs.get(id)) { case (?j2) { if (j2.status == #Expired) jobs.put(id, job) }; case (null) {} };
-              notePayoutFailure(id, "expiry refund", true, e);
+              notePayoutFailure(id, job, now, "expiry refund", true, e);
+            };
+            case (#busy(e)) {
+              // The EVM sender was busy (nothing tried): put it back for the next tick, uncounted.
+              switch (jobs.get(id)) { case (?j2) { if (j2.status == #Expired) jobs.put(id, job) }; case (null) {} };
+              Debug.print("ic402 job " # id # ": expiry refund: " # e);
             };
           };
         };
