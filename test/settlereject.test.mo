@@ -89,11 +89,13 @@ await suite("2.20.0: a rejected ICP settle is unknown, not 'not paid'", func() :
     assert (await ledger.pullCalls()) == 0;
   });
 
-  await test("after the reject, the payer's daily reservation stays held", func() : async () {
-    // Mutation: release the daily reservation on an unknown reject.
+  await test("after the reject, the payer's daily reservation stays held (settleFrom)", func() : async () {
+    // Mutation: release the daily reservation on an unknown reject whatever the path. 2.22.0: an
+    // HTTP `settle` releases it (the sender is only claimed there; test/icpcharge.test.mo), so this
+    // pins the settleFrom side, where the payer is the caller.
     await ledger.script(true);
     let (gate, sig) = setup();
-    ignore await gate.settle(sig, ?5_000);
+    ignore await gate.settleFrom(Principal.fromText(payer), sig, ?5_000);
     assert dailyHeld(gate) == 5_000;
   });
 });
