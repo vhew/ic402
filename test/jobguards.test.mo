@@ -658,4 +658,20 @@ await suite("round 3: a principal recorded on the EVM rail", func() : async () {
     assert evmCalls == 0;
     assert status(reg) == ?#Disputed;
   });
+
+  await test("a controller refund that is #unavailable parks #Settling, so resolveJob can close it", func() : async () {
+    // Mutation: restore the job on #unavailable (as on #err) — it comes back #Disputed, and no
+    // call (sweep, resolveDispute, resolveJob) can ever move it.
+    evmPlay([#confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    let s = reg.toStable();
+    reg.loadStable({ s with jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with buyer = Principal.toText(buyerP) }) }) });
+    switch (await reg.resolveDispute("job-1", true)) { case (#err(_)) {}; case (#ok) { assert false } };
+    assert evmCalls == 0;
+    assert status(reg) == ?#Settling;
+    await sweeps(reg, 1); // the sweep leaves a #Settling job to the controller
+    assert status(reg) == ?#Settling;
+    switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Refunded;
+  });
 });

@@ -919,7 +919,16 @@ module {
             parkRevertedRefund(jobId, fresh, tx, e);
             #err("Refund failed: " # e);
           };
-          case (#err(e) or #busy(e) or #unavailable(e)) {
+          case (#unavailable(e)) {
+            // 2.22.0: a refund that cannot work as configured (no hook or chain, a buyer with no
+            // refundable rail) is not restored: restored, nothing could ever move the job — the
+            // sweep and this call both get #unavailable, and resolveDispute(false) refuses
+            // non-#Disputed jobs. It stays #Settling (nothing moved): the controller refunds the
+            // buyer by hand, then resolveJob(jobId, #Refunded).
+            if (not stillSettling(jobId)) return resolvedMeanwhile(jobId, "No refund was sent");
+            #err("Refund unavailable: " # e # " — nothing moved. The job stays #Settling: refund the buyer by hand, then resolveJob(jobId, #Refunded).");
+          };
+          case (#err(e) or #busy(e)) {
             // Revert to its prior status (no funds moved) — but only if the job is still ours. A
             // controller's resolveJob during the await made it terminal; reverting from the
             // pre-await snapshot would bring it back as #Submitted/#Disputed/#Verified, to be
