@@ -81,8 +81,9 @@ suite("EvmSender fee helpers", func() {
 
 // 2.21.1: an eth_sendRawTransaction result is #err ("not broadcast — safe to retry") ONLY for
 // failures raised before anything was sent. Everything after dispatch is #maybeSent: a send is
-// not idempotent, so "nonce too low" can follow this very tx's inclusion, and with a 2-of-N
-// threshold a third provider may have accepted a tx the agreeing two refused.
+// not idempotent, so "nonce too low" can follow this very tx's inclusion (and with a 2-of-N
+// threshold over the Ok statuses a third provider may have accepted it); a consistent RPC error
+// still comes after dispatch.
 suite("EvmSender.classifySend", func() {
   let H = "0xabc";
   func isMaybe(o : EvmSender.SendOutcome) : Bool { switch (o) { case (#maybeSent(m)) { m.txHash == H }; case (_) { false } } };

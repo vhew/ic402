@@ -1256,7 +1256,10 @@ module {
           switch (await sender.sendErc20Transfer(chainId, token, to, amount)) {
             case (#ok(h)) { #ok(h) };
             case (#err(e)) { #err(e) };
-            case (#maybeSent(m)) { #err(m.reason) };
+            // 2.21.1: still collapsed to #err for API compatibility, but never as "safe to retry":
+            // the text says MAYBE SENT and carries the hash to confirm (NonceTooLow and post-dispatch
+            // RPC errors now land here too).
+            case (#maybeSent(m)) { #err("MAYBE SENT — do NOT retry; confirm tx " # m.txHash # " first: " # m.reason) };
           };
         };
         case (null) { #err("EVM not configured (no ecdsaKeyName)") };

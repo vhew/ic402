@@ -13,7 +13,9 @@ review. Upgrade promptly.** No stored-state change (`STABLE_SCHEMA_VERSION` stay
     principal as the payer. DFINITY ledgers skip the allowance check when a transfer_from's `from`
     is the caller's own account.
   - The effect: anyone could get a paid response free, and each attempt also burned one ledger fee
-    from the canister's default account.
+    from the canister's default account. On a marketplace, a job "paid" this way still paid its
+    operator from the canister's funds, so where operators can register services themselves this
+    was direct theft (the example gates `registerService` to the controller).
   - The fix: `Gateway.settleCore` now refuses the canister as payer (`#invalidSignature`), on
     `settle` and `settleFrom`. `Escrow.depositCore` refuses a session deposit from the canister's
     own account.
@@ -31,15 +33,24 @@ review. Upgrade promptly.** No stored-state change (`STABLE_SCHEMA_VERSION` stay
 - **EVM outbound sends: "nonce too low", and node or outcall errors after dispatch, were read as
   "not broadcast".**
   - The flaw: a send is not idempotent. A node whose copy of a tx arrives after another node's copy
-    was included answers "nonce too low" for that same tx. With a 2-of-N threshold, a third provider
-    may also have accepted a tx the agreeing two refused.
+    was included answers "nonce too low" for that same tx, and with a 2-of-N threshold a third
+    provider may have accepted it. A consistent RPC error needs every provider to agree, but an
+    outcall timeout may still have delivered the tx.
   - The effect: callers rolled back and sent again, a second transfer from the pool. This affected
     session closes, `reconcileEvmDeposit` and marketplace EVM payouts.
-  - The fix: these outcomes are now `#maybeSent` (`EvmSender.classifySend`), so callers confirm-poll
-    the tx hash and park instead of re-sending. Only failures raised before any provider was called
-    are still safe to retry: provider or validation errors, and insufficient gas funds.
-  - Side effect: more ambiguous sends park for confirm-only recovery (`reconcileSession`,
-    `reconcileJob`).
+  - The fix: these outcomes are now `#maybeSent` (`EvmSender.classifySend`). Inbound payments
+    confirm-poll the tx hash; outbound sends park for confirm-only recovery (`reconcileSession`,
+    `reconcileJob`). Nothing re-sends. Only failures raised before any provider was called are still
+    safe to retry: provider or validation errors, and insufficient gas funds.
+  - Residual, planned for 2.22.0: insufficient gas funds stays "not sent", although under the
+    threshold a third provider that already saw a gas top-up could have accepted the tx. Mapping it
+    to "maybe sent" would park every send whenever the gas account runs dry. The full fix re-sends
+    the same signed bytes.
+  - `Gateway.sendErc20Transfer` (no in-repo caller) still returns `#err` for a maybe-sent transfer,
+    for API compatibility, but its text now reads "MAYBE SENT — do NOT retry; confirm tx <hash>".
+  - The recovery runbook (§2) says to check the chain before force-resolving a parked tx, and that
+    "no parked tx" can mean a close is still in flight.
+  - New public symbols, additive: `EvmSender.classifySend`, `EvmSender.SendOutcome`.
 - **Until you upgrade:** keep revenue out of the canister's default account (use a recipient
   subaccount or an external owner), or stop accepting ICP payments over HTTP; and keep EVM pool
   balances minimal.

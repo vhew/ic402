@@ -101,14 +101,20 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      cannot be auto-broadcast by a confirm-only tool. Record `deposited − consumed` and the
      payer's EVM address from the session **now**, then `forceResolveSession(sessionId)`, then
      `sweepEvm(chainId, token, payerEvmAddress, deposited − consumed)` to return the remainder.
-   - `#err("Parked close tx still pending …")` → wait and re-run. Stays parked; safe.
+   - `#err("Parked close tx still pending …")` → wait and re-run. Stays parked; safe. 2.21.1: an
+     ambiguous send (e.g. "nonce too low", an RPC error after dispatch) also parks here, and a tx
+     that never reached a mempool never confirms. Before `forceResolveSession` + `sweepEvm` on a
+     parked tx, check on chain that the canister's account nonce has moved past it, or that no
+     provider knows the hash; otherwise the parked tx can still land and the sweep pays twice.
    - `#err("Parked close tx reverted on-chain; no funds moved — use forceResolveSession")` → the
      parked leg reverted: whatever that leg was moving is still in the pool. Work out what is owed
      from the session record (settle leg reverted ⇒ `consumed` → recipient AND remainder → payer
      both still owed; refund leg reverted ⇒ only the remainder → payer is owed — the settle leg
      had already confirmed), then `forceResolveSession` + `sweepEvm` each owed amount.
    - `#err("Confirm RPC failed …")` → transient; retry later.
-   - `#err("Session is #closing but has no parked tx — use forceResolveSession")` → the close
+   - `#err("Session is #closing but has no parked tx — use forceResolveSession")` → first make
+     sure no close of this session is still running (this answer also appears while a close is
+     in flight; wait for it to return and re-run). Otherwise the close
      failed **pre-broadcast** on a park-without-tx path (e.g. settle reverted, refund
      pre-broadcast failure after a confirmed settle, or the parked hash was lost across an upgrade
      — see §5). Nothing new was broadcast for the missing leg. Determine on-chain what DID happen

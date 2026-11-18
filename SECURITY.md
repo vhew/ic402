@@ -5,12 +5,13 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.21.0.** The posture and open-items sections below are a snapshot from
+> **Current release: v2.21.1.** The posture and open-items sections below are a snapshot from
 > v2.2.3, the last full review of this file. Security-relevant changes since then are in
 > [`CHANGELOG.md`](CHANGELOG.md):
 > - 2.17.0: caller-authenticated sessions and `settleFrom`;
 > - 2.20.0: an ICP ledger reject with an unknown outcome is no longer treated as "not paid";
-> - 2.21.0: such payments can be resolved in-band.
+> - 2.21.0: such payments can be resolved in-band;
+> - 2.21.1: three high-severity fixes (the canister as payer, EVM close race, ambiguous EVM sends).
 >
 > The current model is [`docs/security-model.md`](docs/security-model.md).
 
@@ -28,7 +29,7 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.21.x | ✅ | Current. |
+| 2.21.x | ✅ | Current: 2.21.1. 2.21.0 lacks the 2.21.1 security fixes; upgrade. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |
 | < 2.0.0 | ❌ | Unmaintained. Pre-remediation; contains the Critical findings in `AUDIT.md`. Do not deploy. |

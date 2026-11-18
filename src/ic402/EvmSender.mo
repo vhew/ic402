@@ -27,9 +27,14 @@ module {
   /// 2.21.1: classify an eth_sendRawTransaction result. Only failures raised before anything was
   /// sent are #err. Everything after dispatch is #maybeSent, because a send is not idempotent: a
   /// node whose copy arrives after another node's copy was included answers "nonce too low" for
-  /// that SAME tx, and with a 2-of-N threshold a third provider may have accepted a tx the
-  /// agreeing two refused. Before 2.21.1 a consistent NonceTooLow or RPC error was #err, so
-  /// callers rolled back and sent again — a second transfer when the first had landed.
+  /// that SAME tx, and with a 2-of-N threshold over the Ok statuses a third provider may have
+  /// accepted a tx the agreeing two refused. A consistent RPC #Err needs every provider to agree,
+  /// but it still comes after dispatch (an outcall timeout may have delivered the tx). Before
+  /// 2.21.1 a consistent NonceTooLow or RPC error was #err, so callers rolled back and sent again —
+  /// a second transfer when the first had landed. Residual: InsufficientFunds stays #err (an
+  /// unfunded gas account must not park every send), although under the threshold a third
+  /// provider that already saw a gas top-up could have accepted the tx; the full fix, re-sending
+  /// the same signed bytes, is planned.
   /// `broadcastTxHash` is the locally derived hash of the signed raw tx, always pollable.
   public func classifySend(r : EvmRpc.MultiSendRawTransactionResult, broadcastTxHash : Text) : SendOutcome {
     switch (r) {
