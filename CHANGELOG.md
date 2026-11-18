@@ -17,6 +17,16 @@
 - **Dependencies:** `viem` 2.57.17, `@x402/core` 2.30.0, `vitest` 5.1.0, `cborg` 6.2.1, `eslint` 10.14.0,
   `@types/node` 26.6.6 (Dependabot PR #50).
 
+### Tooling and docs
+
+- **`scripts/setup.sh` no longer deletes other projects' local-network files.** Its cleanup removed
+  every icp-cli port descriptor on the machine and the shared cached pocket-ic. Another project's
+  running network then lost track of itself. It now removes only descriptors whose `project-dir` is
+  this checkout, and skips the pocket-ic purge while any network is running from that cache.
+- **`RELEASING.md`** describes the publish as it works: pushing the tag runs `release.yml`, which
+  publishes to npm by trusted publishing and to mops. The manual `npm publish` / per-repo token steps
+  (replaced in July 2026) and the `integrations/mcp/README.md` version step are gone.
+
 ## v2.20.0 — 2026-11-04
 
 Minor — **an ICP payment whose ledger call is rejected with an unknown outcome is no longer treated as
