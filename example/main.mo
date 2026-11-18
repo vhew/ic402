@@ -22,6 +22,7 @@ import Debug "mo:base/Debug";
 import Prim "mo:⛔"; // rts_total_allocation, for the ed25519VerifyCost diagnostic only
 import IC "mo:base/ExperimentalInternetComputer";
 import Ed25519 "../src/ic402/Ed25519";
+import Utils "../src/ic402/Utils"; // escapeJsonString, for the JSON this file builds by hand
 
 persistent actor KnowledgeBase {
 
@@ -418,6 +419,24 @@ persistent actor KnowledgeBase {
     };
   };
 
+  // M14/I7: why GET /content/<id> cannot deliver this content, as the response to send instead —
+  // or null when it can. Checked before the 402 is minted and again before settling, so no
+  // payment is taken for content this route would not hand over: an unknown id; an upload still
+  // in progress (it would settle, then fail "Read failed"); or multi-chunk content, whose chunks
+  // getChunk serves only against a grant bound to a principal, which an HTTP payer cannot hold.
+  func httpContentRefusal(contentId : Text) : ?Ic402.HttpResponse {
+    switch (store.getMetadata(contentId)) {
+      case (null) { ?Http.httpError(404, "Content not found") };
+      case (?metadata) {
+        if (store.isComplete(contentId) != ?true) {
+          ?Http.httpError(503, "Content upload incomplete — try again once the upload finishes");
+        } else if (metadata.chunkCount > 1) {
+          ?Http.httpError(501, "Multi-chunk content is not served over HTTP — buy it with the Candid getContent method");
+        } else { null };
+      };
+    };
+  };
+
   // 2.17.0: the HTTP settle paths below keep gate.settle — http_request_update has no caller (its
   // msg.caller is anonymous), so ICP payment here stays allowance-authenticated; that is why the
   // SDK approves exactly amount + fee with an expiry. Candid endpoints use gate.settleFrom.
@@ -465,12 +484,12 @@ persistent actor KnowledgeBase {
           case (?p) { p };
           case (null) {
             if (Text.startsWith(path, #text "/content/")) {
-              // M14: don't advertise a 402 for content that doesn't exist — the client would pay
-              // for an undeliverable resource. Check existence before minting the challenge.
+              // M14/I7: don't advertise a 402 for content this route cannot deliver — the client
+              // would pay for an undeliverable resource. Check before minting the challenge.
               let cid = switch (Text.stripStart(path, #text "/content/")) { case (?id) { id }; case (null) { "" } };
-              switch (store.getMetadata(cid)) {
-                case (null) { return Http.httpError(404, "Content not found") };
-                case (?_) {};
+              switch (httpContentRefusal(cid)) {
+                case (?refusal) { return refusal };
+                case (null) {};
               };
               return Http.http402(gate.requireAll(5_000), resourceUrl);
             };
@@ -515,12 +534,12 @@ persistent actor KnowledgeBase {
         case (?id) { id };
         case (null) { return Http.httpError(400, "Missing content ID") };
       };
-      // M14: verify the content exists BEFORE settling — don't take payment for an undeliverable
-      // resource (typo'd/nonexistent id, or content deleted since the 402) then return 404 while
-      // keeping the funds.
-      switch (store.getMetadata(contentId)) {
-        case (null) { return Http.httpError(404, "Content not found") };
-        case (?_) {};
+      // M14/I7: verify the content is deliverable BEFORE settling — don't take payment for an
+      // undeliverable resource (typo'd/nonexistent id, content deleted or replaced since the 402,
+      // an unfinished upload, multi-chunk content) then return an error while keeping the funds.
+      switch (httpContentRefusal(contentId)) {
+        case (?refusal) { return refusal };
+        case (null) {};
       };
       let contentResult = await gate.settle(sig, ?5_000);
       switch (contentResult) {
@@ -537,6 +556,8 @@ persistent actor KnowledgeBase {
               case (null) { return Http.httpError(500, "Read failed") };
             };
           } else {
+            // Reached only when the entry was replaced by multi-chunk content during the settle:
+            // httpContentRefusal turns chunked content away before any payment.
             return Http.http200JsonWithSettlement("{\"delivery\":\"chunked\",\"chunkCount\":" # Nat.toText(metadata.chunkCount) # ",\"receiptId\":\"" # receipt.id # "\"}", settlement);
           };
         };
@@ -556,7 +577,8 @@ persistent actor KnowledgeBase {
           var json = "[";
           for (i in results.keys()) {
             if (i > 0) { json #= "," };
-            json #= "\"" # results[i] # "\"";
+            // I10: results echo the caller's `q` — escape it, or a quote or backslash breaks the JSON.
+            json #= "\"" # Utils.escapeJsonString(results[i]) # "\"";
           };
           return Http.http200JsonWithSettlement("{\"results\":" # json # "]}", settlement);
         };
@@ -632,6 +654,11 @@ persistent actor KnowledgeBase {
   // Remove this section if you only need per-request charges.
   // ═══════════════════════════════════════════════════════════════════════
 
+  // The price of one sessionQuery. The intents advertise it as costPerCall, and sessionQuery
+  // enforces it: the library only requires each voucher's cumulative amount to rise. Transient:
+  // a constant, re-set on every install and upgrade.
+  transient let SESSION_COST_PER_CALL : Nat = 500;
+
   public shared func requestSession() : async Ic402.SessionIntent {
     gate.offerSession({
       network = "icp:1";
@@ -644,7 +671,7 @@ persistent actor KnowledgeBase {
       suggestedDeposit = 50_000;
       minDeposit = ?5_000;
       expiry = Time.now() + 300_000_000_000;
-      costPerCall = ?500;
+      costPerCall = ?SESSION_COST_PER_CALL;
       description = ?"Knowledge base session";
     });
   };
@@ -667,7 +694,7 @@ persistent actor KnowledgeBase {
             suggestedDeposit = 50_000;
             minDeposit = ?5_000;
             expiry = Time.now() + 300_000_000_000;
-            costPerCall = ?500;
+            costPerCall = ?SESSION_COST_PER_CALL;
             description = ?"Knowledge base session (EVM)";
           });
         };
@@ -697,7 +724,18 @@ persistent actor KnowledgeBase {
     // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
     // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
     switch (gate.consumeVoucherFrom(msg.caller, voucher)) {
-      case (#ok(_)) { #ok(doQuery(question)) };
+      case (#ok(delta)) {
+        // S2: the library accepts any increase, so a hand-rolled client could pay 1 per query.
+        // Refuse a voucher that pays less than the advertised price, and leave it unconsumed: a
+        // trap discards the state changes made since the message's last await, and there is no
+        // await between consumeVoucherFrom and here, so the consumption is undone. Keep it so.
+        // (Checking before consuming instead would tell a stranger, whom consumeVoucherFrom
+        // refuses #invalidSignature before it looks at any amount, the session's consumed total.)
+        if (delta < SESSION_COST_PER_CALL) {
+          Debug.trap("Voucher below the per-call price: each sessionQuery must raise cumulativeAmount by at least " # Nat.toText(SESSION_COST_PER_CALL) # " (the intent's costPerCall). The voucher was not consumed.");
+        };
+        #ok(doQuery(question));
+      };
       case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
       case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
@@ -748,6 +786,12 @@ persistent actor KnowledgeBase {
     #error : Text;
   } {
     let amount = 5_000;  // $0.005 USDC
+    // I7: an upload still in progress cannot be delivered (this would settle, then answer "Read
+    // failed" or grant chunks that are not there), so refuse it before quoting or settling.
+    // An unknown id (null) falls through to the M14 check below, as before.
+    if (store.isComplete(contentId) == ?false) {
+      return #error("Content upload incomplete — try again once the upload finishes");
+    };
     switch (paymentSig) {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {

@@ -272,6 +272,23 @@ module {
       };
     };
 
+    /// 2.22.0: whether every chunk of `id` has been uploaded; null for an unknown id. Cheap and
+    /// non-trapping (no decryption): a chunk slot stays empty until putChunk fills it, and a stored
+    /// chunk never is (it carries a 16-byte tag). put() stores every chunk at once, so only a
+    /// putChunkedInit upload can be incomplete. Check it before taking payment: until the upload
+    /// completes, get() returns null and getChunk returns null for a missing chunk.
+    public func isComplete(id : Text) : ?Bool {
+      switch (entries.get(id)) {
+        case (null) { null };
+        case (?entry) {
+          for (chunk in entry.chunks.values()) {
+            if (chunk.size() == 0) return ?false;
+          };
+          ?true;
+        };
+      };
+    };
+
     /// List all entries (metadata only), sorted by createdAt ascending.
     public func list() : [Types.ContentEntry] {
       let items = Iter.toArray(

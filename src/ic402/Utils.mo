@@ -70,6 +70,8 @@ module {
 
   /// Escape special characters for embedding in a JSON string value.
   /// Prevents JSON injection when user-controlled data is interpolated into JSON.
+  /// `"` `\` and every control character U+0000–U+001F are escaped (RFC 8259 §7 forbids the
+  /// controls raw): \n \r \t keep their short forms, the others become \u00XX (lowercase hex).
   public func escapeJsonString(s : Text) : Text {
     var result = "";
     for (c in s.chars()) {
@@ -84,6 +86,8 @@ module {
         result #= "\\r";
       } else if (n == 9) { // tab
         result #= "\\t";
+      } else if (n < 32) { // any other control character
+        result #= "\\u00" # hexNoPrefix([Nat8.fromNat(Nat32.toNat(n))]);
       } else {
         result #= Char.toText(c);
       };
@@ -91,29 +95,50 @@ module {
     result;
   };
 
+  // JSON's insignificant whitespace (RFC 8259 §2): space, tab, line feed, carriage return.
+  func isJsonWs(c : Char) : Bool { c == ' ' or c == '\t' or c == '\n' or c == '\r' };
+
+  func skipJsonWs(chars : [Char], from : Nat) : Nat {
+    var p = from;
+    while (p < chars.size() and isJsonWs(chars[p])) { p += 1 };
+    p;
+  };
+
+  // If `key` (the field name WITH its quotes) starts at chars[i] and is followed by `:` —
+  // optionally with JSON whitespace before the colon — the index just past the colon; else null.
+  // Only whitespace is tolerated: any other character between the key and the colon is no match.
+  func keyColonEnd(chars : [Char], key : [Char], i : Nat) : ?Nat {
+    if (i + key.size() > chars.size()) return null;
+    var j = 0;
+    while (j < key.size()) {
+      if (chars[i + j] != key[j]) return null;
+      j += 1;
+    };
+    let p = skipJsonWs(chars, i + key.size());
+    if (p < chars.size() and chars[p] == ':') { ?(p + 1) } else { null };
+  };
+
   /// Extract a JSON string field value by key.
   /// Handles escaped quotes inside values.
+  ///
+  /// A flat scan, not a JSON parser: the FIRST `"field"` followed by `:` and a string value wins,
+  /// at any nesting depth. JSON whitespace may surround the colon (`"field" : "v"`; Python's
+  /// json.dumps writes `"field": "v"`); any other character there is no match.
   public func extractJsonField(json : Text, field : Text) : Text {
-    let needle = "\"" # field # "\":\"";
     let chars = Iter.toArray(json.chars());
-    let needleChars = Iter.toArray(needle.chars());
+    let key = Iter.toArray(("\"" # field # "\"").chars());
     let len = chars.size();
-    let needleLen = needleChars.size();
 
     var i = 0;
-    while (i + needleLen < len) {
-      var match = true;
-      var j = 0;
-      while (j < needleLen) {
-        if (chars[i + j] != needleChars[j]) {
-          match := false;
-          j := needleLen;
-        } else {
-          j += 1;
-        };
+    while (i < len) {
+      // The value's opening quote, after the colon and any whitespace. As with the old
+      // `"field":"` needle, it must not be the last character.
+      let quote = switch (keyColonEnd(chars, key, i)) {
+        case (?afterColon) { skipJsonWs(chars, afterColon) };
+        case (null) { len };
       };
-      if (match) {
-        let start = i + needleLen;
+      if (quote + 1 < len and chars[quote] == '\"') {
+        let start = quote + 1;
         var end = start;
         // Handle escaped quotes: skip \" sequences
         while (end < len and chars[end] != '\"') {
@@ -148,34 +173,33 @@ module {
 
   /// Extract a JSON numeric field value by key (unquoted number).
   /// Handles both "field":123 and "field":"123" (quoted number string).
+  /// The FIRST `"field"` followed by `:` wins (0 if its value has no leading digits); JSON
+  /// whitespace may surround the colon, as in extractJsonField.
   public func extractJsonNatField(json : Text, field : Text) : Nat {
-    // Try unquoted: "field":123
-    let needle1 = "\"" # field # "\":";
     let chars = Iter.toArray(json.chars());
-    let needleChars = Iter.toArray(needle1.chars());
+    let key = Iter.toArray(("\"" # field # "\"").chars());
     let len = chars.size();
 
     var i = 0;
-    while (i + needleChars.size() < len) {
-      var match = true;
-      var j = 0;
-      while (j < needleChars.size()) {
-        if (chars[i + j] != needleChars[j]) { match := false; j := needleChars.size() }
-        else { j += 1 };
-      };
-      if (match) {
-        let start = i + needleChars.size();
-        // Skip whitespace and opening quote if present
-        var pos = start;
-        while (pos < len and (chars[pos] == ' ' or chars[pos] == '\"')) { pos += 1 };
-        // Parse digits
-        var result : Nat = 0;
-        while (pos < len) {
-          let d = Nat32.toNat(Char.toNat32(chars[pos]));
-          if (d >= 48 and d <= 57) { result := result * 10 + (d - 48); pos += 1 }
-          else { return result };
+    while (i < len) {
+      switch (keyColonEnd(chars, key, i)) {
+        // As with the old `"field":` needle, the colon must not be the last character.
+        case (?start) {
+          if (start < len) {
+            // Skip whitespace and opening quote if present
+            var pos = start;
+            while (pos < len and (isJsonWs(chars[pos]) or chars[pos] == '\"')) { pos += 1 };
+            // Parse digits
+            var result : Nat = 0;
+            while (pos < len) {
+              let d = Nat32.toNat(Char.toNat32(chars[pos]));
+              if (d >= 48 and d <= 57) { result := result * 10 + (d - 48); pos += 1 }
+              else { return result };
+            };
+            return result;
+          };
         };
-        return result;
+        case (null) {};
       };
       i += 1;
     };
