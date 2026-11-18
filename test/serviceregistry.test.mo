@@ -1011,9 +1011,11 @@ suite("ServiceRegistry", func() {
       assert false; [];
     };
 
+    // 2.22.0: the job's service is BuyerConfirm — buyer confirm/dispute apply to no other kind.
     func loadJob(reg : ServiceRegistry.ServiceRegistry, buyer : Text) {
       reg.loadStable({
-        services = []; serviceCounter = 0; jobCounter = 0; evmRails = null; operatorPayouts = null;
+        services = [("svc-1", { baseDef(operatorPrincipal) with id = "svc-1"; verification = #BuyerConfirm({ disputeWindowSeconds = 0 }) })];
+        serviceCounter = 1; jobCounter = 0; evmRails = null; operatorPayouts = null;
         jobs = [("job-1", makeEvmJob("job-1", buyer, #Submitted))];
       });
     };

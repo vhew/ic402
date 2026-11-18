@@ -285,4 +285,13 @@ await suite("ServiceRegistry expiry timer", func() : async () {
     switch (reg.setExpiryIntervalSeconds<system>(120)) { case (#ok) {}; case (#err(_)) { assert false } };
     assert not reg.expiryTimerArmed();
   });
+
+  await test("setting the idle poll arms nothing on a registry whose sweep never started (2.22.0)", func() : async () {
+    // 2.22.0: a non-zero poll set after 0 restarts a sweep the 0 disarmed — that arm cannot run
+    // here (no timer API). What can: the restart is only from 0, so configuring a fresh registry
+    // still starts nothing. Mutation: restart whenever the timer is unarmed — this test traps.
+    let reg = mkRegistry();
+    switch (reg.setExpiryIdlePollSeconds<system>(900)) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert not reg.expiryTimerArmed();
+  });
 });

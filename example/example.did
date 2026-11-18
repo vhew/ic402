@@ -548,6 +548,11 @@ service : {
                        ok: text;
                      });
   requestSession: () -> (SessionIntent);
+  resolveDispute: (jobId: text, refundBuyer: bool) ->
+   (variant {
+      err: text;
+      ok;
+    });
   resolveJob: (jobId: text, terminal: JobStatus) -> (variant {
                                                        err: text;
                                                        ok;
