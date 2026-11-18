@@ -135,6 +135,14 @@ module {
     nothingMoved and (not wasExpired or EvmSender.isSendBusy(err));
   };
 
+  /// 2.22.0: the token an ICP session opened with `intentToken` (resolved to `ledger`) stores: "icp:*"
+  /// as given, anything else as the ledger's principal text. A token matched by its configured
+  /// SYMBOL must not be stored as the symbol: a close reads a stored symbol as a pre-2.22.0 session,
+  /// whose deposit is on tokens[0] (Utils.findSessionLedger).
+  public func storedSessionToken(intentToken : Text, ledger : Principal) : Text {
+    if (Text.startsWith(intentToken, #text "icp:")) { intentToken } else { Principal.toText(ledger) };
+  };
+
   /// Session lifecycle manager: escrow deposits, cumulative vouchers, expiry, and close/refund.
   public class Sessions(
     canisterPrincipal : Principal,
@@ -256,6 +264,13 @@ module {
       Utils.findLedger(config.tokens, identifier);
     };
 
+    // The ledger holding a stored ICP session's escrow (Utils.findSessionLedger: legacy tokens that
+    // are not a principal resolve to tokens[0], as 2.21.0 opened them; an unconfigured principal fails
+    // closed). For close, reconcileSession and recoverEscrow — never for a new open.
+    func findSessionLedger(stored : Text) : ?Types.TokenConfig {
+      Utils.findSessionLedger(config.tokens, stored);
+    };
+
     func recipientAccount() : Types.Account {
       { owner = config.recipient.owner; subaccount = config.recipient.subaccount };
     };
@@ -330,6 +345,9 @@ module {
     /// is refused with #settlementFailed and nothing moves. If the deposit call itself is then
     /// rejected with an unknown outcome, returns #err(#settlementPending(...)) and the session
     /// EXISTS, parked #closing with nothing consumed, for the controller's reconcileSession.
+    /// ICP (2.22.0): intent.token must be a configured ledger's principal text, its symbol, or
+    /// "icp:*" (anything else is #tokenNotAccepted, nothing moved); a symbol is stored, and shown on
+    /// the close receipt, as that ledger's principal text.
     /// A per-caller open lock (auto-expiring after 5 min) rejects concurrent opens with
     /// #policyDenied.
     public func openSession(
@@ -392,9 +410,8 @@ module {
       let sessionId = nextSessionId();
       let subaccount = escrowManager.deriveSubaccount(sessionId);
 
-      // Find ledger. 2.22.0: the intent's token must resolve, no fallback to tokens[0]. A close and
-      // reconcileSession resolve the stored token the same way and refuse when it does not, so a
-      // session opened on a fallback ledger could never close.
+      // Find ledger. 2.22.0: the intent's token must resolve (principal text, a configured symbol, or
+      // "icp:*"), no fallback to tokens[0] for anything else.
       let tokenConfig = switch (findLedger(intent.token)) {
         case (?tc) { tc };
         case (null) {
@@ -405,6 +422,10 @@ module {
       };
 
       let ledger : Types.LedgerActor = actor (Principal.toText(tokenConfig.ledger));
+      // 2.22.0: what the session stores as its token (storedSessionToken): a symbol becomes its
+      // ledger's principal text. Nothing signs over the token; the close receipt's `token` is this
+      // text (a ledger principal, as on an ICP charge receipt).
+      let sessionToken = storedSessionToken(intent.token, tokenConfig.ledger);
 
       // M7/SEC-0: validate the Ed25519 session public key BEFORE pulling the deposit on-chain,
       // so a missing/malformed key fails cheaply without moving funds. The old placement
@@ -450,7 +471,7 @@ module {
           var lastCumulativeAmount = 0;
           subaccount;
           network = intent.network;
-          token = intent.token;
+          token = sessionToken;
           recipient = intent.recipient;
           autoClose = clientConfig.autoClose;
           maxDuration = effectivePolicy.maxSessionDuration;
@@ -1029,8 +1050,10 @@ module {
     /// session is still marked #closed and
     /// #settlementFailed("Refund leg failed/rejected (session marked #closed): …") is returned —
     /// the remainder stays in the escrow subaccount and is recoverable via recoverEscrow.
-    /// 2.22.0: a session token that no longer resolves to a configured ledger is refused before
+    /// 2.22.0: a session token naming a ledger that is no longer configured is refused before
     /// anything moves (#settlementFailed; the session is left #open), never closed on tokens[0].
+    /// Any other unconfigured token (a pre-2.22.0 symbol or other text) closes on tokens[0], where
+    /// 2.21.0 opened it (Utils.findSessionLedger).
     ///
     /// EVM: finalizes ONLY on confirmed transfers. #settlementPending → the session is PARKED
     /// in #closing with the tx hash recorded; recover with reconcileSession (confirm-only —
@@ -1064,11 +1087,11 @@ module {
 
     // The ICP leg of closeSessionInternal, run with the session marked in icpClosesInFlight.
     func closeIcpSession(session : Types.InternalSessionState) : async* Types.PaymentResult {
-      // Find the session's ledger. 2.22.0: no fallback to config.tokens[0] — after a token config
-      // change that is a different ledger than the one holding this escrow. Refused before anything
-      // moves; the session is left #open (as a failed fee query leaves it) for a close once the
-      // token is configured again.
-      let tokenConfig = switch (findLedger(session.token)) {
+      // Find the session's ledger (findSessionLedger). 2.22.0: a principal text that is no longer a
+      // configured ledger is refused, not closed on tokens[0] — after a token config change that is
+      // not the ledger holding this escrow. Refused before anything moves; the session is left #open
+      // (as a failed fee query leaves it) for a close once the ledger is configured again.
+      let tokenConfig = switch (findSessionLedger(session.token)) {
         case (?tc) { tc };
         case (null) {
           session.status := #open;
@@ -1511,7 +1534,7 @@ module {
     /// "did not land", the second settle is paid out of the transfer, not the payer's share.
     /// Refused while a close of the session is in flight (2.22.0: EVM too). A failed balance or fee
     /// query leaves the session #closing; call again once the ledger is reachable. 2.22.0: so does a
-    /// session token that no longer resolves to a configured ledger (no fallback to tokens[0]).
+    /// session token naming a ledger that is no longer configured (Utils.findSessionLedger).
     public func reconcileSession(sessionId : Text) : async { #ok : Text; #err : Text } {
       let session = switch (sessions.get(sessionId)) { case (null) { return #err("Session not found") }; case (?s) { s } };
       if (session.status != #closing) return #err("Session is not parked in #closing (status: " # debug_show (session.status) # ")");
@@ -1545,9 +1568,10 @@ module {
     func reconcileIcpClose(session : Types.InternalSessionState) : async* { #ok : Text; #err : Text } {
       let id = session.id;
       if (icpClosesInFlight.get(id) != null) return #err("A close of this session is still in flight — call again once it returns");
-      // 2.22.0: the session's own ledger or nothing. A fallback to tokens[0] after a token config
-      // change read another ledger's balance (0) and closed the session as "settle landed".
-      let tokenConfig = switch (findLedger(session.token)) {
+      // 2.22.0: the session's own ledger (findSessionLedger) or nothing. A fallback to tokens[0] for a
+      // ledger no longer configured read another ledger's balance (0) and closed the session as
+      // "settle landed".
+      let tokenConfig = switch (findSessionLedger(session.token)) {
         case (?tc) { tc };
         case (null) { return #err("Session token " # session.token # " does not resolve to a configured ledger; the session stays #closing — configure that ledger again (its principal text) and call again") };
       };
@@ -1868,10 +1892,10 @@ module {
             };
           };
           if (refundOwed.get(sessionId) == null) {
-            return #err("Nothing is owed on this session: its close left no remainder in escrow (or it has been recovered already). EVM sessions are never recoverable here.");
+            return #err("Nothing is owed on this session: its close left no remainder in escrow, or it has been recovered already (EVM sessions are never recoverable here). If the canister was upgraded without persisting its owed refunds (refundOwedToStable), the entry was lost: the controller restores it with loadRefundOwed.");
           };
-          // 2.22.0: the session's own ledger, never a caller-chosen canister.
-          let tokenConfig = switch (findLedger(session.token)) {
+          // 2.22.0: the session's own ledger (findSessionLedger), never a caller-chosen canister.
+          let tokenConfig = switch (findSessionLedger(session.token)) {
             case (?tc) { tc };
             case (null) {
               return #err("Session token " # session.token # " does not resolve to a configured ledger — configure that ledger again (its principal text) and retry");
@@ -1903,6 +1927,13 @@ module {
       let owed = switch (refundOwed.get(session.id)) {
         case (?o) { o };
         case (null) { return #err("Nothing is owed on this session any more (the entry was cleared)") };
+      };
+      // 2.22.0: an entry of one fee or less can never move anything (a forced session's, written
+      // without the fee, or one the fee rose past). Clear it, so it stops being reported and stops
+      // keeping the record from the GC.
+      if (owed.escrow <= fee) {
+        refundOwed.delete(session.id);
+        return #err("Nothing left to recover: the owed remainder (" # Nat.toText(owed.escrow) # ") does not exceed the ledger fee (" # Nat.toText(fee) # "); the entry is cleared.");
       };
       // H-5: Cap recovery amount to unconsumed portion, and (2.22.0) to what the entry still owes
       let maxRecoverable = Nat.min(Utils.satSub(session.deposited, session.consumed), Utils.satSub(owed.escrow, fee));

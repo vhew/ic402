@@ -188,12 +188,27 @@ await suite("2.22.0: recoverEscrow is bounded by the refundOwed entry", func() :
 
   await test("a session with no entry (a clean close) has nothing to recover", func() : async () {
     // Mutation: drop the entry check at the top of recoverEscrow — the call goes on to the ledger
-    // (a fee query) before it is refused, with a different reason.
+    // (a fee query) before it is refused, with a different reason. The refusal also names the
+    // lost-entry case (an upgrade that did not persist the entries) and its remedy.
     await ledger.script(0, 0, 0);
     let m = mk([stable_("sess-1", #open, 7, null)]);
     switch (await m.closeSessionInternal("sess-1")) { case (#ok(_)) {}; case (_) { assert false } };
     await ledger.script(0, 0, 0);
-    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 1), "Nothing is owed on this session: its close");
+    let r = await m.recoverEscrow(payerP, ledger, "sess-1", 1);
+    refusedWith(r, "Nothing is owed on this session: its close");
+    switch (r) { case (#err(msg)) { assert Text.contains(msg, #text "loadRefundOwed") }; case (#ok(_)) {} };
+    assert (await ledger.transferCalls()) == 0;
+  });
+
+  await test("an entry of one fee or less is cleared by the recovery that finds it, which moves nothing", func() : async () {
+    // Mutation: refuse without deleting the entry — it can never move anything (5_000 is below the
+    // 10_000 fee), so it stays counted in refundOwed and pins its record from the GC for good.
+    let m = mk([{ stable_("sess-1", #closing, 7, null) with consumed = 45_000; remaining = 5_000 }]);
+    switch (m.forceResolveSession("sess-1")) { case (#ok) {}; case (#err(_)) { assert false } };
+    assert m.refundOwedToStable() == [{ sessionId = "sess-1"; escrow = 5_000; fee = 0 }];
+    await ledger.script(0, 0, 0);
+    refusedWith(await m.recoverEscrow(payerP, ledger, "sess-1", 5_000), "Nothing left to recover");
+    assert owed(m) == 0;
     assert (await ledger.transferCalls()) == 0;
   });
 

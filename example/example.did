@@ -371,6 +371,10 @@ service : {
                                 err: text;
                                 ok;
                               });
+  clearRefundOwed: (sessionId: text) -> (variant {
+                                           err: text;
+                                           ok;
+                                         });
   confirmJob: (jobId: text) -> (variant {
                                   err: text;
                                   ok;
@@ -540,6 +544,11 @@ service : {
                                             err: text;
                                             ok: text;
                                           });
+  recoverEscrow: (sessionId: text, amount: nat) ->
+   (variant {
+      err: text;
+      ok: nat;
+    });
   registerService: (name: text, description: text, serviceType: ServiceType,
    pricing: PricingScheme, verificationMethod: text, verifierCanisterId:
    opt text, verificationKey: opt blob, delivery: ServiceDeliveryMethod,
