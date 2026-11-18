@@ -12,6 +12,9 @@ import Nat "mo:base/Nat";
 import Buffer "mo:base/Buffer";
 import Nat8 "mo:base/Nat8";
 import Error "mo:base/Error";
+import HashMap "mo:base/HashMap";
+import Text "mo:base/Text";
+import Iter "mo:base/Iter";
 import Cycles "mo:base/ExperimentalCycles";
 import IC "mo:ic";
 import Call "mo:ic/Call";
@@ -31,10 +34,12 @@ module {
   /// accepted a tx the agreeing two refused. A consistent RPC #Err needs every provider to agree,
   /// but it still comes after dispatch (an outcall timeout may have delivered the tx). Before
   /// 2.21.1 a consistent NonceTooLow or RPC error was #err, so callers rolled back and sent again —
-  /// a second transfer when the first had landed. Residual: InsufficientFunds stays #err (an
+  /// a second transfer when the first had landed. Residual: InsufficientFunds stays #err here (an
   /// unfunded gas account must not park every send), although under the threshold a third
-  /// provider that already saw a gas top-up could have accepted the tx; the full fix, re-sending
-  /// the same signed bytes, is planned.
+  /// provider that already saw a gas top-up could have accepted the tx. 2.22.0: sendTransaction
+  /// re-reads the pending nonce after an InsufficientFunds answer and reports #maybeSent when it
+  /// moved past the tx's nonce; a tx held by a provider whose view the agreeing providers do not
+  /// share yet is still missed. The full fix, re-sending the same signed bytes, is planned.
   /// `broadcastTxHash` is the locally derived hash of the signed raw tx, always pollable.
   public func classifySend(r : EvmRpc.MultiSendRawTransactionResult, broadcastTxHash : Text) : SendOutcome {
     switch (r) {
@@ -54,6 +59,143 @@ module {
       case (#Consistent(#Err(e))) { #maybeSent({ txHash = broadcastTxHash; reason = "RPC error after dispatch (may have broadcast): " # EvmRpc.rpcErrorToText(e) }) };
       // Providers disagree — one may have accepted the tx into its mempool.
       case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
+    };
+  };
+
+  /// 2.22.0: the single-flight lock's refusal, verbatim. Named so a caller can tell this
+  /// transient, nothing-broadcast refusal from the other pre-broadcast errors (`isSendBusy`).
+  public let SEND_BUSY : Text = "Another outbound EVM transaction is in progress — sends are serialized to keep the nonce consistent. Nothing was broadcast; retry in a few seconds.";
+
+  /// 2.22.0: true when a send's #err is the busy single-flight lock (SEND_BUSY), which clears by
+  /// itself once the send holding the lock returns.
+  public func isSendBusy(err : Text) : Bool { err == SEND_BUSY };
+
+  /// 2.22.0 (F1): whether a tx signed with account nonce `txNonce` can still land, given the
+  /// account's mined-transaction count `latestNonce` (eth_getTransactionCount at #Latest). Once
+  /// the count passes the tx's nonce, a transaction with that nonce has been mined; if no receipt
+  /// exists for this tx's hash, it was another one, and this tx can never be included.
+  public func txNonceConsumed(txNonce : Nat, latestNonce : Nat) : Bool { latestNonce > txNonce };
+
+  // ── EIP-3009 authorizationState (2.22.0, E7) ──
+
+  /// What `authorizationState(authorizer, nonce)` says about an EIP-3009 authorization: #used
+  /// (executed by some transaction, or cancelled by the payer — the token does not say which),
+  /// #unused, or #unknown when the read failed or was ambiguous.
+  public type AuthorizationState = { #used; #unused; #unknown : Text };
+
+  /// Calldata for the EIP-3009 view `authorizationState(address authorizer, bytes32 nonce)`.
+  /// `authorizer` must be 20 bytes and `authNonce` 32 (callers check; the ABI encoder traps).
+  public func buildAuthorizationStateCalldata(authorizer : [Nat8], authNonce : [Nat8]) : [Nat8] {
+    EvmUtils.abiEncodeFunctionCall(
+      EvmUtils.functionSelector("authorizationState(address,bytes32)"),
+      [#static_(EvmUtils.natToBytes(EvmUtils.bytesToNat(authorizer), 32)), #static_(authNonce)],
+    );
+  };
+
+  /// Decode return data holding exactly one ABI `bool` word. null on anything else.
+  public func decodeAbiBool(hex : Text) : ?Bool {
+    let bytes = EvmUtils.hexToBytes(hex);
+    if (bytes.size() != 32) return null;
+    switch (EvmUtils.bytesToNat(bytes)) {
+      case (0) { ?false };
+      case (1) { ?true };
+      case (_) { null };
+    };
+  };
+
+  /// Classify an eth_call of authorizationState. Only a consistent, well-formed answer counts.
+  public func classifyAuthorizationState(r : EvmRpc.MultiCallResult) : AuthorizationState {
+    switch (r) {
+      case (#Consistent(#Ok(hex))) {
+        switch (decodeAbiBool(hex)) {
+          case (?true) { #used };
+          case (?false) { #unused };
+          case (null) { #unknown("authorizationState returned an unexpected value: " # hex) };
+        };
+      };
+      case (#Consistent(#Err(e))) { #unknown("authorizationState call failed: " # EvmRpc.rpcErrorToText(e)) };
+      case (#Inconsistent(_)) { #unknown("authorizationState: providers disagree") };
+    };
+  };
+
+  // ── Broadcast EIP-3009 authorizations (2.22.0, E5) ──
+
+  /// 2.22.0 (E5): the answer to a settle (Gateway) or session open (Sessions) whose EIP-3009 authorization this
+  /// canister has already broadcast. Pending, not failed: the earlier broadcast may have paid.
+  public func alreadyBroadcastText(txHash : ?Text) : Text {
+    let tx = switch (txHash) { case (?h) { " in tx " # h }; case (null) { " (that broadcast is still in flight)" } };
+    "This EIP-3009 authorization was already broadcast by this canister" # tx
+    # " — it is not broadcast again. Do NOT sign a new payment until that tx resolves: re-poll"
+    # " confirmEvmTransaction with its hash. If it reverted and authorizationState shows the"
+    # " authorization unused on chain, sign a fresh one.";
+  };
+
+
+  /// The EIP-3009 authorizations a sender has broadcast, so the same one is never broadcast
+  /// twice. An authorization is single-use on chain, so a second broadcast can only revert — and
+  /// the canister pays its gas and holds the single-flight send lock while it does. Before 2.22.0
+  /// anyone holding a payer's authorization (a replay of a settled one, or a payer's own retry)
+  /// could make the canister broadcast it again.
+  ///
+  /// Keyed by (chainId, token, from, nonce) — authorizationState is per token contract — on
+  /// decoded bytes, so hex case and the 0x prefix do not split one authorization into two.
+  /// An entry is claimed synchronously before the broadcast's first await (so two concurrent
+  /// settles of one authorization cannot both send), released when the send fails before
+  /// broadcast, and otherwise kept until the authorization's validBefore, capped at 24 hours;
+  /// the chain refuses it after validBefore anyway. At most 10_000 entries: when full, expired
+  /// entries are dropped first, then the one expiring soonest, so an attacker filling the set
+  /// (each entry costs the canister a broadcast) can at worst re-enable one replay per entry
+  /// evicted. Transient: an upgrade forgets it, which re-allows one replay per authorization.
+  public class AuthorizationGuard() {
+    let MAX_ENTRIES : Nat = 10_000;
+    let MAX_TTL_SECONDS : Nat = 86_400;
+    let entries = HashMap.HashMap<Text, { expiresAt : Nat; txHash : ?Text }>(16, Text.equal, Text.hash);
+
+    /// The guard key of an authorization.
+    public func key(chainId : Nat, token : Text, from : [Nat8], authNonce : [Nat8]) : Text {
+      Nat.toText(chainId) # ":" # EvmUtils.bytesToHex(EvmUtils.hexToBytes(token)) # ":" # EvmUtils.bytesToHex(from) # ":" # EvmUtils.bytesToHex(authNonce);
+    };
+
+    /// Claim `k` for a broadcast. #seen(txHash) when it is already claimed and not expired —
+    /// txHash is null while that broadcast is still in flight.
+    public func claim(k : Text, validBefore : Nat, nowSeconds : Nat) : { #ok; #seen : ?Text } {
+      switch (entries.get(k)) {
+        case (?e) { if (e.expiresAt > nowSeconds) { return #seen(e.txHash) } };
+        case (null) {};
+      };
+      if (entries.size() >= MAX_ENTRIES) { prune(nowSeconds) };
+      entries.put(k, { expiresAt = Nat.min(validBefore, nowSeconds + MAX_TTL_SECONDS); txHash = null });
+      #ok;
+    };
+
+    /// Forget `k`: its send failed before anything was broadcast, so it may be sent again.
+    public func release(k : Text) { entries.delete(k) };
+
+    /// Record the hash of the tx that broadcast `k`, so a refused replay can name it.
+    public func noteTx(k : Text, txHash : Text) {
+      switch (entries.get(k)) {
+        case (?e) { entries.put(k, { e with txHash = ?txHash }) };
+        case (null) {};
+      };
+    };
+
+    /// Number of remembered authorizations (expired ones included until pruned).
+    public func size() : Nat { entries.size() };
+
+    func prune(nowSeconds : Nat) {
+      for ((k, e) in Iter.toArray(entries.entries()).values()) {
+        if (e.expiresAt <= nowSeconds) { entries.delete(k) };
+      };
+      if (entries.size() >= MAX_ENTRIES) {
+        var soonest : ?(Text, Nat) = null;
+        for ((k, e) in entries.entries()) {
+          switch (soonest) {
+            case (?(_, at)) { if (e.expiresAt < at) { soonest := ?(k, e.expiresAt) } };
+            case (null) { soonest := ?(k, e.expiresAt) };
+          };
+        };
+        switch (soonest) { case (?(k, _)) { entries.delete(k) }; case (null) {} };
+      };
     };
   };
 
@@ -152,6 +294,39 @@ module {
     // H-1: Serialize EVM transactions to prevent nonce desync on concurrent calls.
     var txInProgress : Bool = false;
 
+    /// 2.22.0 (E5): the EIP-3009 authorizations this sender has broadcast (see AuthorizationGuard).
+    /// Gateway.settle and the session-open deposit claim here before broadcasting; a direct caller
+    /// of executeTransferWithAuthorization is not checked.
+    public let broadcastAuthorizations : AuthorizationGuard = AuthorizationGuard();
+
+    // 2.22.0 (F1): the account nonce each tx this sender signed was sent with, by lower-case tx
+    // hash, so reconcileTransaction can tell a tx that can never land from one still pending.
+    // Bounded: the oldest of BROADCAST_NONCE_CAP entries is overwritten. Transient — after an
+    // upgrade (or a setEvmDerivationPath rebuild) reconcile falls back to "still pending".
+    let BROADCAST_NONCE_CAP : Nat = 10_000;
+    let broadcastNonces = HashMap.HashMap<Text, { chainId : Nat; nonce : Nat }>(16, Text.equal, Text.hash);
+    var broadcastRing : [var Text] = [var];
+    var broadcastRingNext : Nat = 0;
+
+    func recordBroadcastNonce(txHash : Text, chainId : Nat, nonce : Nat) {
+      let k = Text.toLowercase(txHash);
+      if (broadcastNonces.get(k) != null) { broadcastNonces.put(k, { chainId; nonce }); return };
+      if (broadcastRing.size() == 0) { broadcastRing := Array.init<Text>(BROADCAST_NONCE_CAP, "") };
+      let old = broadcastRing[broadcastRingNext];
+      if (old != "") { broadcastNonces.delete(old) };
+      broadcastRing[broadcastRingNext] := k;
+      broadcastRingNext := (broadcastRingNext + 1) % BROADCAST_NONCE_CAP;
+      broadcastNonces.put(k, { chainId; nonce });
+    };
+
+    /// 2.22.0: the account nonce this sender signed `txHash` with on `chainId`, if it remembers.
+    public func broadcastNonce(chainId : Nat, txHash : Text) : ?Nat {
+      switch (broadcastNonces.get(Text.toLowercase(txHash))) {
+        case (?e) { if (e.chainId == chainId) { ?e.nonce } else { null } };
+        case (null) { null };
+      };
+    };
+
     // S10: require multi-provider AGREEMENT on every outbound RPC, so a single compromised
     // or stale provider can't forge a result — e.g. a fake "confirmed" receipt that would
     // mint a paid receipt / credit an escrow. `total = null` queries all configured providers;
@@ -226,7 +401,7 @@ module {
       };
       // H-1: Reject concurrent transactions to prevent nonce desync.
       if (txInProgress) {
-        return #err("Another outbound EVM transaction is in progress — sends are serialized to keep the nonce consistent. Nothing was broadcast; retry in a few seconds.");
+        return #err(SEND_BUSY);
       };
       txInProgress := true;
       // B2: #err means the tx was definitely NOT broadcast (safe to roll back + retry);
@@ -308,6 +483,7 @@ module {
         // string in the hash position: callers park the returned value and poll
         // eth_getTransactionReceipt with it, and a message string can never resolve.
         let broadcastTxHash = EvmAddress.toHex(EvmAddress.keccak256(rawTxBytes));
+        recordBroadcastNonce(broadcastTxHash, chainId, nonce);
 
         // B2: isolate the broadcast so a network error AFTER dispatch (which may have
         // reached a provider's mempool) is reported as #maybeSent, not #err.
@@ -317,7 +493,33 @@ module {
           txInProgress := false;
           return #maybeSent({ txHash = broadcastTxHash; reason = "EVM send failed after dispatch (may have broadcast): " # Error.message(e) });
         };
-        classifySend(sendResult, broadcastTxHash);
+        let outcome = classifySend(sendResult, broadcastTxHash);
+        switch (outcome) {
+          case (#ok(h)) { if (h != broadcastTxHash) { recordBroadcastNonce(h, chainId, nonce) } };
+          case (_) {};
+        };
+        switch (sendResult) {
+          case (#Consistent(#Ok(#InsufficientFunds))) {
+            // 2.22.0 (F1): under the 2-of-N threshold a provider that saw a gas top-up may have
+            // accepted this tx while the agreeing two refused it. Re-read the pending nonce: if it
+            // moved past this tx's nonce, something holds that nonce — treat the tx as maybe sent
+            // (confirm, never re-send) rather than letting the caller roll back and send again.
+            let moved = try {
+              switch (
+                await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
+                  services, RPC_CONFIG, { address = senderAddr; block = #Pending },
+                )
+              ) {
+                case (#Consistent(#Ok(p))) { p > nonce };
+                case (_) { false };
+              };
+            } catch (_) { false };
+            if (moved) {
+              #maybeSent({ txHash = broadcastTxHash; reason = "Insufficient ETH for gas was reported, but the account's pending nonce has since moved past this tx's nonce — a provider may have accepted it; confirming instead of re-sending" });
+            } else { outcome };
+          };
+          case (_) { outcome };
+        };
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
         #err("EVM tx failed before broadcast: " # Error.message(e));
@@ -347,6 +549,10 @@ module {
       if (recipientBytes.size() != 20) {
         return #err("Invalid recipient address (expected a 20-byte / 40-hex-char address): " # recipientAddress);
       };
+      // 2.22.0: the ABI encoder truncates to 32 bytes; an amount past uint256 would send a different one.
+      if (not EvmUtils.isUint256(amount)) {
+        return #err("Amount does not fit uint256; nothing was broadcast");
+      };
       let calldata = EvmUtils.abiEncodeFunctionCall(
         selector,
         [
@@ -354,7 +560,8 @@ module {
           #static_(EvmUtils.abiEncodeUint256(amount)),
         ],
       );
-      await sendTransaction(chainId, tokenAddress, calldata, 65_000);
+      // 2.22.0: 100_000, was 65_000 — see EvmUtils.ERC20_TRANSFER_GAS.
+      await sendTransaction(chainId, tokenAddress, calldata, EvmUtils.ERC20_TRANSFER_GAS);
     };
 
     /// Send an ERC-20 transfer AND confirm it mined (status==1) before returning a
@@ -377,8 +584,16 @@ module {
     ) : async { #confirmed : Text; #reverted : Text; #pending : Text; #err : Text } {
       switch (await sendErc20Transfer(chainId, tokenAddress, recipientAddress, amount)) {
         case (#err(msg)) { #err(msg) }; // definitely not broadcast — safe to roll back
-        // H2: may have broadcast — park the POLLABLE canonical hash (not a message), do NOT re-send.
-        case (#maybeSent(m)) { #pending(m.txHash) };
+        // H2: may have broadcast — never re-send. 2.22.0 (F1): poll the locally derived hash with
+        // the same budget before parking, so a tx that did land (a NonceTooLow for this very tx,
+        // say) finalizes now instead of waiting for a manual reconcile.
+        case (#maybeSent(m)) {
+          switch (await confirmTransaction(chainId, m.txHash, maxPolls)) {
+            case (#confirmed) { #confirmed(m.txHash) };
+            case (#reverted) { #reverted(m.txHash) };
+            case (_) { #pending(m.txHash) };
+          };
+        };
         case (#ok(txHash)) {
           switch (await confirmTransaction(chainId, txHash, maxPolls)) {
             case (#confirmed) { #confirmed(txHash) };
@@ -408,6 +623,10 @@ module {
       r : [Nat8],          // 32 bytes
       s : [Nat8],          // 32 bytes
     ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
+      // 2.22.0: refuse fields the calldata encoder would truncate (or trap on) — nothing is sent.
+      if (not EvmUtils.eip3009FieldsFit(value, validAfter, validBefore, authNonce) or from.size() != 20 or to.size() != 20 or r.size() != 32 or s.size() != 32) {
+        return #err("EIP-3009 authorization fields do not fit their on-chain types; nothing was broadcast");
+      };
       // Build calldata via the pure module-level encoder, which denormalizes v (0/1 → 27/28)
       // for the on-chain ecrecover. Kept out of this async fn so it is unit-testable.
       let calldata = buildTransferWithAuthorizationCalldata(
@@ -534,6 +753,83 @@ module {
         };
       };
       #pending;
+    };
+
+    /// 2.22.0 (F1): confirm-only reconcile of a tx this sender broadcast. As confirmTransaction,
+    /// plus #dropped: no receipt, and the account's mined-transaction count (#Latest) has passed
+    /// the nonce the tx was signed with — another transaction took that nonce, so this one can
+    /// never land and moved no funds. Checked in that order and the receipt polled once more after
+    /// the count, so a tx mined in between is not reported dropped. A lagging provider pair can
+    /// still answer "no receipt" for a mined tx, so callers REPORT #dropped and leave the decision
+    /// to an operator. Without a remembered nonce (another instance's tx, or after an upgrade) the
+    /// answer stays #pending. Never broadcasts.
+    public func reconcileTransaction(
+      chainId : Nat,
+      txHash : Text,
+      maxPolls : Nat,
+    ) : async { #confirmed; #reverted; #pending; #dropped : Text; #err : Text } {
+      switch (await confirmTransaction(chainId, txHash, maxPolls)) {
+        case (#confirmed) { #confirmed };
+        case (#reverted) { #reverted };
+        case (#err(e)) { #err(e) };
+        case (#pending) {
+          let n = switch (broadcastNonce(chainId, txHash)) { case (?n) { n }; case (null) { return #pending } };
+          let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+            case (?r) { r };
+            case (null) { return #pending };
+          };
+          let latest = try {
+            switch (
+              await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
+                services, RPC_CONFIG, { address = await getEvmAddress(); block = #Latest },
+              )
+            ) {
+              case (#Consistent(#Ok(c))) { c };
+              case (_) { return #pending };
+            };
+          } catch (_) { return #pending };
+          if (not txNonceConsumed(n, latest)) { return #pending };
+          switch (await confirmTransaction(chainId, txHash, 1)) {
+            case (#confirmed) { #confirmed };
+            case (#reverted) { #reverted };
+            case (#err(e)) { #err(e) };
+            case (#pending) {
+              #dropped("no receipt, and the account has mined " # Nat.toText(latest) # " transactions — nonce " # Nat.toText(n) # " was used by another transaction, so this one can never land");
+            };
+          };
+        };
+      };
+    };
+
+    /// 2.22.0 (E7): read the token's EIP-3009 `authorizationState(authorizer, nonce)` through the
+    /// EVM-RPC canister (eth_call at #Latest, the same 2-of-N agreement as every other read).
+    /// #used means the authorization was executed by SOME transaction or cancelled by the payer.
+    /// Never broadcasts.
+    public func authorizationState(
+      chainId : Nat,
+      tokenAddress : Text,
+      authorizer : [Nat8],
+      authNonce : [Nat8],
+    ) : async AuthorizationState {
+      if (authorizer.size() != 20 or authNonce.size() != 32 or EvmUtils.hexToBytes(tokenAddress).size() != 20) {
+        return #unknown("malformed authorizer, nonce or token address");
+      };
+      let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+        case (?r) { r };
+        case (null) { return #unknown("Unsupported chain ID: " # Nat.toText(chainId)) };
+      };
+      let call : EvmRpc.CallArgs = {
+        transaction = {
+          type_ = null; nonce = null; to = ?tokenAddress; from = null; gas = null; value = null;
+          input = ?EvmUtils.bytesToHex(buildAuthorizationStateCalldata(authorizer, authNonce));
+          gasPrice = null; maxPriorityFeePerGas = null; maxFeePerGas = null; maxFeePerBlobGas = null;
+          accessList = null; blobVersionedHashes = null; blobs = null; chainId = null;
+        };
+        block = ?#Latest;
+      };
+      try {
+        classifyAuthorizationState(await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_call(services, RPC_CONFIG, call));
+      } catch (e) { #unknown("authorizationState call failed: " # Error.message(e)) };
     };
   };
   // ── Construction ──

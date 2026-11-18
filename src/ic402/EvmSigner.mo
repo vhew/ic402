@@ -83,8 +83,20 @@ module {
     var cachedPubKey : ?[Nat8] = null;
     var cachedEvmAddr : ?Text = null;
     // M-6: nonceCounter removed — was not persisted across upgrades.
-    // Now using Time.now() (nanoseconds) which is monotonically increasing
-    // within a canister (single-threaded execution guarantees uniqueness).
+    // 2.22.0: Time.now() alone was not unique — it is the same for every message in a round, so
+    // two signs in one round produced the same EIP-3009 nonce and the second authorization could
+    // never execute (the token marks the nonce used). The nonce is now the time AND this per-call
+    // sequence number; the sequence resets on upgrade, but the time cannot repeat across one.
+    var authNonceSeq : Nat = 0;
+
+    /// 2.22.0: the EIP-3009 nonce for the next authorization this signer signs — the time in
+    /// nanoseconds in the high 128 bits and a per-call sequence number in the low 64, so it is
+    /// unique per call on this signer even within one round. signEip3009Authorization takes one
+    /// per call; each call of this function consumes one.
+    public func nextAuthorizationNonce() : [Nat8] {
+      authNonceSeq += 1;
+      EvmUtils.natToBytes(Int.abs(Time.now()) * 2 ** 64 + authNonceSeq % 2 ** 64, 32);
+    };
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -196,6 +208,10 @@ module {
       if (recipientBytes.size() != 20) {
         return #err("Invalid recipient address (expected a 20-byte / 40-hex-char address): " # recipientAddress);
       };
+      // 2.22.0: the ABI encoder truncates to 32 bytes; an amount past uint256 would sign a different one.
+      if (not EvmUtils.isUint256(amount)) {
+        return #err("Amount does not fit uint256; nothing was signed");
+      };
       let calldata = EvmUtils.abiEncodeFunctionCall(
         selector,
         [
@@ -203,7 +219,8 @@ module {
           #static_(EvmUtils.abiEncodeUint256(amount)),
         ],
       );
-      await signTransaction(chainId, tokenAddress, calldata, 0, 65_000, nonce, maxFeePerGas, maxPriorityFeePerGas);
+      // 2.22.0: 100_000, was 65_000 — see EvmUtils.ERC20_TRANSFER_GAS.
+      await signTransaction(chainId, tokenAddress, calldata, 0, EvmUtils.ERC20_TRANSFER_GAS, nonce, maxFeePerGas, maxPriorityFeePerGas);
     };
 
     /// Sign a native ETH transfer transaction.
@@ -231,6 +248,12 @@ module {
       tokenName : Text,
       tokenVersion : Text,
     ) : async { #ok : SignedAuthorization; #err : Text } {
+      // 2.22.0: the EIP-712 encoder truncates to 32 bytes; an amount past uint256 would sign a different one.
+      if (not EvmUtils.isUint256(amount)) {
+        return #err("Amount does not fit uint256; nothing was signed");
+      };
+      // Taken before the first await, once per call: unique even for two calls in one round.
+      let nonceBytes = nextAuthorizationNonce();
       try {
         let fromAddr = await getEvmAddress();
         let pubKey = await getPublicKey();
@@ -238,9 +261,6 @@ module {
         let now : Nat = Int.abs(Time.now() / 1_000_000_000);
         let validAfter = Utils.satSub(now, 600);
         let validBefore = now + 300;
-
-        // M-6: Use nanosecond timestamp for nonce uniqueness (survives upgrades)
-        let nonceBytes = EvmUtils.natToBytes(Int.abs(Time.now()), 32);
 
         // EIP-712 digest
         let domSep = Eip712.domainSeparator(tokenName, tokenVersion, chainId, tokenAddr);

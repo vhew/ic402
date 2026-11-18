@@ -3,6 +3,24 @@ type ValidationError =
    Custom: text;
    InvalidHex: text;
  };
+type TransactionRequest = 
+ record {
+   accessList: opt vec AccessListEntry;
+   blobVersionedHashes: opt vec text;
+   blobs: opt vec text;
+   chainId: opt nat;
+   from: opt text;
+   gas: opt nat;
+   gasPrice: opt nat;
+   input: opt text;
+   maxFeePerBlobGas: opt nat;
+   maxFeePerGas: opt nat;
+   maxPriorityFeePerGas: opt nat;
+   nonce: opt nat;
+   to: opt text;
+   "type": opt text;
+   value: opt nat;
+ };
 type TransactionReceipt = 
  record {
    blockHash: text;
@@ -31,6 +49,13 @@ type SendRawTransactionResult =
  variant {
    Err: RpcError;
    Ok: SendRawTransactionStatus;
+ };
+type SendMode = 
+ variant {
+   insufficientFunds;
+   nonceTooHigh;
+   nonceTooLow;
+   ok;
  };
 type RpcServices = 
  variant {
@@ -133,6 +158,14 @@ type MultiFeeHistoryResult =
                        FeeHistoryResult;
                      };
  };
+type MultiCallResult = 
+ variant {
+   Consistent: CallResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       CallResult;
+                     };
+ };
 type LogEntry = 
  record {
    address: text;
@@ -190,6 +223,7 @@ type FeeMode =
  variant {
    consistent;
    inconsistentOutlier;
+   unavailable;
  };
 type FeeHistoryResult = 
  variant {
@@ -234,6 +268,16 @@ type ConsensusStrategy =
                 total: opt nat8;
               };
  };
+type CallResult = 
+ variant {
+   Err: RpcError;
+   Ok: text;
+ };
+type CallArgs = 
+ record {
+   block: opt BlockTag;
+   transaction: TransactionRequest;
+ };
 type BlockTag = 
  variant {
    Earliest;
@@ -242,6 +286,17 @@ type BlockTag =
    Number: nat;
    Pending;
    Safe;
+ };
+type AuthStateMode = 
+ variant {
+   error;
+   unused;
+   used;
+ };
+type AccessListEntry = 
+ record {
+   address: text;
+   storageKeys: vec text;
  };
 /// ============================================================================
 /// evm-rpc-mock — a hermetic TEST DOUBLE for the DFINITY EVM RPC canister.
@@ -271,21 +326,39 @@ type BlockTag =
 ///   setFeeMode(#consistent)                  one agreed base fee
 ///   setFeeMode(#inconsistentOutlier)         two providers disagree, one a wild outlier,
 ///                                            so the caller's robust-median fee logic runs
+///   setFeeMode(#unavailable)                 every provider errors → the send refuses
+///                                            BEFORE broadcasting (2.22.0)
+///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds)
+///                                            how eth_sendRawTransaction answers
+///   setPendingNonce(?n)                      pin eth_getTransactionCount(#Pending) at n;
+///                                            null (default) = advance by one per call
+///   setLatestNonce(n)                        eth_getTransactionCount(#Latest) — the mined
+///                                            count (default 0: nothing ever mined)
+///   setAuthStateMode(#unused | #used | #error)
+///                                            eth_call answer (the library's only eth_call
+///                                            is EIP-3009 authorizationState)
 /// ============================================================================
 service : {
+  eth_call: (_services: RpcServices, _config: opt RpcConfig, _args:
+   CallArgs) -> (MultiCallResult);
   eth_feeHistory: (_services: RpcServices, _config: opt RpcConfig, _args:
    FeeHistoryArgs) -> (MultiFeeHistoryResult);
   eth_getTransactionCount: (_services: RpcServices, _config: opt RpcConfig,
-   _args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
+   args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
   eth_getTransactionReceipt: (_services: RpcServices, _config: opt RpcConfig,
    txHash: text) -> (MultiGetTransactionReceiptResult);
   eth_sendRawTransaction: (_services: RpcServices, _config: opt RpcConfig,
    rawTx: text) -> (MultiSendRawTransactionResult);
+  getEthCalls: () -> (nat) query;
   getReceiptPolls: () -> (nat) query;
   getSentTxs: () -> (vec text) query;
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   reset: () -> ();
   sentTxCount: () -> (nat) query;
+  setAuthStateMode: (m: AuthStateMode) -> ();
   setFeeMode: (m: FeeMode) -> ();
+  setLatestNonce: (n: nat) -> ();
+  setPendingNonce: (n: opt nat) -> ();
   setReceiptMode: (m: ReceiptMode) -> ();
+  setSendMode: (m: SendMode) -> ();
 }
