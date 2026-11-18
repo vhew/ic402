@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Interop: viem accepts colon-namespaced EIP-712 names again
+
+- **What changed:** viem 2.57.17 (wevm/viem#5403) accepts struct names such as Hyperliquid's
+  `HyperliquidTransaction:Withdraw` again, after 2.57.12–2.57.16 refused them. It hashes them
+  context-free, so its digest now equals ic402's byte-for-byte. That holds even on a types map that
+  also holds a struct named the first segment, where viem ≤ 2.57.11 computed a different digest.
+  Checked against viem 2.57.17 and 2.57.19.
+- **Effect:** none on ic402's encoder or on `@ic402/client`, which never hashes typed data with viem.
+  The `EIP712Domain:` first-segment rejection stays, because verifiers on viem ≤ 2.57.11 still
+  disagree on that name. Its error message no longer claims current viem refuses colon names.
+- **Test:** the drift alarm in `packages/client/test/eip712-colon-interop.test.ts` now pins viem's
+  agreement on all three shapes. It fails on viem 2.57.11 (wrong digest) and 2.57.13 (refusal).
+- **Dependencies:** `viem` 2.57.17, `@x402/core` 2.30.0, `vitest` 5.1.0, `cborg` 6.2.1, `eslint` 10.14.0,
+  `@types/node` 26.6.6 (Dependabot PR #50).
+
 ## v2.20.0 — 2026-11-04
 
 Minor — **an ICP payment whose ledger call is rejected with an unknown outcome is no longer treated as
