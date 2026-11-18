@@ -55,7 +55,8 @@ incident.
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
 | EVM charge returned `#settlementFailed("EIP-3009 transfer reverted on-chain …")` | Nothing moved, nonce unlocked (since 2.22.0 only when the token reports the authorization still unused) | Not stuck — fix the cause (payer balance / paused token), client re-signs fresh |
 | A marketplace job rests in `#Settling` after the expiry sweep's refund or settle (2.22.0) | **Unknown**: the transfer call was rejected, and the transfer may have landed | §6 |
-| Canister log: "ic402 job …: … failed (…); nothing moved, and the sweep will not try it again on its own …", or "… not sent again — the job is parked #Expired for resolveJob" (2.22.0) | Nothing moved; the sweep has stopped retrying that job | §6 |
+| Canister log: "ic402 job …: … failed (…); nothing moved. The sweep tries again at most once an hour; a controller can act sooner." (2.22.0) | Nothing moved; the sweep's retries for that job are backing off | §6 |
+| Canister log: "… not sent again — the job is parked #Expired …" (2.22.0) | A refund reverted on-chain: nothing moved, and it is not sent again | §6 |
 | EVM close returned `#settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry)")` | Nothing moved; session is `#open` again | Not stuck — retry `closeSession` |
 
 ---
@@ -410,9 +411,9 @@ an empty escrow. Marketplace jobs: §6, *Upgrading to 2.22.0*.
 **What happened:** `settleJob` reserved `#Settling`, the payment to the operator failed (an ICRC-1
 error such as a short pool, or an EVM job whose operator never called `setEvmPayout`), and the job
 was rolled back to `#Verified`. No funds moved. Before v2.17.6 nothing could move a `#Verified` job.
-Since 2.22.0 the expiry sweep settles every `#Verified` job on its own (one whose dispute window
-just ended, or one an earlier settle left behind), with the bounded retries below; a job reaches
-you when the sweep has stopped trying.
+Since 2.22.0 the expiry sweep settles a `#Verified` job on its own (one whose dispute window
+just ended, or one an earlier settle left behind), with the retries below; a job needs you when
+its retries are backing off, or its payment reverted on-chain.
 
 **Do:** fix the cause, then the controller calls `resolveDispute(jobId, false)` to retry the
 settle, or `resolveDispute(jobId, true)` to refund the buyer instead (net of the ledger fee). Each
@@ -420,26 +421,33 @@ path reserves `#Settling` before its transfer, so a concurrent call aborts rathe
 `resolveDispute` is a library method; since 2.22.0 the reference example exposes it,
 controller-only. Wire it the same way in your canister.
 
-**The sweep's automatic retries (2.22.0).** A definite failure that a retry may fix (an ICP ledger
-`#Err`, or an EVM send refused before broadcast) is retried by later sweep ticks, at most 5 times
-per job. After that, or at once for a failure no retry can fix (no transfer hook, an unparseable
-chain, no operator payout address, no token, no assigned operator, a buyer with no rail), the
-sweep leaves the job as it is and prints one line to the canister log: "ic402 job …: … failed (…);
-nothing moved, and the sweep will not try it again on its own. The job is left as it is for a
-controller." The count is in memory, so an upgrade grants each job 5 more tries. Any job left
-unfinished this way keeps the sweep at its 60 s cadence until it is resolved. What you can do
-depends on where it was left:
+**The sweep's automatic retries (2.22.0).** A refund or operator payment that fails definitely
+(an ICP ledger `#Err`, or an EVM send refused before broadcast) is retried at every sweep tick,
+5 times in all, then at most once per hour of the job's age. A failure no retry can fix as things
+are (no transfer hook, an unparseable chain, no operator payout address, no token, no assigned
+operator, a buyer with no rail, an EVM-rail buyer that is not a 20-byte address) goes straight to
+the hourly retry. A busy EVM sender is retried at the next tick and not counted. Every outcome
+other than success is logged; a counted failure reads "ic402 job …: … failed (…); nothing moved.
+The sweep tries again at most once an hour; a controller can act sooner." (or names the next tick
+while under 5). The retry state is in memory: an upgrade, or `resolveDispute` on the job, clears
+it. A job still waiting keeps the sweep at its 60 s cadence. To act sooner, fix the cause, then:
 - `#Verified`, `#Submitted` or `#Disputed`: `resolveDispute` (above).
-- `#Pending`, `#Assigned` or `#Computing` whose expiry refund was given up: no controller call
-  re-drives it (`resolveDispute` refuses those states, and `resolveJob` needs `#Settling` or a
-  parked tx). Fix the cause; the next upgrade grants the sweep 5 more tries.
+- `#Pending`, `#Assigned` or `#Computing` past its `expiresAt` (its expiry refund keeps failing):
+  `resolveDispute(jobId, true)`, the controller's "refund now". With `false`, or before expiry,
+  those states are refused ("Job (status: …) can only be refunded, and only once past its
+  expiry").
+
+**A controller refund that fails (2.22.0).** It puts the job back as it was, except that a
+`#Verified` job comes back `#Disputed`: you chose the refund, so the sweep must not pay the
+operator; it refunds a `#Disputed` job at `expiresAt`, and `resolveDispute` accepts it again.
 
 **A transfer that reverted on-chain is never sent again automatically (2.22.0).** Whatever made it
 revert would most likely do so again, and each try signs and pays gas. `health().jobs.parked`
 counts these jobs with the parked ones.
-- **An expiry refund that reverted:** the job stays `#Expired` carrying the reverted tx (the log
-  says "… not sent again — the job is parked #Expired for resolveJob"). Refund the buyer by hand,
-  then `resolveJob(jobId, #Refunded)`.
+- **A refund that reverted** (at expiry, or a controller's `resolveDispute(jobId, true)` on a job
+  in any status): the job is parked `#Expired` carrying the reverted tx (the log says "… not sent
+  again — the job is parked #Expired …"). Refund the buyer by hand, then
+  `resolveJob(jobId, #Refunded)`.
 - **An operator payment that reverted:** the job goes back to `#Verified` carrying the reverted tx,
   and the sweep skips it. `resolveDispute(jobId, false)` sends the payment again (your decision; it
   drops the record), `resolveDispute(jobId, true)` refunds the buyer instead, and `resolveJob`
@@ -572,7 +580,7 @@ transfer it committed. Then:
 | `confirmEvmTransaction(chainId, txHash)` | library method — consumer must expose (controller-gated) | **No** — read-only receipt poll | Re-polling a charge's `#settlementPending` tx (§1) |
 | `recoverEscrow(ledger, sessionId, amount)` | payer-only (library-enforced); consumer must expose (the example does since 2.22.0) | Yes — ICP escrow subaccount → payer only; 2.22.0: only against the refund-owed entry, never more than it in total, from the session's own ledger | ICP refund-leg failure, or a forced / reconciled ICP session with a remainder (§3). **ICP only** |
 | `clearRefundOwed(sessionId)` | controller; consumer must expose (the example does since 2.22.0) | No | 2.22.0: drop the refund-owed entry of a session whose escrow you have checked is empty (§3) |
-| `resolveDispute(jobId, refundBuyer)` | controller; consumer must expose (the example does since 2.22.0) | **Yes** — settles to the operator or refunds the buyer | Marketplace job stuck in `#Verified` (§6), or a `#Submitted`/`#Disputed` job needing a decision |
+| `resolveDispute(jobId, refundBuyer)` | controller; consumer must expose (the example does since 2.22.0) | **Yes** — settles to the operator or refunds the buyer | Marketplace job stuck in `#Verified` (§6), or a `#Submitted`/`#Disputed` job needing a decision; 2.22.0: also refunds (only) a `#Pending`/`#Assigned`/`#Computing` job past its expiry |
 | `resolveJob(jobId, terminal)` | controller | No — state assertion | A job parked `#Settling`, or (2.22.0) any job carrying a parked tx, after you have checked the transfer's outcome (§6) |
 | `forceCloseSession(sessionId)` | controller | **Yes** — runs the full close (settle + refund) | Admin-closing an `#open`/`#expired` session. **Rejected on `#closing`** — not a recovery tool |
 | `sweepEvm(chainId, token, to, amount)` | controller | **Yes** — arbitrary transfer from the shared pool | Last resort, manual amounts only, after on-chain verification (never sweep funds backing open sessions — [`security-model.md`](security-model.md) §6) |

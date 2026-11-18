@@ -224,17 +224,27 @@ not published; they ship here.
   - It now parks the job `#Settling` for `resolveJob`.
   - A refund that fails definitely is retried by later ticks (below).
   - `expireJobs()` returns only jobs that were refunded or parked.
-- **The sweep's automatic retries were unbounded, and a reverted transfer could be sent again.**
-  - A definite failure a retry may fix (an ICP ledger `#Err`, an EVM send refused before broadcast)
-    is retried at most 5 times, then left for a controller with one log line. The count is in
-    memory: an upgrade grants 5 more.
-  - A failure no retry can fix (no hook, chain, payout address, token or operator; a buyer with no
-    rail) is not retried.
+- **The sweep retries failed refunds and operator payments, with a backoff.** Before, a refund that
+  failed definitely left the job `#Expired` with the refund owed, until the GC dropped it.
+  - A definite failure (an ICP ledger `#Err`, an EVM send refused before broadcast) is retried at
+    every tick 5 times, then at most once per hour of the job's age.
+  - A failure no retry can fix as things are (no hook, chain, payout address, token or operator; a
+    buyer with no rail) goes straight to the hourly retry.
+  - A busy EVM sender is retried at the next tick and not counted: only genuine payment failures
+    count. Every outcome other than success is logged.
+  - The retry state is in memory: an upgrade, or a controller's `resolveDispute`, clears it.
   - A reverted EVM refund is never sent again: the job stays `#Expired` carrying the tx (pay by
     hand, then `resolveJob`). A reverted operator payment is not sent again automatically: the job
     goes back to `#Verified` carrying the tx; `resolveDispute` sends again or refunds, `resolveJob`
     closes it. `health().jobs.parked` counts both.
-  - A job left for a controller keeps the sweep at its 60 s cadence.
+  - A job still waiting keeps the sweep at its 60 s cadence.
+- `resolveDispute(jobId, true)` is also the controller's "refund now" for a `#Pending`, `#Assigned`
+  or `#Computing` job once past `expiresAt`. With `false`, or before expiry, those states are
+  refused ("Job (status: …) can only be refunded, and only once past its expiry").
+- A controller refund of a `#Verified` job that fails comes back `#Disputed`, not `#Verified`, now
+  that the sweep settles `#Verified` jobs: the sweep refunds a `#Disputed` job at `expiresAt` and
+  never pays its operator, and `resolveDispute` accepts it again. A controller refund that reverts
+  on-chain (any status) parks the job `#Expired` with the tx: pay by hand, then `resolveJob`.
 - The sweep now settles a `#Verified` job: one whose window ended, or one an earlier failed settle
   left (not one carrying a reverted payment). Before, only a controller could move the latter.
 - A dispute filed after a window above 0 had closed was accepted. It is now refused ("Dispute window
@@ -242,6 +252,9 @@ not published; they ship here.
   controller rules first (owner decision).
 - The EVM rail followed the buyer's spelling, so a payer written `0X…` or as bare hex was put on
   the ICP rail, where its refund could not be paid. It now follows the receipt's `eip155:` network.
+  A job on the EVM rail whose buyer is not a 20-byte address (a consumer that recorded a principal)
+  cannot be refunded on-chain: its refund is `#unavailable` ("EVM refund unavailable: buyer … is
+  not a 20-byte EVM address"), without calling the hook.
 - `submitResult` accepted a second submission while a ZK verifier call was in flight, and a throwing
   verifier left the job stuck `#Computing`. It now accepts `#Assigned` only, and returns the job to
   `#Assigned` on a verifier error.
@@ -348,8 +361,6 @@ not published; they ship here.
   "unused" for an authorization another tx has just used.
 - `icp:*` session tokens are stored as given, so they follow whatever the first configured ledger
   is.
-- A `#Pending`, `#Assigned` or `#Computing` job whose refund the sweep gave up on has no controller
-  re-drive; only an upgrade (5 more tries) moves it.
 - The MCP `fetch_x402` confirmation is stateless, and `ledger` and `rpcUrl` are not pinned at
   startup.
 - The SDK and the MCP server treat any failure once the paid x402 request was attempted as possibly
@@ -358,7 +369,7 @@ not published; they ship here.
 
 ### Tests
 
-- 857 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
+- 865 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
   `evmrail`, `sessiontoken`.
 - More than 150 mutations across the Motoko fixes, each test run in isolation. Each turns at least
   one test red, except paths the interpreter cannot reach: timers, tECDSA, traps, and real EVM
