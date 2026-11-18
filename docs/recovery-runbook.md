@@ -47,13 +47,15 @@ incident.
 | A marketplace job returned `"Settlement failed: …"` and rests in `#Verified` | Nothing moved; the buyer's payment is still in the pool | §6 |
 | EVM charge or `openSession` returned `#settlementPending("This EIP-3009 authorization was already broadcast by this canister …")` (2.22.0) | Nothing new was sent; the earlier broadcast named in the text may have paid | §1 |
 | EVM charge returned `#settlementPending("EIP-3009 transfer tx … reverted, but the authorization is already used on chain …")` (2.22.0), or `openSession` the same for its deposit | Another tx may have moved the payer's funds to the canister's EVM address; **no receipt, no session** | §1 (charge), §4 (deposit) |
+| EVM charge returned `#settlementPending("EIP-3009 broadcast call rejected (…)…")`, or `openSession` `#err(#settlementPending("EIP-3009 deposit call failed and whether it was broadcast is unknown …"))` (2.22.0) | **Unknown**, and there is **no tx hash**: the authorization may or may not have been broadcast | §1 (charge), §4 (deposit) |
 | ICP charge `settle()`/`settleFrom()` returned `#settlementPending("Ledger call rejected (…)")` (2.20.0) | **Unknown**: the payer may have been charged; no receipt; the nonce stays locked. 2.21.0, with `setLedgerDedup` on and a `settleFrom` charge: the payer's `settleFrom` with the same payment resolves it | §7 |
-| A charge returned `#policyDenied("A settlement with this payment is already in progress — retry this same payment …")` (2.22.0) | Nothing is known to have moved: an earlier attempt with the same payment is still running | Not stuck — retry the **same** payment shortly; never pay with a new nonce |
+| A charge returned `#policyDenied("A settlement with this payment is already in progress — retry this same payment …")` (2.22.0) | Nothing of this payer's is known to have moved: an attempt naming a **different** payer holds this payment | Not stuck — retry the same payment shortly (preferred), or pay anew |
 | ICP `openSession` returned `#err(#settlementPending("Deposit rejected (…) … Session … is parked #closing …"))` (2.21.0) | **Unknown**: the deposit is in that session's escrow subaccount, or never arrived | §7 |
 | ICP close returned `#settlementPending("Settle leg rejected (…)")` (2.20.0), session rests `#closing` | **Unknown**: the escrow is either intact or already settled to the recipient | §7 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
 | EVM charge returned `#settlementFailed("EIP-3009 transfer reverted on-chain …")` | Nothing moved, nonce unlocked (since 2.22.0 only when the token reports the authorization still unused) | Not stuck — fix the cause (payer balance / paused token), client re-signs fresh |
-| A marketplace job rests in `#Settling` after an expiry refund or a dispute-window settle (2.22.0) | **Unknown**: the ledger rejected the transfer, which may have landed | §6 |
+| A marketplace job rests in `#Settling` after the expiry sweep's refund or settle (2.22.0) | **Unknown**: the transfer call was rejected, and the transfer may have landed | §6 |
+| Canister log: "ic402 job …: … failed (…); nothing moved, and the sweep will not try it again on its own …", or "… not sent again — the job is parked #Expired for resolveJob" (2.22.0) | Nothing moved; the sweep has stopped retrying that job | §6 |
 | EVM close returned `#settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry)")` | Nothing moved; session is `#open` again | Not stuck — retry `closeSession` |
 
 ---
@@ -65,13 +67,20 @@ could not confirm it within the poll budget (or the confirmation RPC failed). Th
 the error text. The server nonce stays **locked** until its expiry (default 5 min) precisely so
 the same challenge cannot be re-broadcast; the daily-spend reservation was already released.
 
-Since 2.22.0 two more answers land here:
+Since 2.22.0 three more answers land here:
 
 - **A replayed authorization.** The canister broadcasts each EIP-3009 authorization once. A settle
   (or session open) of one it already broadcast sends nothing and answers `#settlementPending`
   naming the earlier tx ("This EIP-3009 authorization was already broadcast by this canister in tx
-  …"). Resolve that tx with the steps below. If the text says the broadcast is still in flight
-  (no hash), wait for the first attempt's answer.
+  …"); the server nonce that call came with is unlocked, since nothing of it moved. Resolve the
+  named tx with the steps below. If the text says the broadcast is still in flight (no hash), wait
+  for the first attempt's answer.
+- **A broadcast call that was itself rejected** ("EIP-3009 broadcast call rejected (…): the
+  transfer may or may not have been broadcast …"). There is no tx hash to poll. The daily
+  reservation is released and the authorization stays claimed, so the canister never sends it
+  again. Check the authorization (*Checking an authorization on chain*, below): used → step 3;
+  unused → a broadcast copy can still execute until its `validBefore`, so the payer re-pays only
+  after that (golden rule 3).
 - **A revert after another tx used the authorization.** Anyone can submit
   `transferWithAuthorization`, so the canister's tx can revert because another tx executed the
   same authorization first. When a transfer reverts, settle reads the token's `authorizationState`:
@@ -136,13 +145,16 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      that never reached a mempool never confirms. Before `forceResolveSession` + `sweepEvm` on a
      parked tx, check on chain that the canister's account nonce has moved past it, or that no
      provider knows the hash; otherwise the parked tx can still land and the sweep pays twice.
-   - `#err("Parked settle tx can never land (…) — it moved no funds. Verify on a block explorer,
-     then forceResolveSession and sweepEvm what is owed: …")` (or "Parked refund tx …"; 2.22.0) → the
-     account nonce the parked tx was signed with has been used by another tx, and a re-poll still
-     finds no receipt. The session stays parked: a lagging pair of providers can still miss a mined
-     tx, so the decision is yours. Confirm on a block explorer that the hash was never mined, then
-     `forceResolveSession` + `sweepEvm` the amounts the answer names (settle leg: `consumed` →
-     recipient and the remainder → payer; refund leg: the remainder → payer).
+   - `#err("Parked settle tx appears not to have landed (…) — verify on chain before forcing. Only
+     if a block explorer shows it never landed: forceResolveSession, then sweepEvm what is owed: …")`
+     (or "Parked refund tx …"; 2.22.0) → the account nonce the parked tx was signed with has been
+     used by another tx, and the providers **agree** there is no receipt for it. It is reported only
+     on that agreed answer: providers that disagree, an RPC error or no answer leave it "still
+     pending". It is still not proof — a lagging pair of providers can agree on "no receipt" for a
+     mined tx — so the session stays parked and the decision is yours. Confirm on a block explorer
+     that the hash was never mined, then `forceResolveSession` + `sweepEvm` the amounts the answer
+     names (settle leg: `consumed` → recipient and the remainder → payer; refund leg: the remainder
+     → payer).
    - `#err("A close of this session is still in flight — call again once it returns")` (2.22.0) →
      a close of this session is running. Nothing changed; wait for it to return and re-run.
      `forceResolveSession` gives the same answer.
@@ -243,10 +255,10 @@ Practical notes, all code-derived:
   **shared EVM pool** (one tECDSA address for everything — [`security-model.md`](security-model.md)
   §6); there is no per-session EVM account to recover from. For EVM use §2 (`reconcileSession` /
   `forceResolveSession` + `sweepEvm`) or §4 (`reconcileEvmDeposit`).
-- **Exposure:** `Gateway.recoverEscrow` is a library method; the reference example
-  (`example/main.mo`) does **not** expose it as a public endpoint (only `forceResolveSession` /
-  `reconcileSession` / `sweepEvm` / `reconcileEvmDeposit` / `setEvmDrainMode` are wired). A consumer
-  must add it (passing `msg.caller` as `caller` — the library enforces payer-only from there).
+- **Exposure:** `Gateway.recoverEscrow` is a library method. Since 2.22.0 the reference example
+  (`example/main.mo`) exposes it as `recoverEscrow(sessionId, amount)`, for the payer: it passes
+  `msg.caller` as `caller` and its one ICP ledger, and the library enforces payer-only and the
+  session's own ledger from there. Before 2.22.0 it did not; a consumer adds it the same way.
 - **Amount vs. ledger fee:** the refund is an `icrc1_transfer` with `fee = null` (`Escrow.refund`),
   so the
   ledger deducts its fee **on top of** `amount` from the subaccount. The subaccount holds
@@ -258,7 +270,9 @@ Practical notes, all code-derived:
   close left, so `entry − fee` empties it in one call, whatever the fee was at the close. An entry
   `forceResolveSession` wrote is `deposited − consumed`, one settle fee more than the escrow holds
   when the settle had landed: request `balance − fee` there. Either way, a recovery that leaves one
-  fee or less of the entry clears it.
+  fee or less of the entry clears it, and an entry already at one fee or less (a forced session's
+  remainder the fee exceeds, or one the fee rose past) is cleared by the next recovery attempt,
+  which answers "Nothing left to recover: …" and moves nothing.
 - **Time window:** `recoverEscrow` needs the session record and its refund-owed entry. Since
   2.22.0 `gcClosedSessions` removes `#closed` records only (never `#expired`, a close not yet
   finished), **24 h after `lastActivityAt`**, and never one that still has an entry, so a record is
@@ -266,7 +280,9 @@ Practical notes, all code-derived:
   `loadRefundOwed` is required since 2.22.0** (the reference example does; see
   [`upgrade-safety.md`](upgrade-safety.md)): entries an upgrade drops leave those payers'
   remainders in the (deterministically derivable) subaccount with **no in-band method left to move
-  them**. The same holds, with no entry to begin with, for:
+  them**; `recoverEscrow`'s "Nothing is owed" answer names that case. A controller holding a copy of
+  the lost entries can put them back with `loadRefundOwed` (it replaces the whole set). The same
+  holds, with no entry to begin with, for:
   - a refund that failed before the canister ran 2.18.0 (not retroactive), and an ICP session
     forced before 2.22.0. Those `#closed` sessions cannot use `recoverEscrow` from 2.22.0 on;
     settle them by hand (§5, *Upgrading from before 2.22.0*).
@@ -275,8 +291,8 @@ Practical notes, all code-derived:
   `sessionCounts().refundOwed` and keeps the record from the GC for good. Query the escrow balance
   first; only if it holds no more than one ledger fee (which no transfer can move), the controller
   calls `clearRefundOwed(sessionId)`. It moves no funds; afterwards `recoverEscrow` refuses the
-  session and its record is GC-eligible. It is a library method the reference example does not
-  expose: wire it controller-gated.
+  session and its record is GC-eligible. It is a library method; since 2.22.0 the reference
+  example exposes it, controller-only. Wire it controller-gated.
 
 ## §4 Inbound EVM deposit broadcast-but-unconfirmed at `openSession` (no session)
 
@@ -293,16 +309,16 @@ broadcast** (the refund leg) on confirmation. Outcomes:
   on-chain) to the payer's EVM address. Done — the payer can open a fresh session.
 - `#reverted` → the deposit never landed; nothing to refund. The tracker entry is dropped. The
   payer can simply re-sign and open a new session. Since 2.22.0 this also covers a deposit tx that
-  can never land (its account nonce was used by another tx), but only while the token reports the
-  deposit's authorization unused.
-- `#err("deposit tx can never land (…), but its authorization is used on chain …")` (2.22.0) →
-  the canister's deposit tx moved nothing, but another tx executed the authorization (anyone can
-  submit it) or the payer cancelled it. The entry is kept. Check the authorization (§1, *Checking
+  appears not to have landed (its account nonce was used by another tx, and the providers agree
+  there is no receipt), but only while the token reports the deposit's authorization unused.
+- `#err("deposit tx appears not to have landed (…), but its authorization is used on chain …")`
+  (2.22.0) → the canister's deposit tx appears to have moved nothing, but another tx executed the
+  authorization (anyone can submit it) or the payer cancelled it. The entry is kept. Check the authorization (§1, *Checking
   an authorization on chain*): if the deposit arrived, return it with `sweepEvm` to the payer's
   EVM address. The tracker has no delete, so the entry keeps answering this way and counting in
   `pendingEvmDepositCount()` until an upgrade wipes the tracker: note the tx hash as handled.
-  `#err("deposit tx can never land (…); whether its authorization was executed by another
-  transaction could not be checked …")` → retry later.
+  `#err("deposit tx appears not to have landed (…); whether its authorization was executed by
+  another transaction could not be checked …")` → retry later.
 - `#stillPending` → deposit tx not yet mined; entry retained — retry later.
 - `#notFound` → not tracked: wrong hash, already reconciled by a concurrent call (the entry is
   claimed synchronously exactly so two reconciles can't double-refund), or the tracker was wiped
@@ -329,6 +345,14 @@ was executed, the deposit is in the shared pool: return it with `sweepEvm` to th
 address. If it was cancelled, nothing arrived; if it is unused, nothing has arrived yet, but it can
 still execute until its `validBefore` (golden rule 3).
 
+**A deposit call that failed with an unknown outcome (2.22.0).** `openSession` returned
+`#err(#settlementPending("EIP-3009 deposit call failed and whether it was broadcast is unknown …"))`.
+Before 2.22.0 this was `#settlementFailed`. No session exists, nothing is tracked and there is no
+tx hash; the authorization stays claimed, so the canister never broadcasts it again. Check the
+authorization as above and handle it the same way. A confirm call that is itself rejected during
+the open is "confirmation unavailable": the deposit is tracked, and `reconcileEvmDeposit` handles
+it as above. A rejected `authorizationState` call after a revert answers "could not be checked".
+
 **Do NOT:** have the payer re-sign the same or a fresh deposit authorization while the original
 deposit tx is still pending (golden rule 3), and do not `sweepEvm` a "refund" for a deposit that
 `reconcileEvmDeposit` can still handle — the in-band path is double-refund-safe; the manual path
@@ -349,8 +373,8 @@ only the `forceResolveSession` + `sweepEvm` path.
 
 1. `setEvmDrainMode(true)` — `openSession` rejects new inbound EVM deposits before any funds move.
 2. Poll `pendingEvmDepositCount()` until **0**; `reconcileEvmDeposit(txHash)` each straggler
-   (`listPendingEvmDeposits()` to enumerate). A deposit §4 reports as "can never land … used on
-   chain" stays counted after you have handled it; upgrading drops it.
+   (`listPendingEvmDeposits()` to enumerate). A deposit §4 reports as "appears not to have landed
+   … used on chain" stays counted after you have handled it; upgrading drops it.
 3. Also drive `sessionCounts().closing` to **0** via §2 (`reconcileSession`, then
    `forceResolveSession` for the rest) — otherwise those sessions' parked hashes are lost and
    their recovery degrades to manual sweeps.
@@ -371,11 +395,24 @@ concern funds that may need moving by hand:
   were signed from the **empty-path** address, not your configured one (sessions kept the sender
   built at construction). Check the empty-path address for funds and gas left there.
 
+Sessions opened before 2.22.0 with a symbol, `icp:*` or other text keep closing on the ledger
+they did: the stored token resolves to the first configured ledger, as 2.21.0 opened it. A stored
+principal text that is not a configured ledger fails closed at close, reconcile and `recoverEscrow`
+(the session stays as it was). That has two causes, and the refusal names both: the ledger was
+removed from the configuration, or the session was opened before 2.22.0 with a principal that was
+never configured, so its deposit is on the ledger that was then first. **Close the second kind
+before upgrading.** After the upgrade, check which ledger holds the session's escrow subaccount
+before changing the configuration; do not simply configure the stored ledger, or the close reads
+an empty escrow. Marketplace jobs: §6, *Upgrading to 2.22.0*.
+
 ## §6 Marketplace job stuck in `#Verified` (operator payment failed)
 
 **What happened:** `settleJob` reserved `#Settling`, the payment to the operator failed (an ICRC-1
 error such as a short pool, or an EVM job whose operator never called `setEvmPayout`), and the job
 was rolled back to `#Verified`. No funds moved. Before v2.17.6 nothing could move a `#Verified` job.
+Since 2.22.0 the expiry sweep settles every `#Verified` job on its own (one whose dispute window
+just ended, or one an earlier settle left behind), with the bounded retries below; a job reaches
+you when the sweep has stopped trying.
 
 **Do:** fix the cause, then the controller calls `resolveDispute(jobId, false)` to retry the
 settle, or `resolveDispute(jobId, true)` to refund the buyer instead (net of the ledger fee). Each
@@ -383,23 +420,49 @@ path reserves `#Settling` before its transfer, so a concurrent call aborts rathe
 `resolveDispute` is a library method; since 2.22.0 the reference example exposes it,
 controller-only. Wire it the same way in your canister.
 
-**A job parked `#Settling` by the expiry sweep (2.22.0).** A refund at expiry, or a
-dispute-window settle to the operator (a `#BuyerConfirm` job whose window passed with no dispute),
-whose transfer call is *rejected* has an unknown outcome: the transfer may have landed. The sweep
-parks the job `#Settling` and goes on. Check the ledger (or chain) for the transfer, then
+**The sweep's automatic retries (2.22.0).** A definite failure that a retry may fix (an ICP ledger
+`#Err`, or an EVM send refused before broadcast) is retried by later sweep ticks, at most 5 times
+per job. After that, or at once for a failure no retry can fix (no transfer hook, an unparseable
+chain, no operator payout address, no token, no assigned operator, a buyer with no rail), the
+sweep leaves the job as it is and prints one line to the canister log: "ic402 job …: … failed (…);
+nothing moved, and the sweep will not try it again on its own. The job is left as it is for a
+controller." The count is in memory, so an upgrade grants each job 5 more tries. Any job left
+unfinished this way keeps the sweep at its 60 s cadence until it is resolved. What you can do
+depends on where it was left:
+- `#Verified`, `#Submitted` or `#Disputed`: `resolveDispute` (above).
+- `#Pending`, `#Assigned` or `#Computing` whose expiry refund was given up: no controller call
+  re-drives it (`resolveDispute` refuses those states, and `resolveJob` needs `#Settling` or a
+  parked tx). Fix the cause; the next upgrade grants the sweep 5 more tries.
+
+**A transfer that reverted on-chain is never sent again automatically (2.22.0).** Whatever made it
+revert would most likely do so again, and each try signs and pays gas. `health().jobs.parked`
+counts these jobs with the parked ones.
+- **An expiry refund that reverted:** the job stays `#Expired` carrying the reverted tx (the log
+  says "… not sent again — the job is parked #Expired for resolveJob"). Refund the buyer by hand,
+  then `resolveJob(jobId, #Refunded)`.
+- **An operator payment that reverted:** the job goes back to `#Verified` carrying the reverted tx,
+  and the sweep skips it. `resolveDispute(jobId, false)` sends the payment again (your decision; it
+  drops the record), `resolveDispute(jobId, true)` refunds the buyer instead, and `resolveJob`
+  closes it if you have paid by hand. This survives an upgrade: the record is on the job.
+
+**A job parked `#Settling` by the expiry sweep (2.22.0).** A refund at expiry, or a settle to the
+operator, whose transfer call is *rejected* has an unknown outcome: the transfer may have landed.
+The sweep parks the job `#Settling` and goes on. Check the ledger (or chain) for the transfer, then
 `resolveJob(jobId, …)` with the status that matches what happened (`#Refunded` / `#Settled`); if
-it did not land, pay it by hand first. `resolveJob` moves no funds. A dispute-window settle that
-fails definitely leaves the job `#Verified` (above). A refund that fails definitely (`#Err`:
-nothing moved) puts the job back as it was, and the next tick retries it; a persistent error
-(e.g. no EVM hook wired) retries every tick indefinitely and keeps the sweep at its 60 s cadence,
-so fix the cause. `expireJobs()` returns only the jobs it refunded, or left `#Expired` with a
-pending refund parked on them.
+it did not land, pay it by hand first. `resolveJob` moves no funds. `expireJobs()` returns only the
+jobs it refunded, or left `#Expired` with a pending refund parked on them.
 
 **A parked tx that reverted.** `reconcileJob` cannot finalize a parked tx that reverted on-chain.
 Since 2.22.0 `resolveJob` accepts any job that carries a parked tx, not only `#Settling`: a refund
 parked on an `#Expired` job, or an Upto remainder parked on a `#Settled` one. Verify the outcome,
 settle what is owed by hand, then `resolveJob`; it clears the parked tx so the job becomes
 GC-eligible.
+
+**Upgrading to 2.22.0.** On the first sweep after the upgrade, `#Submitted` `#BuyerConfirm` jobs
+whose dispute window (> 0) has already passed are paid to the operator, and `#Verified` jobs an
+earlier failed settle left behind are settled. Once a window has closed, a dispute is refused
+("Dispute window has closed: the result was accepted"); a `#Disputed` job is still refunded at
+`expiresAt` unless a controller rules first.
 
 
 ## §7 ICP ledger call rejected with an unknown outcome (2.20.0, 2.21.0)
@@ -454,14 +517,16 @@ challenges. After that, the payer's re-submit is answered `#expired` (pay with a
 resolve a pending charge before then. (2.21.0 corrects 2.20.0's "freed at expiry" only in that the
 clean-up, not the expiry itself, frees it.)
 
-*Busy is not pending (2.22.0).* A charge whose earlier attempt with the same payment is still in
-flight answers `#policyDenied("A settlement with this payment is already in progress — retry this
-same payment …")`, not `#settlementPending`. That is not a recovery case: nothing is known to have
-moved, and the payer retries the same payment shortly (never with a new nonce). The attempt in
-flight may be anyone's, since nonces are not bound to a payer. Only an attempt whose outcome is
-unknown answers pending, and so does a lock restored after an upgrade (nothing is in flight across
-one): treat those as above. The clean-up keeps a nonce whose settlement is in flight for 24 hours
-past its expiry.
+*Busy vs pending (2.22.0).* Nonces are not bound to a payer, so the attempt holding a payment's
+nonce may be anyone's. If it names a **different** payer (ICP `sender`; EVM authorization `from`,
+in any hex spelling), the charge answers `#policyDenied("A settlement with this payment is already
+in progress — retry this same payment …")`. That is not a recovery case: nothing of this payer's is
+known to have moved. Retrying the same payment shortly is preferred; paying anew is also safe. If
+it names the **same** payer (a client's re-send while its first attempt is running), the answer is
+`#settlementPending`, as in 2.21.0: the first attempt may be moving that payer's funds, so wait for
+its result. An attempt whose outcome is unknown answers pending too, and so does a lock restored
+after an upgrade (nothing is in flight across one): treat those as above. The clean-up keeps a
+nonce whose settlement is in flight for 24 hours past its expiry.
 
 *With `setLedgerDedup(true)` (2.21.0).* Every charge first asks the ledger for its fee, so a stopped
 ledger usually refuses the charge cleanly (`#settlementFailed`, nonce unlocked, nothing moved) and the
@@ -505,8 +570,8 @@ transfer it committed. Then:
 | `pendingEvmDepositCount()` / `listPendingEvmDeposits()` | controller | No | Drain / triage (§4, §5) |
 | `setEvmDrainMode(on)` / `getEvmDrainMode()` | controller | No | Pre-upgrade drain (§5) |
 | `confirmEvmTransaction(chainId, txHash)` | library method — consumer must expose (controller-gated) | **No** — read-only receipt poll | Re-polling a charge's `#settlementPending` tx (§1) |
-| `recoverEscrow(ledger, sessionId, amount)` | payer-only (library-enforced); consumer must expose (example does not) | Yes — ICP escrow subaccount → payer only; 2.22.0: only against the refund-owed entry, never more than it in total, from the session's own ledger | ICP refund-leg failure, or a forced / reconciled ICP session with a remainder (§3). **ICP only** |
-| `clearRefundOwed(sessionId)` | controller; consumer must expose (example does not) | No | 2.22.0: drop the refund-owed entry of a session whose escrow you have checked is empty (§3) |
+| `recoverEscrow(ledger, sessionId, amount)` | payer-only (library-enforced); consumer must expose (the example does since 2.22.0) | Yes — ICP escrow subaccount → payer only; 2.22.0: only against the refund-owed entry, never more than it in total, from the session's own ledger | ICP refund-leg failure, or a forced / reconciled ICP session with a remainder (§3). **ICP only** |
+| `clearRefundOwed(sessionId)` | controller; consumer must expose (the example does since 2.22.0) | No | 2.22.0: drop the refund-owed entry of a session whose escrow you have checked is empty (§3) |
 | `resolveDispute(jobId, refundBuyer)` | controller; consumer must expose (the example does since 2.22.0) | **Yes** — settles to the operator or refunds the buyer | Marketplace job stuck in `#Verified` (§6), or a `#Submitted`/`#Disputed` job needing a decision |
 | `resolveJob(jobId, terminal)` | controller | No — state assertion | A job parked `#Settling`, or (2.22.0) any job carrying a parked tx, after you have checked the transfer's outcome (§6) |
 | `forceCloseSession(sessionId)` | controller | **Yes** — runs the full close (settle + refund) | Admin-closing an `#open`/`#expired` session. **Rejected on `#closing`** — not a recovery tool |

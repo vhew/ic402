@@ -6,7 +6,9 @@
 ///
 // Supports Ethereum, Avalanche, Base, Optimism, and Arbitrum (mainnet + testnet).
 ///
-// Used by Gateway.settle() when the payment network is "eip155:*".
+// Not on Gateway.settle()'s path: settle confirms its own EIP-3009 broadcast through
+// EvmSender.confirmTransaction, and nothing in the library calls this module. See
+// verifyTransaction for what it does NOT check (the payer, single use).
 
 import Text "mo:base/Text";
 import Nat "mo:base/Nat";

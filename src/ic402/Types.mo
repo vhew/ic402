@@ -105,8 +105,10 @@ module {
     #expired : Text;
     // Refused by policy (access, rate or spending limits, a nonce bound to another price). 2.22.0:
     // also the "busy" answer, #policyDenied("A settlement with this payment is already in progress
-    // — retry this same payment …"): another settle of the same payment is still in flight and
-    // nothing is known to have moved. Retry the SAME payment shortly; never pay with a new nonce.
+    // — retry this same payment …"): a settle naming a DIFFERENT payer (ICP sender; EVM
+    // authorization `from`) holds this payment's nonce in flight, so nothing of this payer's is
+    // known to have moved. Retrying the same payment shortly is preferred; paying anew is also
+    // safe. The same payer's own duplicate in flight answers #settlementPending instead.
     #policyDenied : Text;
     #tokenNotAccepted : Text;
     #networkNotSupported : Text;
@@ -116,9 +118,12 @@ module {
     // charged; with setLedgerDedup, the payer's settleFrom of the SAME payment resolves it). ICP
     // (2.20.0): a ledger call rejected after it may have run. EVM: a transfer broadcast but not
     // confirmed, and (2.22.0) one that reverted while the authorization reads used or unreadable,
-    // or an authorization this canister already broadcast. Session opens and closes return it too,
-    // for a deposit or a close leg in that state. On a charge the bound nonce stays locked (the
-    // nonce clean-up removes it some time after expiry) so the same payment is not replayed.
+    // a broadcast call rejected with an unknown outcome, or an authorization this canister already
+    // broadcast. Also (2.22.0) a settle for the SAME payer while that payer's earlier attempt with
+    // this payment is still in flight. Session opens and closes return it too, for a deposit or a
+    // close leg in that state. On a charge the bound nonce stays locked (the nonce clean-up removes
+    // it some time after expiry) so the same payment is not replayed; an authorization replay
+    // ("already broadcast") unlocks the server nonce it came with, since nothing of it moved.
     // Resolve it by checking the ledger or chain (docs/recovery-runbook.md).
     #settlementPending : Text;
     #reputationTooLow : Nat;
@@ -648,7 +653,8 @@ module {
     // Buyer approves (confirmJob) or disputes (disputeJob). 2.22.0 (D1): with disputeWindowSeconds
     // > 0, a #Submitted job that the buyer neither confirms nor disputes by completedAt +
     // disputeWindowSeconds is settled to the operator by the expiry sweep, and is not refunded at
-    // expiresAt while the window runs. A disputed job is still refunded at expiry unless resolved.
+    // expiresAt while the window runs; once it has closed, a dispute is refused. A disputed job is
+    // still refunded at expiry unless a controller resolves it first.
     // 0 = no auto-settle: a silent buyer is refunded at expiresAt (the pre-2.22.0 behaviour).
     #BuyerConfirm : { disputeWindowSeconds : Nat };
     #AutoSettle;                             // trust the operator (reputation-gated)

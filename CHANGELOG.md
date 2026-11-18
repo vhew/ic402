@@ -5,8 +5,9 @@
 Minor — **security release. It fixes three high-severity issues and about forty medium and low
 ones, all found by a whole-library adversarial review. Upgrade promptly, and read the upgrade notes
 first: several fixes change behaviour.** No stored-state change (`STABLE_SCHEMA_VERSION` stays 1).
-`example.did` adds `resolveDispute`. The three high fixes were prepared as 2.21.1, which was not
-published; they ship here.
+`example.did` adds `resolveDispute`, `recoverEscrow`, `clearRefundOwed`, `confirmJobEvm`,
+`disputeJobEvm` and `buyerActionMessage`. The three high fixes were prepared as 2.21.1, which was
+not published; they ship here.
 
 ### Upgrade notes: read before upgrading
 
@@ -17,22 +18,34 @@ published; they ship here.
   `recoverEscrow`.** That covers a refund that failed before 2.18.0, and any forced ICP session.
   Before upgrading, compare `refundOwedToStable()` with your `#closed` ICP sessions whose escrow
   still holds funds, and settle those by hand.
-- **Session tokens must resolve to a configured ledger.** ICP open, close and reconcile no longer
-  fall back to the first configured ledger. A session's token must be one of:
-  - the ledger's principal text;
-  - a configured token's exact symbol (new in 2.22.0);
-  - `icp:*`.
-
-  Anything else is refused at open (`#tokenNotAccepted`). At close and reconcile it fails closed,
-  and the session stays as it was.
+- **Session tokens now name the ledger holding the deposit.**
+  - A new ICP open's token must be one of: the ledger's principal text; a configured token's exact
+    symbol (new in 2.22.0); `icp:*`. Anything else is refused (`#tokenNotAccepted`). A symbol is
+    stored as its ledger's principal text, so the close receipt's `token` shows the principal.
+  - Sessions opened before 2.22.0 with a symbol, `icp:*` or other text keep closing as they did:
+    the stored token resolves to the first configured ledger, as in 2.21.0.
+  - A stored principal text that is not a configured ledger now fails closed at close, reconcile
+    and `recoverEscrow`, and the session stays as it was. Before, it fell back to the first ledger.
+  - **Close these before upgrading:** ICP sessions opened before 2.22.0 whose intent token was a
+    principal text that was not configured. Their deposit was pulled on the ledger that was then
+    first, and after the upgrade they can no longer close, reconcile or recover: they fail closed,
+    indistinguishable from a removed ledger. The refusal names both causes and says to check which
+    ledger holds the session's escrow before changing the configuration. Do not simply configure
+    the stored ledger: the close would then read an empty escrow.
 - **EVM chains whose tokens have different decimals are refused.** The constructor traps, so install
   or upgrade fails with the message, and `setEvmChains` returns `#err`. Tokens listed on one chain
   must also have equal unit value; that is the operator's duty.
 - **EVM blocklist entries now match the payer's lower-cased address.** Rebuild any entry made from a
   checksum-case address with the new `Ic402.evmPolicyPrincipal`.
 - **BuyerConfirm services with a dispute window above 0 now pay the operator automatically** once
-  the window passes with no dispute. Inside the window they are no longer refunded at `expiresAt`.
-  A window of 0 keeps the old behaviour.
+  the window passes with no dispute. Inside the window they are no longer refunded at `expiresAt`,
+  and after it a dispute is refused. A window of 0 keeps the old behaviour.
+  - Existing `#Submitted` jobs whose window has already passed are paid to the operator on the
+    first sweep after upgrading.
+  - `#Verified` jobs left by an earlier failed settle are settled by the sweep.
+- **Sessions an earlier version left resting `#expired` (before 2.17.2) are no longer deleted by
+  the GC,** and keep the session sweep's timer running. If you upgrade from below 2.17.2, let the
+  old version's GC remove them first (recovery runbook §3).
 - **Grants:**
   - `issueGrant` caps the TTL at 7 days, and traps on a content id containing `|`.
   - `verifyGrant` refuses a grant with `|` in either id.
@@ -46,6 +59,9 @@ published; they ship here.
   - `configure` and a per-call `canisterId` change them only when
     `IC402_MCP_ALLOW_SECURITY_CHANGES=1`.
   - Local development needs `IC402_MCP_LOCAL_DEV=1`.
+  - `submit_request` with `confirm:true` must repeat the approved `amount`, and `open_session` the
+    approved `maxDeposit`, from the proposal's `confirmWith`. Both are refused if the canister now
+    asks something else.
 - **EVM gas:** the ERC-20 transfer gas limit rises from 65,000 to 100,000. Unused gas is not
   charged, but the up-front reservation rises about 54%.
 
@@ -91,8 +107,7 @@ published; they ship here.
     "maybe sent" would park every send whenever the gas account runs dry.
   - `Gateway.sendErc20Transfer` (no in-repo caller) still returns `#err` for a maybe-sent transfer,
     for API compatibility, but its text now reads "MAYBE SENT — do NOT retry; confirm tx <hash>".
-  - The recovery runbook (§2) says to check the chain before force-resolving a parked tx, and that
-    "no parked tx" can mean a close is still in flight.
+  - The recovery runbook (§2) says to check the chain before force-resolving a parked tx.
   - New public symbols, additive: `EvmSender.classifySend`, `EvmSender.SendOutcome`.
 
 ### Security: medium and low
@@ -102,10 +117,13 @@ published; they ship here.
 - **A stranger could make a payer's own settle report "funds may have moved".** Nonces are
   predictable and not bound to a payer, so anyone could start a settle of the same payment (an HTTP
   settle naming any sender).
-  - An attempt still in flight now answers `#policyDenied("A settlement with this payment is already
-    in progress — retry this same payment …")`.
-  - Only an attempt whose outcome is unknown answers `#settlementPending`.
-  - Locks restored after an upgrade count as unknown.
+  - While an attempt naming a **different** payer is in flight, the payer's settle now answers
+    `#policyDenied("A settlement with this payment is already in progress — retry this same
+    payment …")`. Retrying the same payment is preferred; paying anew is also safe.
+  - An attempt naming the same payer (ICP sender; EVM authorization `from`, in any hex spelling)
+    still answers `#settlementPending`, as in 2.21.0: it may be moving that payer's funds.
+  - An attempt whose outcome is unknown answers `#settlementPending`. Locks restored after an
+    upgrade count as unknown.
   - The SDK treats the busy answer as retryable with the same payment.
 - Nonce clean-up during a settle's fee query could drop the lock of a dedup charge still in flight.
   In-flight locks are now kept 24 hours past expiry, like stored transfers.
@@ -140,8 +158,12 @@ published; they ship here.
   `sessionIdleTimeout`.
 - An open parked by an unknown deposit outcome did not count toward `maxConcurrentSessions`. It now
   does.
-- An unresolvable session token fell back to the first ledger, so a refund could be paid in the
-  wrong token (see the upgrade notes).
+- A session token that did not resolve fell back to the first ledger, a principal text no longer
+  configured included, so a refund could be paid in the wrong token. Such a principal now fails
+  closed; other legacy tokens keep the first ledger, where their deposit is (see the upgrade notes).
+- An owed entry of one fee or less could never move anything and kept its record from the GC. The
+  next recovery attempt now clears it ("Nothing left to recover: …"). `recoverEscrow`'s no-entry
+  refusal now names entries lost at an upgrade, and `loadRefundOwed`.
 - EVM reconcile and force could act on an EVM session while its close was in flight. Both now refuse
   with "A close of this session is still in flight — call again once it returns".
 
@@ -151,21 +173,35 @@ published; they ship here.
   send lock.
   - The sender now keeps one claim per chain, token, payer and nonce. It takes the claim before
     sending and releases it only if nothing was broadcast.
-  - A replay answers `#settlementPending` naming the earlier tx.
+  - A replay answers `#settlementPending` naming the earlier tx, and unlocks the server nonce it
+    came with (nothing of it moved).
   - The claims are transient: an upgrade allows one more broadcast per authorization.
+- A rejected EVM send, confirm or `authorizationState` call left the server nonce locked as if in
+  flight, the authorization claimed and the daily reservation held. Each now ends
+  `#settlementPending` with the reservation released; a rejected send keeps the claim, since it may
+  have broadcast.
 - **A reverted transfer was read as "no funds moved".** Anyone can submit
   `transferWithAuthorization`, so our tx can revert because another tx used the authorization
   first. Settle and session open now read the token's `authorizationState`:
   - unused: failed, as before;
   - used, or the read failed: `#settlementPending`, with no receipt and no session.
-- **Parked transactions that can never land are detected.** A tx is "dropped" when its nonce has
-  been used by another tx and a re-poll still finds no receipt.
-  - `reconcileSession` reports a dropped tx and leaves the session parked.
-  - `reconcileEvmDeposit` treats a dropped deposit as reverted only if the authorization is still
+- **Parked transactions that appear not to have landed are reported.** A tx is reported when its
+  nonce has been used by another tx and the providers agree there is no receipt for it. Providers
+  that disagree, an RPC error or no answer leave it "still pending". It is not proof: verify on a
+  block explorer before `forceResolveSession` and `sweepEvm`.
+  - `reconcileSession` reports such a tx and leaves the session parked.
+  - `reconcileEvmDeposit` treats such a deposit as reverted only if the authorization is still
     unused.
   - Maybe-sent transactions are confirm-polled before parking.
+- A session open whose deposit call failed with an unknown outcome answered `#settlementFailed`,
+  inviting a re-sign. It now returns `#settlementPending` with no tx hash (check the payer's
+  authorization on chain), and the authorization stays claimed. A rejected confirm call during the
+  open is "confirmation unavailable" (the deposit is tracked for `reconcileEvmDeposit`), and a
+  rejected `authorizationState` call is "could not be checked", as on settle. Before, a rejected
+  confirm call left the caller's open lock held and the broadcast deposit untracked.
 - Sessions kept the sender built at construction, so a later `setEvmDerivationPath` did not reach
-  them (see the upgrade notes). They now read the gateway's current sender.
+  them (see the upgrade notes). They now read the gateway's current sender. Re-applying the current
+  path is a no-op, so the sender keeps its send lock, authorization claims and nonce memory.
 - Tokens with different decimals on one chain (see the upgrade notes).
 - Checksum and lower-case spellings of one address had separate policy buckets, which let a payer
   escape a blocklist. `evmPolicyPrincipal` now lower-cases the address.
@@ -186,8 +222,26 @@ published; they ship here.
   (owner decision; see the upgrade notes).
 - A rejected expiry refund stopped the sweep and left the job `#Expired`.
   - It now parks the job `#Settling` for `resolveJob`.
-  - A refund that fails with `#Err` is retried on the next tick.
+  - A refund that fails definitely is retried by later ticks (below).
   - `expireJobs()` returns only jobs that were refunded or parked.
+- **The sweep's automatic retries were unbounded, and a reverted transfer could be sent again.**
+  - A definite failure a retry may fix (an ICP ledger `#Err`, an EVM send refused before broadcast)
+    is retried at most 5 times, then left for a controller with one log line. The count is in
+    memory: an upgrade grants 5 more.
+  - A failure no retry can fix (no hook, chain, payout address, token or operator; a buyer with no
+    rail) is not retried.
+  - A reverted EVM refund is never sent again: the job stays `#Expired` carrying the tx (pay by
+    hand, then `resolveJob`). A reverted operator payment is not sent again automatically: the job
+    goes back to `#Verified` carrying the tx; `resolveDispute` sends again or refunds, `resolveJob`
+    closes it. `health().jobs.parked` counts both.
+  - A job left for a controller keeps the sweep at its 60 s cadence.
+- The sweep now settles a `#Verified` job: one whose window ended, or one an earlier failed settle
+  left (not one carrying a reverted payment). Before, only a controller could move the latter.
+- A dispute filed after a window above 0 had closed was accepted. It is now refused ("Dispute window
+  has closed: the result was accepted"). A `#Disputed` job is still refunded at `expiresAt` unless a
+  controller rules first (owner decision).
+- The EVM rail followed the buyer's spelling, so a payer written `0X…` or as bare hex was put on
+  the ICP rail, where its refund could not be paid. It now follows the receipt's `eip155:` network.
 - `submitResult` accepted a second submission while a ZK verifier call was in flight, and a throwing
   verifier left the job stuck `#Computing`. It now accepts `#Assigned` only, and returns the job to
   `#Assigned` on a verifier error.
@@ -207,7 +261,12 @@ published; they ship here.
   `{ maxAmount }` and refuse a higher price before approving anything. `submitServiceRequest`
   returns `paidAmount`.
 - `Ic402Error.paymentNotSent` marks refusals raised before the paying call; `fundsMoved` marks the
-  opposite. A settlement already in progress is transient: retry the same payment.
+  opposite. A settlement already in progress is another payer's attempt and is transient: retrying
+  the same payment is preferred, and paying anew is also safe.
+- `fetchX402` treated a network error, timeout or unreadable body after the paid request as a
+  retryable error, and a retry signed a second authorization. Those, and any non-402 error status,
+  are now possibly paid: `fundsMoved`, kind `not_confirmed`, not retryable. New export
+  `paidRequestError`.
 - `call()` returned a post-payment `{error}`, or a fresh `{paymentRequired}`, as a value. It now
   throws.
 
@@ -222,7 +281,13 @@ published; they ship here.
   fee.
 - Spend reservations were released after timeouts and post-payment errors. Now they are released
   only when no payment was sent.
-- `submit_request` and `open_session` pass the confirmed amount to the SDK as its ceiling.
+- `submit_request` and `open_session` paid what the canister asked when confirmed. The
+  `confirm:true` call must now repeat the approved `amount` (`submit_request`) or `maxDeposit`
+  (`open_session`) from `confirmWith`, and is refused if the canister now asks something else (see
+  the upgrade notes). The confirmed amount is the SDK's ceiling.
+- A `fetch_x402` failure after the paid request was sent (network error, timeout, refused hop,
+  oversized body), and any non-402 error status, is now reported as possibly paid (`fundsMoved`,
+  not retryable).
 - SSRF gaps closed:
   - NAT64, 6to4, 198.18/15 and 240/4 are refused;
   - the x402 probe checks DNS on every redirect;
@@ -242,7 +307,12 @@ published; they ship here.
 - `getJob` and `getJobResult` were readable by anyone. Only the buyer, the operator or a controller
   can read them now. EVM-paid buyers lose access to results; job status stays public.
 - `registerService` mapped an unknown verification string to AutoSettle. It is now refused.
-- `resolveDispute` is exposed, to controllers only.
+- New endpoints:
+  - `resolveDispute` and `clearRefundOwed`, to controllers only;
+  - `recoverEscrow`, for the session's payer;
+  - for EVM-paid buyers, `confirmJobEvm` and `disputeJobEvm` (behind the facilitator's admission
+    limit) and the query `buyerActionMessage`. The buyer signs keccak256 of the message as a raw
+    digest (no EIP-191 prefix), sent as r ‖ s ‖ v.
 - Smaller fixes:
   - the JSON reader rejected payment headers with whitespace, as Python's `json.dumps` writes them;
   - `/search` echoed the query unescaped;
@@ -253,8 +323,16 @@ published; they ship here.
 - The EngramX contract strings are unchanged.
 - The EVM settle text for a revert now says the authorization is still unused on chain, and drops
   "authorization nonce already used" from its list of causes.
-- ICP close and reconcile no longer say "No token configured". They name the token that does not
-  resolve, and say the session stays open (close) or `#closing` (reconcile).
+- ICP close, reconcile and `recoverEscrow` no longer say "No token configured". They name the
+  token that does not resolve, say the session stays open (close) or `#closing` (reconcile), and
+  give both causes: the ledger was removed from the configuration, or the session was opened before
+  2.22.0 with an unconfigured token and its escrow is on the ledger that was then first. They say to
+  check which ledger holds the escrow before changing the configuration.
+- The EVM reconcile texts for a tx whose nonce was taken now say it "appears not to have landed …
+  verify on chain before forcing" (they said it "can never land … moved no funds"); the deposit
+  texts likewise.
+- An EVM session open whose deposit call failed answers `#settlementPending`, not
+  `#settlementFailed`.
 
 ### Known residuals
 
@@ -266,18 +344,30 @@ published; they ship here.
 - An open made while a close is in flight can exceed `maxConcurrentSessions`.
 - `confirmEvmTransaction` and `ServiceRegistry.reconcileJob` do not detect dropped transactions.
 - A fresh authorization from an unfunded wallet costs gas once.
+- `authorizationState` is read at the latest block, so a lagging provider pair can still read
+  "unused" for an authorization another tx has just used.
+- `icp:*` session tokens are stored as given, so they follow whatever the first configured ledger
+  is.
+- A `#Pending`, `#Assigned` or `#Computing` job whose refund the sweep gave up on has no controller
+  re-drive; only an upgrade (5 more tries) moves it.
+- The MCP `fetch_x402` confirmation is stateless, and `ledger` and `rpcUrl` are not pinned at
+  startup.
+- The SDK and the MCP server treat any failure once the paid x402 request was attempted as possibly
+  paid, including a refusal before the request left the process and a non-402 4xx/5xx. This is
+  conservative, and the MCP's spend caps bound it.
 
 ### Tests
 
-- 837 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
-  `evmrail`.
-- 112 mutations across the Motoko fixes, each test run in isolation. Each turns at least one test
-  red, except paths the interpreter cannot reach: timers, tECDSA, traps, and real EVM broadcasts.
+- 857 Motoko tests. New suites: `payerguards`, `icpcharge`, `sessionguards`, `jobguards`,
+  `evmrail`, `sessiontoken`.
+- More than 150 mutations across the Motoko fixes, each test run in isolation. Each turns at least
+  one test red, except paths the interpreter cannot reach: timers, tECDSA, traps, and real EVM
+  broadcasts.
   Those are covered by review and by the replica cases.
 - New replica cases in `test/integration.test.ts` and `test/evm-outbound.test.ts`. They run in CI.
   The EVM-RPC mock gained `eth_call` and modes for insufficient funds, unavailable fees and
   scripted nonces.
-- TypeScript: 227 root tests and 103 client tests.
+- TypeScript: 236 root tests and 105 client tests.
 
 ### Release tooling
 
