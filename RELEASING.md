@@ -17,7 +17,8 @@ ic402 has **two independent version numbers**. Most releases move only the first
 `scripts/version.sh` syncs the version across **9 files** (mops.toml, the four `package.json`s,
 `example/zk-verifier/Cargo.toml` + `Cargo.lock`, and the runtime version literals in
 `integrations/mcp/src/index.ts` + `example/client/src/index.ts`). It does **not** touch
-`integrations/mcp/README.md` or `CHANGELOG.md` — those are edited by hand each release.
+`CHANGELOG.md` or the "versions uniform at X" line in `docs/production-readiness.md` — those are
+edited by hand each release.
 
 ---
 
@@ -31,51 +32,45 @@ extra to do for the stable contract.
    ```bash
    ./scripts/version.sh 2.2.5          # or: patch | minor | major  (also: pnpm version:bump 2.2.5)
    ```
-3. **By hand** (the two files version.sh doesn't touch):
-   - `integrations/mcp/README.md` — update both `2.2.x` references (the `version:` line + the
-     `new McpServer({ … version: '2.2.x' })` prose).
+3. **By hand** (what version.sh doesn't touch):
    - `CHANGELOG.md` — prepend a `## v2.2.5 — YYYY-MM-DD` entry (most-recent-first), with a
      release-type summary line + categorized `###` subsections. State whether there are any
-     wire/HTTP or `@ic402/client` breaking changes.
-4. **Commit + tag** (annotated tag, `ic402 vX.Y.Z (…)` subject — matches the existing tags):
+     wire/HTTP or `@ic402/client` breaking changes. If an `## Unreleased` section exists, fold it
+     into the new entry. The release workflow takes the GitHub Release notes from this entry.
+   - `docs/production-readiness.md` — the "versions uniform at X" line.
+4. **Commit and push master.** `release.yml` ignores branch pushes, so this publishes nothing:
    ```bash
    git commit -am "release: v2.2.5"
+   git push origin master
+   ```
+5. **Tag and push the tag — this is the publish.** Wait for CI on the release commit to be green
+   first; a published version can't be taken back. Annotated tag, `ic402 vX.Y.Z (…)` subject, as
+   the existing tags:
+   ```bash
    git tag -a v2.2.5 -m "ic402 v2.2.5 (short description)"
+   git push origin v2.2.5
    ```
-5. **Push** (your action):
-   ```bash
-   git push origin master && git push origin v2.2.5
-   ```
-6. **npm auth (one-time).** The two npm packages publish with a **per-repo** token in a gitignored
-   `.npmrc`, so ic402 and sibling repos (e.g. engramx) each publish with their own token — no shared
-   global `~/.npmrc` token. pnpm won't expand env vars in a project `.npmrc`, so the token is a
-   **literal** value (safe: `.npmrc` is gitignored, never committed). Create it once:
-   ```bash
-   pnpm config set "//registry.npmjs.org/:_authToken" npm_xxxxxxxx --location project
-   ```
-   (or `cp .npmrc.example .npmrc` and paste your automation token). `mops publish` uses separate
-   mops auth, not this token.
-7. **Publish** (after CI on the pushed tag is green):
-   ```bash
-   pnpm build:client && pnpm build:demo     # ensure dist/ is fresh
-   mops publish                              # publishes the `ic402` mops package
-   (cd packages/client && npm publish)       # @ic402/client   (first ever publish: --access public)
-   (cd integrations/mcp && npm publish)      # @ic402/mcp       (first ever publish: --access public)
-   ```
-   Publishing is optional for a release with no consumer-facing code change (e.g. a docs/CI-only
-   patch) — the git tag still marks it.
+   The tag push runs `.github/workflows/release.yml`, which:
+   - refuses a tag that doesn't match `mops.toml`'s version;
+   - packs both npm packages and proves they install (`scripts/check-npm-pack.sh`);
+   - creates the GitHub Release from the version's CHANGELOG entry;
+   - publishes `@ic402/client` and `@ic402/mcp` to npm by **trusted publishing** (GitHub OIDC,
+     with provenance) — no npm token on any machine;
+   - publishes `ic402` to mops with the `release` environment's `MOPS_IDENTITY_PEM` secret.
 
-> **PATH gotcha:** `mops publish` and `npm publish` run directly in your shell (not through a
-> project script that sanitizes PATH). A sibling repo's `node_modules/.bin` ahead on `PATH` can
-> shadow `mops` with a broken copy (`Cannot find package '@dfinity/identity'`). If you hit that,
-> run the project's toolchain explicitly (e.g. `/opt/homebrew/bin/mops publish`) or drop the
-> offending entry from `PATH`.
+   Each publish skips a version its registry already has, so re-running the workflow is safe. The
+   one-time setup (npm trusted publishers, the `release` environment) is described in the header of
+   `release.yml`.
+6. **Verify** once the workflow is green:
+   ```bash
+   npm view @ic402/client@2.2.5 version     # npm can lag ~a minute after a publish; re-check before
+   npm view @ic402/mcp@2.2.5 version        # calling it failed
+   ```
+   Then run a real `npm install @ic402/mcp@2.2.5` in an empty directory (it proves the published
+   dependency ranges resolve), and check that https://mops.one/ic402 lists the version.
 
-> **`Failed to replace env in config: ${NPM_TOKEN}` warning:** this comes from the **global**
-> `~/.npmrc` (`_authToken=${NPM_TOKEN}`) when `NPM_TOKEN` is unset. It's harmless (install/build
-> from the public registry needs no auth). Now that each repo carries its own gitignored `.npmrc`,
-> the global token line is redundant — remove it from `~/.npmrc` (or `export NPM_TOKEN=…`) to
-> silence the warning. A project `.npmrc` with a **literal** token does not warn.
+> **Old npm versions** can only be deprecated from your machine (`npm login`, then
+> `npm deprecate`): CI's trusted publishing can publish, nothing else.
 
 ---
 

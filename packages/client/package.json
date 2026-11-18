@@ -51,12 +51,12 @@
   },
   "dependencies": {
     "@icp-sdk/core": "6.1.1",
-    "cborg": "6.1.6",
-    "viem": "2.57.13"
+    "cborg": "6.2.1",
+    "viem": "2.57.17"
   },
   "devDependencies": {
     "@icp-sdk/core": "6.1.1",
     "typescript": "6.0.3",
-    "vitest": "5.0.5"
+    "vitest": "5.1.0"
   }
 }
