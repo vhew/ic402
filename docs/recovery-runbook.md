@@ -45,7 +45,8 @@ incident.
 | `openSession` returned `#err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx …) — no session was created…"))` | Deposit may or may not have landed in the shared pool; **no session exists** | §4 |
 | You are about to upgrade the canister | Transient recovery state (parked txs, pending-deposit tracker) would be wiped | §5 |
 | A marketplace job returned `"Settlement failed: …"` and rests in `#Verified` | Nothing moved; the buyer's payment is still in the pool | §6 |
-| ICP charge `settle()`/`settleFrom()` returned `#settlementPending("Ledger call rejected (…)")` (2.20.0) | **Unknown**: the payer may have been charged; no receipt; the nonce stays locked | §7 |
+| ICP charge `settle()`/`settleFrom()` returned `#settlementPending("Ledger call rejected (…)")` (2.20.0) | **Unknown**: the payer may have been charged; no receipt; the nonce stays locked. 2.21.0, with `setLedgerDedup` on and a `settleFrom` charge: the payer's `settleFrom` with the same payment resolves it | §7 |
+| ICP `openSession` returned `#err(#settlementPending("Deposit rejected (…) … Session … is parked #closing …"))` (2.21.0) | **Unknown**: the deposit is in that session's escrow subaccount, or never arrived | §7 |
 | ICP close returned `#settlementPending("Settle leg rejected (…)")` (2.20.0), session rests `#closing` | **Unknown**: the escrow is either intact or already settled to the recipient | §7 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
 | EVM charge returned `#settlementFailed("EIP-3009 transfer reverted on-chain …")` | Nothing moved, nonce unlocked | Not stuck — fix the cause (payer balance / reused authz nonce), client re-signs fresh |
@@ -277,7 +278,7 @@ path reserves `#Settling` before its transfer, so a concurrent call aborts rathe
 controller-gated, as the example does `resolveJob`.
 
 
-## §7 ICP ledger call rejected with an unknown outcome (2.20.0)
+## §7 ICP ledger call rejected with an unknown outcome (2.20.0, 2.21.0)
 
 A rejected ledger call does not prove the transfer failed. The DFINITY ledgers commit a transfer and
 then await their archive inside the same call, and a stopped ledger answers with the same reject
@@ -296,23 +297,75 @@ code as a trap after commit. So ic402 treats any reject not raised before the le
 2. Only if reconcile can never decide, check the ledger yourself before `forceResolveSession` (see §3's
    warning: forcing a session whose settle did not land strands the recipient's share).
 
+**ICP session open (2.21.0).** `openSession` first asks the ledger for its fee. If the ledger is
+stopped (an upgrade) or unreachable, that query fails and the open is refused with
+`#settlementFailed("Ledger fee query failed before the deposit (nothing moved; safe to retry) …")`:
+nothing moved, nothing to recover; the payer retries.
+
+**ICP session open: the deposit was rejected after that (2.21.0).** Rare: the ledger stopped between
+the two calls, or rejected a transfer it had committed. `openSession` returned
+`#err(#settlementPending("Deposit rejected (…) … Session <id> is parked #closing …"))`. The session record
+exists, `#closing`, with nothing consumed and the payer's daily reservation held. Vouchers and closes
+refuse it, the expiry sweep skips it (it keeps the sweep's timer running until it is resolved).
+1. Once the ledger answers again, run **`reconcileSession(<id>)`** (controller). It reads the escrow:
+   - `#ok("Escrow holds the full deposit … the deposit landed. Session opened.")`: the session is `#open`.
+     Its open time is the original attempt's, so if you reconcile after its `maxDuration` has passed,
+     the next sweep closes it and refunds the deposit less the ledger fee. Tell the payer.
+   - `#ok("… nothing was consumed: the deposit did not land … nothing is owed.")`: the session is
+     `#closed` and the daily reservation released. Nothing moved, and nothing is recorded as owed.
+   - `#err(…)`: as for a close above; run it again later.
+2. Tell the payer not to open another session for that deposit until it is reconciled.
+
+**Not covered: the concurrency refund at open.** If a deposit lands but the payer's concurrent-session
+limit was reached meanwhile, `openSession` refunds it at once, before any session record exists. If
+that refund itself fails, the deposit sits in the session's escrow subaccount with no record, and
+`recoverEscrow` cannot reach it: recover it by hand from the controller (unchanged from earlier versions).
+
 **ICP charge (`settle` / `settleFrom`).** It returned `#settlementPending("Ledger call rejected …")`. No
-receipt was issued, the nonce stays locked until it expires (so the same payment cannot be replayed),
-and the payer's daily reservation stays held. There is **no in-band resolution**:
+receipt was issued, the nonce stays locked (so the same payment cannot be replayed), and the payer's
+daily reservation stays held. The nonce clean-up removes the lock some time after the nonce expires:
+it runs once the table holds 10,000 live nonces or 20,000 have been issued, and anyone can request
+challenges. After that, the payer's re-submit is answered `#expired` (pay with a fresh challenge), so
+resolve a pending charge before then. (2.21.0 corrects 2.20.0's "freed at expiry" only in that the
+clean-up, not the expiry itself, frees it.)
+
+*With `setLedgerDedup(true)` (2.21.0).* Every charge first asks the ledger for its fee, so a stopped
+ledger usually refuses the charge cleanly (`#settlementFailed`, nonce unlocked, nothing moved) and the
+payer retries. A charge can still go pending if the ledger stops between the two calls, or rejects a
+transfer it committed. Then:
+- **Made through `settleFrom`** (the caller is the payer): the canister kept the transfer (fee, nonce as
+  memo, `created_at_time`). **The payer calls `settleFrom` again with the same payment** once the ledger
+  answers. The identical transfer is sent again, and the ledger's deduplication decides: it was charged
+  (`#Duplicate`) or not yet (`#Ok`, charged now). Either way the payer gets one receipt. Another
+  caller, network or price sends nothing. The nonce and the kept transfer survive the clean-up for 24
+  hours past the nonce's expiry. It stays pending if:
+  - the ledger still rejects, or answers a fixable error (allowance, funds): call again later. On
+    DFINITY ledgers `#InsufficientAllowance`/`#InsufficientFunds` on a re-send also show the first
+    transfer did not land (deduplication is checked first). The SDK's approvals expire after 5
+    minutes, so after a longer outage the payer re-approves, then calls `settleFrom` again;
+  - the ledger answers `#TooOld` (its 24-hour window has passed) or `#BadFee` (its fee changed): a
+    re-send can no longer decide it. Use the manual steps below;
+  - the canister was upgraded since (the kept transfer is not persisted): manual steps below.
+- **Made through `settle`** (HTTP): nothing is kept, because over HTTP `sender` is only a claim and the
+  nonce is not a secret. Use the manual steps below.
+
+*Manual steps* (setting off, HTTP charges, or past the cases above):
 1. Do not deliver, and tell the payer not to pay again yet.
 2. Look on the ledger for an `icrc2_transfer_from` from the payer to the canister's recipient account
-   for the charged amount, around the time of the call.
-3. If it landed, deliver (or refund the payer) out of band. If it did not, the payer pays again once
-   the nonce has expired (default 5 minutes).
-
-Ledger deduplication (`created_at_time` + `memo`) would let the canister answer this itself. It is a
-tracked follow-up, not built.
+   for the charged amount, around the time of the call. With `setLedgerDedup` on, its memo is the
+   payment's nonce.
+3. If it landed, deliver (or refund the payer) out of band. If it did not, the payer pays again with a
+   fresh 402 challenge. With `setLedgerDedup` on and a `settleFrom` charge still re-sendable (the
+   ledger had not answered `#TooOld`/`#BadFee`), have the payer pay anew only after their allowance
+   for the old payment has expired or been revoked; otherwise a later re-send of the old payment
+   could also land.
 
 ## Method reference
 
 | Method | Gate | Broadcasts / moves funds? | Use for |
 |---|---|---|---|
-| `reconcileSession(sessionId)` | controller (consumer-gated) | **No** — confirm-only; finalize releases allocation + daily reservation | EVM session parked in `#closing` with a recorded tx (§2); ICP session resting in `#closing` — reads the escrow balance (§7, 2.20.0) |
+| `reconcileSession(sessionId)` | controller (consumer-gated) | **No** — confirm-only; finalize releases allocation + daily reservation | EVM session parked in `#closing` with a recorded tx (§2); ICP session resting in `#closing` — reads the escrow balance (§7, 2.20.0), including a session parked at open (2.21.0) |
+| `setLedgerDedup(on)` | init-time setting (transient) | No | Lets the payer's `settleFrom` with the same payment resolve a pending ICP charge through the ledger's deduplication (§7, 2.21.0). Only for deduplicating ledgers |
 | `forceResolveSession(sessionId)` | controller | **No** — moves no on-chain funds; releases the pool allocation + daily reservation (v2.5.5) | `#closing` with no parked tx / after out-of-band verification (§2) |
 | `reconcileEvmDeposit(txHash)` | controller | **Yes** — refunds on confirmed deposit | Broadcast-but-unconfirmed inbound deposit, no session (§4) |
 | `pendingEvmDepositCount()` / `listPendingEvmDeposits()` | controller | No | Drain / triage (§4, §5) |

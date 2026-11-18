@@ -93,7 +93,7 @@ line-by-line state.
   won't produce on demand, and closes B4's residual EVM-outbound gap. **Still recommended (not blocking):**
   a periodic live-testnet smoke for the funded leg, which by definition can't be hermetic.
 - [~] **B4 — CI green is hollow for the substance — MOSTLY FIXED (v2.1.1).** The only e2e suite
-  (`test/integration.test.ts`, now 50 cases) used to **silently pass in CI** (every case is
+  (`test/integration.test.ts`, now 60 cases) used to **silently pass in CI** (every case is
   `if (skip) return`; with no replica vitest counts them as passed) and failed locally on
   hardcoded `svc-1`/price assumptions. **DONE:** (1) the suite is now deterministic — it binds to
   its own registered service id and is hermetic (every fetch hits the local replica; the EVM cases

@@ -1,6 +1,7 @@
 /// Motoko unit tests for NonceManager.
 import Nonce "../src/ic402/Nonce";
 import Principal "mo:base/Principal";
+import Blob "mo:base/Blob";
 import Time "mo:base/Time";
 import { test; suite } "mo:test";
 
@@ -172,5 +173,107 @@ suite("NonceManager", func() {
     let mgr = Nonce.NonceManager(testPrincipal);
     let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
     assert(nonce.size() == 32);
+  });
+
+  // 2.21.0: the stored transfer of a pending ICP charge (Gateway.setLedgerDedup).
+  let charge : Nonce.PendingCharge = {
+    ledger = testPrincipal;
+    network = testNetwork;
+    args = {
+      spender_subaccount = null; from = { owner = testPrincipal; subaccount = null };
+      to = { owner = testPrincipal; subaccount = null }; amount = testAmount; fee = ?10_000;
+      memo = null; created_at_time = ?1;
+    };
+  };
+
+  test("2.21.0: a pending charge is stored only under a lock, and checked out once until put back", func() {
+    // Mutations: let takePending hand the record out again while it is checked out (two
+    // concurrent re-submits would both re-send the transfer); or store it without a lock (a record
+    // could outlive its nonce).
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
+    mgr.setPending(nonce, charge); // not locked yet: ignored
+    assert(mgr.takePending(nonce) == null);
+    ignore mgr.lock(nonce, testNetwork, testToken);
+    mgr.setPending(nonce, charge);
+    assert(mgr.takePending(nonce) == ?charge);
+    assert(mgr.takePending(nonce) == null); // checked out: a re-send is in flight
+    mgr.setPending(nonce, charge); // put back after the re-send
+    assert(mgr.takePending(nonce) == ?charge);
+  });
+
+  test("2.21.0: a first attempt's transfer is stored in flight: nobody else can check it out until it is made available", func() {
+    // Mutation: make setInFlight's record available at once — a re-submit arriving while the
+    // first attempt is in flight would send the transfer a second time.
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
+    ignore mgr.lock(nonce, testNetwork, testToken);
+    mgr.setInFlight(nonce, charge);
+    assert(mgr.takePending(nonce) == null);
+    mgr.setPending(nonce, charge); // the first attempt's outcome was unknown
+    assert(mgr.takePending(nonce) == ?charge);
+  });
+
+  test("2.21.0: dropPending removes the transfer and leaves the nonce locked", func() {
+    // Mutation: dropPending also unlocks — the payer's next re-submit would start a NEW charge.
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let nonce = mgr.generate(Time.now() + 300_000_000_000, testAmount, testNetwork, testToken);
+    ignore mgr.lock(nonce, testNetwork, testToken);
+    mgr.setPending(nonce, charge);
+    ignore mgr.takePending(nonce);
+    mgr.dropPending(nonce);
+    assert(mgr.takePending(nonce) == null);
+    assert(mgr.isLocked(nonce));
+  });
+
+  test("2.21.0: the clean-up keeps a locked nonce with a stored transfer until 24 h past its expiry", func() {
+    // Mutations: no retention (the payer's re-submit after the clean-up is told to pay with a
+    // fresh nonce); or retention for every locked nonce (locks without a stored transfer, which
+    // anyone can create over HTTP, would pile up for a day).
+    let now = Time.now();
+    let SEC : Int = 1_000_000_000;
+    let a = Blob.fromArray([1]); // expired 1 s ago, stored transfer: kept
+    let b = Blob.fromArray([2]); // expired 25 h ago, stored transfer: removed
+    let c = Blob.fromArray([3]); // expired 1 s ago, no stored transfer: removed
+    let mgr = Nonce.NonceManager(testPrincipal);
+    mgr.loadStable({
+      nonces = [
+        (a, (now - SEC, testAmount, testNetwork, testToken)),
+        (b, (now - 25 * 3600 * SEC, testAmount, testNetwork, testToken)),
+        (c, (now - SEC, testAmount, testNetwork, testToken)),
+      ];
+      counter = 0;
+      lockedNonces = ?[a, b, c];
+    });
+    mgr.setPending(a, charge);
+    mgr.setPending(b, charge);
+    mgr.gcExpired();
+    assert(mgr.isLocked(a));
+    assert(mgr.takePending(a) == ?charge);
+    // Checked out for a re-send (in flight), it is still kept: the clean-up running during the
+    // re-send's await must not drop the lock.
+    mgr.gcExpired();
+    assert(mgr.isLocked(a));
+    mgr.setPending(a, charge);
+    assert(mgr.takePending(a) == ?charge);
+    assert(not mgr.isLocked(b));
+    assert(mgr.takePending(b) == null);
+    assert(not mgr.isLocked(c));
+  });
+
+  test("2.21.0: unlock and consumeLocked drop the pending charge with the lock", func() {
+    // Mutation: drop the `pending.delete` from unlock or consumeLocked.
+    let mgr = Nonce.NonceManager(testPrincipal);
+    let expiry = Time.now() + 300_000_000_000;
+    let a = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    let b = mgr.generate(expiry, testAmount, testNetwork, testToken);
+    ignore mgr.lock(a, testNetwork, testToken);
+    ignore mgr.lock(b, testNetwork, testToken);
+    mgr.setPending(a, charge);
+    mgr.setPending(b, charge);
+    mgr.unlock(a);
+    mgr.consumeLocked(b);
+    assert(mgr.takePending(a) == null);
+    assert(mgr.takePending(b) == null);
   });
 });

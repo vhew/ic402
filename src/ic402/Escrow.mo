@@ -26,6 +26,21 @@ module {
       amount : Nat,
       subaccount : Blob,
     ) : async { #ok : Nat; #err : Text } {
+      await* depositCore(ledger, from, amount, subaccount);
+    };
+
+    /// 2.21.0: `deposit` run inline (`await*`), so a ledger reject reaches the caller with the
+    /// ledger's own reject code. Through `deposit`'s self-call the caller sees the self-call's
+    /// code instead, and cannot tell "the ledger never ran" from "the outcome is unknown". As with
+    /// settleCore, a trap while decoding a malformed ledger reply now rolls back the CALLER's message
+    /// instead of reaching it as a reject: openSession then leaves no session record (its open lock
+    /// expires after 5 minutes). Identical for any conformant ledger.
+    public func depositCore(
+      ledger : Types.LedgerActor,
+      from : Types.Account,
+      amount : Nat,
+      subaccount : Blob,
+    ) : async* { #ok : Nat; #err : Text } {
       let result = await ledger.icrc2_transfer_from({
         spender_subaccount = null;
         from;

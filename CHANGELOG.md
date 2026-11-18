@@ -1,6 +1,160 @@
 # Changelog
 
-## Unreleased
+## v2.21.0 — 2026-11-18
+
+Minor — **ICP payments whose ledger call ends with an unknown outcome: a stopped ledger is refused
+cleanly, a session-open deposit is never left without a record, and a pending Candid charge can be
+settled by the payer's own re-submit.** 2.20.0 stopped treating such a reject as "not paid", but a
+pending charge could only be resolved by checking the ledger by hand, and a rejected session-open
+deposit escaped `openSession` with no session record. No stored-state change (`STABLE_SCHEMA_VERSION`
+stays 1), no `example.did` change, no `mops.toml` change.
+
+Behaviour changes integrators see:
+- **ICP `openSession`** queries the ledger's fee before pulling the deposit. If the query fails, the
+  open returns `#err(#settlementFailed)` and nothing moves.
+- **A deposit rejected with an unknown outcome** after that query returns `#err(#settlementPending)`
+  with the session parked.
+- **With the new setting on,** a pending `settleFrom` charge is settled by the payer calling
+  `settleFrom` again with the same payment.
+
+### Added
+
+- **`Gateway.setLedgerDedup(on)`** (default **off**; transient, set it at init) and
+  `ledgerDedupEnabled()`.
+  - **Every ICP charge, with the setting on,** queries `icrc1_fee` first. A failed query moves
+    nothing, so it is `#settlementFailed` with the nonce unlocked: in practice a stopped ledger (an
+    upgrade) now refuses a charge cleanly instead of leaving it pending. The charge then sends that
+    fee, the payment nonce as memo and a `created_at_time`.
+  - **A charge made through `settleFrom`** (the caller is the payer) whose transfer is rejected with
+    an unknown outcome keeps that transfer. When the payer calls `settleFrom` again with the same
+    payment, the transfer is re-sent unchanged and the ledger's deduplication decides: `#Duplicate`
+    (it was charged) or `#Ok` (charged now). Either way the payer gets exactly one receipt.
+  - **Charges made through `settle` (HTTP) keep nothing and are never re-sent.** There `sender` is
+    only a claim, and nonces are not secrets (the memo even shows the nonce on the ledger). A re-send
+    on that path would let anyone who saw the transfer collect the payer's receipt. They stay
+    `#settlementPending`, as in 2.20.0.
+  - **Re-sends are narrow.** Another caller, network or price sends nothing.
+  - **A send in flight blocks re-sends.** While a send of the kept transfer is in flight (the first
+    attempt, or a re-send), it stays stored but marked in flight. A re-submit meanwhile sends
+    nothing, and the nonce clean-up still keeps the nonce.
+  - **When re-sending stops.** `#TooOld` (the ledger's 24-hour window passed) and `#BadFee` (its fee
+    changed) leave the charge pending and stop further re-sends. Other errors and rejects leave it
+    re-sendable.
+  - **The fee is explicit because the ICP ledger keys deduplication on the fee it charges.** With
+    `fee = null`, a fee change between the attempts would turn the re-send into a second transfer.
+    Explicit, it is `#BadFee`, which both DFINITY ledgers check before deduplication. Verified
+    against dfinity/ic `0dc067ae`.
+  - **The nonce clean-up keeps a nonce that holds a kept transfer** for 24 hours past its expiry
+    (`Nonce.PENDING_RETENTION_NS`), so the ledger's window is really available.
+  - **The kept transfer is transient:** after an upgrade a pending charge behaves as in 2.20.0.
+  - **Turn the setting on only for ledgers that deduplicate** on `created_at_time` + `memo`.
+    DFINITY's ICP and ICRC-1 ledgers do. ICRC-1 makes deduplication a SHOULD and no ledger API
+    declares it, so this is the operator's declaration; on a ledger that does not deduplicate, a
+    re-send charges twice. The ledger's memo limit must be at least 32 bytes.
+- **`Escrow.depositCore`** (`async*`): the deposit run inline, so the ledger's reject code reaches the
+  caller. As with `settleCore`, a trap decoding a malformed ledger reply now rolls back the caller's
+  message; `openSession` then leaves no record and its open lock expires after 5 minutes. Identical
+  for any conformant ledger.
+
+### Changed
+
+- **ICP `openSession` asks the ledger for its fee before pulling the deposit.** If that query fails (a
+  stopped ledger), the open returns `#err(#settlementFailed("Ledger fee query failed before the deposit
+  (nothing moved; safe to retry) …"))`. Nothing is parked, and the open lock is released. One extra
+  ledger query per ICP open.
+- **ICP `openSession`: a deposit rejected after that, with an unknown outcome, parks the session.**
+  Rejects raised before the ledger ran are still `#settlementFailed` (nothing moved). Any other reject
+  records the session `#closing` with nothing consumed and the daily reservation held, and returns
+  `#err(#settlementPending("Deposit rejected (…) … Session <id> is parked #closing …"))`. Vouchers,
+  closes and the expiry sweep leave it alone, and the sweep's timer keeps running. The controller's
+  `reconcileSession` reads that session's escrow:
+  - the full deposit opens the session;
+  - anything less closes it with the daily reservation released.
+
+  Before, the reject escaped `openSession`, and a deposit that had landed had no session record. A
+  late reconcile can open a session already past its `maxDuration`, which the next sweep closes,
+  refunding the deposit less the fee.
+- **`reconcileSession` (ICP): a short escrow with nothing consumed owes nothing.** A close sends a
+  settle only when something was consumed, so the escrow is short because the deposit never arrived
+  (or a refund already left). It used to record `deposited − fee` as owed regardless.
+- **`example/main.mo` turns `setLedgerDedup(true)` on:** its one ledger, ckUSDC, is a DFINITY ledger.
+- **The example's pending prefix now reads `Settlement pending — do NOT retry payment with a new
+  nonce: `.** It still contains the SDK's moved-funds marker.
+
+### Corrected
+
+- **When a locked nonce is freed.** 2.20.0 said a pending payment's nonce "is freed when it
+  expires". It is freed by the first nonce clean-up after it expires. The clean-up runs once the
+  table holds 10,000 live nonces or 20,000 have been issued, and anyone can request challenges, so
+  on a busy canister that is soon after expiry. The payer's re-submit is then answered `#expired`,
+  so a pending payment must be resolved before then. With `setLedgerDedup` on, a nonce with a kept
+  transfer is kept 24 hours longer (above).
+- Doc comments that still described 2.20.0: `openSession`, `reconcileSession`, `sessionCounts`, and
+  the `#settlementPending` variant.
+
+### Not covered
+
+- **The concurrency refund at open.** If a deposit lands but the payer's concurrent-session limit
+  was reached meanwhile, `openSession` refunds it before any record exists. If that refund fails, the
+  deposit has no session record. Unchanged.
+- **HTTP charges stay manual.** A pending charge made through `settle` (HTTP) is still resolved by
+  checking the ledger (recovery runbook §7).
+
+### Tests
+
+- **`test/chargededup.test.mo` (19).** The resolution against a fake ledger that deduplicates as
+  DFINITY's do. It covers:
+  - charged-then-rejected, with one fee query;
+  - rejected-before-charge;
+  - the receipt consuming the nonce;
+  - the fields sent;
+  - the setting off (exactly 2.20.0), and the setting flipped mid-call;
+  - HTTP charges kept nothing, and HTTP re-submits never re-send;
+  - another caller, network or price;
+  - no price given;
+  - two re-submits at once, and a re-submit during the first attempt;
+  - re-sends rejected or refused;
+  - `#TooOld`, `#BadFee`, and a failed fee query.
+
+  The interpreter's clock never moves, so no test can tell a re-send that reuses the stored
+  `created_at_time` from one that takes a fresh one. That part is pinned by review.
+- **`test/opendeposit.test.mo` (2):** reconciling a parked deposit, landed and not landed, against
+  that session's escrow subaccount.
+- **`test/nonce.test.mo` (+5):**
+  - the kept transfer needs the lock, and is checked out once until put back;
+  - a first attempt's transfer is in flight;
+  - dropping it keeps the lock;
+  - it goes with the lock;
+  - it survives the clean-up for 24 hours past expiry, also while checked out.
+- **`test/integration.test.ts` (+2, replica).** Both stop the local ckUSDC ledger with the icp CLI:
+  - a charge is refused before any transfer, and the same payment then settles once;
+  - a session open is refused before the deposit, nothing is parked, and the next open succeeds.
+
+  No test reaches the parking itself. The replica cannot stop the ledger between the fee query and
+  the deposit, and the interpreter cannot run a successful `openSession`. It is covered by review;
+  its reconcile is unit-tested.
+- **Mutation check:** 37 mutations, each test run in isolation. None went undetected; 32 turn exactly
+  one test red. Five turn more, by design:
+  - treating the re-send's `#Ok` as pending breaks all 8 tests that resolve that way;
+  - storing the transfer whatever the setting and path breaks the 3 tests that pin "off" and "HTTP";
+  - a `takePending` that hands out a checked-out record breaks the concurrency and `#TooOld`/`#BadFee`
+    tests as well as its unit test;
+  - `setInFlight` leaving the record available, and `dropPending` also unlocking, are each caught by
+    a Nonce unit test and by the Gateway test of the behaviour it protects.
+
+  The `openSession` fee check has no mutation here; only the replica test pins it.
+- **Adversarial review.** Three Fable reviewers (fund safety, the parked deposit, tests and docs),
+  then one on the fixes. Confirmed and fixed:
+  - a pending HTTP charge's receipt could be collected by anyone who saw the transfer;
+  - the nonce clean-up could drop a pending charge long before the ledger's 24 hours;
+  - the clean-up could still drop a nonce while its transfer was out for a send, which the in-flight
+    marker fixes;
+  - a ledger outage turned every open attempt into a parked record;
+  - plus test gaps and doc errors.
+
+  Not fixed: the open lock can be overridden after 5 minutes and then deleted by the stale call.
+  This pattern already existed on the deposit await, and the post-deposit concurrency re-check
+  still bounds it.
 
 ### Interop: viem accepts colon-namespaced EIP-712 names again
 
@@ -26,6 +180,14 @@
 - **`RELEASING.md`** describes the publish as it works: pushing the tag runs `release.yml`, which
   publishes to npm by trusted publishing and to mops. The manual `npm publish` / per-repo token steps
   (replaced in July 2026) and the `integrations/mcp/README.md` version step are gone.
+
+### Docs
+
+- `docs/recovery-runbook.md` §7: the open's fee check, the parked deposit, the `settleFrom` re-send and
+  its limits, when the nonce clean-up runs, and the concurrency refund at open (not covered).
+- `docs/security-model.md` §2b and `docs/fund-safety-invariants.md`: the operator declaration, why HTTP
+  charges are not re-sent, a new invariant (DEDUP-RESEND-IS-VERBATIM), and the corrected NONCE-EXPIRY.
+- `ci.yml` and `docs/production-readiness.md`: the replica suite has 60 cases, not 50.
 
 ## v2.20.0 — 2026-11-04
 

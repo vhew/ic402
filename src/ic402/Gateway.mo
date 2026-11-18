@@ -7,6 +7,7 @@ import GrantsMod "Grants";
 import SessionsMod "Sessions";
 import Time "mo:base/Time";
 import Nat "mo:base/Nat";
+import Nat64 "mo:base/Nat64";
 import Int "mo:base/Int";
 import Text "mo:base/Text";
 import Buffer "mo:base/Buffer";
@@ -171,6 +172,8 @@ module {
     };
 
     var receiptCounter : Nat = 0;
+    // 2.21.0 (default OFF): see setLedgerDedup. Transient: re-apply at init.
+    var ledgerDedup = false;
     // Self-derived EVM address (from tECDSA key). Populated by deriveEvmRecipient().
     var evmRecipient : ?Text = null;
     // Live EVM chain set (see setEvmChains). Starts as the constructor config's evmChains;
@@ -672,13 +675,18 @@ module {
     /// amount. ICP settlement ALWAYS requires the server nonce (empty nonce → #expired).
     ///
     /// Nonce lifecycle: lock → (awaits) → consume on #ok / unlock on failure, EXCEPT
-    /// #settlementPending, where the nonce stays LOCKED (GC'd at expiry) so the same challenge
-    /// cannot be re-broadcast. #settlementPending is NOT final: no receipt is issued and the
+    /// #settlementPending, where the nonce stays LOCKED so the same challenge cannot be
+    /// re-broadcast. The nonce clean-up removes it some time after it expires: the clean-up runs
+    /// once the table holds 10,000 live nonces or 20,000 have been issued, and anyone can request
+    /// challenges. 2.21.0: a nonce holding a stored pending transfer is kept for 24 hours past its
+    /// expiry (setLedgerDedup). #settlementPending is NOT final: no receipt is issued and the
     /// caller MUST NOT deliver value — the broadcast tx may still mine later (handle out-of-band).
     /// 2.20.0: the ICP rail returns #settlementPending too, when the ledger call is rejected after
     /// it may have run (Utils.rejectedBeforeExecution is false): the payer may have been charged.
     /// Do not deliver, do not re-submit; check the ledger before taking a new payment. A reject
     /// the system raised before the ledger ran is still #settlementFailed (nonce unlocked).
+    /// 2.21.0, with setLedgerDedup on: a pending ICP charge made through settleFrom is resolved by
+    /// the payer calling settleFrom again with the SAME payment (one receipt, never a second charge).
     ///
     /// Multi-token (v2.5.0): the EVM verify + on-chain execution key off `signature.asset`
     /// (the EIP-712 verifyingContract the payer signed for); `asset = null` falls back to the
@@ -691,11 +699,13 @@ module {
     /// it and recorded only with a receipt (I6). EVM settles are metered by the GLOBAL facilitator
     /// token bucket and can return #policyDenied("Rate limited…") under load; ICP settles are not.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
-      await* settleCore(signature, expectedAmount);
+      await* settleCore(signature, expectedAmount, false);
     };
 
     // The body of `settle`, shared with settleFrom as `async*` so neither adds a self-send hop.
-    func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async* Types.PaymentResult {
+    // `payerIsCaller`: true only from settleFrom, which has checked that the caller is the named
+    // sender. 2.21.0: only then is a pending charge's transfer stored or re-sent (setLedgerDedup).
+    func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat, payerIsCaller : Bool) : async* Types.PaymentResult {
       // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
       // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
       // bogus payloads on ANY paid path (/content, /search, /settle) cannot run unmetered ecRecover
@@ -725,7 +735,15 @@ module {
             // 2.20.0: a locked nonce means a settlement with it is in flight, or ended with an
             // unknown outcome. Telling that caller to pay again with a fresh nonce could charge twice.
             if (nonceManager.isLocked(signature.nonce)) {
-              return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew (the nonce is freed when it expires).");
+              // 2.21.0: a pending ICP charge made through settleFrom with setLedgerDedup on kept its
+              // transfer; only the payer, calling settleFrom again, can have it re-sent.
+              if (payerIsCaller) {
+                switch (nonceManager.takePending(signature.nonce)) {
+                  case (?p) { return await* resolvePendingCharge(signature, expectedAmount, p) };
+                  case (null) {};
+                };
+              };
+              return #settlementPending("A settlement with this payment is in flight, or its outcome is unknown — do NOT pay again. Wait for the first attempt's result; if it was #settlementPending, check the ledger before paying anew.");
             };
             return #expired("Server nonce expired, already used, or bound to a different network/token — nonces are single-use and expire (default 5 min). Re-request the resource to get a fresh 402 challenge and pay with its nonce.");
           };
@@ -913,7 +931,7 @@ module {
             return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, authorization nonce already used, or token paused. Fix the cause and re-sign a fresh authorization.");
           };
           case (#pending) {
-            // Keep the nonce locked (GC'd at expiry) so the same challenge is
+            // Keep the nonce locked (only the nonce clean-up removes it) so the same challenge is
             // not re-broadcast; release the daily reservation since no receipt
             // is issued. Caller MUST NOT deliver value on #settlementPending.
             policy.releaseDaily(evmSender, evmSpendDay, amount);
@@ -966,34 +984,44 @@ module {
       let icpSpendDay = policy.currentDay();
       policy.recordSpend(senderPrincipal, amount);
 
+      // 2.21.0 (setLedgerDedup): send the fee, the nonce as memo and a created_at_time, so that a
+      // re-submit can send this exact transfer again and the ledger's deduplication decides. The
+      // fee is explicit because the ICP ledger's deduplication key holds the fee it charges: with
+      // `fee = null`, a fee change between the attempts would make the re-send a NEW transfer.
+      // Explicit, a changed fee is #BadFee, which both DFINITY ledgers check before deduplication.
+      // Read once, so flipping the setting during the awaits cannot store a transfer sent without
+      // deduplication fields.
+      let dedup = ledgerDedup;
+      let fee : ?Nat = if (not dedup) { null } else {
+        try { ?(await ledger.icrc1_fee()) } catch (e) {
+          // A fee query moves nothing, whatever its reject code.
+          nonceManager.unlock(signature.nonce);
+          policy.releaseDaily(senderPrincipal, icpSpendDay, amount);
+          return #settlementFailed("Ledger fee query failed (nothing was charged; safe to retry): " # Error.message(e));
+        };
+      };
+      let args : Types.TransferFromArg = {
+        spender_subaccount = null;
+        from = { owner = senderPrincipal; subaccount = null };
+        to = recipientAccount();
+        amount; // actual bound amount
+        fee;
+        memo = if (dedup) { ?signature.nonce } else { null };
+        created_at_time = if (dedup) { ?Nat64.fromIntWrap(Time.now()) } else { null };
+      };
+
+      // 2.21.0: a settleFrom charge with dedup stores its transfer as in flight before the await,
+      // so the nonce clean-up keeps the nonce even if it expires meanwhile, and a concurrent
+      // re-submit cannot send it.
+      if (dedup and payerIsCaller) {
+        nonceManager.setInFlight(signature.nonce, { ledger = tokenConfig.ledger; network = signature.network; args });
+      };
       try {
-        let result = await ledger.icrc2_transfer_from({
-          spender_subaccount = null;
-          from = { owner = senderPrincipal; subaccount = null };
-          to = recipientAccount();
-          amount; // actual bound amount
-          fee = null;
-          memo = null;
-          created_at_time = null;
-        });
+        let result = await ledger.icrc2_transfer_from(args);
 
         switch (result) {
           case (#Ok(blockIndex)) {
-            nonceManager.consumeLocked(signature.nonce);
-            policy.recordRateHit(senderPrincipal); // I6: the transfer succeeded — now it counts
-            let receipt : Types.PaymentReceipt = {
-              id = nextReceiptId();
-              amount;
-              token = Principal.toText(tokenConfig.ledger);
-              sender = signature.sender;
-              recipient = recipientText();
-              network = signature.network;
-              timestamp = Time.now();
-              txHash = ?Nat.toText(blockIndex);
-              sessionId = null;
-              refunded = null;
-            };
-            #ok(receipt);
+            chargeReceipt(signature, senderPrincipal, amount, tokenConfig.ledger, blockIndex);
           };
           case (#Err(err)) {
             nonceManager.unlock(signature.nonce);
@@ -1016,9 +1044,77 @@ module {
         // 2.20.0: any other reject leaves the outcome UNKNOWN — the transfer may have been
         // committed (see Utils.rejectedBeforeExecution). Before, this unlocked the nonce and
         // reported #settlementFailed, so re-submitting the same payment could charge the payer a
-        // second time. Now the nonce stays locked (the same payment cannot be replayed; it is
-        // freed at expiry), the daily reservation stays held, and no receipt is issued.
+        // second time. Now the nonce stays locked (the same payment cannot be replayed), the daily
+        // reservation stays held, and no receipt is issued.
+        if (dedup and payerIsCaller) {
+          // 2.21.0: make the stored transfer available, so the payer's settleFrom with this payment
+          // can resolve it.
+          nonceManager.setPending(signature.nonce, { ledger = tokenConfig.ledger; network = signature.network; args });
+          return #settlementPending("Ledger call rejected (" # debug_show (Error.code(e)) # "): the transfer's outcome is UNKNOWN — it may have been charged. Do NOT deliver value and do NOT pay with a new nonce. Once the ledger is reachable, submit this SAME payment again (settleFrom, as the payer): the ledger's deduplication then settles it once, with a receipt either way. That works for the ledger's 24-hour window; after it, check the ledger instead. " # Error.message(e));
+        };
         #settlementPending("Ledger call rejected (" # debug_show (Error.code(e)) # "): the transfer's outcome is UNKNOWN — it may have been charged. Do NOT deliver value and do NOT re-submit this payment. Check the payer's ledger history for a transfer to this canister's account before taking a new payment: " # Error.message(e));
+      };
+    };
+
+    // Consume the nonce, count the payer's rate hit (I6: only a transfer that landed counts) and
+    // issue the receipt of an ICP charge.
+    func chargeReceipt(signature : Types.PaymentSignature, payer : Principal, amount : Nat, ledger : Principal, blockIndex : Nat) : Types.PaymentResult {
+      nonceManager.consumeLocked(signature.nonce);
+      policy.recordRateHit(payer);
+      #ok({
+        id = nextReceiptId();
+        amount;
+        token = Principal.toText(ledger);
+        sender = signature.sender;
+        recipient = recipientText();
+        network = signature.network;
+        timestamp = Time.now();
+        txHash = ?Nat.toText(blockIndex);
+        sessionId = null;
+        refunded = null;
+      });
+    };
+
+    // 2.21.0: re-send a pending ICP charge's exact transfer (setLedgerDedup); the ledger's
+    // deduplication decides. #Ok: the first attempt had not landed and this one did. #Duplicate:
+    // the first had landed. Both issue the receipt, against the daily reservation the first
+    // attempt still holds. Anything else keeps the charge pending and the nonce locked; #TooOld
+    // (the 24 h window passed) and #BadFee (the fee changed) also drop the stored transfer, since
+    // re-sending it can no longer settle anything. The caller has checked the stored transfer out
+    // (takePending marks it in flight), so a second re-submit arriving during the await sends
+    // nothing, and the clean-up still keeps the nonce; every outcome below puts it back
+    // (setPending), drops it (dropPending) or consumes the nonce (chargeReceipt).
+    func resolvePendingCharge(signature : Types.PaymentSignature, expectedAmount : ?Nat, p : Nonce.PendingCharge) : async* Types.PaymentResult {
+      let nonce = signature.nonce;
+      // Only the payment that started the charge resolves it. The caller is authenticated as the
+      // named sender (settleFrom); the nonce binds amount, network and token, not the payer, and the
+      // re-sent transfer is the payer's own, so without this check another principal's settleFrom
+      // with the same nonce would collect the receipt for the payer's money.
+      let sameAmount = switch (expectedAmount) { case (?e) { e == p.args.amount }; case (null) { true } };
+      if (signature.sender != Principal.toText(p.args.from.owner) or signature.network != p.network or not sameAmount) {
+        nonceManager.setPending(nonce, p);
+        return #settlementPending("A charge with this payment's nonce is pending, and this request does not match it (payer, network or amount) — nothing was sent. The payer resolves it by calling settleFrom with the original payment.");
+      };
+      let ledger : Types.LedgerActor = actor (Principal.toText(p.ledger));
+      let result = try { await ledger.icrc2_transfer_from(p.args) } catch (e) {
+        nonceManager.setPending(nonce, p);
+        return #settlementPending("Re-sending the pending charge was rejected (" # debug_show (Error.code(e)) # "): still pending. Call settleFrom with this same payment later; do NOT pay with a new nonce. " # Error.message(e));
+      };
+      switch (result) {
+        case (#Ok(blockIndex)) { chargeReceipt(signature, p.args.from.owner, p.args.amount, p.ledger, blockIndex) };
+        case (#Err(#Duplicate({ duplicate_of }))) { chargeReceipt(signature, p.args.from.owner, p.args.amount, p.ledger, duplicate_of) };
+        case (#Err(#TooOld)) {
+          nonceManager.dropPending(nonce);
+          #settlementPending("The pending charge is past the ledger's 24-hour deduplication window, so re-submitting can no longer settle it. Check the payer's ledger history for a transfer to this canister's account with this payment's nonce as memo before taking a new payment.");
+        };
+        case (#Err(#BadFee(_))) {
+          nonceManager.dropPending(nonce);
+          #settlementPending("The ledger's fee changed since the pending charge was sent, so re-submitting can no longer settle it. Check the payer's ledger history for a transfer to this canister's account with this payment's nonce as memo before taking a new payment.");
+        };
+        case (#Err(err)) {
+          nonceManager.setPending(nonce, p);
+          #settlementPending("Re-sending the pending charge returned " # debug_show (err) # ": still pending. Fix that and call settleFrom with this same payment again; do NOT pay with a new nonce.");
+        };
       };
     };
 
@@ -1031,7 +1127,7 @@ module {
       if (not isEvmNetwork(signature.network) and signature.sender != Principal.toText(caller)) {
         return #policyDenied("Not authorized: this payment names sender " # signature.sender # " but was submitted by " # Principal.toText(caller) # " — on the ICP rail the caller must be the paying principal");
       };
-      await* settleCore(signature, expectedAmount);
+      await* settleCore(signature, expectedAmount, not isEvmNetwork(signature.network));
     };
 
     // ── Session (delegates to Sessions module) ──
@@ -1443,6 +1539,35 @@ module {
 
     /// 2.17.0 (default ON): see Sessions.setSignedVoucherFallback. Transient: re-apply at init.
     public func setSignedVoucherFallback(on : Bool) { sessionsMgr.setSignedVoucherFallback(on) };
+
+    /// 2.21.0 (default OFF): resolve a pending ICP charge through the ledger's deduplication.
+    ///
+    /// Turn it on ONLY if every ledger in `Config.tokens` deduplicates `icrc2_transfer_from` on
+    /// `created_at_time` + `memo`, as DFINITY's ICP and ICRC-1 ledgers do. ICRC-1 makes
+    /// deduplication a SHOULD, and nothing a ledger exposes declares it, so this is the operator's
+    /// declaration. On a ledger that does not deduplicate, a re-submitted pending payment is
+    /// charged twice.
+    ///
+    /// With it on, every ICP charge queries `icrc1_fee` first and sends that fee, the payment nonce
+    /// as memo and a `created_at_time`. A fee query that fails moves nothing, so a stopped ledger
+    /// refuses the charge cleanly (#settlementFailed, nonce unlocked) instead of leaving it pending.
+    ///
+    /// A charge made through `settleFrom` (the caller is the payer) whose transfer is then rejected
+    /// with an unknown outcome keeps that transfer. The payer calls `settleFrom` again with the SAME
+    /// payment, and the identical transfer is sent again: the ledger answers #Ok (the first had not
+    /// landed; this one did) or #Duplicate (the first had), and either way the payer gets one
+    /// receipt. Through `settle` (HTTP: `sender` is only claimed, and nonces are not secret) nothing
+    /// is stored and nothing is resolved, so nobody can collect the receipt for another payer's
+    /// transfer; those charges stay #settlementPending as in 2.20.0. The nonce and its stored
+    /// transfer are kept for the ledger's 24-hour window (the nonce clean-up skips them). After
+    /// that, after #TooOld or #BadFee, or after an upgrade (the stored transfer is transient), the
+    /// charge stays #settlementPending as in 2.20.0. The ledger's memo limit must be at least 32
+    /// bytes (both DFINITY ledgers allow 32); a shorter limit traps every charge. Transient:
+    /// re-apply at init.
+    public func setLedgerDedup(on : Bool) { ledgerDedup := on };
+
+    /// 2.21.0: whether setLedgerDedup is on.
+    public func ledgerDedupEnabled() : Bool { ledgerDedup };
 
     /// Whether a session's voucher key is the payer's own IC identity key (derived, works for
     /// pre-existing sessions). null = unknown session; false = "not identity-bound", never
