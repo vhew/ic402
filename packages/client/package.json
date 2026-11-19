@@ -52,7 +52,7 @@
   "dependencies": {
     "@icp-sdk/core": "6.1.1",
     "cborg": "6.2.1",
-    "viem": "2.57.17"
+    "viem": "2.57.20"
   },
   "devDependencies": {
     "@icp-sdk/core": "6.1.1",
