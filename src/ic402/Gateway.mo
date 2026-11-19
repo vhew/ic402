@@ -1417,6 +1417,18 @@ module {
       await sessionsMgr.recoverEscrow(caller, ledger, sessionId, amount);
     };
 
+    /// 2.23.0: recoverEscrow, reporting what moved instead of only the block index: the amount paid
+    /// to the payer (the request after both caps), the ledger fee charged out of the escrow, and the
+    /// refund-owed entry left afterwards (Types.RecoveryReceipt). Same checks and caps as recoverEscrow.
+    public func recoverEscrowReceipt(
+      caller : Principal,
+      ledger : Types.LedgerActor,
+      sessionId : Text,
+      amount : Nat,
+    ) : async { #ok : Types.RecoveryReceipt; #err : Text } {
+      await sessionsMgr.recoverEscrowReceipt(caller, ledger, sessionId, amount);
+    };
+
     /// 1a: Send an ERC-20 transfer from the canister's EVM address via tECDSA, if EVM is
     /// configured. Returns the tx hash on mempool acceptance.
     ///

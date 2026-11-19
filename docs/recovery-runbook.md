@@ -217,7 +217,10 @@ method; the reference example does not expose it, so wire a controller-gated que
 
 **Do:** `recoverEscrow(ledger, sessionId, amount)` — refunds from the escrow subaccount **to the
 payer only** (the library hard-codes the destination and requires `caller == session.payer`; it
-caps `amount` at `deposited − consumed`).
+caps `amount` at `deposited − consumed`). To tell the payer what moved, use
+`recoverEscrowReceipt` (2.23.0) instead: the same call, returning the amount actually paid, the
+fee, and what the entry still owes (`owedLeft`; 0 means nothing more can be recovered). Do not
+recompute the caps yourself.
 
 > **Changed in 2.22.0:** `recoverEscrow` pays only against the session's **refund-owed entry**
 > (the list `refundOwedToStable()` returns). No entry, nothing to recover. Each recovery is capped
@@ -581,7 +584,7 @@ transfer it committed. Then:
 | `pendingEvmDepositCount()` / `listPendingEvmDeposits()` | controller | No | Drain / triage (§4, §5) |
 | `setEvmDrainMode(on)` / `getEvmDrainMode()` | controller | No | Pre-upgrade drain (§5) |
 | `confirmEvmTransaction(chainId, txHash)` | library method — consumer must expose (controller-gated) | **No** — read-only receipt poll | Re-polling a charge's `#settlementPending` tx (§1) |
-| `recoverEscrow(ledger, sessionId, amount)` | payer-only (library-enforced); consumer must expose (the example does since 2.22.0) | Yes — ICP escrow subaccount → payer only; 2.22.0: only against the refund-owed entry, never more than it in total, from the session's own ledger | ICP refund-leg failure, or a forced / reconciled ICP session with a remainder (§3). **ICP only** |
+| `recoverEscrow(ledger, sessionId, amount)` / `recoverEscrowReceipt` (2.23.0: also returns the amount paid, the fee and what is still owed) | payer-only (library-enforced); consumer must expose (the example does since 2.22.0) | Yes — ICP escrow subaccount → payer only; 2.22.0: only against the refund-owed entry, never more than it in total, from the session's own ledger | ICP refund-leg failure, or a forced / reconciled ICP session with a remainder (§3). **ICP only** |
 | `clearRefundOwed(sessionId)` | controller; consumer must expose (the example does since 2.22.0) | No | 2.22.0: drop the refund-owed entry of a session whose escrow you have checked is empty (§3) |
 | `resolveDispute(jobId, refundBuyer)` | controller; consumer must expose (the example does since 2.22.0) | **Yes** — settles to the operator or refunds the buyer | Marketplace job stuck in `#Verified` (§6), or a `#Submitted`/`#Disputed` job needing a decision; 2.22.0: also refunds (only) a `#Pending`/`#Assigned`/`#Computing` job past its expiry |
 | `resolveJob(jobId, terminal)` | controller | No — state assertion | A job parked `#Settling`, or (2.22.0) any job carrying a parked tx, after you have checked the transfer's outcome (§6) |

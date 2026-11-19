@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`Gateway.recoverEscrowReceipt(caller, ledger, sessionId, amount)`** reports what a recovery
+  moved, so a consumer no longer recomputes the caps. On success it returns
+  `#ok({ blockIndex; amount; fee; owedLeft })`:
+  - `amount`: what the payer was paid, which is the request after both caps (the unconsumed
+    deposit, and the refund-owed entry less the fee);
+  - `fee`: the ledger fee charged out of the escrow for it;
+  - `owedLeft`: what the refund-owed entry still holds afterwards; 0 means nothing more can be
+    recovered.
+
+  It runs the same checks, caps and accounting as `recoverEscrow`, which is unchanged and still
+  returns the block index. New type `Ic402.RecoveryReceipt`. Requested by EngramX: since 2.22.0's
+  entry cap, `min(asked, deposited − consumed)` over-states a full recovery by two fees.
+
 ## v2.22.0 — 2026-11-18
 
 Minor — **security release. It fixes three high-severity issues and about forty medium and low

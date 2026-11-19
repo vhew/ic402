@@ -349,6 +349,13 @@ module {
   /// StableGatewayState. This record's shape is itself stored by consumers, so it must not change.
   public type RefundOwed = { sessionId : Text; escrow : Nat; fee : Nat };
 
+  /// What a successful recoverEscrowReceipt moved (2.23.0): the ledger block of the transfer; the
+  /// amount paid to the payer (the request, capped by the unconsumed deposit and by the refund-owed
+  /// entry less the fee); the ledger fee charged out of the escrow for it (as read just before the
+  /// transfer); and what the refund-owed entry still holds afterwards (0 once it is settled, i.e.
+  /// nothing more can be recovered).
+  public type RecoveryReceipt = { blockIndex : Nat; amount : Nat; fee : Nat; owedLeft : Nat };
+
   /// Stable storage format for sessions (canister upgrades).
   public type StableSession = {
     id : Text;
