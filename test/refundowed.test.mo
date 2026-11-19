@@ -343,3 +343,47 @@ await suite("2.23.0: recoverEscrowReceipt reports what moved", func() : async ()
     };
   });
 });
+
+await suite("2.23.0: recoverEscrowReceipt edge cases", func() : async () {
+
+  await test("a recovery that leaves one fee or less reports nothing owed and clears the entry", func() : async () {
+    // Mutation: report `left` instead of 0 when the entry is cleared — the receipt says 9_000
+    // (39_000 − 20_000 − 10_000) while nothing more can ever be recovered.
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    switch (await m.recoverEscrowReceipt(payerP, ledger, "sess-1", 20_000)) {
+      case (#ok(r)) { assert r.amount == 20_000; assert r.owedLeft == 0 };
+      case (#err(_)) { assert false };
+    };
+    assert owed(m) == 0;
+  });
+
+  await test("an entry cleared while the transfer is in flight reports nothing owed", func() : async () {
+    // Mutation: compute owedLeft from the entry read before the transfer — the receipt says 24_000
+    // for an entry the controller has since cleared.
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    await ledger.script(0, 0, 40); // park the recovery transfer
+    let p = m.recoverEscrowReceipt(payerP, ledger, "sess-1", 5_000);
+    var n = 0; while ((await ledger.transferCalls()) == 0 and n < 50) { await async {}; n += 1 };
+    switch (m.clearRefundOwed("sess-1")) { case (#ok) {}; case (#err(_)) { assert false } };
+    switch (await p) {
+      case (#ok(r)) { assert r.amount == 5_000; assert r.owedLeft == 0 };
+      case (#err(_)) { assert false };
+    };
+    assert owed(m) == 0;
+  });
+
+  await test("a forced session's receipt reports the ledger's current fee, not the entry's 0", func() : async () {
+    // Mutation: report the entry's stored fee — a forced entry is written with fee 0, so the receipt
+    // would say 0 while 10_000 came out of the escrow.
+    let m = mk([stable_("sess-1", #closing, 7, null)]);
+    switch (m.forceResolveSession("sess-1")) { case (#ok) {}; case (#err(_)) { assert false } };
+    await ledger.script(0, 0, 0);
+    switch (await m.recoverEscrowReceipt(payerP, ledger, "sess-1", 1_000_000)) {
+      case (#ok(r)) { assert r.fee == 10_000; assert r.amount == 39_000; assert r.owedLeft == 0 };
+      case (#err(_)) { assert false };
+    };
+    assert (await ledger.paidTotal()) == 39_000;
+  });
+});

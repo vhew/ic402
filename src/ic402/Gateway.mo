@@ -1418,8 +1418,9 @@ module {
     };
 
     /// 2.23.0: recoverEscrow, reporting what moved instead of only the block index: the amount paid
-    /// to the payer (the request after both caps), the ledger fee charged out of the escrow, and the
-    /// refund-owed entry left afterwards (Types.RecoveryReceipt). Same checks and caps as recoverEscrow.
+    /// to the payer (the request after both caps), the ledger fee the recovery was accounted at (read
+    /// just before the transfer), and the refund-owed entry left afterwards (Types.RecoveryReceipt).
+    /// Same checks and caps as recoverEscrow.
     public func recoverEscrowReceipt(
       caller : Principal,
       ledger : Types.LedgerActor,
