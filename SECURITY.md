@@ -5,10 +5,11 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.22.0**, a security release: three high-severity fixes and about forty
-> medium and low ones, all found by a whole-library adversarial review. Read its upgrade notes in
-> [`CHANGELOG.md`](CHANGELOG.md) before upgrading; several fixes change behaviour. Earlier
-> security-relevant releases since v2.2.3:
+> **Current release: v2.23.0** (additive: `recoverEscrowReceipt`). The latest security release is
+> **v2.22.0**: three high-severity fixes and about forty medium and low ones, all found by a
+> whole-library adversarial review (advisory GHSA-jxw7-5x89-grxh). Read its upgrade notes in
+> [`CHANGELOG.md`](CHANGELOG.md) before upgrading from an earlier version; several fixes change
+> behaviour. Earlier security-relevant releases since v2.2.3:
 > - 2.17.0: caller-authenticated sessions and `settleFrom`;
 > - 2.20.0: an ICP ledger reject with an unknown outcome is no longer treated as "not paid";
 > - 2.21.0: such payments can be resolved in-band.
@@ -30,7 +31,8 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.22.x | ✅ | Current. |
+| 2.23.x | ✅ | Current. |
+| 2.22.x | ✅ | Supported: has every security fix. 2.23.0 only adds `recoverEscrowReceipt`. |
 | 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |

@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v2.23.0 — 2026-11-18
+
+Minor, additive: `recoverEscrowReceipt` reports what a session-escrow recovery moved. No stored-state
+change (`STABLE_SCHEMA_VERSION` stays 1), no `example.did` change, and no change to any existing call.
 
 ### Added
 
