@@ -1888,6 +1888,30 @@ module {
       sessionId : Text,
       amount : Nat,
     ) : async { #ok : Nat; #err : Text } {
+      switch (await* recoverEscrowCore(caller, ledger, sessionId, amount)) {
+        case (#ok(r)) { #ok(r.blockIndex) };
+        case (#err(e)) { #err(e) };
+      };
+    };
+
+    /// 2.23.0: recoverEscrow, reporting what moved (Types.RecoveryReceipt) instead of only the
+    /// block index, so a consumer need not recompute the caps. Same checks, caps and accounting:
+    /// both run recoverEscrowCore.
+    public func recoverEscrowReceipt(
+      caller : Principal,
+      ledger : Types.LedgerActor,
+      sessionId : Text,
+      amount : Nat,
+    ) : async { #ok : Types.RecoveryReceipt; #err : Text } {
+      await* recoverEscrowCore(caller, ledger, sessionId, amount);
+    };
+
+    func recoverEscrowCore(
+      caller : Principal,
+      ledger : Types.LedgerActor,
+      sessionId : Text,
+      amount : Nat,
+    ) : async* { #ok : Types.RecoveryReceipt; #err : Text } {
       // Check authorization — only session payer can recover
       switch (sessions.get(sessionId)) {
         case (?session) {
@@ -1930,7 +1954,7 @@ module {
     };
 
     // recoverEscrow's transfer, run with the session marked in recoveriesInFlight.
-    func recoverOwed(session : Types.InternalSessionState, ledgerP : Principal, amount : Nat) : async* { #ok : Nat; #err : Text } {
+    func recoverOwed(session : Types.InternalSessionState, ledgerP : Principal, amount : Nat) : async* { #ok : Types.RecoveryReceipt; #err : Text } {
       let ledger : Types.LedgerActor = actor (Principal.toText(ledgerP));
       // The fee this recovery pays, out of the payer's remainder. The entry's own `fee` is the close's
       // (0 for a forced session, which could not ask the ledger), so the current one is used.
@@ -1959,16 +1983,23 @@ module {
       let subaccount = escrowManager.deriveSubaccount(session.id);
       let result = await* escrowManager.refundCore(ledger, subaccount, payerAccount, cappedAmount);
       // 2.18.0: an owed refund is settled once one fee or less is left (nothing more can move).
-      switch (result, refundOwed.get(session.id)) {
-        case (#ok(_), ?o) {
-          let left = Utils.satSub(o.escrow, cappedAmount + fee);
-          if (left <= fee) { refundOwed.delete(session.id) } else {
-            refundOwed.put(session.id, { o with escrow = left });
+      switch (result) {
+        case (#err(e)) { #err(e) };
+        case (#ok(blockIndex)) {
+          // The entry as it is now (a clearRefundOwed during the transfer leaves none).
+          let owedLeft = switch (refundOwed.get(session.id)) {
+            case (?o) {
+              let left = Utils.satSub(o.escrow, cappedAmount + fee);
+              if (left <= fee) { refundOwed.delete(session.id); 0 } else {
+                refundOwed.put(session.id, { o with escrow = left });
+                left;
+              };
+            };
+            case (null) { 0 };
           };
+          #ok({ blockIndex; amount = cappedAmount; fee; owedLeft });
         };
-        case (_, _) {};
       };
-      result;
     };
 
     /// 2.22.0: drop a session's refundOwed entry — for one whose escrow is in fact empty (the refund

@@ -230,7 +230,7 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `sessionExpiryTimerArmed()` | Whether the session sweep is ticking (`false` on an idle canister is the expected steady state) |
 | `setSessionExpiryIntervalSeconds<system>(n)` | Sweep cadence, default 60s — bounds expiry latency and how long a stale session holds pool/concurrency capacity |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
-| `sessionCounts()` | Session counts by status, plus `refundOwed` (2.18.0): closed ICP sessions that left the payer a remainder in escrow (a failed refund leg; also `reconcileSession` and, since 2.22.0, `forceResolveSession`) and that the payer has not yet emptied with `recoverEscrow`. Their records are kept past the 24h GC until then |
+| `sessionCounts()` | Session counts by status, plus `refundOwed` (2.18.0): closed ICP sessions that left the payer a remainder in escrow (a failed refund leg; also `reconcileSession` and, since 2.22.0, `forceResolveSession`) and that the payer has not yet emptied with `recoverEscrow` (or `recoverEscrowReceipt`, 2.23.0, which also reports the amount paid and what is still owed). Their records are kept past the 24h GC until then |
 | `refundOwedToStable()` / `loadRefundOwed(data)` | 2.18.0: the owed refunds behind `refundOwed`. Persist them in **their own** stable variable (they are not in `toStable()`), restoring after `loadStable`. **Required since 2.22.0:** `recoverEscrow` pays only against an entry (never more than it in total), so entries an upgrade drops leave those payers with no in-band recovery |
 
 ### ServiceRegistry (optional)

@@ -299,3 +299,47 @@ await suite("an owed record outlives the GC and an upgrade (2.18.0)", func() : a
     assert restored.refundOwedToStable() == m.refundOwedToStable();
   });
 });
+
+await suite("2.23.0: recoverEscrowReceipt reports what moved", func() : async () {
+
+  await test("asking for everything reports the capped amount the ledger paid, its fee, and nothing left owed", func() : async () {
+    // Mutation: report the requested amount instead of the capped one — the receipt says 1_000_000
+    // while the ledger paid 29_000 (the entry's 39_000 less the recovery's own 10_000 fee).
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    switch (await m.recoverEscrowReceipt(payerP, ledger, "sess-1", 1_000_000)) {
+      case (#ok(r)) {
+        assert r.amount == 29_000;
+        assert r.fee == 10_000;
+        assert r.owedLeft == 0;
+        assert r.amount == (await ledger.paidTotal());
+      };
+      case (#err(_)) { assert false };
+    };
+    assert owed(m) == 0;
+  });
+
+  await test("a partial recovery reports what the entry still owes, and the next one finds it", func() : async () {
+    // Mutation: report owedLeft from the entry as it was before the recovery — the receipt says
+    // 39_000 while the entry holds 24_000 (5_000 plus its fee came out).
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    await makeOwing(m);
+    switch (await m.recoverEscrowReceipt(payerP, ledger, "sess-1", 5_000)) {
+      case (#ok(r)) { assert r.amount == 5_000; assert r.fee == 10_000; assert r.owedLeft == 24_000 };
+      case (#err(_)) { assert false };
+    };
+    assert m.refundOwedToStable() == [{ sessionId = "sess-1"; escrow = 24_000; fee = 10_000 }];
+    // recoverEscrow keeps its shape (the block index) and runs the same caps: 14_000 is all that is left.
+    switch (await m.recoverEscrow(payerP, ledger, "sess-1", 1_000_000)) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert (await ledger.paidTotal()) == 19_000;
+    assert owed(m) == 0;
+  });
+
+  await test("a refusal is the same text as recoverEscrow's", func() : async () {
+    let m = mk([stable_("sess-1", #open, 7, null)]);
+    switch (await m.recoverEscrowReceipt(payerP, ledger, "sess-1", 1)) {
+      case (#err(msg)) { assert Text.startsWith(msg, #text "Cannot recover escrow from an open session") };
+      case (#ok(_)) { assert false };
+    };
+  });
+});

@@ -107,6 +107,8 @@ module {
   /// 2.18.0: an owed ICP refund (a close whose refund leg failed). Persist the list from
   /// Gateway.refundOwedToStable in its own stable variable; restore it with loadRefundOwed.
   public type RefundOwed = Types.RefundOwed;
+  /// What a successful `Gateway.recoverEscrowReceipt` moved (2.23.0).
+  public type RecoveryReceipt = Types.RecoveryReceipt;
   /// Serializable content store state for canister upgrades.
   public type StableContentStoreState = Types.StableContentStoreState;
   /// Serializable identity state for canister upgrades.
