@@ -41,6 +41,54 @@ const PendingDeposit = IDL.Record({
   amount: IDL.Nat,
   createdAt: IDL.Int,
 });
+// 2.24.0: settleToSplit's argument and result (mirrors packages/client/src/idl.ts).
+const PaymentSignatureIdl = IDL.Record({
+  scheme: IDL.Text,
+  network: IDL.Text,
+  signature: IDL.Vec(IDL.Nat8),
+  publicKey: IDL.Opt(IDL.Vec(IDL.Nat8)),
+  sender: IDL.Text,
+  nonce: IDL.Vec(IDL.Nat8),
+  authorization: IDL.Opt(
+    IDL.Record({
+      from: IDL.Text,
+      to: IDL.Text,
+      value: IDL.Nat,
+      validAfter: IDL.Nat,
+      validBefore: IDL.Nat,
+      nonce: IDL.Vec(IDL.Nat8),
+      v: IDL.Nat8,
+      r: IDL.Vec(IDL.Nat8),
+      s: IDL.Vec(IDL.Nat8),
+    }),
+  ),
+  asset: IDL.Opt(IDL.Text),
+});
+const PaymentResultIdl = IDL.Variant({
+  ok: IDL.Record({
+    id: IDL.Text,
+    amount: IDL.Nat,
+    token: IDL.Text,
+    sender: IDL.Text,
+    recipient: IDL.Text,
+    network: IDL.Text,
+    timestamp: IDL.Int,
+    txHash: IDL.Opt(IDL.Text),
+    sessionId: IDL.Opt(IDL.Text),
+    refunded: IDL.Opt(IDL.Nat),
+  }),
+  insufficientFunds: IDL.Text,
+  invalidSignature: IDL.Text,
+  expired: IDL.Text,
+  policyDenied: IDL.Text,
+  tokenNotAccepted: IDL.Text,
+  networkNotSupported: IDL.Text,
+  settlementFailed: IDL.Text,
+  settlementPending: IDL.Text,
+  reputationTooLow: IDL.Nat,
+  depositBelowMinimum: IDL.Nat,
+});
+
 const exampleIdl = () =>
   IDL.Service({
     sweepEvm: IDL.Func([IDL.Nat, IDL.Text, IDL.Text, IDL.Nat], [sweepResult], []),
@@ -49,6 +97,17 @@ const exampleIdl = () =>
     liftEvmPayerCooldown: IDL.Func([IDL.Nat, IDL.Text, IDL.Text], [IDL.Bool], []),
     // 2.23.2: lift a chain's gas stop (controller-only).
     liftEvmGasStop: IDL.Func([IDL.Nat], [IDL.Bool], []),
+    // 2.24.0: split payees (controller-only).
+    setEvmSplitCeiling: IDL.Func(
+      [IDL.Opt(IDL.Nat)],
+      [IDL.Variant({ ok: IDL.Null, err: IDL.Text })],
+      [],
+    ),
+    settleToSplit: IDL.Func(
+      [PaymentSignatureIdl, IDL.Opt(IDL.Nat), IDL.Text, IDL.Nat],
+      [PaymentResultIdl],
+      [],
+    ),
     // 2.22.0: controller-only recovery endpoints, also absent from the public client IDL.
     reconcileSession: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Text, err: IDL.Text })], []),
     setGatewayDerivationPath: IDL.Func(
@@ -569,6 +628,170 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setPendingNonce([]);
     expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
     expect(await full.endSession(opened.ok.id)).toHaveProperty('ok');
+  });
+
+  // ── Split payees (2.24.0) ──
+  //
+  // The 0xSplits push split v2.2 (no owner) paying a finder its share and the canister the rest.
+  // Computed here independently of the canister's EvmSplits (same formula; pinned by vectors the
+  // deployed factory returns), so the two cross-check.
+  const FINDER = '0x9f8e7d6c5b4a39281706fedcba9876543210fedc';
+  function splitAddress(finder: string, seller: string, shareBps: number): string {
+    const w = (n: bigint | number) => BigInt(n).toString(16).padStart(64, '0');
+    const a = (x: string) => x.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+    const enc =
+      w(0x40) +
+      w(0) +
+      w(0x80) +
+      w(0xe0) +
+      w(10000) +
+      w(0) +
+      w(2) +
+      a(finder) +
+      a(seller) +
+      w(2) +
+      w(shareBps) +
+      w(10000 - shareBps) +
+      w(0);
+    const inner = Buffer.from(keccak_256(Buffer.from(enc, 'hex'))).toString('hex');
+    const pre =
+      'ff' +
+      '8e8eb0cc6ae34a38b67d5cf91aca38f60bc3ecf4' +
+      inner +
+      '45b1cff75f6e3ad2b2df0c59635a8d507669cada88ba862dcce929e591ea7356';
+    return (
+      '0x' +
+      Buffer.from(keccak_256(Buffer.from(pre, 'hex')))
+        .toString('hex')
+        .slice(24)
+    );
+  }
+  // A canister-signed authorization paying `payTo`, as a PaymentSignature.
+  async function sigTo(payTo: string, amount: bigint) {
+    const signed = await full.signX402Payment(CHAIN_ID, USDC, payTo, amount, 'USD Coin', '2');
+    const au = signed.ok.authorization;
+    const sig = hexBytes(au.signature as string);
+    return {
+      scheme: 'exact',
+      network: 'eip155:8453',
+      signature: [],
+      publicKey: [],
+      sender: au.from,
+      nonce: [],
+      authorization: [
+        {
+          from: au.from,
+          to: au.to,
+          value: au.value,
+          validAfter: au.validAfter,
+          validBefore: au.validBefore,
+          nonce: hexBytes(au.nonce as string),
+          v: sig[64],
+          r: sig.slice(0, 32),
+          s: sig.slice(32, 64),
+        },
+      ],
+      asset: [USDC],
+    };
+  }
+
+  it('2.24.0: split payees are off by default — a payment to a split is refused before anything is signed', async () => {
+    if (skip) return;
+    await mock.reset();
+    expect(await example.setEvmSplitCeiling([])).toHaveProperty('ok');
+    const self = (await full.gatewayRecipient())[0] as string;
+    const split = splitAddress(FINDER, self, 500);
+    const res = await example.settleToSplit(await sigTo(split, 1000n), [1000n], FINDER, 500n);
+    expect(res.policyDenied).toContain('Split payees are off');
+    expect(await mock.getSimulations()).toBe(0n);
+    expect(await mock.sentTxCount()).toBe(0n);
+  });
+
+  it('2.24.0: with a ceiling set, a payment to the exact split settles; the transfer pays the split and the receipt names it', async () => {
+    if (skip) return;
+    await mock.reset();
+    expect(await example.setEvmSplitCeiling([1000n])).toHaveProperty('ok');
+    const self = (await full.gatewayRecipient())[0] as string;
+    const split = splitAddress(FINDER, self, 500);
+    // Signed with the split spelled in upper case: the receipt still names the canonical form.
+    const res = await example.settleToSplit(
+      await sigTo('0x' + split.slice(2).toUpperCase(), 1000n),
+      [1000n],
+      FINDER,
+      500n,
+    );
+    expect(res.ok.recipient).toBe(split);
+    expect(res.ok.amount).toBe(1000n); // the full payment; the canister's share arrives on distribution
+    const [rawTx] = (await mock.getSentTxs()) as string[];
+    expect(rawTx.toLowerCase()).toContain(split.slice(2)); // transferWithAuthorization(…, to = split, …)
+    const [sim] = await mock.getLastSimulation();
+    expect((sim.input as string).toLowerCase()).toContain(split.slice(2));
+    expect(await example.setEvmSplitCeiling([])).toHaveProperty('ok');
+  });
+
+  it('2.24.0: another split, a share over the ceiling, or a bad ceiling is refused; plain settle still refuses a split', async () => {
+    if (skip) return;
+    await mock.reset();
+    expect(await example.setEvmSplitCeiling([1000n])).toHaveProperty('ok');
+    const self = (await full.gatewayRecipient())[0] as string;
+    const split = splitAddress(FINDER, self, 500);
+    // Signed to the 500-bps split, claimed at 600: the recomputed split differs.
+    const wrong = await example.settleToSplit(await sigTo(split, 1000n), [1000n], FINDER, 600n);
+    expect(wrong.invalidSignature).toContain('must be the split');
+    const over = await example.settleToSplit(
+      await sigTo(splitAddress(FINDER, self, 1001), 1000n),
+      [1000n],
+      FINDER,
+      1001n,
+    );
+    expect(over.policyDenied).toContain('ceiling of 1000');
+    // settle's own recipient check is unchanged: a split is not this canister (the HTTP /settle
+    // route, which calls settle).
+    const signed = await full.signX402Payment(CHAIN_ID, USDC, split, 1000n, 'USD Coin', '2');
+    const plain = await postSettle(
+      JSON.stringify({
+        x402Version: 2,
+        paymentPayload: JSON.parse(
+          Buffer.from(signed.ok.header as string, 'base64').toString('utf8'),
+        ),
+        paymentRequirements: {
+          scheme: 'exact',
+          network: 'eip155:8453',
+          amount: '1000',
+          asset: USDC,
+          payTo: split,
+          extra: { name: 'USD Coin', version: '2' },
+        },
+      }),
+    );
+    expect(plain.success).toBe(false);
+    expect(await mock.getSimulations()).toBe(0n);
+    expect(await mock.sentTxCount()).toBe(0n);
+    expect(await example.setEvmSplitCeiling([10000n])).toHaveProperty('err');
+    expect(await example.setEvmSplitCeiling([0n])).toHaveProperty('err');
+    expect(await example.setEvmSplitCeiling([])).toHaveProperty('ok');
+  });
+
+  it('2.24.0: only a controller can set the ceiling or settle to a split', async () => {
+    if (skip) return;
+    const stranger = Actor.createActor(exampleIdl, {
+      agent: await HttpAgent.create({
+        identity: Secp256k1KeyIdentity.generate(),
+        host: 'http://localhost:4944',
+        shouldFetchRootKey: true,
+      }),
+      canisterId: exampleId,
+    });
+    await expect(stranger.setEvmSplitCeiling([1000n])).rejects.toThrow();
+    const self = (await full.gatewayRecipient())[0] as string;
+    await expect(
+      stranger.settleToSplit(
+        await sigTo(splitAddress(FINDER, self, 500), 1000n),
+        [1000n],
+        FINDER,
+        500n,
+      ),
+    ).rejects.toThrow();
   });
 
   // Poll until `cond` holds (a held simulation has been reached), or fail.

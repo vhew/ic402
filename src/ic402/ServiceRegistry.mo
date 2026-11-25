@@ -458,6 +458,9 @@ module {
     /// buyer's spelling. Pass the payer's EVM address as `buyer` for such a receipt: a buyer that
     /// is not a 20-byte address (a principal, say) cannot be refunded on-chain — its refunds come
     /// back #unavailable and wait for a controller.
+    /// 2.24.0: never pass a Gateway.settleToSplit receipt (its recipient is a split, not your
+    /// canister). Its amount is the full payment, but only the seller's share reaches the canister,
+    /// after distribution, so this job's refund or payout would pay the difference from other funds.
     public func createJobFromReceipt(buyer : Text, serviceId : Text, params : Blob, receipt : Types.PaymentReceipt, callback : ?Text) : Text {
       let timeout = switch (services.get(serviceId)) { case (?s) { s.timeout }; case (null) { 0 } };
       jobCounter += 1;

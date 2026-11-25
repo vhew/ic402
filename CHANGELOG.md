@@ -1,5 +1,72 @@
 # Changelog
 
+## v2.24.0 — 2026-11-25
+
+Minor, additive: split payees. `Gateway.settleToSplit` settles an EVM charge the payer sent to a
+0xSplits referral split instead of to the canister. The split pays a finder its share and the
+canister the rest. It is off until the operator sets a ceiling, and `settle` is unchanged. No
+stored-state change (`STABLE_SCHEMA_VERSION` stays 1). `example.did` adds `setEvmSplitCeiling` and
+`settleToSplit`, both controller-only. Requested by EngramX for referral codes on an engram's own
+Base sales.
+
+### Added
+
+- **`Gateway.settleToSplit(signature, expectedAmount, { finder; finderShareBps })`.** The payment
+  must go to the 0xSplits push split (v2.2, no owner) that pays `finder` its `finderShareBps`
+  (basis points of 10,000) and this canister's EVM address the rest. The canister recomputes that
+  split's address with no outcall (`EvmSplits`) and accepts the payment only when the
+  authorization's `to` is exactly it. Everything else is `settle`: the signature, the exact amount,
+  the simulation, the payer slot, the gas stop and the confirmation.
+  - **Refused before anything is signed** (`#policyDenied`): split payees off, a chain other than
+    Base (8453) or Base Sepolia (84532), a share of 0 or above the ceiling, a zero-address finder,
+    or the paid token as finder.
+  - **Refused as `#invalidSignature`:** a `to` that is not that split.
+  - **Refused as `#networkNotSupported`:** an ICP payment.
+  - **The receipt's `recipient` is the split** (the canister's own computed address, lowercase),
+    and its `amount` is the full payment.
+- **`Gateway.setEvmSplitCeiling(?bps)` / `evmSplitCeiling()`.** The operator's ceiling on the
+  finder share, 1–9,999 basis points, or null for off (the default). Transient: re-apply it after
+  an upgrade.
+- **`EvmSplits`** (also `Ic402.EvmSplits`): `splitAddress`, `splitPayTo`, `FACTORY`,
+  `INIT_CODE_HASH`, `TOTAL_ALLOCATION`, `SPLITS_OFF` and the `SplitPayee` type. The address is the
+  factory's deterministic one (`createSplitDeterministic`, owner 0, salt 0). It is pinned by test
+  vectors that the deployed factory's `predictDeterministicAddress` returns on Base and Base
+  Sepolia.
+
+### Security notes
+
+- **Trusted caller only.** Take the finder and share from your own records (the referral codes you
+  honour), never from the payment or the request. Otherwise any payer can name itself finder and
+  take the share as a discount. Do not call it from a public facilitator route. The example
+  exposes it controller-only.
+- **A buyer can still refer itself** through a code it controls. The ceiling bounds that discount.
+- **Not for session deposits,** which must reach the canister's own address (closes refund from it).
+- **Not for jobs.** Never pass a `settleToSplit` receipt to `ServiceRegistry.createJobFromReceipt`
+  or `submitRequest`. The job would record the full amount, while only the seller's share reaches
+  the canister, after distribution. A refund or operator payout would pay the difference out of
+  other funds, and a buyer who is also the finder could profit from a refund.
+- `settle`, `settleFrom` and `verifyPayment` are unchanged: `settle` still requires the canister's
+  own address.
+
+### Known residuals
+
+- **ic402 does not deploy or distribute splits.** A payment to a split not deployed yet waits at
+  its address until someone deploys it through the factory and distributes it. The distribution
+  incentive is 0, so nobody is paid to do it. The canister's share is not in its EVM account until
+  then.
+- **Not yet confirmed:** whether anyone may deploy and distribute an owner-less v2.2 split. EngramX's
+  deployment test will show it. The canister's share can only ever go to the canister.
+- **A finder the token will not pay may block both shares.** If ERC-20 distribution pays each
+  recipient in one transaction, a finder USDC refuses (a blacklisted address) would make every
+  distribution revert. The split has no owner to fix it. This can't be checked offline, so honour
+  only codes whose finders you trust.
+- **Only splits made by `createSplitDeterministic` with salt 0 match.** A split from the
+  nonce-salted `createSplit`, another owner or another factory version has another address, and a
+  new factory version needs a library release.
+- **The 402 challenge is the integrator's.** The library's built-in challenges offer the canister's
+  own address, so an integrator offering a split builds its own requirement with `payTo` set to
+  the split.
+
 ## v2.23.2 — 2026-11-25
 
 Patch, EVM rail. The canister no longer signs again and again on a chain it cannot pay gas on.

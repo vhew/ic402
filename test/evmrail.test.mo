@@ -17,6 +17,7 @@ import Policy "../src/ic402/Policy";
 import Escrow "../src/ic402/Escrow";
 import EvmEscrow "../src/ic402/EvmEscrow";
 import EvmSender "../src/ic402/EvmSender";
+import EvmSplits "../src/ic402/EvmSplits";
 import EvmSigner "../src/ic402/EvmSigner";
 import EvmRpc "../src/ic402/EvmRpc";
 import EvmUtils "../src/ic402/EvmUtils";
@@ -833,6 +834,114 @@ await suite("2.23.2: a chain the canister cannot pay gas on", func() : async () 
         case (_) { assert false };
       };
       switch (m.getSession("sess-1")) { case (?s) { assert s.status == #open }; case (null) { assert false } };
+    };
+  });
+});
+
+await suite("2.24.0: settleToSplit", func() : async () {
+
+  let finder = "0x9f8e7d6c5b4a39281706fedcba9876543210fedc";
+  func toAddr(to : Text) : Types.PaymentSignature {
+    let a = authz(9_999_999_999, b32);
+    switch (a.authorization) {
+      case (?au) { { a with authorization = ?{ au with to } } };
+      case (null) { a };
+    };
+  };
+  func mkGate() : Gateway.Gateway {
+    let gate = Gateway.Gateway(config(null, null), canisterP);
+    gate.loadStable({ gate.toStable() with evmRecipient = ?canisterEvm });
+    gate;
+  };
+  let split = switch (EvmSplits.splitPayTo(84532, finder, canisterEvm, 500, tokenA, ?1000)) { case (#ok(a)) { a }; case (#err(_)) { "" } };
+
+  await test("the operator's ceiling: off by default, 1 to 9999 basis points", func() : async () {
+    // Mutation: setEvmSplitCeiling accepts 0 or 10000+ (a split leaving the seller nothing), or does
+    // not store the value; settleToSplit runs with split payees off.
+    let gate = mkGate();
+    assert gate.evmSplitCeiling() == null;
+    switch (await gate.settleToSplit(toAddr(split), ?5000, { finder; finderShareBps = 500 })) {
+      case (#policyDenied(e)) { assert e == EvmSplits.SPLITS_OFF };
+      case (_) { assert false };
+    };
+    assert gate.setEvmSplitCeiling(?0) != #ok;
+    assert gate.setEvmSplitCeiling(?10_000) != #ok;
+    assert gate.setEvmSplitCeiling(?20_000) != #ok;
+    assert gate.setEvmSplitCeiling(?9_999) == #ok;
+    assert gate.setEvmSplitCeiling(?1000) == #ok;
+    assert gate.evmSplitCeiling() == ?1000;
+    assert gate.setEvmSplitCeiling(null) == #ok;
+    assert gate.evmSplitCeiling() == null;
+  });
+
+  await test("the payment must be to the exact split allowed, recomputed; settle still requires this canister", func() : async () {
+    // Mutation: settleToSplit skips the split check or compares against another split; a share
+    // above the ceiling passes; settle's own recipient check is relaxed for every caller; ICP is let
+    // through. The fixture's signature is for another `to`, so a payment that passes the split check
+    // stops at the signature check — that is how the test tells "split accepted" apart.
+    let gate = mkGate();
+    assert gate.setEvmSplitCeiling(?1000) == #ok;
+    switch (await gate.settleToSplit(toAddr(split), ?5000, { finder; finderShareBps = 500 })) {
+      case (#invalidSignature(e)) { assert Text.contains(e, #text "signature verification failed") };
+      case (_) { assert false };
+    };
+    switch (await gate.settleToSplit(toAddr(split), ?5000, { finder; finderShareBps = 600 })) {
+      case (#invalidSignature(e)) { assert Text.contains(e, #text "must be the split") };
+      case (_) { assert false };
+    };
+    switch (await gate.settleToSplit(toAddr(canisterEvm), ?5000, { finder; finderShareBps = 500 })) {
+      case (#invalidSignature(e)) { assert Text.contains(e, #text "must be the split") }; // paid to the canister: not this call
+      case (_) { assert false };
+    };
+    switch (await gate.settleToSplit(toAddr(split), ?5000, { finder; finderShareBps = 1001 })) {
+      case (#policyDenied(e)) { assert Text.contains(e, #text "ceiling of 1000") };
+      case (_) { assert false };
+    };
+    switch (await gate.settle(toAddr(split), ?5000)) {
+      case (#invalidSignature(e)) { assert Text.contains(e, #text "must be the canister's EVM address") };
+      case (_) { assert false };
+    };
+    switch (await gate.settleToSplit({ toAddr(split) with network = "icp:1" }, ?5000, { finder; finderShareBps = 500 })) {
+      case (#networkNotSupported(_)) {};
+      case (_) { assert false };
+    };
+    // The Gateway passes the paid token: the token as finder is refused.
+    switch (await gate.settleToSplit(toAddr(split), ?5000, { finder = tokenA; finderShareBps = 500 })) {
+      case (#policyDenied(e)) { assert Text.contains(e, #text "paid token") };
+      case (_) { assert false };
+    };
+  });
+
+  await test("the Gateway passes the payment's chain: a configured chain other than Base is refused", func() : async () {
+    // Mutation: settleCore hands splitPayTo a fixed Base chain id instead of the payment's.
+    let chainOne : Types.EvmChainConfig = { chainA with chainId = 1 };
+    let gate = Gateway.Gateway({ config(null, null) with evmChains = [chainOne] }, canisterP);
+    gate.loadStable({ gate.toStable() with evmRecipient = ?canisterEvm });
+    assert gate.setEvmSplitCeiling(?1000) == #ok;
+    switch (await gate.settleToSplit({ toAddr(split) with network = "eip155:1" }, ?5000, { finder; finderShareBps = 500 })) {
+      case (#policyDenied(e)) { assert Text.contains(e, #text "Base (8453) and Base Sepolia (84532) only") };
+      case (_) { assert false };
+    };
+  });
+
+  await test("a refused split frees the server nonce: the same payment is answered the same way again", func() : async () {
+    // Mutation: either split refusal returns without nonceManager.unlock — the nonce stays locked
+    // and the second attempt is answered "in progress" instead.
+    let gate = mkGate();
+    let n = gate.requireEvm(5000)[0].nonce;
+    let sig = { toAddr(split) with nonce = n };
+    for (_ in [1, 2].vals()) {
+      switch (await gate.settleToSplit(sig, ?5000, { finder; finderShareBps = 500 })) {
+        case (#policyDenied(e)) { assert e == EvmSplits.SPLITS_OFF };
+        case (_) { assert false };
+      };
+    };
+    assert gate.setEvmSplitCeiling(?1000) == #ok;
+    for (_ in [1, 2].vals()) {
+      switch (await gate.settleToSplit(sig, ?5000, { finder; finderShareBps = 600 })) {
+        case (#invalidSignature(e)) { assert Text.contains(e, #text "must be the split") };
+        case (_) { assert false };
+      };
     };
   });
 });

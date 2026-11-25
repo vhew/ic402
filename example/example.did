@@ -638,6 +638,12 @@ service : {
                                       err: text;
                                       ok;
                                     });
+  /// 2.24.0: the split-payee ceiling, in basis points, or null for off (see
+  /// Gateway.setEvmSplitCeiling). Controller-only.
+  setEvmSplitCeiling: (bps: opt nat) -> (variant {
+                                           err: text;
+                                           ok;
+                                         });
   /// Move the gateway's EVM keys — outbound sender and inbound recipient — onto one path.
   /// 
   /// NOT PERSISTED: a production consumer re-applies this after every upgrade, in the same
@@ -648,6 +654,11 @@ service : {
       ok;
     });
   setPolicy: (p: SpendingPolicy) -> ();
+  /// 2.24.0: settle an EVM charge paid to a split payee (see Gateway.settleToSplit). Controller-
+  /// only, because the finder and share must come from the operator's own records, never from the
+  /// payer: a real integrator calls it from its own paid route with the codes it honours.
+  settleToSplit: (sig: PaymentSignature, expectedAmount: opt nat, finder:
+   text, finderShareBps: nat) -> (PaymentResult);
   /// Sign an ERC-8004 agent registration tx.
   /// Client provides nonce + gas from their RPC, broadcasts + polls receipt.
   signAgentRegistration: (nonce: nat, maxFeePerGas: nat,

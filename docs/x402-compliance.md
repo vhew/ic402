@@ -24,7 +24,9 @@ and the explicit statement of what stays non‑standard by nature.
   sent nothing and invites the same payment again carries the ic402 `errorReason`
   `settlement_retry`, beside `settlement_pending`). The spec
   explicitly blesses "server‑as‑its‑own‑facilitator", so the fused `Gateway.settle` model is
-  conformant. The standalone facilitator HTTP API (`/verify`, `/settle`, `/supported`) and the
+  conformant. 2.24.0: an integrator may offer `payTo` = a 0xSplits referral split and settle it
+  with `settleToSplit` (its own route; the library's built-in challenges and `/settle` keep the
+  canister's address). The standalone facilitator HTTP API (`/verify`, `/settle`, `/supported`) and the
   discovery Bazaar were **optional** for resource‑server compliance (they make ic402 callable
   *by third parties* as a facilitator) — these are **now implemented** as well (see Status).
 

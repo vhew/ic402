@@ -5,9 +5,10 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.23.2.** It no longer signs again and again on a chain the canister cannot
-> pay gas on: a broadcast that reports the canister short of gas stops every send on that chain,
-> before signing, for 10 minutes. It completes v2.23.1, which:
+> **Current release: v2.24.0** (additive: `settleToSplit`, split payees, off by default). The
+> latest security fix is **v2.23.2**: it no longer signs again and again on a chain the canister
+> cannot pay gas on: a broadcast that reports the canister short of gas stops every send on that
+> chain, before signing, for 10 minutes. It completes v2.23.1, which:
 > - fixed the EVM-RPC consensus config that had failed every EVM call on Ethereum, Base,
 >   Optimism, Arbitrum and Ethereum Sepolia since 2.1.0;
 > - stopped signing an inbound EVM payment that cannot succeed: the transfer is simulated first.
@@ -40,7 +41,8 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.23.x | ✅ | Current: 2.23.2. 2.23.1 signs every inbound EVM payment, and every retried close, on a listed chain the canister cannot pay gas on; 2.23.0 lacks the 2.23.1 fixes. |
+| 2.24.x | ✅ | Current. |
+| 2.23.x | ✅ | Supported at 2.23.2, which has every security fix; 2.24.0 only adds `settleToSplit`. 2.23.1 signs every inbound EVM payment, and every retried close, on a listed chain the canister cannot pay gas on; 2.23.0 lacks the 2.23.1 fixes. |
 | 2.22.x | ⚠️ | Superseded; upgrade to 2.23.2. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
 | 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
@@ -97,7 +99,10 @@ exercised on the inbound settlement path:
   the canister's own derived EVM address before any signature verification or broadcast,
   in **both** the charge path (`Gateway.settleCore`) and the session-open path
   (`Sessions.openEvmSession`). This closes the self-transfer payment-bypass /
-  treasury-drain that was the audit's highest-priority finding.
+  treasury-drain that was the audit's highest-priority finding. Since 2.24.0 the one exception
+  is `Gateway.settleToSplit`, off until the operator sets a share ceiling. It accepts only the
+  owner-less 0xSplits split of (finder, this canister, share), which the canister recomputes;
+  its finder and share must come from the integrator's own records.
 - **`value == amount` (exact-EVM).** The exact-EVM scheme rejects an authorization whose
   `value` is not exactly the required amount, not merely `>=` it
   (`Gateway.settleCore`) — a v1-style overpayment is rejected.
