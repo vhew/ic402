@@ -16,6 +16,8 @@ import HashMap "mo:base/HashMap";
 import Text "mo:base/Text";
 import Iter "mo:base/Iter";
 import Cycles "mo:base/ExperimentalCycles";
+import Time "mo:base/Time";
+import Int "mo:base/Int";
 import IC "mo:ic";
 import Call "mo:ic/Call";
 import SchnorrSigner "SchnorrSigner";
@@ -68,7 +70,7 @@ module {
 
   /// 2.22.0: true when a send's #err is the busy single-flight lock (SEND_BUSY), which clears by
   /// itself once the send holding the lock returns.
-  public func isSendBusy(err : Text) : Bool { err == SEND_BUSY };
+  public func isSendBusy(err : Text) : Bool { err == SEND_BUSY or err == INBOUND_SEND_BUSY };
 
   /// 2.22.0 (F1): whether a tx signed with account nonce `txNonce` can still land, given the
   /// account's mined-transaction count `latestNonce` (eth_getTransactionCount at #Latest). Once
@@ -218,6 +220,286 @@ module {
     };
   };
 
+  // ── Simulate before signing (2.23.1) ──
+  //
+  // The canister pays for the signature, the RPC reads and the gas of every inbound transfer it
+  // broadcasts, and an EIP-3009 authorization from a wallet holding nothing costs its signer
+  // nothing. Before 2.23.1 such an authorization passed every check (they are all off-chain) and
+  // was signed and sent, to revert on chain: about one threshold signature of cycles per try, with
+  // the single-flight send lock held while it ran. executeTransferWithAuthorization now simulates
+  // the exact call first and signs only what the chain says will succeed.
+
+  /// 2.23.1: what a simulation (eth_call) of a transferWithAuthorization says, before anything is
+  /// signed. #ok only when the providers agree the call succeeds. #reverted when they agree it
+  /// reverts, or when they disagree but at least two report a revert and none a success (their
+  /// messages may differ; the third may have failed). #unknown otherwise.
+  public type SimulationVerdict = { #ok; #reverted : Text; #unknown : Text };
+
+  /// 2.23.1: true for a JSON-RPC error reporting an EVM revert — geth's code 3, or any message
+  /// naming one ("execution reverted: …"). Provider and outcall failures are not reverts.
+  public func isRevertError(e : EvmRpc.RpcError) : Bool {
+    switch (e) {
+      case (#JsonRpcError(j)) { j.code == 3 or Text.contains(Text.toLowercase(j.message), #text "revert") };
+      case (_) { false };
+    };
+  };
+
+  /// 2.23.1: classify the simulation's eth_call. Only an agreed success lets the send go ahead.
+  public func classifySimulation(r : EvmRpc.MultiCallResult) : SimulationVerdict {
+    switch (r) {
+      case (#Consistent(#Ok(_))) { #ok };
+      case (#Consistent(#Err(e))) {
+        if (isRevertError(e)) { #reverted(EvmRpc.rpcErrorToText(e)) } else { #unknown(EvmRpc.rpcErrorToText(e)) };
+      };
+      case (#Inconsistent(results)) {
+        // The sender asks for 2-of-N agreement; two reverts and no success is that agreement on a
+        // revert, whatever the rest answered (a rate limit, an outcall error).
+        var revert : ?Text = null; // the first revert seen
+        var reverts = 0;
+        var successes = 0;
+        for ((_, cr) in results.values()) {
+          switch (cr) {
+            case (#Err(e)) {
+              if (isRevertError(e)) {
+                reverts += 1;
+                if (revert == null) { revert := ?EvmRpc.rpcErrorToText(e) };
+              };
+            };
+            case (#Ok(_)) { successes += 1 };
+          };
+        };
+        switch (revert) {
+          case (?m) { if (reverts >= 2 and successes == 0) { return #reverted(m) } };
+          case (null) {};
+        };
+        #unknown("providers disagree on the simulation");
+      };
+    };
+  };
+
+  /// 2.23.1: the refusal when the simulation reverts. Nothing was signed or sent.
+  public func simulationRevertedText(detail : Text) : Text {
+    "The token refuses this transfer: a simulation before signing reverted (" # detail # "). Usual causes: the payer's balance is below the amount, the authorization was already used or cancelled, the token is paused, or the payer is blocked. Nothing was signed or sent; fix the cause before paying again.";
+  };
+
+  /// 2.23.1: the refusal when the simulation gives no agreed answer. Nothing was signed or sent.
+  public func simulationUnknownText(detail : Text) : Text {
+    "Could not check this transfer with the chain before signing (" # detail # "). Nothing was signed or sent; retry this same payment shortly.";
+  };
+
+  /// 2.23.1: the refusal for a simulation `verdict` (null for #ok). The simulation runs at the
+  /// chain's latest block, which trails the clock: a revert while the authorization became valid
+  /// less than RECENTLY_VALID_SECONDS ago may only mean that block predates `validAfter`, so it is
+  /// answered as "could not check", which invites the same payment again.
+  public func simulationRefusal(verdict : SimulationVerdict, validAfter : Nat, nowSeconds : Nat) : ?Text {
+    switch (verdict) {
+      case (#ok) { null };
+      case (#reverted(d)) {
+        if (validAfter + RECENTLY_VALID_SECONDS > nowSeconds) {
+          ?simulationUnknownText("it reverted, but the authorization became valid only moments ago and the chain's latest block may predate it: " # d);
+        } else { ?simulationRevertedText(d) };
+      };
+      case (#unknown(d)) { ?simulationUnknownText(d) };
+    };
+  };
+  public let RECENTLY_VALID_SECONDS : Nat = 60;
+
+  /// 2.23.1: the least time an inbound authorization must still be valid for when the canister
+  /// takes it. The simulation runs at the latest block, and the nonce and fee reads, the signature,
+  /// the send and inclusion follow it; an authorization that expires in that gap passes the
+  /// simulation and reverts on chain at the canister's cost. Checked by Gateway.settle,
+  /// Gateway.verifyPayment, the session-open deposit and executeTransferWithAuthorization.
+  public let MIN_VALIDITY_SECONDS : Nat = 120;
+
+  /// 2.23.1: true when `validBefore` leaves less than MIN_VALIDITY_SECONDS (an expired one too).
+  public func expiresTooSoon(validBefore : Nat, nowSeconds : Nat) : Bool {
+    validBefore < nowSeconds + MIN_VALIDITY_SECONDS;
+  };
+
+  /// 2.23.1: the refusal for an authorization that expires too soon. Nothing was signed or sent.
+  public let EXPIRES_TOO_SOON : Text = "Authorization expired, or expires too soon: it must stay valid for at least 120 more seconds, so it cannot expire between the check and its inclusion on chain. Nothing was signed or sent; sign a new one with a later validBefore.";
+
+  /// 2.23.1: the refusal when the same payer already has a transfer in flight (see PayerGuard).
+  /// Contains "retry this same payment", which @ic402/client reads as transient (not funds-moved).
+  public let PAYER_BUSY : Text = "Another payment from this payer, on this chain and token, is still settling, so this one was not sent — retry this same payment in a few seconds, once that one returns.";
+
+  /// 2.23.1: the refusal while a payer is cooling down (see PayerGuard.coolDown). Final for now:
+  /// it does not invite a retry.
+  public func payerCoolingText(untilSeconds : Nat) : Text {
+    "This payer's last transfer, sent by this canister, reverted on chain after passing the check, or has not confirmed yet. Payments from this payer, on this chain and token, are refused until " # Nat.toText(untilSeconds) # " (Unix seconds), so it cannot make the canister pay for failing transfers. Nothing of this one was signed or sent.";
+  };
+
+  /// 2.23.1: how long a payer is refused after its sent transfer reverted (PayerGuard.coolDown).
+  public let REVERT_COOLDOWN_SECONDS : Nat = 3_600;
+
+  /// 2.23.1: how long a payer is refused after its sent transfer did not confirm within the
+  /// confirmation polls (#settlementPending), long enough for it to land or drop. A revert seen in
+  /// that time is not cooled (nothing watches), so this is also the bound on that case.
+  public let UNCONFIRMED_HOLD_SECONDS : Nat = 300;
+
+  /// 2.23.1: the inbound refusal when the single-flight send lock is held. Transient.
+  public let INBOUND_SEND_BUSY : Text = "Another outbound EVM transaction is in progress (sends are serialized to keep the nonce consistent), so this payment was not sent — retry this same payment in a few seconds.";
+
+  /// 2.23.1: a pre-broadcast send failure that clears by itself: the send lock, a nonce or fee read
+  /// that failed or was rejected, or another failure before the broadcast (signing). An inbound
+  /// payment refused for one is asked to retry the same payment. Each prefix is the start of the
+  /// error sendTransaction builds (the constants below are used there too).
+  public func transientSendError(err : Text) : Bool {
+    isSendBusy(err) or Text.startsWith(err, #text NONCE_READ_FAILED) or Text.startsWith(err, #text FEE_DATA_UNAVAILABLE) or Text.startsWith(err, #text FAILED_BEFORE_BROADCAST);
+  };
+  public let NONCE_READ_FAILED : Text = "Failed to get EVM nonce";
+  public let FEE_DATA_UNAVAILABLE : Text = "EVM fee data unavailable";
+  public let FAILED_BEFORE_BROADCAST : Text = "EVM tx failed before broadcast";
+
+  /// 2.23.1: the refusal while the simulation budget is spent (see SimulationBudget). Transient:
+  /// it contains "retry this same payment".
+  public let SIMULATION_BUSY : Text = "The canister's budget for checking payments against the chain is spent for now (too many checks lately led to no send), so this one was not checked, signed or sent — retry this same payment in a minute.";
+
+  /// 2.23.1: the refusal below MIN_INBOUND_CYCLES.
+  public let LOW_INBOUND_CYCLES : Text = "The canister's cycles are below its reserve for new inbound payments (500B), which it keeps for closes and refunds. Nothing was signed or sent; the operator must top up the canister.";
+
+  /// 2.23.1: the payers with an inbound EIP-3009 transfer in flight on this sender — at most one per
+  /// (chainId, token, from) — and the payers cooling down.
+  ///
+  /// In flight: the simulation before signing reads the payer's balance at the latest block, so
+  /// authorizations from one wallet funded once would all pass it while the first is unconfirmed,
+  /// and all but one revert at the canister's cost. Holding one slot per payer from before the
+  /// simulation until the confirmation resolves makes the next one wait, so its simulation sees the
+  /// first transfer's effect. Gateway.settle and the session-open deposit claim a slot after the
+  /// signature verifies (only the holder of `from`'s key can occupy it) and release it however the
+  /// call returns (`finally`, which also runs on a trap after an await). A slot is released when its
+  /// call returns, even when the transfer is still unconfirmed then (#settlementPending): the next
+  /// payment's simulation may not see it yet. No expiry, like the send lock: a call that never
+  /// returns would hold both.
+  ///
+  /// Cooling down: a simulation cannot see everything. The payer can move its funds or cancel the
+  /// authorization after the check, or (a payer with code, e.g. an EIP-7702 delegate) answer the
+  /// simulation differently from the real transaction. All of these end with the sent transfer
+  /// reverting. Almost always that is the payer's doing (a third party cannot cancel or spend for
+  /// it); a token paused, or the canister blocked, between the check and the send would also do it,
+  /// and an operator can lift the cooldown. So the callers cool the payer down for
+  /// REVERT_COOLDOWN_SECONDS (an hour) after a revert of a sent transfer whose authorization then
+  /// reads unused, or cannot be read. When it reads USED, someone else's transaction may have
+  /// executed it first (a mempool copier, on a chain with a public mempool), with the funds arrived:
+  /// that payer is only held for UNCONFIRMED_HOLD_SECONDS, as is one whose transfer had not
+  /// confirmed within the polls. A payer that cancels after the check is therefore bounded at one
+  /// reverting broadcast per 5 minutes.
+  /// One reverting broadcast per payer per hour where the polls see it; per 5 minutes where they do
+  /// not. A cooldown is never shortened by a later, shorter one. At most `maxCooling` entries (the
+  /// sender uses 10_000); when full, expired ones are dropped first, then the one ending soonest.
+  /// Transient: an upgrade forgets both maps.
+  public class PayerGuard(maxCooling : Nat) {
+    let entries = HashMap.HashMap<Text, ()>(16, Text.equal, Text.hash);
+    let cooling = HashMap.HashMap<Text, Nat>(16, Text.equal, Text.hash);
+
+    /// The guard key of a payer: (chainId, token, from), on decoded bytes like AuthorizationGuard.
+    public func key(chainId : Nat, token : Text, from : [Nat8]) : Text {
+      Nat.toText(chainId) # ":" # EvmUtils.bytesToHex(EvmUtils.hexToBytes(token)) # ":" # EvmUtils.bytesToHex(from);
+    };
+
+    /// Claim `k`. #busy when that payer already holds it; #coolingDown(until) while it cools down.
+    public func claim(k : Text, nowSeconds : Nat) : { #ok; #busy; #coolingDown : Nat } {
+      switch (cooling.get(k)) {
+        case (?until) { if (nowSeconds < until) { return #coolingDown(until) } else { cooling.delete(k) } };
+        case (null) {};
+      };
+      if (entries.get(k) != null) { return #busy };
+      entries.put(k, ());
+      #ok;
+    };
+
+    /// Free `k` — its call has returned.
+    public func release(k : Text) { entries.delete(k) };
+
+    /// Refuse `k` for `seconds` from `nowSeconds` (REVERT_COOLDOWN_SECONDS or
+    /// UNCONFIRMED_HOLD_SECONDS); an existing, later end is kept.
+    public func coolDown(k : Text, nowSeconds : Nat, seconds : Nat) {
+      let until = nowSeconds + seconds;
+      switch (cooling.get(k)) {
+        case (?existing) { if (existing >= until) { return } };
+        case (null) { if (cooling.size() >= maxCooling) { pruneCooling(nowSeconds) } };
+      };
+      cooling.put(k, until);
+    };
+
+    /// Lift `k`'s cooldown (an operator's call). True when it was cooling down.
+    public func liftCooldown(k : Text, nowSeconds : Nat) : Bool {
+      let was = switch (cooling.get(k)) { case (?until) { nowSeconds < until }; case (null) { false } };
+      cooling.delete(k);
+      was;
+    };
+
+    /// Number of payers with a transfer in flight.
+    public func size() : Nat { entries.size() };
+
+    /// Number of payers remembered as cooling down (expired ones included until pruned).
+    public func coolingSize() : Nat { cooling.size() };
+
+    /// Lift every cooldown (an operator's call, e.g. for a payer whose transfer reverted by
+    /// mistake). Returns how many were remembered.
+    public func clearCooldowns() : Nat {
+      let n = cooling.size();
+      for (k in Iter.toArray(cooling.keys()).values()) { cooling.delete(k) };
+      n;
+    };
+
+    func pruneCooling(nowSeconds : Nat) {
+      for ((k, until) in Iter.toArray(cooling.entries()).values()) {
+        if (until <= nowSeconds) { cooling.delete(k) };
+      };
+      if (cooling.size() >= maxCooling) {
+        var soonest : ?(Text, Nat) = null;
+        for ((k, until) in cooling.entries()) {
+          switch (soonest) {
+            case (?(_, at)) { if (until < at) { soonest := ?(k, until) } };
+            case (null) { soonest := ?(k, until) };
+          };
+        };
+        switch (soonest) { case (?(k, _)) { cooling.delete(k) }; case (null) {} };
+      };
+    };
+  };
+
+  /// 2.23.1: a token bucket for simulations that do not lead to a send. A simulation is the one
+  /// inbound check that costs an outcall (a multi-provider eth_call, ~1.7B cycles on mainnet by one
+  /// estimate). Every inbound payment that verifies reaches it, and a wallet that verifies costs
+  /// nothing to make, so without a bound below the global facilitator bucket (2 a second) a flood of
+  /// unfunded payments spends about as much as the signed broadcasts it replaced. Each simulation
+  /// takes a token BEFORE its outcall (so simulations in flight are bounded too); the token is given
+  /// back only when the transfer then goes out. A refused simulation, or one that passes but is not
+  /// sent (the send lock was taken meanwhile), keeps it. With none left, payments are not checked
+  /// until one refills: at most `capacity` at once, and one more every `refillSeconds`, so honest
+  /// payments that go out never use it up. Transient, starts full.
+  public class SimulationBudget(capacity : Nat, refillSeconds : Nat) {
+    var tokens : Nat = capacity;
+    var last : Nat = 0;
+
+    func refill(nowSeconds : Nat) {
+      if (last == 0) { last := nowSeconds }; // the refill clock starts at the first call
+      if (nowSeconds > last) {
+        let add = Nat.sub(nowSeconds, last) / refillSeconds;
+        if (add > 0) {
+          tokens := Nat.min(capacity, tokens + add);
+          last += add * refillSeconds;
+        };
+      };
+    };
+
+    /// Take a token at `nowSeconds` for a simulation. False when none is left.
+    public func take(nowSeconds : Nat) : Bool {
+      refill(nowSeconds);
+      if (tokens == 0) { return false };
+      tokens := Nat.sub(tokens, 1);
+      true;
+    };
+
+    /// Give a token back: its transfer was sent.
+    public func giveBack() { tokens := Nat.min(capacity, tokens + 1) };
+  };
+
+  /// 2.23.1: the gas limit of a transferWithAuthorization broadcast, also the simulation's.
+  public let TRANSFER_WITH_AUTHORIZATION_GAS : Nat = 120_000;
+
   // ── Pure fee helpers (module scope so they're unit-testable) ──
 
   /// Pick the latest base fee from one provider's FeeHistory: prefer the forecast
@@ -318,6 +600,14 @@ module {
     /// of executeTransferWithAuthorization is not checked.
     public let broadcastAuthorizations : AuthorizationGuard = AuthorizationGuard();
 
+    /// 2.23.1: the payers with an inbound transfer in flight (see PayerGuard). Gateway.settle and
+    /// the session-open deposit claim here; a direct caller of executeTransferWithAuthorization is
+    /// not checked (the simulation still runs for it).
+    public let inFlightPayers : PayerGuard = PayerGuard(10_000);
+
+    // 2.23.1: at most 10 refused simulations at once, one more every 6 seconds (SimulationBudget).
+    let simulationBudget : SimulationBudget = SimulationBudget(10, 6);
+
     // 2.22.0 (F1): the account nonce each tx this sender signed was sent with, by lower-case tx
     // hash, so reconcileTransaction can tell a tx whose nonce another tx took from one still pending.
     // Bounded: the oldest of BROADCAST_NONCE_CAP entries is overwritten. Transient — after an
@@ -348,13 +638,10 @@ module {
 
     // S10: require multi-provider AGREEMENT on every outbound RPC, so a single compromised
     // or stale provider can't forge a result — e.g. a fake "confirmed" receipt that would
-    // mint a paid receipt / credit an escrow. `total = null` queries all configured providers;
-    // `min = 2` requires at least two to agree (vs. the prior `null` config, which could act
-    // on a single provider's answer for the 2-provider custom chains).
-    let RPC_CONFIG : ?EvmRpc.RpcConfig = ?{
-      responseSizeEstimate = null;
-      responseConsensus = ?#Threshold({ total = null; min = 2 });
-    };
+    // mint a paid receipt / credit an escrow. `min = 2` requires at least two to agree (vs. the
+    // prior `null` config, which could act on a single provider's answer for the 2-provider custom
+    // chains). 2.23.1: the config depends on the services — see EvmRpc.consensusConfig.
+    func rpcConfig(services : EvmRpc.RpcServices) : ?EvmRpc.RpcConfig { EvmRpc.consensusConfig(services) };
 
     // Ops cycle floor: refuse to BROADCAST a tx the canister can't afford to also CONFIRM.
     // A full settle is ~7 EVM-RPC outcalls (fee + nonce + send + up to 4 receipt polls) plus a
@@ -363,6 +650,10 @@ module {
     // and then freezing mid-confirm — which is exactly what leaves a transfer parked. Top up the
     // canister to clear it. (Surfaced via the example's `health` query cycle balance.)
     let MIN_BROADCAST_CYCLES : Nat = 120_000_000_000;
+    let LOW_CYCLES_TEXT : Text = "Insufficient cycles to safely broadcast and confirm; top up the canister";
+    // 2.23.1: new inbound transfers (and their simulation, an outcall anyone can trigger) stop here,
+    // above MIN_BROADCAST_CYCLES, so a flood of them cannot spend the reserve closes and refunds need.
+    let MIN_INBOUND_CYCLES : Nat = 500_000_000_000;
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -408,7 +699,7 @@ module {
       // Cycle floor (see MIN_BROADCAST_CYCLES): never broadcast a tx we can't afford to confirm.
       // Pre-broadcast #err => no funds move and callers roll back safely.
       if (Cycles.balance() < MIN_BROADCAST_CYCLES) {
-        return #err("Insufficient cycles to safely broadcast and confirm; top up the canister");
+        return #err(LOW_CYCLES_TEXT);
       };
       // M9: validate the destination address BEFORE taking the single-flight lock. addressToBytes
       // (used below to build the tx) asserts a 20-byte decode and TRAPS on a malformed address;
@@ -445,13 +736,13 @@ module {
         // Reading #Pending each time self-heals and accounts for in-flight txs.
         let nonce = switch (
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-            services, RPC_CONFIG, { address = senderAddr; block = #Pending },
+            services, rpcConfig(services), { address = senderAddr; block = #Pending },
           )
         ) {
           case (#Consistent(#Ok(n))) { n };
           case (_) {
             txInProgress := false;
-            return #err("Failed to get EVM nonce: eth_getTransactionCount did not reach multi-provider consensus. Nothing was broadcast — safe to retry. If it persists, check the EVM-RPC canister's providers/cycles for this chain.");
+            return #err(NONCE_READ_FAILED # ": eth_getTransactionCount did not reach multi-provider consensus. Nothing was broadcast — safe to retry. If it persists, check the EVM-RPC canister's providers/cycles for this chain.");
           };
         };
 
@@ -460,7 +751,7 @@ module {
           case (?fd) { fd };
           case (null) {
             txInProgress := false;
-            return #err("EVM fee data unavailable — not broadcasting (retry later)");
+            return #err(FEE_DATA_UNAVAILABLE # " — not broadcasting (retry later)");
           };
         };
 
@@ -507,7 +798,7 @@ module {
         // B2: isolate the broadcast so a network error AFTER dispatch (which may have
         // reached a provider's mempool) is reported as #maybeSent, not #err.
         let sendResult = try {
-          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, RPC_CONFIG, rawTxHex);
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_sendRawTransaction(services, rpcConfig(services), rawTxHex);
         } catch (e) {
           txInProgress := false;
           return #maybeSent({ txHash = broadcastTxHash; reason = "EVM send failed after dispatch (may have broadcast): " # Error.message(e) });
@@ -526,7 +817,7 @@ module {
             let moved = try {
               switch (
                 await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-                  services, RPC_CONFIG, { address = senderAddr; block = #Pending },
+                  services, rpcConfig(services), { address = senderAddr; block = #Pending },
                 )
               ) {
                 case (#Consistent(#Ok(p))) { p > nonce };
@@ -541,7 +832,7 @@ module {
         };
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
-        #err("EVM tx failed before broadcast: " # Error.message(e));
+        #err(FAILED_BEFORE_BROADCAST # ": " # Error.message(e));
       } finally {
         // M9: guarantee the single-flight lock is released on EVERY exit — including a local trap
         // (e.g. an assert), which `catch` does NOT intercept. Without this, one trap after the
@@ -659,16 +950,38 @@ module {
         r,
         s,
       );
+      // 2.23.1: sign only what the chain says will succeed (see "Simulate before signing"). The
+      // cheap refusals come first, so they cost no outcall: an authorization that expires too soon,
+      // a busy send lock (sendTransaction checks it again), cycles below the inbound reserve, and an
+      // exhausted simulation budget. Every refusal here is #err: nothing was signed or broadcast.
+      let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
+      if (EvmUtils.hexToBytes(tokenAddress).size() != 20) {
+        return #err("Invalid token address (expected 20 bytes): " # tokenAddress # "; nothing was signed or sent");
+      };
+      if (expiresTooSoon(validBefore, nowSeconds)) { return #err(EXPIRES_TOO_SOON) };
+      if (txInProgress) { return #err(INBOUND_SEND_BUSY) };
+      if (Cycles.balance() < MIN_INBOUND_CYCLES) { return #err(LOW_INBOUND_CYCLES) };
+      if (not simulationBudget.take(nowSeconds)) { return #err(SIMULATION_BUSY) };
+      switch (simulationRefusal(await* simulate(chainId, tokenAddress, calldata), validAfter, nowSeconds)) {
+        case (null) {};
+        case (?refusal) { return #err(refusal) }; // the budget token stays spent
+      };
       // transferWithAuthorization uses more gas than a simple transfer (~80k).
       // B2 (G5/G6): SURFACE #maybeSent (with its tx hash), do not collapse it to #err. The inbound
       // EIP-3009 path is replay-protected on-chain (the authorization's token nonce is single-use),
       // so an ambiguous broadcast cannot double-pay — but it MAY still mine, so the caller must keep
       // the tx hash to poll/reconcile it rather than stranding a hash-less #settlementFailed. Callers
       // (Gateway.settle, Sessions.openEvmSession) route the hash into confirmTransaction.
-      switch (await sendTransaction(chainId, tokenAddress, calldata, 120_000)) {
-        case (#ok(h)) { #ok(h) };
-        case (#err(e)) { #err(e) };
-        case (#maybeSent(m)) { #maybeSent(m) };
+      switch (await sendTransaction(chainId, tokenAddress, calldata, TRANSFER_WITH_AUTHORIZATION_GAS)) {
+        case (#ok(h)) { simulationBudget.giveBack(); #ok(h) };
+        // Not sent: the budget token stays spent. A failure that clears by itself asks the payer
+        // to retry the same payment (2.23.1).
+        case (#err(e)) {
+          if (isSendBusy(e)) { #err(INBOUND_SEND_BUSY) } else if (transientSendError(e)) {
+            #err(e # " Nothing of this payment was sent — retry this same payment shortly.");
+          } else { #err(e) };
+        };
+        case (#maybeSent(m)) { simulationBudget.giveBack(); #maybeSent(m) };
       };
     };
 
@@ -693,7 +1006,7 @@ module {
     func getFeeData(evmRpc : EvmRpc.EvmRpcCanister, services : EvmRpc.RpcServices) : async ?(Nat, Nat) {
       try {
         let result = await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_feeHistory(
-          services, RPC_CONFIG,
+          services, rpcConfig(services),
           { blockCount = 1; newestBlock = #Latest; rewardPercentiles = null },
         );
         switch (result) {
@@ -753,7 +1066,7 @@ module {
       label poll while (attempts < maxPolls) {
         attempts += 1;
         let result = try {
-          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
+          await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, rpcConfig(services), txHash);
         } catch (_) { return #err("Receipt query failed — transaction status unknown (it may still mine). Transient RPC failure: re-poll confirmTransaction with the same tx hash; never re-broadcast on this outcome.") };
         switch (result) {
           case (#Consistent(#Ok(?receipt))) {
@@ -801,7 +1114,7 @@ module {
           let latest = try {
             switch (
               await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionCount(
-                services, RPC_CONFIG, { address = await getEvmAddress(); block = #Latest },
+                services, rpcConfig(services), { address = await getEvmAddress(); block = #Latest },
               )
             ) {
               case (#Consistent(#Ok(c))) { c };
@@ -813,7 +1126,7 @@ module {
           // disagreeing, an RPC error, a status-less receipt) into #pending, which was then
           // reported as dropped.
           let last = try {
-            await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, RPC_CONFIG, txHash);
+            await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, rpcConfig(services), txHash);
           } catch (_) { return #pending };
           switch (finalReceiptVerdict(last)) {
             case (#confirmed) { #confirmed };
@@ -846,7 +1159,9 @@ module {
       };
       let call : EvmRpc.CallArgs = {
         transaction = {
-          type_ = null; nonce = null; to = ?tokenAddress; from = null; gas = null; value = null;
+          // 2.23.1: the canonical 0x form — the EVM-RPC canister refuses a `to` without the prefix,
+          // and a payer chooses the asset's spelling.
+          type_ = null; nonce = null; to = ?EvmUtils.bytesToHex(EvmUtils.hexToBytes(tokenAddress)); from = null; gas = null; value = null;
           input = ?EvmUtils.bytesToHex(buildAuthorizationStateCalldata(authorizer, authNonce));
           gasPrice = null; maxPriorityFeePerGas = null; maxFeePerGas = null; maxFeePerBlobGas = null;
           accessList = null; blobVersionedHashes = null; blobs = null; chainId = null;
@@ -854,8 +1169,36 @@ module {
         block = ?#Latest;
       };
       try {
-        classifyAuthorizationState(await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_call(services, RPC_CONFIG, call));
+        classifyAuthorizationState(await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_call(services, rpcConfig(services), call));
       } catch (e) { #unknown("authorizationState call failed: " # Error.message(e)) };
+    };
+
+    /// 2.23.1: simulate `calldata` against `tokenAddress` as an eth_call at the latest block,
+    /// through the EVM-RPC canister (the same 2-of-N agreement as every other read), exactly as the
+    /// broadcast will run it: from this sender's own address (the transaction's origin) and with its
+    /// gas limit. A payer with code (USDC asks it to check the signature, e.g. an EIP-7702 delegate)
+    /// can still tell the two apart by block, time or gas price; PayerGuard's cooldown bounds that.
+    /// The token is sent in canonical 0x form. Never signs or broadcasts. A rejected call is #unknown.
+    func simulate(chainId : Nat, tokenAddress : Text, calldata : [Nat8]) : async* SimulationVerdict {
+      let (evmRpc, services) = switch (EvmRpc.resolveRpc(evmRpcCanister, chainId)) {
+        case (?r) { r };
+        case (null) { return #unknown("Unsupported chain ID: " # Nat.toText(chainId)) };
+      };
+      try {
+        let self = switch (cachedEvmAddr) { case (?a) { a }; case (null) { await getEvmAddress() } };
+        if (self == "") { return #unknown("this canister's EVM address could not be derived") };
+        let call : EvmRpc.CallArgs = {
+          transaction = {
+            type_ = null; nonce = null; to = ?EvmUtils.bytesToHex(EvmUtils.hexToBytes(tokenAddress)); from = ?self;
+            gas = ?TRANSFER_WITH_AUTHORIZATION_GAS; value = null;
+            input = ?EvmUtils.bytesToHex(calldata);
+            gasPrice = null; maxPriorityFeePerGas = null; maxFeePerGas = null; maxFeePerBlobGas = null;
+            accessList = null; blobVersionedHashes = null; blobs = null; chainId = null;
+          };
+          block = ?#Latest;
+        };
+        classifySimulation(await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_call(services, rpcConfig(services), call));
+      } catch (e) { #unknown("simulation call failed: " # Error.message(e)) };
     };
   };
   // ── Construction ──

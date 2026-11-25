@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { createLocalAgent, createExampleActor, getCanisterId } from './helpers.js';
-import { Actor, type HttpAgent } from '@icp-sdk/core/agent';
+import { Actor, HttpAgent } from '@icp-sdk/core/agent';
+import { Secp256k1KeyIdentity } from '@icp-sdk/core/identity/secp256k1';
 import { IDL } from '@icp-sdk/core/candid';
 
 /**
@@ -42,6 +44,9 @@ const PendingDeposit = IDL.Record({
 const exampleIdl = () =>
   IDL.Service({
     sweepEvm: IDL.Func([IDL.Nat, IDL.Text, IDL.Text, IDL.Nat], [sweepResult], []),
+    // 2.23.1: lift every EVM payer cooldown (controller-only).
+    clearEvmPayerCooldowns: IDL.Func([], [IDL.Nat], []),
+    liftEvmPayerCooldown: IDL.Func([IDL.Nat, IDL.Text, IDL.Text], [IDL.Bool], []),
     // 2.22.0: controller-only recovery endpoints, also absent from the public client IDL.
     reconcileSession: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Text, err: IDL.Text })], []),
     setGatewayDerivationPath: IDL.Func(
@@ -84,6 +89,13 @@ const SendMode = IDL.Variant({
   insufficientFunds: IDL.Null,
 });
 const AuthStateMode = IDL.Variant({ unused: IDL.Null, used: IDL.Null, error: IDL.Null });
+const SimulationMode = IDL.Variant({
+  ok: IDL.Null,
+  reverted: IDL.Null,
+  revertedInconsistent: IDL.Null,
+  inconsistent: IDL.Null,
+  error: IDL.Null,
+});
 const mockIdl = () =>
   IDL.Service({
     setReceiptMode: IDL.Func([ReceiptMode], [], []),
@@ -97,6 +109,23 @@ const mockIdl = () =>
     getSentTxs: IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
     getReceiptPolls: IDL.Func([], [IDL.Nat], ['query']),
     getEthCalls: IDL.Func([], [IDL.Nat], ['query']),
+    setSimulationMode: IDL.Func([SimulationMode], [], []),
+    setHoldSimulations: IDL.Func([IDL.Bool], [], []),
+    getSimulations: IDL.Func([], [IDL.Nat], ['query']),
+    getLastSimulation: IDL.Func(
+      [],
+      [
+        IDL.Opt(
+          IDL.Record({
+            to: IDL.Opt(IDL.Text),
+            from: IDL.Opt(IDL.Text),
+            gas: IDL.Opt(IDL.Nat),
+            input: IDL.Text,
+          }),
+        ),
+      ],
+      ['query'],
+    ),
   });
 
 // The gasLimit field of a signed EIP-1559 tx (0x02 || rlp([chainId, nonce, maxPriorityFee,
@@ -168,6 +197,13 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
         '[evm-outbound] mock fixture not deployed — suite SKIPPED. Run `pnpm setup:local` then `bash scripts/setup-evm-outbound.sh`.',
       );
     }
+  });
+
+  // 2.23.1: most payments in this suite come from one payer (the canister signs for itself), and a
+  // sent transfer that reverts or stays unconfirmed cools that payer down (an hour, or 5 minutes).
+  // Several tests do that on purpose, so every test starts with no payer cooling down.
+  beforeEach(async () => {
+    if (!skip) await example.clearEvmPayerCooldowns();
   });
 
   const sweep = () => example.sweepEvm(CHAIN_ID, USDC, TO, AMOUNT);
@@ -356,7 +392,7 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     const body = await settleBody(1000n);
     const first = await postSettle(body);
     expect(first.success).toBe(false);
-    expect(first.errorReason).toBe('invalid_transaction_state');
+    expect(first.errorReason).toBe('settlement_retry'); // 2.23.1: nothing sent, retry the same payment
     expect(await mock.sentTxCount()).toBe(0n);
     await mock.setFeeMode({ consistent: null });
     const retry = await postSettle(body);
@@ -373,6 +409,8 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     expect(res.success).toBe(false);
     expect(res.errorReason).toBe('settlement_pending');
     expect(await mock.getEthCalls()).toBe(1n);
+    // 2.23.1: any revert of a sent transfer cools the payer down, whatever the token then says.
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n);
   });
 
   it('2.22.0 (E7): a reverted transfer whose authorization is still UNUSED fails (no funds moved)', async () => {
@@ -383,6 +421,165 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     const res = await postSettle(await settleBody(1000n));
     expect(res.success).toBe(false);
     expect(res.errorReason).toBe('invalid_transaction_state');
+  });
+
+  // ── Simulate before signing; one inbound transfer in flight per payer (2.23.1) ──
+  //
+  // Every payment in this suite is signed by the canister for itself, so they all share one payer.
+
+  it('2.23.1: a transfer the token refuses in simulation is not signed or sent; the same payment goes through once it would succeed', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSimulationMode({ reverted: null }); // e.g. a payer holding no USDC
+    const body = await settleBody(1000n);
+    const refused = await postSettle(body);
+    expect(refused.success).toBe(false);
+    expect(refused.errorReason).toBe('invalid_transaction_state');
+    expect(await mock.getSimulations()).toBe(1n);
+    expect(await mock.sentTxCount()).toBe(0n);
+    await mock.setSimulationMode({ ok: null });
+    // Nothing was sent, so the authorization claim and the payer slot were both freed.
+    expect((await postSettle(body)).success).toBe(true);
+    expect(await mock.sentTxCount()).toBe(1n);
+  });
+
+  it('2.23.1: a simulation with no agreed answer is refused too — nothing signed or sent', async () => {
+    if (skip) return;
+    for (const [mode, reason] of [
+      [{ revertedInconsistent: null }, 'invalid_transaction_state'], // every provider reverts: final
+      [{ inconsistent: null }, 'settlement_retry'], // no agreed answer: retry the same payment
+      [{ error: null }, 'settlement_retry'],
+    ] as const) {
+      await mock.reset();
+      await mock.setSimulationMode(mode);
+      const res = await postSettle(await settleBody(1000n));
+      expect(res.success).toBe(false);
+      expect(res.errorReason).toBe(reason);
+      expect(await mock.getSimulations()).toBe(1n);
+      expect(await mock.sentTxCount()).toBe(0n);
+    }
+  });
+
+  it('2.23.1: the simulation is the exact call then sent, against the paid token', async () => {
+    if (skip) return;
+    await mock.reset();
+    expect((await postSettle(await settleBody(1000n))).success).toBe(true);
+    const [sim] = await mock.getLastSimulation();
+    expect((sim.to[0] as string).toLowerCase()).toBe(USDC.toLowerCase());
+    // Run as the broadcast runs: from the canister's own address, with its gas limit.
+    const self = (await full.gatewayRecipient())[0] as string;
+    expect((sim.from[0] as string).toLowerCase()).toBe(self.toLowerCase());
+    expect(sim.gas).toEqual([120_000n]);
+    const [rawTx] = (await mock.getSentTxs()) as string[];
+    expect(rawTx.toLowerCase()).toContain((sim.input as string).replace(/^0x/, '').toLowerCase());
+  });
+
+  it('2.23.1: a session deposit the token refuses in simulation opens nothing and sends nothing', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSimulationMode({ reverted: null });
+    const res = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(res.err).toContain('simulation before signing reverted');
+    expect(await mock.sentTxCount()).toBe(0n);
+  });
+
+  // Poll until `cond` holds (a held simulation has been reached), or fail.
+  async function until(cond: () => Promise<boolean>): Promise<void> {
+    for (let k = 0; k < 100; k++) {
+      if (await cond()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('condition not reached');
+  }
+  const simulationReached = async () => (await mock.getSimulations()) === 1n;
+
+  it('2.23.1: one transfer in flight per payer — a second payment from the same wallet is refused as busy, then goes through', async () => {
+    if (skip) return;
+    await mock.reset();
+    const b1 = await settleBody(1000n);
+    const b2 = await settleBody(1000n);
+    await mock.setHoldSimulations(true); // the first settle stays in flight, holding the payer's slot
+    const first = postSettle(b1);
+    try {
+      await until(simulationReached);
+      const busy = await postSettle(b2);
+      expect(busy.success).toBe(false);
+      expect(busy.errorReason).toBe('settlement_retry'); // busy: nothing sent, retry the same payment
+      // The refusal left the first payment's slot held: a third is busy too.
+      expect((await postSettle(await settleBody(1000n))).errorReason).toBe('settlement_retry');
+    } finally {
+      await mock.setHoldSimulations(false);
+    }
+    expect((await first).success).toBe(true);
+    expect(await mock.getSimulations()).toBe(1n); // the busy one was refused before its simulation
+    expect(await mock.sentTxCount()).toBe(1n);
+    // The slot was freed when the first returned: the refused payment goes through unchanged.
+    expect((await postSettle(b2)).success).toBe(true);
+    expect(await mock.sentTxCount()).toBe(2n);
+  });
+
+  it('2.23.1: settle and session open share the payer slot', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ reverted: null }); // the deposit reverts, so no session is left open
+    await mock.setHoldSimulations(true);
+    const opening = full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    try {
+      await until(simulationReached); // the open holds the payer's slot
+      const busy = await postSettle(await settleBody(1000n));
+      expect(busy.success).toBe(false);
+      expect(busy.errorReason).toBe('settlement_retry');
+    } finally {
+      await mock.setHoldSimulations(false);
+    }
+    expect((await opening).err).toContain('Settlement failed');
+    expect(await mock.getSimulations()).toBe(1n);
+    await mock.setReceiptMode({ confirmed: null });
+    // Its deposit reverted with the authorization unused, which cools the payer down; lift that
+    // to see that the open also freed the slot when it returned.
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n);
+    expect((await postSettle(await settleBody(1000n))).success).toBe(true);
+  });
+
+  // A payment on a paid route carries the server nonce of its 402 challenge
+  // (accepted.extra.ic402Nonce), as @ic402/client sends it.
+  async function searchPayment(): Promise<string> {
+    const challenge = await fetch(`${raw()}/search?q=x`);
+    expect(challenge.status).toBe(402);
+    const req = (await challenge.json()).accepts.find(
+      (a: { network: string }) => a.network === 'eip155:8453',
+    );
+    const signed = await full.signX402Payment(
+      CHAIN_ID,
+      USDC,
+      req.payTo,
+      BigInt(req.amount),
+      'USD Coin',
+      '2',
+    );
+    const payload = JSON.parse(Buffer.from(signed.ok.header as string, 'base64').toString('utf8'));
+    payload.accepted = req;
+    return Buffer.from(JSON.stringify(payload)).toString('base64');
+  }
+  const paySearch = (header: string) =>
+    fetch(`${raw()}/search?q=x`, { headers: { 'PAYMENT-SIGNATURE': header } });
+
+  it('2.23.1: a payment refused as busy frees its server nonce — retried unchanged, it goes through', async () => {
+    if (skip) return;
+    await mock.reset();
+    const h1 = await searchPayment();
+    const h2 = await searchPayment();
+    await mock.setHoldSimulations(true);
+    const first = paySearch(h1);
+    try {
+      await until(simulationReached);
+      expect((await paySearch(h2)).status).toBe(402); // busy
+    } finally {
+      await mock.setHoldSimulations(false);
+    }
+    expect((await first).status).toBe(200);
+    expect((await paySearch(h2)).status).toBe(200); // its nonce was unlocked, not left in flight
+    expect(await mock.sentTxCount()).toBe(2n);
   });
 
   // ── A parked tx that can never land (2.22.0, F1) ──
@@ -424,6 +621,7 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setReceiptMode({ pendingThenConfirmed: 999n }); // never mined
     const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
     expect(opened).toHaveProperty('err'); // "Settlement pending …": tracked, no session
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n); // 2.23.1: the payer is held meanwhile
     // The mock echoes "0x" + the send's 1-based index, zero-padded: the first send after reset.
     const txHash = '0x' + '1'.padStart(64, '0');
     const deps: { txHash: string }[] = await example.listPendingEvmDeposits();
@@ -476,7 +674,9 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setReceiptMode({ reverted: null }); // authorization still unused (mock default)
     const body = await settleBody(1000n);
     expect((await postSettle(body)).success).toBe(false);
-    expect((await postSettle(body)).success).toBe(false);
+    const replay = await postSettle(body);
+    expect(replay.success).toBe(false);
+    expect(replay.errorReason).toBe('settlement_pending'); // the guard, checked before the cooldown
     expect(await mock.sentTxCount()).toBe(1n);
   });
 
@@ -498,6 +698,7 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setAuthStateMode({ used: null });
     const used = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
     expect(used.err).toContain('Settlement pending');
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n); // 2.23.1: any revert cools the payer
     await mock.setAuthStateMode({ unused: null });
     const sig = await evmSessionSig(50_000n);
     const unused = await full.openSession(sessionCfg, sig);
@@ -532,5 +733,209 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     const dead = await example.reconcileSession(opened.ok.id);
     expect(dead.err).toContain('appears not to have landed');
     expect(dead.err).toContain('verify on chain before forcing');
+  });
+  // ── Cooldown and the budget of refused checks (2.23.1). Keep these last: the budget test leaves
+  // the budget spent for about a minute. ──
+
+  // An authorization from another payer: the canister's signer at another derivation path, so the
+  // cooldown it triggers leaves the suite's usual payer alone. EIP-712 hashed here, signed there.
+  const OTHER_PATH = [Uint8Array.of(0x23, 0x01)];
+  const u256 = (n: bigint) => Buffer.from(n.toString(16).padStart(64, '0'), 'hex');
+  const word = (a: string) =>
+    Buffer.from(a.replace(/^0x/, '').toLowerCase().padStart(64, '0'), 'hex');
+  const k256 = (b: Uint8Array) => Buffer.from(keccak_256(b));
+  // An EIP-3009 authorization signed by the canister's signer at `path`, for `value` to the gateway.
+  async function otherPayerAuthorization(path: Uint8Array[], value: bigint) {
+    const payTo = (await full.gatewayRecipient())[0] as string;
+    const from = (await full.evmAddressAt(path)).ok as string;
+    const validBefore = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const nonce = randomBytes(32);
+    const text = (t: string) => Buffer.from(t);
+    const domainSeparator = k256(
+      Buffer.concat([
+        k256(
+          text(
+            'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)',
+          ),
+        ),
+        k256(text('USD Coin')),
+        k256(text('2')),
+        u256(CHAIN_ID),
+        word(USDC),
+      ]),
+    );
+    const structHash = k256(
+      Buffer.concat([
+        k256(
+          text(
+            'TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)',
+          ),
+        ),
+        word(from),
+        word(payTo),
+        u256(value),
+        u256(0n),
+        u256(validBefore),
+        nonce,
+      ]),
+    );
+    const signed = await full.signTypedDataAt(path, domainSeparator, structHash);
+    return { from, payTo, validBefore, nonce, signature: signed.ok.signature as string };
+  }
+
+  async function otherPayerSettleBody(path: Uint8Array[] = OTHER_PATH): Promise<string> {
+    const a = await otherPayerAuthorization(path, 1000n);
+    const body = JSON.parse(await settleBody(1000n));
+    body.paymentPayload.payload = {
+      signature: a.signature,
+      authorization: {
+        from: a.from,
+        to: a.payTo,
+        value: '1000',
+        validAfter: '0',
+        validBefore: a.validBefore.toString(),
+        nonce: '0x' + a.nonce.toString('hex'),
+      },
+    };
+    return JSON.stringify(body);
+  }
+
+  // An EVM session-open signature from another payer (see evmSessionSig).
+  async function otherPayerSessionSig(path: Uint8Array[], deposit: bigint) {
+    const a = await otherPayerAuthorization(path, deposit);
+    const sig = hexBytes(a.signature);
+    return {
+      scheme: 'exact',
+      network: 'eip155:8453',
+      signature: [],
+      publicKey: [randomBytes(32)],
+      sender: a.from,
+      nonce: [],
+      authorization: [
+        {
+          from: a.from,
+          to: a.payTo,
+          value: deposit,
+          validAfter: 0n,
+          validBefore: a.validBefore,
+          nonce: a.nonce,
+          v: sig[64],
+          r: sig.slice(0, 32),
+          s: sig.slice(32, 64),
+        },
+      ],
+      asset: [],
+    };
+  }
+
+  it('2.23.1: a payer whose transfer reverts with its authorization unused is cooled down; others are not', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ reverted: null }); // passes the simulation, reverts, authorization unused
+    const first = await postSettle(await otherPayerSettleBody());
+    expect(first.success).toBe(false);
+    expect(first.errorReason).toBe('invalid_transaction_state');
+    expect(await mock.sentTxCount()).toBe(1n);
+    const next = await postSettle(await otherPayerSettleBody());
+    expect(next.success).toBe(false);
+    expect(next.errorReason).toBe('unexpected_settle_error'); // cooling down: final, not "retry"
+    expect(await mock.getSimulations()).toBe(1n); // refused before its simulation
+    expect(await mock.sentTxCount()).toBe(1n);
+    await mock.setReceiptMode({ confirmed: null });
+    expect((await postSettle(await settleBody(1000n))).success).toBe(true); // the usual payer is not cooled
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n);
+    expect((await postSettle(await otherPayerSettleBody())).success).toBe(true); // lifted
+  });
+
+  it('2.23.1: an asset spelled without 0x still cools the payer down after a revert', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ reverted: null });
+    const body = JSON.parse(await settleBody(1000n));
+    const bare = USDC.replace(/^0x/, '');
+    body.paymentRequirements.asset = bare;
+    body.paymentPayload.accepted.asset = bare;
+    const res = await postSettle(JSON.stringify(body));
+    expect(res.errorReason).toBe('invalid_transaction_state'); // the token was read: authorization unused
+    expect(await mock.getEthCalls()).toBe(1n);
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n);
+  });
+
+  it('2.23.1: a payer whose transfer is unconfirmed after the polls is held; an operator can lift one payer', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    expect((await postSettle(await settleBody(1000n))).errorReason).toBe('settlement_pending');
+    await mock.setReceiptMode({ confirmed: null });
+    const held = await postSettle(await settleBody(1000n));
+    expect(held.errorReason).toBe('unexpected_settle_error'); // held: final for now, nothing sent
+    expect(await mock.sentTxCount()).toBe(1n);
+    const self = (await full.gatewayRecipient())[0] as string;
+    expect(await example.liftEvmPayerCooldown(CHAIN_ID, USDC, self)).toBe(true);
+    expect((await postSettle(await settleBody(1000n))).success).toBe(true);
+  });
+
+  it('2.23.1: the budget bounds simulations in flight — a burst of opens from many wallets checks at most 10', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSimulationMode({ reverted: null }); // unfunded wallets: every check refuses
+    // Distinct callers (no shared open lock), each paying from its own wallet. Candid calls reach
+    // the canister together; HTTP through the local gateway arrives about ten at a time.
+    const N = 16;
+    const payers = [];
+    for (let i = 0; i < N; i++) {
+      const caller = await HttpAgent.create({
+        identity: Secp256k1KeyIdentity.generate(),
+        host: 'http://localhost:4944',
+        shouldFetchRootKey: true,
+      });
+      payers.push({
+        actor: createExampleActor(caller, exampleId),
+        sig: await otherPayerSessionSig([Uint8Array.of(0x30, i)], 50_000n),
+      });
+    }
+    await mock.setHoldSimulations(true);
+    let returned = 0;
+    let results: { err?: string }[] = [];
+    try {
+      const opens = payers.map((p) =>
+        p.actor.openSession(sessionCfg, p.sig).then((r: { err?: string }) => {
+          returned++;
+          return r;
+        }),
+      );
+      // Every open is then either held in its check or already refused.
+      await until(async () => (await mock.getSimulations()) + BigInt(returned) >= BigInt(N));
+      // At most the 10 tokens, plus one if a refill fell inside the burst (one every 6 s).
+      expect(await mock.getSimulations()).toBeLessThanOrEqual(11n);
+      await mock.setHoldSimulations(false);
+      results = await Promise.all(opens);
+    } finally {
+      await mock.setHoldSimulations(false);
+    }
+    const unchecked = results.filter((r) =>
+      String(r.err).includes('budget for checking payments'),
+    ).length;
+    expect(BigInt(unchecked) + (await mock.getSimulations())).toBe(BigInt(N));
+    expect(await mock.sentTxCount()).toBe(0n);
+  });
+
+  it('2.23.1: refused checks are budgeted — after about 10 in a minute, payments are not checked until one refills', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSimulationMode({ reverted: null }); // every check refuses, as for an unfunded payer
+    let refusedUnchecked = false;
+    for (let i = 0; i < 30 && !refusedUnchecked; i++) {
+      const sig = await evmSessionSig(50_000n); // sign first, so the open follows the last refusal closely
+      const before = await mock.getSimulations();
+      const res = await full.openSession(sessionCfg, sig);
+      if (String(res.err).includes('budget for checking payments')) {
+        expect(String(res.err)).toContain('retry this same payment');
+        expect(await mock.getSimulations()).toBe(before); // not checked: no outcall
+        refusedUnchecked = true;
+      }
+    }
+    expect(refusedUnchecked).toBe(true);
+    expect(await mock.sentTxCount()).toBe(0n);
   });
 });

@@ -177,7 +177,7 @@ Two flags tell a caller whether money may have moved. Check them before you pay 
 | `paymentNotSent` (2.22.0) | The client stopped before it sent the paying call: the price was above `maxAmount`, autoPayment or the ledger was not configured, the ledger answered the approve with `#Err`, or the canister refused the unpaid request. | Nothing was paid. You may release the budget and pay again later. |
 | neither | The paying call may have been sent: a timeout or reject after it, or a canister error after payment. | Treat as possibly paid: keep the budget. Do not pay with a new nonce until you know the first payment did not settle. |
 
-The canister's busy answer ("already in progress — retry this same payment") comes back as `transient` (retryable) with both flags false: another caller's attempt with that payment is running, and your funds did not move through it. Retrying the same payment is preferred; a new payment is also safe.
+The canister's busy answer ("already in progress — retry this same payment") comes back as `transient` (retryable) with both flags false: another caller's attempt with that payment is running, and your funds did not move through it. Retrying the same payment is preferred; a new payment is also safe. Since 2.23.1 the EVM refusals that sent nothing come back the same way: another payment from the payer is still settling, the chain could not be checked, or too many checks failed recently. Over HTTP they arrive as a 402 with `errorReason: "settlement_retry"` (`isSettlementRetryBody`).
 
 
 | `Ic402ErrorKind` | Meaning |

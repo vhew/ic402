@@ -372,6 +372,8 @@ service : {
                                 err: text;
                                 ok;
                               });
+  /// 2.23.1: lift every EVM payer cooldown (see Gateway.clearEvmPayerCooldowns). Controller-only.
+  clearEvmPayerCooldowns: () -> (nat);
   clearRefundOwed: (sessionId: text) -> (variant {
                                            err: text;
                                            ok;
@@ -506,6 +508,8 @@ service : {
     });
   /// Helper: compute keccak256 hash of a byte array. Useful for building type hashes.
   keccak256: (data: vec nat8) -> (vec nat8) query;
+  /// 2.23.1: lift one EVM payer's cooldown (see Gateway.liftEvmPayerCooldown). Controller-only.
+  liftEvmPayerCooldown: (chainId: nat, token: text, from: text) -> (bool);
   listContent: () -> (vec ContentEntry) query;
   listJobs: (serviceId: text, statusFilter: opt JobStatus) -> (vec Job) query;
   listPendingEvmDeposits: () ->

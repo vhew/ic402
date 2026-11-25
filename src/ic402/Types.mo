@@ -109,6 +109,9 @@ module {
     // authorization `from`) holds this payment's nonce in flight, so nothing of this payer's is
     // known to have moved. Retrying the same payment shortly is preferred; paying anew is also
     // safe. The same payer's own duplicate in flight answers #settlementPending instead.
+    // 2.23.1, EVM: also EvmSender.PAYER_BUSY (another payment from this payer is still settling;
+    // retry this same payment) and EvmSender.payerCoolingText (this payer's last sent transfer
+    // reverted — refused for an hour — or had not confirmed — 5 minutes). Nothing of either was sent.
     #policyDenied : Text;
     #tokenNotAccepted : Text;
     #networkNotSupported : Text;

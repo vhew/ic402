@@ -5,7 +5,14 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.23.0** (additive: `recoverEscrowReceipt`). The latest security release is
+> **Current release: v2.23.1.**
+> - It fixes the EVM-RPC consensus config that had failed every EVM call on Ethereum, Base,
+>   Optimism, Arbitrum and Ethereum Sepolia since 2.1.0.
+> - It no longer signs an inbound EVM payment that cannot succeed: the transfer is simulated first.
+>   An expiry margin, one transfer per payer, a cooldown after a revert and a simulation budget
+>   bound what the simulation cannot see.
+>
+> The last full security release is
 > **v2.22.0**: three high-severity fixes and about forty medium and low ones, all found by a
 > whole-library adversarial review (advisory GHSA-jxw7-5x89-grxh). Read its upgrade notes in
 > [`CHANGELOG.md`](CHANGELOG.md) before upgrading from an earlier version; several fixes change
@@ -31,8 +38,8 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.23.x | ✅ | Current. |
-| 2.22.x | ✅ | Supported: has every security fix. 2.23.0 only adds `recoverEscrowReceipt`. |
+| 2.23.x | ✅ | Current: 2.23.1. 2.23.0 lacks the 2.23.1 fixes. |
+| 2.22.x | ⚠️ | Superseded; upgrade to 2.23.1. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
 | 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |
@@ -145,7 +152,14 @@ composed-system security pass is complete:
   `recoverBuyerActionSigner`) are in [`docs/security-model.md`](docs/security-model.md).
 - **SEC-1 — unauthenticated-facilitator cycle/DoS: FIXED.** A caller-agnostic token-bucket
   rate-limit + cycle-floor gate (`Gateway.facilitatorAdmit`) fronts the facilitator paths
-  before the expensive work runs.
+  before the expensive work runs. The bucket bounds the rate, not what each request costs.
+  Until 2.23.1, an EVM payment from an unfunded wallet still cost a signed broadcast each time
+  (about one threshold signature of cycles, with the send lock held). Since 2.23.1:
+  - the transfer is simulated first, and one per payer is in flight at a time;
+  - simulations that lead to no send have their own budget (10 at once, about 10 a minute);
+  - a payer whose sent transfer reverts is refused for an hour (5 minutes if another transaction
+    executed its authorization), and one whose transfer is unconfirmed after the polls for 5
+    minutes.
 - **SEC-2 — `getFeeData` hostile-RPC grief-park: FIXED.** Fee data now takes the ROBUST
   (lower-median) base fee across providers, so a single outlier can't make the gas
   reservation unpayable; a confirm-only `reconcileJob` / `reconcileSession` recovery path
@@ -186,8 +200,10 @@ Not blockers, but recommended before treating it as battle-tested:
   and `/settle` are **unauthenticated update
   calls**: no funds can be stolen (C-1 recipient binding still applies), but they cost the
   canister cycles. They are now fronted by a caller-agnostic token-bucket rate-limit +
-  cycle-floor gate (SEC-1, `Gateway.facilitatorAdmit`); operators should still cap the
-  canister's overall cycle budget.
+  cycle-floor gate (SEC-1, `Gateway.facilitatorAdmit`). Since 2.23.1 an EVM settle is simulated
+  before it is signed. A payment that cannot succeed costs one RPC read, not a signed broadcast,
+  and reads that lead to no send have their own budget. Operators should still cap the canister's overall
+  cycle budget.
 - **IC boundary-node CORS caveat.** Every HTTP response sets
   `Access-Control-Allow-Origin: *` (`src/ic402/HttpHandler.mo:42`) so browser agents can
   pass the OPTIONS preflight carrying the custom `PAYMENT-SIGNATURE` header. This is

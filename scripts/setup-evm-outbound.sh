@@ -77,6 +77,12 @@ patch_evm_rpc "$MOCK_ID"
 echo "  rebuild + reinstall example (pointed at the mock)..."
 bash "$PROJECT_ROOT/scripts/build-example.sh" .icp/example.wasm >/dev/null
 icp canister install example --wasm .icp/example.wasm --mode reinstall -e local >/dev/null
+# Headroom (2.23.1): an EVM settle or session open ties up hundreds of billions of cycles while its
+# calls are in flight, far beyond the ~17B it nets (docs/costs-and-rails.md §2). The suite's burst
+# test holds about ten inbound checks in flight at once: from around 5T the canister could no longer
+# make its calls ("could not perform self call"), and from the default creation balance its last
+# session open failed as "EVM fee data unavailable". Local cycles only.
+icp canister top-up --amount 25t example -e local >/dev/null
 
 # ── 4. restore source (also handled by the trap) ──
 restore_source

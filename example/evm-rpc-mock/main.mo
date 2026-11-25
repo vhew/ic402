@@ -38,13 +38,30 @@
 ///   setLatestNonce(n)                        eth_getTransactionCount(#Latest) — the mined
 ///                                            count (default 0: nothing ever mined)
 ///   setAuthStateMode(#unused | #used | #error)
-///                                            eth_call answer (the library's only eth_call
-///                                            is EIP-3009 authorizationState)
+///                                            the authorizationState eth_call's answer
+///   setSimulationMode(#ok | #reverted | #revertedInconsistent | #inconsistent | #error)
+///                                            2.23.1: the answer to the eth_call that simulates
+///                                            a transferWithAuthorization before signing
+///                                            (told apart by its selector, 0xe3ee160e)
+///   setHoldSimulations(true | false)         2.23.1: while true, a simulation is counted but
+///                                            does not answer, so its caller stays in flight
+///                                            (holding its payer slot) until set false (or
+///                                            a minute passes)
+///
+/// 2.23.1: eth_call rejects a `to` or `from` without the 0x prefix, as the real canister's Hex20
+/// decoding does.
+/// 2.23.1: like the real EVM-RPC canister, every method refuses a Threshold consensus without
+/// `total` for default-provider services (#EthMainnet(null), #BaseMainnet(null), …) with
+/// InvalidRpcConfig. ic402 sent exactly that from 2.1.0 to 2.23.0; this mock ignored the config,
+/// so the hermetic suite never saw every call on those chains fail.
 /// ============================================================================
 
 import EvmRpc "../../src/ic402/EvmRpc";
 import Nat "mo:base/Nat";
 import Array "mo:base/Array";
+import Text "mo:base/Text";
+import Time "mo:base/Time";
+import Debug "mo:base/Debug";
 
 persistent actor EvmRpcMock {
 
@@ -72,6 +89,17 @@ persistent actor EvmRpcMock {
     #error;
   };
 
+  // 2.23.1: what the simulation (eth_call of transferWithAuthorization) answers. #reverted: every
+  // provider reports the same revert. #revertedInconsistent: every provider reverts, in different
+  // words. #inconsistent: one says it succeeds, one that it reverts. #error: no provider answers.
+  public type SimulationMode = {
+    #ok;
+    #reverted;
+    #revertedInconsistent;
+    #inconsistent;
+    #error;
+  };
+
   // G5/G6: how eth_sendRawTransaction resolves. #ok = clean broadcast; #nonceTooHigh makes the
   // send AMBIGUOUS (#Consistent(#Ok(#NonceTooHigh))), which the library maps to #maybeSent — the
   // tx may have reached a mempool, so its hash must be preserved/tracked, not discarded as #err.
@@ -95,7 +123,11 @@ persistent actor EvmRpcMock {
   var pendingNoncePin : ?Nat = null; // 2.22.0: pinned #Pending answer
   var latestNonce : Nat = 0; // 2.22.0: the #Latest (mined) count
   var authStateMode : AuthStateMode = #unused; // 2.22.0
-  var ethCalls : Nat = 0; // 2.22.0: eth_call count since reset
+  var ethCalls : Nat = 0; // 2.22.0: authorizationState eth_call count since reset
+  var simulationMode : SimulationMode = #ok; // 2.23.1
+  var simulations : Nat = 0; // 2.23.1: simulation eth_calls since reset
+  var lastSimulation : ?{ to : ?Text; from : ?Text; gas : ?Nat; input : Text } = null; // 2.23.1
+  var holdSimulations : Bool = false; // 2.23.1
   var sentTxs : [Text] = []; // every raw tx we were asked to broadcast, in order
 
   // ── test hooks (open by design — see header warning) ──
@@ -115,6 +147,15 @@ persistent actor EvmRpcMock {
 
   public func setAuthStateMode(m : AuthStateMode) : async () { authStateMode := m };
 
+  public func setSimulationMode(m : SimulationMode) : async () { simulationMode := m };
+
+  public func setHoldSimulations(b : Bool) : async () { holdSimulations := b };
+
+  // A held simulation waits one consensus round per check (raw_rand answers in the next round). A
+  // self-call loop would also wait, but a replica can run many self-calls in one round, starving
+  // the other canisters of execution.
+  transient let management : actor { raw_rand : () -> async Blob } = actor "aaaaa-aa";
+
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   public func reset() : async () {
     receiptMode := #confirmed;
@@ -126,6 +167,10 @@ persistent actor EvmRpcMock {
     latestNonce := 0;
     authStateMode := #unused;
     ethCalls := 0;
+    simulationMode := #ok;
+    simulations := 0;
+    lastSimulation := null;
+    holdSimulations := false;
     sentTxs := [];
   };
 
@@ -133,14 +178,36 @@ persistent actor EvmRpcMock {
   public query func sentTxCount() : async Nat { sentTxs.size() };
   public query func getReceiptPolls() : async Nat { receiptPolls };
   public query func getEthCalls() : async Nat { ethCalls };
+  public query func getSimulations() : async Nat { simulations };
+  public query func getLastSimulation() : async ?{ to : ?Text; from : ?Text; gas : ?Nat; input : Text } { lastSimulation };
+
+  // 2.23.1: what the real EVM-RPC canister answers to a Threshold without `total` on its default
+  // providers (it needs to know how many to query).
+  func configError(services : EvmRpc.RpcServices, config : ?EvmRpc.RpcConfig) : ?EvmRpc.RpcError {
+    let defaults = switch (services) {
+      case (#EthMainnet(null)) { true };
+      case (#EthSepolia(null)) { true };
+      case (#ArbitrumOne(null)) { true };
+      case (#BaseMainnet(null)) { true };
+      case (#OptimismMainnet(null)) { true };
+      case (_) { false };
+    };
+    switch (config) {
+      case (?{ responseConsensus = ?#Threshold({ total = null }) }) {
+        if (defaults) { ?#ProviderError(#InvalidRpcConfig("total must be specified when using default providers")) } else { null };
+      };
+      case (_) { null };
+    };
+  };
 
   // ── EvmRpc.EvmRpcCanister interface (the 5 methods the library calls) ──
 
   public func eth_sendRawTransaction(
-    _services : EvmRpc.RpcServices,
-    _config : ?EvmRpc.RpcConfig,
+    services : EvmRpc.RpcServices,
+    config : ?EvmRpc.RpcConfig,
     rawTx : Text,
   ) : async EvmRpc.MultiSendRawTransactionResult {
+    switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     sentTxs := Array.append(sentTxs, [rawTx]);
     switch (sendMode) {
       // G5/G6: ambiguous broadcast — the raw tx was recorded (it may have reached a mempool), but
@@ -154,10 +221,11 @@ persistent actor EvmRpcMock {
   };
 
   public func eth_getTransactionCount(
-    _services : EvmRpc.RpcServices,
-    _config : ?EvmRpc.RpcConfig,
+    services : EvmRpc.RpcServices,
+    config : ?EvmRpc.RpcConfig,
     args : EvmRpc.GetTransactionCountArgs,
   ) : async EvmRpc.MultiGetTransactionCountResult {
+    switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     switch (args.block, pendingNoncePin) {
       case (#Latest, _) { #Consistent(#Ok(latestNonce)) };
       case (_, ?p) { #Consistent(#Ok(p)) };
@@ -170,10 +238,11 @@ persistent actor EvmRpcMock {
   };
 
   public func eth_getTransactionReceipt(
-    _services : EvmRpc.RpcServices,
-    _config : ?EvmRpc.RpcConfig,
+    services : EvmRpc.RpcServices,
+    config : ?EvmRpc.RpcConfig,
     txHash : Text,
   ) : async EvmRpc.MultiGetTransactionReceiptResult {
+    switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     receiptPolls += 1;
     switch (receiptMode) {
       case (#confirmed) { #Consistent(#Ok(?receipt(txHash, 1))) };
@@ -195,10 +264,11 @@ persistent actor EvmRpcMock {
   };
 
   public func eth_feeHistory(
-    _services : EvmRpc.RpcServices,
-    _config : ?EvmRpc.RpcConfig,
+    services : EvmRpc.RpcServices,
+    config : ?EvmRpc.RpcConfig,
     _args : EvmRpc.FeeHistoryArgs,
   ) : async EvmRpc.MultiFeeHistoryResult {
+    switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     let normal : EvmRpc.FeeHistory = feeHistory(1_000_000_000); // 1 gwei
     switch (feeMode) {
       case (#consistent) { #Consistent(#Ok(normal)) };
@@ -215,13 +285,46 @@ persistent actor EvmRpcMock {
     };
   };
 
-  // 2.22.0: the library's only eth_call is the EIP-3009 view authorizationState(authorizer, nonce),
-  // read after an inbound transfer reverted. Answers one ABI bool word (or an error) per the mode.
+  // The library makes two eth_calls. 2.23.1: a simulation of transferWithAuthorization (selector
+  // 0xe3ee160e) before signing an inbound transfer — answered per simulationMode. 2.22.0: the
+  // EIP-3009 view authorizationState(authorizer, nonce), read after an inbound transfer reverted —
+  // one ABI bool word (or an error) per authStateMode.
   public func eth_call(
-    _services : EvmRpc.RpcServices,
-    _config : ?EvmRpc.RpcConfig,
-    _args : EvmRpc.CallArgs,
+    services : EvmRpc.RpcServices,
+    config : ?EvmRpc.RpcConfig,
+    args : EvmRpc.CallArgs,
   ) : async EvmRpc.MultiCallResult {
+    switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
+    // 2.23.1: the real canister decodes `to` and `from` as Hex20, which needs the 0x prefix; a
+    // value without it fails the call itself (a reject here, as there).
+    for (a in [args.transaction.to, args.transaction.from].values()) {
+      switch (a) { case (?t) { if (not Text.startsWith(t, #text "0x")) { Debug.trap("Hex20: a 0x prefix is required") } }; case (null) {} };
+    };
+    let input = switch (args.transaction.input) { case (?i) { i }; case (null) { "" } };
+    if (Text.startsWith(Text.toLowercase(input), #text "0xe3ee160e")) {
+      simulations += 1;
+      lastSimulation := ?{ to = args.transaction.to; from = args.transaction.from; gas = args.transaction.gas; input };
+      let deadline = Time.now() + 60_000_000_000; // never hold past a minute (a test that died mid-hold)
+      while (holdSimulations and Time.now() < deadline) { ignore await management.raw_rand() };
+      let revert = #JsonRpcError({ code = 3 : Int64; message = "execution reverted: FiatTokenV2: transfer amount exceeds balance" });
+      return switch (simulationMode) {
+        case (#ok) { #Consistent(#Ok("0x")) };
+        case (#reverted) { #Consistent(#Err(revert)) };
+        case (#revertedInconsistent) {
+          #Inconsistent([
+            (#EthSepolia(#Sepolia), #Err(revert)),
+            (#EthSepolia(#Ankr), #Err(#JsonRpcError({ code = -32000 : Int64; message = "execution reverted" }))),
+          ]);
+        };
+        case (#inconsistent) {
+          #Inconsistent([
+            (#EthSepolia(#Sepolia), #Ok("0x")),
+            (#EthSepolia(#Ankr), #Err(revert)),
+          ]);
+        };
+        case (#error) { #Consistent(#Err(#ProviderError(#NoPermission))) };
+      };
+    };
     ethCalls += 1;
     switch (authStateMode) {
       case (#unused) { #Consistent(#Ok("0x0000000000000000000000000000000000000000000000000000000000000000")) };

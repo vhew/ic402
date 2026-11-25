@@ -38,6 +38,14 @@ type TransactionReceipt =
    transactionHash: text;
    transactionIndex: nat;
  };
+type SimulationMode = 
+ variant {
+   error;
+   inconsistent;
+   ok;
+   reverted;
+   revertedInconsistent;
+ };
 type SendRawTransactionStatus = 
  variant {
    InsufficientFunds;
@@ -340,30 +348,54 @@ type AccessListEntry =
 ///   setLatestNonce(n)                        eth_getTransactionCount(#Latest) — the mined
 ///                                            count (default 0: nothing ever mined)
 ///   setAuthStateMode(#unused | #used | #error)
-///                                            eth_call answer (the library's only eth_call
-///                                            is EIP-3009 authorizationState)
+///                                            the authorizationState eth_call's answer
+///   setSimulationMode(#ok | #reverted | #revertedInconsistent | #inconsistent | #error)
+///                                            2.23.1: the answer to the eth_call that simulates
+///                                            a transferWithAuthorization before signing
+///                                            (told apart by its selector, 0xe3ee160e)
+///   setHoldSimulations(true | false)         2.23.1: while true, a simulation is counted but
+///                                            does not answer, so its caller stays in flight
+///                                            (holding its payer slot) until set false (or
+///                                            a minute passes)
+/// 
+/// 2.23.1: eth_call rejects a `to` or `from` without the 0x prefix, as the real canister's Hex20
+/// decoding does.
+/// 2.23.1: like the real EVM-RPC canister, every method refuses a Threshold consensus without
+/// `total` for default-provider services (#EthMainnet(null), #BaseMainnet(null), …) with
+/// InvalidRpcConfig. ic402 sent exactly that from 2.1.0 to 2.23.0; this mock ignored the config,
+/// so the hermetic suite never saw every call on those chains fail.
 /// ============================================================================
 service : {
-  eth_call: (_services: RpcServices, _config: opt RpcConfig, _args:
-   CallArgs) -> (MultiCallResult);
-  eth_feeHistory: (_services: RpcServices, _config: opt RpcConfig, _args:
+  eth_call: (services: RpcServices, config: opt RpcConfig, args: CallArgs) ->
+   (MultiCallResult);
+  eth_feeHistory: (services: RpcServices, config: opt RpcConfig, _args:
    FeeHistoryArgs) -> (MultiFeeHistoryResult);
-  eth_getTransactionCount: (_services: RpcServices, _config: opt RpcConfig,
+  eth_getTransactionCount: (services: RpcServices, config: opt RpcConfig,
    args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
-  eth_getTransactionReceipt: (_services: RpcServices, _config: opt RpcConfig,
+  eth_getTransactionReceipt: (services: RpcServices, config: opt RpcConfig,
    txHash: text) -> (MultiGetTransactionReceiptResult);
-  eth_sendRawTransaction: (_services: RpcServices, _config: opt RpcConfig,
+  eth_sendRawTransaction: (services: RpcServices, config: opt RpcConfig,
    rawTx: text) -> (MultiSendRawTransactionResult);
   getEthCalls: () -> (nat) query;
+  getLastSimulation: () ->
+   (opt record {
+          from: opt text;
+          gas: opt nat;
+          input: text;
+          to: opt text;
+        }) query;
   getReceiptPolls: () -> (nat) query;
   getSentTxs: () -> (vec text) query;
+  getSimulations: () -> (nat) query;
   /// Reset to a pristine confirmed/consistent fixture and forget sent txs.
   reset: () -> ();
   sentTxCount: () -> (nat) query;
   setAuthStateMode: (m: AuthStateMode) -> ();
   setFeeMode: (m: FeeMode) -> ();
+  setHoldSimulations: (b: bool) -> ();
   setLatestNonce: (n: nat) -> ();
   setPendingNonce: (n: opt nat) -> ();
   setReceiptMode: (m: ReceiptMode) -> ();
   setSendMode: (m: SendMode) -> ();
+  setSimulationMode: (m: SimulationMode) -> ();
 }
