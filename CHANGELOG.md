@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.23.1 — 2026-11-24
+## v2.23.1 — 2026-11-25
 
 Patch, EVM rail. Two things:
 - EVM payments on Ethereum, Base, Optimism, Arbitrum and Ethereum Sepolia work again; they have
