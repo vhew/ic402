@@ -47,6 +47,7 @@ export {
 export {
   Ic402Error,
   isSettlementPendingBody,
+  isSettlementRetryBody,
   settlementError402,
   paidRequestError,
   classifyNetworkError,

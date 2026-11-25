@@ -116,6 +116,9 @@ const FUNDS_MOVED_MARKER = 'do NOT retry payment';
  * retry this same payment in a few seconds; …"). It is returned when another caller's attempt with
  * this payment is running, so the caller's funds did not move through that attempt: transient and
  * not funds-moved. Retrying the same payment is preferred; a new payment is also safe.
+ * 2.23.1: the EVM refusals that sent nothing carry the same words — the payer has another payment
+ * still settling, the chain could not be checked, or too many payments are being checked at once.
+ * Over HTTP they arrive as a 402 with errorReason `settlement_retry` (settlementError402).
  */
 const SETTLE_IN_PROGRESS_MARKER = 'retry this same payment';
 

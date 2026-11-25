@@ -291,6 +291,30 @@ module {
     /// facilitatorAdmit on those routes avoids charging the global bucket twice per request.
     public func cyclesBelowFloor() : Bool { Cycles.balance() < FACILITATOR_MIN_CYCLES };
 
+    /// 2.23.1: lift every EVM payer cooldown. A payer whose sent inbound transfer reverted is refused
+    /// for an hour, or 5 minutes when it had not confirmed or another transaction executed its
+    /// authorization (EvmSender.PayerGuard); an operator can lift that early, e.g. for a payer whose
+    /// funds moved by mistake. Returns how many payers were
+    /// cooling down (expired entries included). OPERATOR op: a consumer must restrict it to its
+    /// controllers. Settle and the session open share the one guard, so this lifts both.
+    public func clearEvmPayerCooldowns() : Nat {
+      switch (evmSenderInst) {
+        case (?s) { s.inFlightPayers.clearCooldowns() };
+        case (null) { 0 };
+      };
+    };
+
+    /// 2.23.1: lift one EVM payer's cooldown (see clearEvmPayerCooldowns), for `from` paying in
+    /// `token` on `chainId`. True when it was cooling down. OPERATOR op: restrict to controllers.
+    public func liftEvmPayerCooldown(chainId : Nat, token : Text, from : Text) : Bool {
+      switch (evmSenderInst) {
+        case (?s) {
+          s.inFlightPayers.liftCooldown(s.inFlightPayers.key(chainId, token, EvmUtils.hexToBytes(from)), Int.abs(Time.now() / 1_000_000_000));
+        };
+        case (null) { false };
+      };
+    };
+
     // 2.22.0 (E3): Sessions reads the sender through a getter, like the recipient, so it always
     // uses the CURRENT one. It was handed the construction-time sender, which setEvmDerivationPath
     // then replaced — so session deposits, closes and reconciles signed from the empty-path address
@@ -685,7 +709,9 @@ module {
       // 2.22.0: strict, as the token checks it (block.timestamp < validBefore) — at nowSeconds ==
       // validBefore the transfer can only revert. (validAfter stays non-strict: the tx mines
       // seconds after this check, by when the chain's strict validAfter < block.timestamp holds.)
-      if (nowSeconds >= authz.validBefore) {
+      // 2.23.1: and it must stay valid long enough to land, as settle requires
+      // (EvmSender.MIN_VALIDITY_SECONDS), so /verify does not pass what /settle refuses.
+      if (EvmSender.expiresTooSoon(authz.validBefore, nowSeconds)) {
         return { isValid = false; invalidReason = ?"invalid_exact_evm_payload_authorization_valid_before"; payer = ?authz.from };
       };
       if (not EvmUtils.addressesEqual(authz.to, payTo)) {
@@ -790,6 +816,15 @@ module {
     /// reverts is checked against the token's authorizationState: still unused → #settlementFailed
     /// (no funds moved); used (another tx executed it, or the payer cancelled it) or unreadable →
     /// #settlementPending (funds may have arrived; no receipt). validBefore is strict, as on chain.
+    ///
+    /// 2.23.1, EVM: before anything is signed, the transfer is simulated (an eth_call made as the
+    /// broadcast would run). Refused without signing: an authorization with under 120 s left
+    /// (#expired); a payer with another transfer still settling (#policyDenied, "retry this same
+    /// payment"); a payer cooling down after its sent transfer reverted (an hour) or did not confirm
+    /// within the polls (5 minutes) (#policyDenied, final for now); and as #settlementFailed — the
+    /// canister below 500B cycles, a spent check budget, or a simulation that
+    /// reverts (final) or gives no agreed answer ("retry this same payment"). Nothing of any of
+    /// these was sent. See EvmSender's "Simulate before signing".
     ///
     /// Interleaving: this method awaits (EVM broadcast + confirmation poll / ICP ledger call).
     /// The nonce lock and the daily-spend reservation commit synchronously BEFORE the first
@@ -896,7 +931,8 @@ module {
         // strict, as on chain (see verifyPayment).
         let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
         if (nowSeconds < authz.validAfter) { nonceManager.unlock(signature.nonce); return #expired("Authorization not yet valid") };
-        if (nowSeconds >= authz.validBefore) { nonceManager.unlock(signature.nonce); return #expired("Authorization expired") };
+        // 2.23.1: and it must stay valid long enough to land (EvmSender.MIN_VALIDITY_SECONDS).
+        if (EvmSender.expiresTooSoon(authz.validBefore, nowSeconds)) { nonceManager.unlock(signature.nonce); return #expired(EvmSender.EXPIRES_TOO_SOON) };
 
         // M-1: Derive deterministic Principal from EVM sender for policy tracking.
         // M-2: Uses 29 bytes of SHA-256 (232 bits) — collision probability ~2^-116.
@@ -1003,111 +1039,141 @@ module {
           case (#ok) {};
         };
 
-        // H-4 (v2): Reserve the daily spend synchronously BEFORE the value-moving
-        // await (this whole prefix runs atomically up to the await, so concurrent
-        // charges can no longer each pass a stale daily-limit check). Released on
-        // any settlement failure below — releasing against `evmSpendDay` (captured
-        // now) so a rollback after the await targets the same bucket across midnight.
-        let evmSpendDay = policy.currentDay();
-        policy.recordSpend(evmSender, amount);
-
-        // 2.22.0: each await below is in `try`. Untried, a reject left the nonce locked as if in
-        // flight ("busy" for a day), the authorization claimed and the daily reservation held.
-        let execResult = try {
-          await sender.executeTransferWithAuthorization(
-            chainId, tokenAddr,
-            fromBytes,
-            EvmUtils.hexToBytes(authz.to),
-            authz.value, authz.validAfter, authz.validBefore,
-            authNonceBytes,
-            authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
-          );
-        } catch (e) {
-          // The send may or may not have broadcast: keep the authorization claimed (never send it
-          // twice) and the nonce locked, now with an unknown outcome.
-          policy.releaseDaily(evmSender, evmSpendDay, amount);
-          nonceManager.markOutcomeUnknown(signature.nonce);
-          return #settlementPending("EIP-3009 broadcast call rejected (" # debug_show (Error.code(e)) # "): the transfer may or may not have been broadcast — NOT final: do not deliver value. Do not re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused. " # Error.message(e));
-        };
-
-        // Extract the broadcast tx hash. #maybeSent (ambiguous broadcast — post-dispatch error /
-        // inconsistent RPC / nonce-too-high) carries a hash and MAY still mine, so route it into the
-        // SAME confirm-poll instead of discarding it as a hash-less #settlementFailed (G5/G6). No
-        // double-pay: the EIP-3009 token nonce is single-use on-chain, so if the tx already mined it
-        // yields a receipt below, else it parks as #settlementPending WITH the hash (recoverable).
-        let txHash = switch (execResult) {
-          case (#err(msg)) {
-            sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
+        // 2.23.1: one inbound transfer in flight per payer (chain, token, from) — see
+        // EvmSender.PayerGuard. Without it, authorizations from a wallet funded once would all pass
+        // the simulation before signing while the first is unconfirmed. Claimed after the signature
+        // verified, synchronously with the checks above; released however this settle returns.
+        // Refused while that payer cools down after a sent transfer reverted, or is held while one
+        // had not confirmed (PayerGuard.coolDown).
+        let payerKey = sender.inFlightPayers.key(chainId, tokenAddr, fromBytes);
+        switch (sender.inFlightPayers.claim(payerKey, nowSeconds)) {
+          case (#ok) {};
+          case (refused) {
+            sender.broadcastAuthorizations.release(authKey); // not sent, so it may be sent later
             nonceManager.unlock(signature.nonce);
-            policy.releaseDaily(evmSender, evmSpendDay, amount);
-            return #settlementFailed("EIP-3009 execution failed: " # msg);
+            return #policyDenied(switch (refused) { case (#coolingDown(until)) { EvmSender.payerCoolingText(until) }; case (_) { EvmSender.PAYER_BUSY } });
           };
-          case (#ok(h)) { h };
-          case (#maybeSent(m)) { m.txHash };
         };
-        sender.broadcastAuthorizations.noteTx(authKey, txHash);
-        // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the transfer actually
-        // mined (status == 1) before issuing a receipt; an on-chain revert (insufficient balance,
-        // reused token nonce, paused token) must not yield a "paid" receipt.
-        // A rejected confirm call is "confirmation unavailable" (#err): the tx was broadcast.
-        let confirmation = try { await sender.confirmTransaction(chainId, txHash, 4) } catch (e) {
-          #err(Error.message(e));
-        };
-        switch (confirmation) {
-          case (#confirmed) {
-            nonceManager.consumeLocked(signature.nonce);
-            policy.recordRateHit(evmSender); // I6: the settle succeeded — now it counts
-            let receipt : Types.PaymentReceipt = {
-              id = nextReceiptId();
-              amount;
-              token = tokenAddr;
-              sender = authz.from;
-              recipient = canisterEvmAddr;
-              network = signature.network;
-              timestamp = Time.now();
-              txHash = ?txHash;
-              sessionId = null;
-              refunded = null;
-            };
-            return #ok(receipt);
-          };
-          case (#reverted) {
+        try {
+          // H-4 (v2): Reserve the daily spend synchronously BEFORE the value-moving
+          // await (this whole prefix runs atomically up to the await, so concurrent
+          // charges can no longer each pass a stale daily-limit check). Released on
+          // any settlement failure below — releasing against `evmSpendDay` (captured
+          // now) so a rollback after the await targets the same bucket across midnight.
+          let evmSpendDay = policy.currentDay();
+          policy.recordSpend(evmSender, amount);
+
+          // 2.22.0: each await below is in `try`. Untried, a reject left the nonce locked as if in
+          // flight ("busy" for a day), the authorization claimed and the daily reservation held.
+          let execResult = try {
+            await sender.executeTransferWithAuthorization(
+              chainId, tokenAddr,
+              fromBytes,
+              EvmUtils.hexToBytes(authz.to),
+              authz.value, authz.validAfter, authz.validBefore,
+              authNonceBytes,
+              authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
+            );
+          } catch (e) {
+            // The send may or may not have broadcast: keep the authorization claimed (never send it
+            // twice) and the nonce locked, now with an unknown outcome. 2.23.1: hold the payer while
+            // it may still land (PayerGuard.coolDown).
+            sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS);
             policy.releaseDaily(evmSender, evmSpendDay, amount);
-            // 2.22.0 (E7): THIS tx reverting does not mean no funds moved. transferWithAuthorization
-            // can be submitted by anyone, so an earlier attempt or a mempool copier may have
-            // executed the same authorization first — and then ours reverts. Ask the token.
-            // A rejected check is "could not be checked" (#unknown); the reservation is released.
-            let authState = try { await sender.authorizationState(chainId, tokenAddr, fromBytes, authNonceBytes) } catch (e) {
-              #unknown(Error.message(e));
+            nonceManager.markOutcomeUnknown(signature.nonce);
+            return #settlementPending("EIP-3009 broadcast call rejected (" # debug_show (Error.code(e)) # "): the transfer may or may not have been broadcast — NOT final: do not deliver value. Do not re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused. " # Error.message(e));
+          };
+
+          // Extract the broadcast tx hash. #maybeSent (ambiguous broadcast — post-dispatch error /
+          // inconsistent RPC / nonce-too-high) carries a hash and MAY still mine, so route it into the
+          // SAME confirm-poll instead of discarding it as a hash-less #settlementFailed (G5/G6). No
+          // double-pay: the EIP-3009 token nonce is single-use on-chain, so if the tx already mined it
+          // yields a receipt below, else it parks as #settlementPending WITH the hash (recoverable).
+          let txHash = switch (execResult) {
+            case (#err(msg)) {
+              sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
+              nonceManager.unlock(signature.nonce);
+              policy.releaseDaily(evmSender, evmSpendDay, amount);
+              return #settlementFailed("EIP-3009 execution failed: " # msg);
             };
-            switch (authState) {
-              case (#unused) {
-                nonceManager.unlock(signature.nonce);
-                return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") and the authorization is still unused on chain — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, or token paused. Fix the cause and re-sign a fresh authorization.");
+            case (#ok(h)) { h };
+            case (#maybeSent(m)) { m.txHash };
+          };
+          sender.broadcastAuthorizations.noteTx(authKey, txHash);
+          // H-1 (v2): Mempool acceptance is NOT settlement finality. Confirm the transfer actually
+          // mined (status == 1) before issuing a receipt; an on-chain revert (insufficient balance,
+          // reused token nonce, paused token) must not yield a "paid" receipt.
+          // A rejected confirm call is "confirmation unavailable" (#err): the tx was broadcast.
+          let confirmation = try { await sender.confirmTransaction(chainId, txHash, 4) } catch (e) {
+            #err(Error.message(e));
+          };
+          switch (confirmation) {
+            case (#confirmed) {
+              nonceManager.consumeLocked(signature.nonce);
+              policy.recordRateHit(evmSender); // I6: the settle succeeded — now it counts
+              let receipt : Types.PaymentReceipt = {
+                id = nextReceiptId();
+                amount;
+                token = tokenAddr;
+                sender = authz.from;
+                recipient = canisterEvmAddr;
+                network = signature.network;
+                timestamp = Time.now();
+                txHash = ?txHash;
+                sessionId = null;
+                refunded = null;
               };
-              case (#used) {
-                nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
-                return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, but the authorization is already used on chain: another transaction executed it (an earlier attempt, or anyone who copied it — transferWithAuthorization can be submitted by anyone), or the payer cancelled it. Funds may have reached the canister. No receipt is issued. Do NOT re-sign or pay again — check the chain for payer " # authz.from # "'s authorization before taking a new payment.");
+              return #ok(receipt);
+            };
+            case (#reverted) {
+              // 2.23.1: it passed the simulation and reverted on chain — hold the payer now, and
+              // cool it down for the hour below unless another transaction executed the
+              // authorization (#used) (PayerGuard.coolDown).
+              sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS);
+              policy.releaseDaily(evmSender, evmSpendDay, amount);
+              // 2.22.0 (E7): THIS tx reverting does not mean no funds moved. transferWithAuthorization
+              // can be submitted by anyone, so an earlier attempt or a mempool copier may have
+              // executed the same authorization first — and then ours reverts. Ask the token.
+              // A rejected check is "could not be checked" (#unknown); the reservation is released.
+              let authState = try { await sender.authorizationState(chainId, tokenAddr, fromBytes, authNonceBytes) } catch (e) {
+                #unknown(Error.message(e));
               };
-              case (#unknown(e)) {
-                nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
-                return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, and whether another transaction executed the authorization could not be checked (" # e # "). Funds may have reached the canister. No receipt is issued. Do NOT re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused.");
+              switch (authState) {
+                case (#unused) {
+                  sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.REVERT_COOLDOWN_SECONDS);
+                  nonceManager.unlock(signature.nonce);
+                  return #settlementFailed("EIP-3009 transfer reverted on-chain (tx " # txHash # ") and the authorization is still unused on chain — no funds moved and no receipt issued. Usual causes: payer USDC balance below value, or token paused. Payments from this payer are refused for an hour. Fix the cause and re-sign a fresh authorization.");
+                };
+                case (#used) {
+                  nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
+                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, but the authorization is already used on chain: another transaction executed it (an earlier attempt, or anyone who copied it — transferWithAuthorization can be submitted by anyone), or the payer cancelled it. Funds may have reached the canister. No receipt is issued. Payments from this payer are refused for 5 minutes. Do NOT re-sign or pay again — check the chain for payer " # authz.from # "'s authorization before taking a new payment.");
+                };
+                case (#unknown(e)) {
+                  sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.REVERT_COOLDOWN_SECONDS);
+                  nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
+                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, and whether another transaction executed the authorization could not be checked (" # e # "). Funds may have reached the canister. No receipt is issued. Payments from this payer are refused for an hour. Do NOT re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused.");
+                };
               };
             };
+            case (#pending) {
+              // Keep the nonce locked (only the nonce clean-up removes it) so the same challenge is
+              // not re-broadcast; release the daily reservation since no receipt
+              // is issued. Caller MUST NOT deliver value on #settlementPending.
+              // 2.23.1: hold the payer while it may still land or revert (PayerGuard.coolDown).
+              sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS);
+              policy.releaseDaily(evmSender, evmSpendDay, amount);
+              nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
+              return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain). Payments from this payer are refused for 5 minutes meanwhile.");
+            };
+            case (#err(e)) {
+              sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS); // 2.23.1
+              policy.releaseDaily(evmSender, evmSpendDay, amount);
+              nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
+              return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending. Payments from this payer are refused for 5 minutes meanwhile.");
+            };
           };
-          case (#pending) {
-            // Keep the nonce locked (only the nonce clean-up removes it) so the same challenge is
-            // not re-broadcast; release the daily reservation since no receipt
-            // is issued. Caller MUST NOT deliver value on #settlementPending.
-            policy.releaseDaily(evmSender, evmSpendDay, amount);
-            nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
-            return #settlementPending("EIP-3009 transfer broadcast but not yet confirmed (tx " # txHash # ") — NOT final: do not deliver value. Re-poll confirmEvmTransaction with this tx hash; the tx may still mine. Do not re-submit the same authorization (it is single-use on-chain).");
-          };
-          case (#err(e)) {
-            policy.releaseDaily(evmSender, evmSpendDay, amount);
-            nonceManager.markOutcomeUnknown(signature.nonce); // 2.22.0: no longer in flight
-            return #settlementPending("EIP-3009 transfer broadcast; confirmation unavailable: " # e # " (tx " # txHash # ") — NOT final: do not deliver value. Transient RPC failure; re-poll confirmEvmTransaction with this tx hash rather than re-sending.");
-          };
+        } finally {
+          sender.inFlightPayers.release(payerKey);
         };
       };
 

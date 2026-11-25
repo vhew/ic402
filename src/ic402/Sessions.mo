@@ -636,7 +636,8 @@ module {
       };
       let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
       if (nowSeconds < authz.validAfter) { sessionOpenLocks.delete(caller); return #err(#expired("Authorization not yet valid")) };
-      if (nowSeconds >= authz.validBefore) { sessionOpenLocks.delete(caller); return #err(#expired("Authorization expired")) };
+      // 2.23.1: and it must stay valid long enough to land (EvmSender.MIN_VALIDITY_SECONDS).
+      if (EvmSender.expiresTooSoon(authz.validBefore, nowSeconds)) { sessionOpenLocks.delete(caller); return #err(#expired(EvmSender.EXPIRES_TOO_SOON)) };
 
       // Extract chain ID
       let chainId = switch (extractChainId(intent.network)) {
@@ -798,127 +799,158 @@ module {
         case (#ok) {};
       };
 
-      let execResult = try {
-        await sender.executeTransferWithAuthorization(
-          chainId, intent.token,
-          fromBytes,
-          EvmUtils.hexToBytes(authz.to),
-          authz.value, authz.validAfter, authz.validBefore,
-          authNonceBytes,
-          authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
-        );
-      } catch (e) {
-        // H3: no session — release the reservation. Round 2: whether the call broadcast is unknown
-        // (the E5 claim is kept for that reason), so this is pending, not "failed, nothing moved".
-        ignore evmEscrowManager.deallocate(sessionId);
+      // 2.23.1: one inbound transfer in flight per payer (chain, token, from), shared with
+      // Gateway.settle through the one sender — see EvmSender.PayerGuard. Claimed after the
+      // signature verified; released however this open returns.
+      // Refused while that payer cools down after a sent transfer reverted, or is held while one
+      // had not confirmed (PayerGuard.coolDown).
+      let payerKey = sender.inFlightPayers.key(chainId, intent.token, fromBytes);
+      switch (sender.inFlightPayers.claim(payerKey, nowSeconds)) {
+        case (#ok) {};
+        case (refused) {
+          sender.broadcastAuthorizations.release(authKey); // not sent, so it may be sent later
+          ignore evmEscrowManager.deallocate(sessionId);
+          sessionOpenLocks.delete(caller);
+          return #err(#policyDenied(switch (refused) { case (#coolingDown(until)) { EvmSender.payerCoolingText(until) }; case (_) { EvmSender.PAYER_BUSY } }));
+        };
+      };
+
+      try {
+        let execResult = try {
+          await sender.executeTransferWithAuthorization(
+            chainId, intent.token,
+            fromBytes,
+            EvmUtils.hexToBytes(authz.to),
+            authz.value, authz.validAfter, authz.validBefore,
+            authNonceBytes,
+            authz.v, Blob.toArray(authz.r), Blob.toArray(authz.s),
+          );
+        } catch (e) {
+          // H3: no session — release the reservation. Round 2: whether the call broadcast is unknown
+          // (the E5 claim is kept for that reason), so this is pending, not "failed, nothing moved".
+          // 2.23.1: hold the payer while it may still land (PayerGuard.coolDown).
+          sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS);
+          ignore evmEscrowManager.deallocate(sessionId);
+          sessionOpenLocks.delete(caller);
+          return #err(#settlementPending("EIP-3009 deposit call failed and whether it was broadcast is unknown: " # Error.message(e) # ". No session was created. The deposit may still land — do NOT re-sign; this authorization will not be broadcast again. The operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
+        };
+
+        let depositTxHash = switch (execResult) {
+          case (#ok(hash)) { hash };
+          case (#err(msg)) {
+            sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
+            ignore evmEscrowManager.deallocate(sessionId); // H3: pre-broadcast failure — release reservation.
+            sessionOpenLocks.delete(caller);
+            return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
+          };
+          // G5/G6: ambiguous broadcast (may still mine) — keep its hash and route it into the confirm
+          // poll below, so if it mines the session opens, and if it stays pending it is tracked in
+          // pendingEvmDeposits + surfaced as #settlementPending (recoverable via reconcileEvmDeposit),
+          // rather than stranded as a hash-less #settlementFailed. Single-use EIP-3009 nonce → no double-pay.
+          case (#maybeSent(m)) { m.txHash };
+        };
+        sender.broadcastAuthorizations.noteTx(authKey, depositTxHash);
+
+        // H-1 (v2): Confirm the deposit transfer actually mined before crediting an
+        // escrow allocation. Otherwise a reverted/never-mined deposit would still
+        // open a funded session whose refund is drawn from the canister's balance.
+        // 2.22.0: a rejected confirm call is "confirmation unavailable" (#err), as in Gateway.settleCore:
+        // the deposit was broadcast, so it must be tracked, not left with the open lock held.
+        let depositConfirmation = try { await sender.confirmTransaction(chainId, depositTxHash, 4) } catch (e) {
+          #err(Error.message(e));
+        };
+        switch (depositConfirmation) {
+          case (#confirmed) {};
+          case (#reverted) {
+            // H3: no session — release the reservation. 2.22.0 (E7): THIS tx reverting does not mean
+            // the deposit did not arrive: anyone can submit the authorization, so another tx may have
+            // executed it first. Ask the token before answering. 2.23.1: it passed the simulation and
+            // reverted on chain — hold the payer now, and cool it down for the hour below unless
+            // another transaction executed the authorization (#used) (PayerGuard.coolDown).
+            sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS);
+            ignore evmEscrowManager.deallocate(sessionId);
+            sessionOpenLocks.delete(caller);
+            // A rejected check is "could not be checked" (#unknown), as in Gateway.settleCore.
+            let depositAuthState = try { await sender.authorizationState(chainId, intent.token, fromBytes, authNonceBytes) } catch (e) {
+              #unknown(Error.message(e));
+            };
+            switch (depositAuthState) {
+              case (#unused) {
+              sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.REVERT_COOLDOWN_SECONDS);
+              return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ") with the authorization unused: no funds moved. Payments from this payer are refused for an hour."));
+            };
+              case (#used) {
+                return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, but the deposit authorization is already used on chain: another transaction executed it (anyone can submit it) or the payer cancelled it. The deposit may be in the canister's pool; no session was created. Payments from this payer are refused for 5 minutes. Do NOT re-sign — the operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
+              };
+              case (#unknown(e)) {
+                sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.REVERT_COOLDOWN_SECONDS);
+                return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, and whether another transaction executed the deposit authorization could not be checked (" # e # "). The deposit may be in the canister's pool; no session was created. Payments from this payer are refused for an hour. Do NOT re-sign until the token's authorizationState for payer " # authz.from # " shows it unused."));
+              };
+            };
+          };
+          case (#pending) {
+            // H3: release the pool reservation so it does not leak headroom. M8: track the
+            // broadcast-but-unconfirmed deposit so it can be reconciled (refunded) if it later mines,
+            // instead of stranding unattributed in the shared pool.
+            sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS); // 2.23.1
+            ignore evmEscrowManager.deallocate(sessionId);
+            pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
+            sessionOpenLocks.delete(caller);
+            return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ") — no session was created. If the tx mines, the deposit lands in the shared pool: call reconcileEvmDeposit with this tx hash to refund it, then open a new session (payments from this payer are refused for 5 minutes meanwhile). Do not re-sign the same authorization."));
+          };
+          case (#err(e)) {
+            // H3: release reservation. M8: track for reconcile (see #pending).
+            sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.UNCONFIRMED_HOLD_SECONDS); // 2.23.1
+            ignore evmEscrowManager.deallocate(sessionId);
+            pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
+            sessionOpenLocks.delete(caller);
+            return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ") — no session was created; the deposit is tracked. Retry reconcileEvmDeposit with this tx hash once the RPC recovers (refund-on-confirm). Payments from this payer are refused for 5 minutes meanwhile."));
+          };
+        };
+
+        // (Session ID + escrow reservation were established above, BEFORE the on-chain deposit.)
+        let now = Time.now();
+        let effectivePolicy = policy.getEffectivePolicy(caller);
+
+        let session : Types.InternalSessionState = {
+          id = sessionId;
+          payer = caller;
+          payerPublicKey = sessionPublicKey;
+          deposited = deposit;
+          spendDay = policy.currentDay();
+          var consumed = 0;
+          var remaining = deposit;
+          var voucherCount = 0;
+          var status = #open;
+          openedAt = now;
+          var lastActivityAt = now;
+          var lastSequence = 0;
+          var lastCumulativeAmount = 0;
+          subaccount = Blob.fromArray([]); // Not used for EVM sessions
+          network = intent.network;
+          token = intent.token;
+          recipient = intent.recipient;
+          autoClose = clientConfig.autoClose;
+          maxDuration = effectivePolicy.maxSessionDuration;
+          idleTimeout = effectiveIdleTimeout(clientConfig.idleTimeout, effectivePolicy.sessionIdleTimeout);
+          evmDeposit = ?{
+            txHash = depositTxHash;
+            chainId;
+            payerEvmAddress = authz.from;
+            tokenAddress = intent.token;
+          };
+        };
+
+        sessions.put(sessionId, session);
+        // Self-arming expiry: second of the two session-CREATING paths (see the contract above).
+        armExpiryTimer<system>();
+        policy.recordSpend(caller, deposit);
         sessionOpenLocks.delete(caller);
-        return #err(#settlementPending("EIP-3009 deposit call failed and whether it was broadcast is unknown: " # Error.message(e) # ". No session was created. The deposit may still land — do NOT re-sign; this authorization will not be broadcast again. The operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
+
+        #ok(toPublic(session));
+      } finally {
+        sender.inFlightPayers.release(payerKey);
       };
-
-      let depositTxHash = switch (execResult) {
-        case (#ok(hash)) { hash };
-        case (#err(msg)) {
-          sender.broadcastAuthorizations.release(authKey); // nothing was broadcast
-          ignore evmEscrowManager.deallocate(sessionId); // H3: pre-broadcast failure — release reservation.
-          sessionOpenLocks.delete(caller);
-          return #err(#settlementFailed("EIP-3009 execution failed: " # msg));
-        };
-        // G5/G6: ambiguous broadcast (may still mine) — keep its hash and route it into the confirm
-        // poll below, so if it mines the session opens, and if it stays pending it is tracked in
-        // pendingEvmDeposits + surfaced as #settlementPending (recoverable via reconcileEvmDeposit),
-        // rather than stranded as a hash-less #settlementFailed. Single-use EIP-3009 nonce → no double-pay.
-        case (#maybeSent(m)) { m.txHash };
-      };
-      sender.broadcastAuthorizations.noteTx(authKey, depositTxHash);
-
-      // H-1 (v2): Confirm the deposit transfer actually mined before crediting an
-      // escrow allocation. Otherwise a reverted/never-mined deposit would still
-      // open a funded session whose refund is drawn from the canister's balance.
-      // 2.22.0: a rejected confirm call is "confirmation unavailable" (#err), as in Gateway.settleCore:
-      // the deposit was broadcast, so it must be tracked, not left with the open lock held.
-      let depositConfirmation = try { await sender.confirmTransaction(chainId, depositTxHash, 4) } catch (e) {
-        #err(Error.message(e));
-      };
-      switch (depositConfirmation) {
-        case (#confirmed) {};
-        case (#reverted) {
-          // H3: no session — release the reservation. 2.22.0 (E7): THIS tx reverting does not mean
-          // the deposit did not arrive: anyone can submit the authorization, so another tx may have
-          // executed it first. Ask the token before answering.
-          ignore evmEscrowManager.deallocate(sessionId);
-          sessionOpenLocks.delete(caller);
-          // A rejected check is "could not be checked" (#unknown), as in Gateway.settleCore.
-          let depositAuthState = try { await sender.authorizationState(chainId, intent.token, fromBytes, authNonceBytes) } catch (e) {
-            #unknown(Error.message(e));
-          };
-          switch (depositAuthState) {
-            case (#unused) { return #err(#settlementFailed("EVM deposit reverted on-chain (tx " # depositTxHash # ")")) };
-            case (#used) {
-              return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, but the deposit authorization is already used on chain: another transaction executed it (anyone can submit it) or the payer cancelled it. The deposit may be in the canister's pool; no session was created. Do NOT re-sign — the operator checks the chain for payer " # authz.from # "'s authorization and returns the deposit (sweepEvm) if it arrived."));
-            };
-            case (#unknown(e)) {
-              return #err(#settlementPending("EVM deposit tx " # depositTxHash # " reverted, and whether another transaction executed the deposit authorization could not be checked (" # e # "). The deposit may be in the canister's pool; no session was created. Do NOT re-sign until the token's authorizationState for payer " # authz.from # " shows it unused."));
-            };
-          };
-        };
-        case (#pending) {
-          // H3: release the pool reservation so it does not leak headroom. M8: track the
-          // broadcast-but-unconfirmed deposit so it can be reconciled (refunded) if it later mines,
-          // instead of stranding unattributed in the shared pool.
-          ignore evmEscrowManager.deallocate(sessionId);
-          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
-          sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast but not yet confirmed (tx " # depositTxHash # ") — no session was created. If the tx mines, the deposit lands in the shared pool: call reconcileEvmDeposit with this tx hash to refund it, then open a new session. Do not re-sign the same authorization."));
-        };
-        case (#err(e)) {
-          // H3: release reservation. M8: track for reconcile (see #pending).
-          ignore evmEscrowManager.deallocate(sessionId);
-          pendingEvmDeposits.put(depositTxHash, { payer = caller; payerEvmAddress = authz.from; chainId; token = intent.token; amount = deposit; createdAt = Time.now(); authNonce = authz.nonce });
-          sessionOpenLocks.delete(caller);
-          return #err(#settlementPending("EVM deposit broadcast; confirmation unavailable: " # e # " (tx " # depositTxHash # ") — no session was created; the deposit is tracked. Retry reconcileEvmDeposit with this tx hash once the RPC recovers (refund-on-confirm)."));
-        };
-      };
-
-      // (Session ID + escrow reservation were established above, BEFORE the on-chain deposit.)
-      let now = Time.now();
-      let effectivePolicy = policy.getEffectivePolicy(caller);
-
-      let session : Types.InternalSessionState = {
-        id = sessionId;
-        payer = caller;
-        payerPublicKey = sessionPublicKey;
-        deposited = deposit;
-        spendDay = policy.currentDay();
-        var consumed = 0;
-        var remaining = deposit;
-        var voucherCount = 0;
-        var status = #open;
-        openedAt = now;
-        var lastActivityAt = now;
-        var lastSequence = 0;
-        var lastCumulativeAmount = 0;
-        subaccount = Blob.fromArray([]); // Not used for EVM sessions
-        network = intent.network;
-        token = intent.token;
-        recipient = intent.recipient;
-        autoClose = clientConfig.autoClose;
-        maxDuration = effectivePolicy.maxSessionDuration;
-        idleTimeout = effectiveIdleTimeout(clientConfig.idleTimeout, effectivePolicy.sessionIdleTimeout);
-        evmDeposit = ?{
-          txHash = depositTxHash;
-          chainId;
-          payerEvmAddress = authz.from;
-          tokenAddress = intent.token;
-        };
-      };
-
-      sessions.put(sessionId, session);
-      // Self-arming expiry: second of the two session-CREATING paths (see the contract above).
-      armExpiryTimer<system>();
-      policy.recordSpend(caller, deposit);
-      sessionOpenLocks.delete(caller);
-
-      #ok(toPublic(session));
     };
 
     /// Verify a cumulative voucher and return the incremental delta (#ok(cumulative − last)).

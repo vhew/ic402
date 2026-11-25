@@ -1,5 +1,214 @@
 # Changelog
 
+## v2.23.1 — 2026-11-24
+
+Patch, EVM rail. Two things:
+- EVM payments on Ethereum, Base, Optimism, Arbitrum and Ethereum Sepolia work again; they have
+  failed on every call since 2.1.0.
+- The canister no longer signs an inbound EVM payment that cannot succeed.
+
+Upgrade if your canister settles EVM payments or opens EVM sessions, and read the upgrade notes
+first. No stored-state change (`STABLE_SCHEMA_VERSION` stays 1). `example.did` adds
+`clearEvmPayerCooldowns` and `liftEvmPayerCooldown`. Reported by EngramX. Three adversarial
+pre-release reviews found the consensus-config break and the gaps closed before release.
+
+### Upgrade notes: read before upgrading
+
+- **EVM on the default-provider chains starts working.** On chains 1, 8453, 10, 42161 and
+  11155111, every EVM-RPC call ic402 made since 2.1.0 was refused before it reached a provider (see
+  Fixed). After the upgrade, those calls go through:
+  - charges, session deposits, closes, refunds, sweeps and marketplace payouts on those chains
+    really broadcast;
+  - the canister's EVM address pays the gas.
+
+  If you listed one of these chains in `evmChains`, check that you mean to run it, and fund the
+  address. Nothing was broadcast on those chains before, so nothing is parked from that time.
+- **Inbound EVM payments are refused below 500B cycles.** The old floor for any broadcast was 120B.
+  The reserve now kept below 500B is for closes and refunds.
+- **Keep a larger cycle cushion if payments can arrive in bursts.** Up to 10 inbound checks can now
+  be in flight at once, each holding outstanding calls. Before, almost every concurrent payment
+  stopped at the send lock without an outcall. In the hermetic suite, a canister with about 5T
+  could no longer make its calls ("could not perform self call") under a burst of 16 session opens;
+  at 10T it could.
+- **Concurrent EVM payments from one wallet are serialized.** A wallet whose sent transfer reverts
+  is refused for an hour (5 minutes when another transaction executed its authorization), and one
+  whose transfer has not confirmed within the confirmation polls is refused for 5 minutes. On Ethereum mainnet, where a transfer often has not confirmed within
+  the polls, a wallet's next payment can therefore wait up to 5 minutes. All are detailed below.
+- **Keep `nonceExpirySeconds` at 300 (the default) or more.** The 402's EVM `maxTimeoutSeconds` is
+  the nonce window, and stock x402 clients sign for exactly that long. With the 120 s margin
+  below, a window of 125 s or less gets every stock EVM payment refused, and 180 s leaves a client
+  under a minute.
+
+### Fixed
+
+- **EVM-RPC consensus config refused on default-provider chains (since 2.1.0).**
+  - **The bug.** S10 (2.1.0) asked the EVM-RPC canister for 2-of-N agreement with no `total`. The
+    canister refuses that for its default providers ("total must be specified when using default
+    providers").
+  - **The effect.** On chains 1, 8453, 10, 42161 and 11155111, every nonce read, fee read, send,
+    receipt poll and `eth_call` failed before reaching a provider. Charges and opens failed with
+    "Failed to get EVM nonce". Closes, refunds, sweeps and marketplace payouts failed before
+    sending: sessions stayed open and payouts were retried. Chains on custom providers (Base,
+    Optimism and Arbitrum Sepolia, Avalanche) were unaffected.
+  - **Why it went unnoticed.** The hermetic suite's EVM-RPC mock ignored the config.
+  - **The fix.** New `EvmRpc.consensusConfig(services)` sets `total = 3` for default providers, and
+    `null` (all of them) for custom services or an explicit provider list; `min = 2` everywhere.
+    The mock now refuses a config the real canister refuses.
+- **An inbound EVM transfer is simulated before it is signed.**
+  - **The problem.** `Gateway.settle`, `settleFrom`, the facilitator `/settle` and the EVM session
+    open sign and send the payer's EIP-3009 authorization at the canister's cost: a threshold
+    signature, the RPC reads, the receipt polls and the gas. Every check before that was off-chain.
+    So an authorization from a wallet holding no USDC, which costs nothing to make, passed them all
+    and was signed and sent, only to revert on chain.
+  - **The effect.** Repeated, this spent cycles down to the broadcast floor. It also held the
+    single-flight send lock, so honest settles, opens, closes and refunds were mostly refused as
+    busy meanwhile. On the default-provider chains above, the config bug stopped this before the
+    signature; on custom-provider chains it was live.
+  - **The fix.** `EvmSender.executeTransferWithAuthorization` first runs the exact call as an
+    `eth_call` at the latest block, through the EVM-RPC canister with 2-of-N agreement. The call is
+    made as the broadcast will run it: from the canister's own address, with the transaction's
+    120,000 gas limit. It signs only when the providers agree the call succeeds.
+    - **When the simulation reverts:** `#settlementFailed`, final ("fix the cause"). The usual
+      causes: the balance is below the amount, the authorization was used or cancelled, the token
+      is paused, or the payer is blocked.
+    - **When there is no agreed answer:** "could not check … retry this same payment". A revert
+      counts as agreed when two providers report it and none reports success. The "could not
+      check" answer also covers a revert within 60 s of the authorization's `validAfter`, since the
+      latest block may predate it.
+    - Either way, nothing is signed or sent, and the authorization claim, the server nonce and the
+      daily reservation are freed.
+- **The simulation's blind spots are bounded.**
+  - **Expiry margin.** An authorization must still be valid for 120 s when the canister takes it.
+    Otherwise it could pass the simulation and expire before it lands. This is checked by
+    `settle`, `verifyPayment` (so `/verify` does not pass what `/settle` refuses), the session
+    open and `executeTransferWithAuthorization`. The refusal is `#expired`.
+  - **One inbound transfer per payer.** One is in flight per (chain, token, payer `from`), across
+    settle and session open (new `EvmSender.PayerGuard`, on the sender as `inFlightPayers`). It is
+    claimed after the signature verifies and released however the call returns. Without it, a
+    wallet funded once could have many authorizations pass the simulation against the same
+    balance. A second payment meanwhile gets `#policyDenied` ("… still settling, so this one was
+    not sent — retry this same payment in a few seconds").
+  - **Cooldown.** A payer whose sent transfer reverts is refused for an hour when the token's
+    `authorizationState` then reads the authorization unused, or cannot be read. The payer is held
+    for 5 minutes in three cases: the authorization reads used; the transfer has not confirmed
+    within the confirmation polls; or the broadcast call failed with an unknown outcome. This
+    covers funds moved after the check, a cancelled authorization (used: 5 minutes), and a payer
+    with code (an EIP-7702 delegate) that answers the simulation differently from the real
+    transaction.
+    - Almost always the payer causes a revert after a passed check. A third party can only execute
+      the payer's own authorization first (a mempool copier, on a chain with a public mempool), and
+      then the payer has paid, so "used" gets the 5-minute hold, not the hour. A token paused, or
+      the canister blocked, between the check and the send would also cool the payer.
+    - A shorter hold never cuts a longer cooldown.
+    - The refusal is `#policyDenied`, naming the end time, and it does not invite a retry.
+    - An operator can lift one payer's cooldown with the new
+      `Gateway.liftEvmPayerCooldown(chainId, token, from)`, or every one with
+      `Gateway.clearEvmPayerCooldowns()`.
+  - **Simulation budget.** Each simulation takes a token before its outcall, and gives it back only
+    when the transfer then goes out: at most 10 at once, one more every 6 s.
+    - A refused simulation keeps its token, as does one that passes but is not sent (the send lock
+      was taken meanwhile).
+    - With none left, payments are not checked (no outcall) until one refills ("… budget for
+      checking payments … is spent … retry this same payment in a minute").
+    - A simulation is an outcall; one estimate puts it at ~1.7B cycles on mainnet. Without the
+      budget, a flood of unfunded payments under the global facilitator bucket (2 a second) would
+      spend about as much as the signed broadcasts it replaced.
+    - The budget bounds simulations in flight as well as refused ones, and honest payments that go
+      out never use it up.
+  - **Order of checks.** The margin, a busy send lock, the inbound cycle floor and the budget are
+    all checked before the simulation, so those refusals make no outcall.
+- **The retry signal.** Inbound refusals that sent nothing and clear by themselves now say "retry
+  this same payment":
+  - another payment from the payer still settling;
+  - no agreed simulation answer;
+  - the simulation budget spent;
+  - the send lock busy (`INBOUND_SEND_BUSY`, which `isSendBusy` also recognises);
+  - a nonce or fee read that failed or was rejected, or another failure before the broadcast.
+
+  The example maps a `#policyDenied` or `#settlementFailed` carrying those words to `errorReason:
+  "settlement_retry"`, an ic402 extension like `settlement_pending`. Before, these were
+  `unexpected_settle_error` or `invalid_transaction_state`. `@ic402/client` maps
+  `settlement_retry` to a `transient` (retryable, not funds-moved) error (new
+  `isSettlementRetryBody`). This covers the 2.22.0 busy answer as well.
+
+### Behaviour changes
+
+- A settle or EVM session open makes one more EVM-RPC read, the simulation, before signing.
+- Concurrent payments from one wallet on one chain and token are serialized: the second is refused
+  as busy until the first returns, and succeeds when retried.
+- A wallet whose transfer did not confirm within the polls is refused for 5 minutes, and one whose
+  transfer reverted for an hour.
+- Authorizations with less than 120 s left are refused. The `@ic402/client` and stock x402 clients
+  sign for `maxTimeoutSeconds`, 300 s at ic402.
+- Inbound EVM payments stop below 500B cycles.
+
+### Added
+
+- `EvmRpc.consensusConfig`.
+- From `EvmSender`:
+  - `classifySimulation`, `SimulationVerdict`, `isRevertError`, `simulationRefusal`,
+    `transientSendError`, `NONCE_READ_FAILED`, `FEE_DATA_UNAVAILABLE`,
+    `FAILED_BEFORE_BROADCAST`;
+  - the texts `simulationRevertedText`, `simulationUnknownText`, `EXPIRES_TOO_SOON`,
+    `PAYER_BUSY`, `payerCoolingText`, `SIMULATION_BUSY`, `LOW_INBOUND_CYCLES`,
+    `INBOUND_SEND_BUSY`;
+  - `expiresTooSoon`, `MIN_VALIDITY_SECONDS`, `RECENTLY_VALID_SECONDS`,
+    `TRANSFER_WITH_AUTHORIZATION_GAS`, `REVERT_COOLDOWN_SECONDS`, `UNCONFIRMED_HOLD_SECONDS`;
+  - `PayerGuard`, `SimulationBudget`, and `Sender.inFlightPayers`.
+- `Gateway.clearEvmPayerCooldowns()` and `Gateway.liftEvmPayerCooldown(chainId, token, from)`
+  (operator), both exposed controller-only in the example.
+- `@ic402/client`: `isSettlementRetryBody`.
+- The EVM-RPC test mock:
+  - answers the simulation separately from `authorizationState` (`setSimulationMode`,
+    `getSimulations`, `getLastSimulation`);
+  - can hold a simulation in flight (`setHoldSimulations`; it waits a consensus round per check);
+  - refuses invalid consensus configs.
+- `scripts/setup-evm-outbound.sh` tops the example canister up by 5T. An EVM operation ties up
+  hundreds of billions of cycles in flight, and the longer suite ran out by its last test.
+
+### Known residuals
+
+- **Reverting broadcasts per wallet.** A payer can still cost the canister one reverting broadcast
+  per wallet per chain and token:
+  - once an hour, where the polls see the revert and the authorization reads unused;
+  - once every 5 minutes otherwise: the transfer still unconfirmed when the polls end (common on
+    Ethereum mainnet, and a later revert is not watched), or the authorization used (cancelled
+    after the check).
+
+  It does so by moving its funds after the check, cancelling, or answering the simulation
+  differently from code. Each new wallet needs funding (and, for code, a delegation), all
+  on-chain transactions.
+- **The budget is shared.** Anyone can spend the simulation budget with free wallets: one unfunded
+  payment every 6 s keeps it spent, and honest payments wait while it is. Honest traffic can also
+  spend it, through payments that pass but are not sent (the send lock busy, the gas account
+  unfunded). This is the same class as the global facilitator bucket,
+  which bounds the drain, not fairness. Spending the budget costs the canister about 10 checks a
+  minute, plus 10 at once.
+- **A slot is freed when its call returns,** even with the transfer unconfirmed
+  (`#settlementPending`). The 5-minute hold then stands in for it, but a later revert is not
+  cooled.
+- **`validBefore` has no upper bound.** A payer's old, used authorizations can be replayed once the
+  2.22.0 broadcast guard has forgotten them (24 h, or an upgrade). Each replay holds that payer's
+  slot for one check and spends from the budget. A cap was left out: it would refuse long-lived
+  authorizations that are legitimate today.
+- **A direct caller of `executeTransferWithAuthorization`** gets the margin, the floor, the budget
+  and the simulation, but not the per-payer slot or the cooldown.
+- **`/verify` does not simulate.** It stays an off-chain check.
+- **The retry mapping and the operator methods live in the example.** A consumer of the library
+  maps "retry this same payment" to its own HTTP answer, and restricts
+  `clearEvmPayerCooldowns` / `liftEvmPayerCooldown` to its controllers. The example's Candid
+  routes still answer a `#settlementFailed` without its text (pre-existing).
+- **Test gaps.** The mock cannot reject a receipt read, so the 5-minute hold after an unavailable
+  confirmation or a rejected broadcast call is pinned only by reading the code. The budget is
+  private, so its give-back on a sent transfer is tested only through the suite's sequence of
+  payments.
+- **Never run against live providers.** The default-provider chains have not been exercised by
+  this repo's tests against the real EVM-RPC canister and providers. The config was checked
+  against a local EVM-RPC canister, which validates it and then needs cycles and API keys to go
+  further. Arbitrum's L1 data gas also comes out of the fixed gas limits (pre-existing).
+- **Pre-existing:** below the in-flight peak of an operation (hundreds of billions of cycles), a
+  send the canister cannot afford is reported as "EVM fee data unavailable".
+
 ## v2.23.0 — 2026-11-18
 
 Minor, additive: `recoverEscrowReceipt` reports what a session-escrow recovery moved. No stored-state

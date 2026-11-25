@@ -19,7 +19,10 @@ and the explicit statement of what stays non‑standard by nature.
   `scheme_exact_icp.md` was closed *unmerged* 2026‑02‑16). They are kept as clearly‑labelled
   non‑standard extensions and are gated so they don't break a strict v2 client.
 - ic402 is a **resource server that self‑hosts the facilitator role** (it verifies the EIP‑712
-  signature and broadcasts `transferWithAuthorization` itself, via threshold‑ECDSA). The spec
+  signature and broadcasts `transferWithAuthorization` itself, via threshold‑ECDSA; since 2.23.1
+  it first simulates the call and signs only what the chain says will succeed; a refusal that
+  sent nothing and invites the same payment again carries the ic402 `errorReason`
+  `settlement_retry`, beside `settlement_pending`). The spec
   explicitly blesses "server‑as‑its‑own‑facilitator", so the fused `Gateway.settle` model is
   conformant. The standalone facilitator HTTP API (`/verify`, `/settle`, `/supported`) and the
   discovery Bazaar were **optional** for resource‑server compliance (they make ic402 callable

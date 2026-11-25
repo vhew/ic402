@@ -71,8 +71,32 @@ export function paidRequestError(e: unknown): Ic402Error {
   );
 }
 
-/** The Ic402Error for a 402 paid-request response (fundsMoved when settlement is pending). */
+/**
+ * 2.23.1: true for a 402 body whose `errorReason` is `settlement_retry`: the canister sent nothing
+ * of the payment and asks for the SAME payment again shortly (the payer has another payment still
+ * settling, the chain could not be checked, or too many payments are being checked at once).
+ */
+export function isSettlementRetryBody(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { errorReason?: unknown }).errorReason === 'settlement_retry'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Ic402Error for a 402 paid-request response: fundsMoved when settlement is pending;
+ * 2.23.1: transient (retry the same payment) when the canister sent nothing and asked for a retry.
+ */
 export function settlementError402(body: string): Ic402Error {
+  if (isSettlementRetryBody(body)) {
+    return new Ic402Error('transient', body.slice(0, 200), undefined, false);
+  }
   return new Ic402Error(
     'settlement_failed',
     body.slice(0, 200),

@@ -5,6 +5,7 @@ import {
   Ic402Error,
   probeX402,
   isSettlementPendingBody,
+  isSettlementRetryBody,
   settlementError402,
   fetchX402,
 } from '../src/evm.js';
@@ -521,6 +522,22 @@ describe('settlement_pending 402 (2.20.0)', () => {
     expect(e.fundsMoved).toBe(true);
     expect(e.retryable).toBe(false);
     expect(settlementError402(failed).fundsMoved).toBe(false);
+  });
+
+  it('2.23.1: a settlement_retry 402 is transient and not funds-moved', () => {
+    const retry = JSON.stringify({
+      success: false,
+      errorReason: 'settlement_retry',
+      transaction: '',
+    });
+    expect(isSettlementRetryBody(retry)).toBe(true);
+    expect(isSettlementRetryBody(failed)).toBe(false);
+    expect(isSettlementRetryBody(pending)).toBe(false);
+    const e = settlementError402(retry);
+    expect(e.kind).toBe('transient');
+    expect(e.retryable).toBe(true);
+    expect(e.fundsMoved).toBe(false);
+    expect(settlementError402(failed).retryable).toBe(false);
   });
 });
 

@@ -398,6 +398,8 @@ persistent actor KnowledgeBase {
     Http.httpError(404, "Not found");
   };
 
+  func retrySamePayment(reason : Text) : Bool { Text.contains(reason, #text "retry this same payment") };
+
   // Map a settle PaymentResult to a v2 SettlementResponse JSON, mapping ic402's result variants
   // to the x402 v2 error-reason vocabulary. Used by the facilitator /settle endpoint and by HTTP
   // resource settlement failures.
@@ -409,7 +411,12 @@ persistent actor KnowledgeBase {
       case (#expired(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_exact_evm_payload_authorization_valid_before") };
       case (#networkNotSupported(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"invalid_network") };
       case (#tokenNotAccepted(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unsupported_scheme") };
-      case (#policyDenied(_)) { Http.settlementResponseJson(false, null, network, payer, amount, ?"unexpected_settle_error") };
+      // 2.23.1: a refusal that sent nothing and invites the same payment again (its text says
+      // "retry this same payment": busy, could not check with the chain, too many checks at once)
+      // gets its own reason, so a client retries the payment instead of treating it as failed.
+      // @ic402/client maps it to a transient error.
+      case (#policyDenied(r)) { Http.settlementResponseJson(false, null, network, payer, amount, ?(if (retrySamePayment(r)) "settlement_retry" else "unexpected_settle_error")) };
+      case (#settlementFailed(r)) { Http.settlementResponseJson(false, null, network, payer, amount, ?(if (retrySamePayment(r)) "settlement_retry" else "invalid_transaction_state")) };
       // 2.20.0: the outcome is unknown (an EVM broadcast not yet confirmed, or an ICP ledger call
       // rejected after it may have run). A distinct reason so a client does not pay again:
       // @ic402/client and the MCP server map it to an error with fundsMoved = true.
@@ -1338,6 +1345,18 @@ persistent actor KnowledgeBase {
 
   /// The path the gateway's EVM keys derive under.
   public query func gatewayDerivationPath() : async [Blob] { gate.getEvmDerivationPath() };
+
+  /// 2.23.1: lift every EVM payer cooldown (see Gateway.clearEvmPayerCooldowns). Controller-only.
+  public shared (msg) func clearEvmPayerCooldowns() : async Nat {
+    requireController(msg.caller);
+    gate.clearEvmPayerCooldowns();
+  };
+
+  /// 2.23.1: lift one EVM payer's cooldown (see Gateway.liftEvmPayerCooldown). Controller-only.
+  public shared (msg) func liftEvmPayerCooldown(chainId : Nat, token : Text, from : Text) : async Bool {
+    requireController(msg.caller);
+    gate.liftEvmPayerCooldown(chainId, token, from);
+  };
 
   /// The address the gateway's OWN outbound sender signs from — the one that must equal the
   /// published recipient. Derived here through the same path the gateway holds.

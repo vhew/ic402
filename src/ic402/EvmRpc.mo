@@ -239,7 +239,7 @@ module {
     #Inconsistent : [(RpcService, FeeHistoryResult)];
   };
 
-  // ── eth_call (2.22.0: reads an EIP-3009 authorizationState after a reverted transfer) ──
+  // ── eth_call (2.22.0: reads an EIP-3009 authorizationState after a reverted transfer; 2.23.1: simulates a transferWithAuthorization before signing) ──
 
   /// EIP-2930 access-list entry — mirror of evm_rpc.did.
   public type AccessListEntry = { address : Text; storageKeys : [Text] };
@@ -413,6 +413,24 @@ module {
         ?(rpc, services);
       };
     };
+  };
+
+  /// 2.23.1: the 2-of-N consensus config for `services`, used on every EvmSender call. The EVM-RPC
+  /// canister refuses a Threshold without `total` for its default providers ("total must be
+  /// specified when using default providers"). From 2.1.0 to 2.23.0 ic402 sent exactly that, so
+  /// every sender call on Ethereum, Base, Optimism, Arbitrum and Ethereum Sepolia failed before it
+  /// reached a provider. Default providers: 3 queried, 2 must agree. Custom services or an
+  /// explicit provider list: all of them queried (`total = null`), 2 must agree.
+  public func consensusConfig(services : RpcServices) : ?RpcConfig {
+    let total : ?Nat8 = switch (services) {
+      case (#EthMainnet(null)) { ?3 };
+      case (#EthSepolia(null)) { ?3 };
+      case (#ArbitrumOne(null)) { ?3 };
+      case (#BaseMainnet(null)) { ?3 };
+      case (#OptimismMainnet(null)) { ?3 };
+      case (_) { null };
+    };
+    ?{ responseSizeEstimate = null; responseConsensus = ?#Threshold({ total; min = 2 }) };
   };
 
   /// Format an RpcError as human-readable text.

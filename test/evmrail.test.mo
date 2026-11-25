@@ -1,4 +1,5 @@
 /// 2.22.0 — EVM rail fixes (findings E3, E4, E5, E7, E9, E10, F1).
+/// 2.23.1 — simulate an inbound transfer before signing it; one inbound transfer in flight per payer.
 ///
 /// Everything here runs before a broadcast: the interpreter has no tECDSA and traps on
 /// Cycles.balance(), so a test that reaches EvmSender.sendTransaction dies there — which is how a
@@ -23,6 +24,7 @@ import Principal "mo:base/Principal";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Text "mo:base/Text";
+import Iter "mo:base/Iter";
 import SHA256 "mo:sha2/Sha256";
 import { test; suite } "mo:test/async";
 
@@ -416,5 +418,281 @@ await suite("F1: a parked tx that appears not to have landed", func() : async ()
     // Mutation: report #dropped without a remembered nonce.
     let snd = EvmSender.EvmSender("k", ?rpcText);
     assert (await snd.reconcileTransaction(84532, "0x01", 1)) == #pending;
+  });
+});
+
+// ── 2.23.1: simulate before signing; one inbound transfer in flight per payer ──
+//
+// The simulation runs inside executeTransferWithAuthorization after the cycle floor, which the
+// interpreter cannot read, so its wiring (refused → nothing signed, the claims freed) is pinned in
+// test/evm-outbound.test.ts against the mock. Here: the verdict, the texts, the guard, and the
+// session-open busy refusal, which comes before the send.
+
+await suite("2.23.1: simulate before signing", func() : async () {
+  // Code 3 is geth's revert code; this message does not say "revert", so only the code marks it.
+  let revertByCode : EvmRpc.RpcError = #JsonRpcError({ code = 3; message = "FiatTokenV2: transfer amount exceeds balance" });
+  let revertByText : EvmRpc.RpcError = #JsonRpcError({ code = -32000; message = "Execution Reverted" });
+  let rateLimited : EvmRpc.RpcError = #JsonRpcError({ code = -32005; message = "rate limit exceeded" });
+  let down : EvmRpc.RpcError = #ProviderError(#NoPermission);
+
+  await test("only an agreed success lets the send go ahead", func() : async () {
+    // Mutation: classifySimulation fails open — #ok for a provider error, for disagreement, or for
+    // an #Inconsistent of successes or of nothing.
+    assert EvmSender.classifySimulation(#Consistent(#Ok("0x"))) == #ok;
+    switch (EvmSender.classifySimulation(#Consistent(#Err(down)))) { case (#unknown(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Consistent(#Err(rateLimited)))) { case (#unknown(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Ok("0x")), (#EthSepolia(#Sepolia), #Ok("0x01"))]))) { case (#unknown(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Ok("0x")), (#EthSepolia(#Sepolia), #Err(revertByCode))]))) { case (#unknown(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([]))) { case (#unknown(_)) {}; case (_) { assert false } };
+  });
+
+  await test("a revert is a revert in any provider's words; a provider failure is not one", func() : async () {
+    // Mutation: isRevertError drops the code-3 test, the message test, or the lower-casing; or an
+    // #Inconsistent holding one non-revert error is read as reverted.
+    switch (EvmSender.classifySimulation(#Consistent(#Err(revertByCode)))) { case (#reverted(m)) { assert Text.contains(m, #text "exceeds balance") }; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Consistent(#Err(revertByText)))) { case (#reverted(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Err(revertByCode)), (#EthSepolia(#Sepolia), #Err(revertByText))]))) { case (#reverted(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Err(revertByCode)), (#EthSepolia(#Sepolia), #Err(down))]))) { case (#unknown(_)) {}; case (_) { assert false } };
+    // Two reverts and no success is the 2-of-N agreement on a revert, whatever the third said.
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Err(revertByCode)), (#EthSepolia(#Sepolia), #Err(revertByText)), (#EthSepolia(#PublicNode), #Err(rateLimited))]))) { case (#reverted(_)) {}; case (_) { assert false } };
+    switch (EvmSender.classifySimulation(#Inconsistent([(#EthSepolia(#Ankr), #Err(revertByCode)), (#EthSepolia(#Sepolia), #Err(revertByText)), (#EthSepolia(#PublicNode), #Ok("0x"))]))) { case (#unknown(_)) {}; case (_) { assert false } };
+    assert not EvmSender.isRevertError(rateLimited);
+    assert not EvmSender.isRevertError(down);
+  });
+
+  await test("the refusals say nothing was signed or sent; only 'could not check' and 'busy' invite the same payment again", func() : async () {
+    // Mutation: a text change that makes @ic402/client (marker "retry this same payment") read a
+    // revert as transient, or "could not check" / busy as final.
+    let rev = EvmSender.simulationRevertedText("x");
+    let unk = EvmSender.simulationUnknownText("x");
+    assert Text.contains(rev, #text "Nothing was signed or sent") and not Text.contains(rev, #text "retry this same payment");
+    assert Text.contains(unk, #text "Nothing was signed or sent") and Text.contains(unk, #text "retry this same payment");
+    assert Text.contains(EvmSender.PAYER_BUSY, #text "retry this same payment");
+  });
+});
+
+await suite("2.23.1: one inbound transfer in flight per payer; cooldown after a revert", func() : async () {
+
+  await test("a payer holds one slot until it is released", func() : async () {
+    // Mutation: claim ignores an existing entry, or release does not delete.
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    assert g.claim(k, 0) == #ok;
+    assert g.claim(k, 0) == #busy;
+    assert g.size() == 1;
+    g.release(k);
+    assert g.claim(k, 0) == #ok;
+  });
+
+  await test("the key is (chain, token, payer) on decoded bytes", func() : async () {
+    // Mutation: key the token or payer by its text, or leave the chain or the token out.
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    assert g.key(84532, "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", EvmUtils.hexToBytes(Text.toLowercase(signer))) == k;
+    assert g.key(8453, tokenA, EvmUtils.hexToBytes(signer)) != k;
+    assert g.key(84532, "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", EvmUtils.hexToBytes(signer)) != k;
+    assert g.key(84532, tokenA, EvmUtils.hexToBytes(canisterEvm)) != k;
+  });
+
+  await test("a payer cooled down is refused for an hour, then claims again; others are not", func() : async () {
+    // Mutation: claim ignores the cooldown, the cooldown never ends (or lasts another time), or it
+    // cools every payer.
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    let other = g.key(84532, tokenA, EvmUtils.hexToBytes(canisterEvm));
+    g.coolDown(k, 1_000, EvmSender.REVERT_COOLDOWN_SECONDS);
+    assert g.claim(k, 1_000) == #coolingDown(4_600);
+    assert g.claim(k, 4_599) == #coolingDown(4_600);
+    assert g.claim(other, 1_000) == #ok;
+    assert g.claim(k, 4_600) == #ok;
+  });
+
+  await test("a full cooldown list drops the expired entries first, then the one ending soonest", func() : async () {
+    // Mutation: coolDown grows without bound, or evicts a live entry while expired ones remain.
+    let g = EvmSender.PayerGuard(3);
+    let key = func(i : Nat) : Text { g.key(i, tokenA, EvmUtils.hexToBytes(signer)) };
+    g.coolDown(key(1), 10_000, EvmSender.REVERT_COOLDOWN_SECONDS); // live until 13_600
+    g.coolDown(key(2), 0, EvmSender.REVERT_COOLDOWN_SECONDS); // expired at 3_600
+    g.coolDown(key(3), 400, EvmSender.REVERT_COOLDOWN_SECONDS); // expired at 4_000
+    g.coolDown(key(4), 10_000, EvmSender.REVERT_COOLDOWN_SECONDS); // full: BOTH expired ones go, not just the soonest
+    assert g.coolingSize() == 2;
+    g.coolDown(key(5), 9_000, EvmSender.REVERT_COOLDOWN_SECONDS); // live until 12_600, ends soonest of the live ones
+    g.coolDown(key(6), 10_000, EvmSender.REVERT_COOLDOWN_SECONDS); // full, none expired: the one ending soonest goes
+    assert g.coolingSize() == 3;
+    assert g.claim(key(5), 10_000) == #ok;
+    assert g.claim(key(1), 10_000) == #coolingDown(13_600);
+    assert g.claim(key(4), 10_000) == #coolingDown(13_600);
+    assert g.claim(key(6), 10_000) == #coolingDown(13_600);
+  });
+
+  await test("Sessions: a deposit from a payer with a transfer in flight is refused as busy, before any send, freeing what it took", func() : async () {
+    // Mutation: drop the payer claim in openEvmSession (the open then reaches the send — the
+    // interpreter traps on Cycles.balance()); skip freeing the authorization claim, the open lock
+    // or the pool allocation on the busy refusal; or release a slot the refused open never held.
+    let snd = EvmSender.EvmSender("k", null);
+    let pool = EvmEscrow.EvmEscrowManager();
+    let m = Sessions.Sessions(
+      canisterP, config(null, null), Policy.Engine(), Escrow.EscrowManager(canisterP), pool,
+      ?snd, { get = func() : ?Text { ?canisterEvm } },
+    );
+    let pk = snd.inFlightPayers.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    assert snd.inFlightPayers.claim(pk, 0) == #ok; // another transfer from this payer is in flight
+    switch (await m.openSession(payerP, intent, clientCfg, signed)) {
+      case (#err(#policyDenied(msg))) { assert msg == EvmSender.PAYER_BUSY };
+      case (_) { assert false };
+    };
+    // Busy again, not "already broadcast" (the authorization claim was freed) and not "an open is
+    // in progress" (the open lock was freed).
+    switch (await m.openSession(payerP, intent, clientCfg, signed)) {
+      case (#err(#policyDenied(msg))) { assert msg == EvmSender.PAYER_BUSY };
+      case (_) { assert false };
+    };
+    let ak = snd.broadcastAuthorizations.key(84532, tokenA, EvmUtils.hexToBytes(signer), Blob.toArray(b32));
+    assert snd.broadcastAuthorizations.claim(ak, 9_999_999_999, 0) == #ok;
+    assert pool.totalAllocated(84532, tokenA) == 0; // the reservation was returned
+    assert snd.inFlightPayers.claim(pk, 0) == #busy; // still the other transfer's
+  });
+
+  await test("Sessions: a deposit from a payer cooling down is refused, before any send", func() : async () {
+    // Mutation: Sessions ignores #coolingDown (treats it as #ok, reaching the send), or answers it
+    // with the busy text, which invites a retry.
+    let snd = EvmSender.EvmSender("k", null);
+    let m = mkSessions(?snd);
+    snd.inFlightPayers.coolDown(snd.inFlightPayers.key(84532, tokenA, EvmUtils.hexToBytes(signer)), 0, EvmSender.REVERT_COOLDOWN_SECONDS);
+    switch (await m.openSession(payerP, intent, clientCfg, signed)) {
+      case (#err(#policyDenied(msg))) {
+        assert msg == EvmSender.payerCoolingText(3_600);
+        assert not Text.contains(msg, #text "retry this same payment");
+      };
+      case (_) { assert false };
+    };
+  });
+});
+
+await suite("2.23.1: what the simulation does not see", func() : async () {
+
+  await test("an authorization must stay valid 120 more seconds", func() : async () {
+    // Mutation: expiresTooSoon drops the margin (back to `validBefore <= now`) or uses another one.
+    assert EvmSender.expiresTooSoon(100, 0);
+    assert EvmSender.expiresTooSoon(119, 0);
+    assert not EvmSender.expiresTooSoon(120, 0);
+    assert EvmSender.expiresTooSoon(1_119, 1_000);
+  });
+
+  await test("settle, verifyPayment and session open refuse one that expires too soon (the interpreter's clock is 0)", func() : async () {
+    // Mutation: drop the margin at any of the three (validBefore 100 then passes the window check
+    // and fails on its signature, which is over another validBefore).
+    let gate = Gateway.Gateway(config(null, null), canisterP);
+    switch (await gate.settle(authz(100, b32), ?5000)) { case (#expired(m)) { assert m == EvmSender.EXPIRES_TOO_SOON }; case (_) { assert false } };
+    assert gate.verifyPayment(authz(100, b32), 5000, canisterEvm, tokenA).invalidReason == ?"invalid_exact_evm_payload_authorization_valid_before";
+    let m = mkSessions(?EvmSender.EvmSender("k", null));
+    switch (await m.openSession(payerP, intent, clientCfg, authz(100, b32))) { case (#err(#expired(_))) {}; case (_) { assert false } };
+    // 120 s left passes the window check (and then fails on the signature).
+    assert gate.verifyPayment(authz(120, b32), 5000, canisterEvm, tokenA).invalidReason == ?"invalid_exact_evm_payload_authorization_signature";
+  });
+
+  await test("a revert just after validAfter is 'could not check', not a final refusal", func() : async () {
+    // Mutation: simulationRefusal ignores validAfter (a revert is always final), or reads a recent
+    // validAfter as a pass.
+    assert EvmSender.simulationRefusal(#ok, 0, 1_000) == null;
+    switch (EvmSender.simulationRefusal(#reverted("x"), 0, 1_000)) { case (?t) { assert t == EvmSender.simulationRevertedText("x") }; case (null) { assert false } };
+    switch (EvmSender.simulationRefusal(#reverted("x"), 941, 1_000)) {
+      case (?t) { assert Text.contains(t, #text "retry this same payment") and Text.contains(t, #text "only moments ago") };
+      case (null) { assert false };
+    };
+    switch (EvmSender.simulationRefusal(#reverted("x"), 940, 1_000)) { case (?t) { assert t == EvmSender.simulationRevertedText("x") }; case (null) { assert false } };
+    switch (EvmSender.simulationRefusal(#unknown("y"), 0, 1_000)) { case (?t) { assert t == EvmSender.simulationUnknownText("y") }; case (null) { assert false } };
+  });
+
+  await test("the simulation budget: 10 at once, one more every 6 seconds; a sent transfer gives its token back", func() : async () {
+    // Mutation: take never refuses, never refills or refills faster; giveBack does nothing or
+    // overfills past the capacity.
+    let b = EvmSender.SimulationBudget(10, 6);
+    for (_ in Iter.range(1, 10)) { assert b.take(1_000_000) };
+    assert not b.take(1_000_000); // 10 in flight or refused: no more
+    b.giveBack(); // one of them was sent
+    assert b.take(1_000_000);
+    assert not b.take(1_000_005);
+    assert b.take(1_000_006); // refilled one
+    assert not b.take(1_000_006);
+    for (_ in Iter.range(1, 20)) { b.giveBack() };
+    for (_ in Iter.range(1, 10)) { assert b.take(1_000_006) };
+    assert not b.take(1_000_006); // capped at 10
+  });
+
+  await test("an operator can lift every cooldown", func() : async () {
+    // Mutation: clearCooldowns clears nothing, or the Gateway's wrapper does not reach the guard.
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    g.coolDown(k, 0, EvmSender.REVERT_COOLDOWN_SECONDS);
+    assert g.clearCooldowns() == 1;
+    assert g.claim(k, 0) == #ok;
+    assert g.clearCooldowns() == 0;
+    assert Gateway.Gateway(config(null, null), canisterP).clearEvmPayerCooldowns() == 0; // no sender
+    assert not Gateway.Gateway(config(null, null), canisterP).liftEvmPayerCooldown(84532, tokenA, signer);
+  });
+
+  await test("an operator can lift one payer's cooldown; the others stay", func() : async () {
+    // Mutation: liftCooldown lifts nothing, lifts every payer, or reports an expired one as lifted.
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    let other = g.key(84532, tokenA, EvmUtils.hexToBytes(canisterEvm));
+    g.coolDown(k, 0, EvmSender.REVERT_COOLDOWN_SECONDS);
+    g.coolDown(other, 0, EvmSender.REVERT_COOLDOWN_SECONDS);
+    assert g.liftCooldown(k, 10);
+    assert g.claim(k, 10) == #ok;
+    assert g.claim(other, 10) == #coolingDown(3_600);
+    assert not g.liftCooldown(k, 10); // not cooling any more
+    g.coolDown(k, 0, 5);
+    assert not g.liftCooldown(k, 10); // expired at 5
+  });
+
+  await test("a cooldown is never shortened; a short hold then a revert extends it", func() : async () {
+    // Mutation: coolDown always overwrites (a 5-minute hold after an hour's cooldown would cut it).
+    let g = EvmSender.PayerGuard(10_000);
+    let k = g.key(84532, tokenA, EvmUtils.hexToBytes(signer));
+    g.coolDown(k, 0, EvmSender.REVERT_COOLDOWN_SECONDS);
+    g.coolDown(k, 10, EvmSender.UNCONFIRMED_HOLD_SECONDS);
+    assert g.claim(k, 400) == #coolingDown(3_600);
+    let k2 = g.key(84532, tokenA, EvmUtils.hexToBytes(canisterEvm));
+    g.coolDown(k2, 0, EvmSender.UNCONFIRMED_HOLD_SECONDS);
+    g.coolDown(k2, 100, EvmSender.REVERT_COOLDOWN_SECONDS);
+    assert g.claim(k2, 400) == #coolingDown(3_700);
+  });
+
+  await test("transient send failures invite the same payment again; others do not", func() : async () {
+    // Mutation: transientSendError misses the send lock, the nonce read or the fee read, or
+    // matches any error (an unfunded gas account is the operator's to fix, not the payer's).
+    assert EvmSender.transientSendError(EvmSender.SEND_BUSY);
+    assert EvmSender.transientSendError(EvmSender.INBOUND_SEND_BUSY);
+    assert EvmSender.transientSendError(EvmSender.NONCE_READ_FAILED # ": eth_getTransactionCount did not reach multi-provider consensus.");
+    assert EvmSender.transientSendError(EvmSender.FEE_DATA_UNAVAILABLE # " — not broadcasting (retry later)");
+    assert EvmSender.transientSendError(EvmSender.FAILED_BEFORE_BROADCAST # ": the EVM-RPC canister is stopped");
+    assert EvmSender.isSendBusy(EvmSender.INBOUND_SEND_BUSY); // a direct caller's 2.22.0 helper still sees busy
+    assert not EvmSender.transientSendError("Insufficient ETH for gas — the canister's derived EVM address pays gas for broadcasts.");
+    assert Text.contains(EvmSender.INBOUND_SEND_BUSY, #text "retry this same payment");
+  });
+
+  await test("the cooling and budget texts: cooling is final, the budget invites the same payment again", func() : async () {
+    // Mutation: a text change that makes @ic402/client read cooling as transient, or the budget as final.
+    assert not Text.contains(EvmSender.payerCoolingText(1), #text "retry this same payment");
+    assert Text.contains(EvmSender.SIMULATION_BUSY, #text "retry this same payment");
+  });
+});
+
+await suite("2.23.1: the EVM-RPC consensus config names a total for default providers", func() : async () {
+
+  await test("default providers: 3 queried, 2 agree; custom services or an explicit list: all queried", func() : async () {
+    // Mutation: back to `total = null` everywhere (refused by the EVM-RPC canister for default
+    // providers), or a total on Custom services.
+    let threshold = func(c : ?EvmRpc.RpcConfig) : ?{ total : ?Nat8; min : Nat8 } {
+      switch (c) { case (?{ responseConsensus = ?#Threshold(t) }) { ?t }; case (_) { null } };
+    };
+    for (svc in [#EthMainnet(null), #EthSepolia(null), #ArbitrumOne(null), #BaseMainnet(null), #OptimismMainnet(null)].values()) {
+      assert threshold(EvmRpc.consensusConfig(svc)) == ?{ total = ?3; min = 2 };
+    };
+    assert threshold(EvmRpc.consensusConfig(#Custom({ chainId = 43114; services = [] }))) == ?{ total = null; min = 2 };
+    assert threshold(EvmRpc.consensusConfig(#BaseMainnet(?[#Ankr]))) == ?{ total = null; min = 2 };
+    assert EvmRpc.rpcServices(8453) == ?#BaseMainnet(null); // what the sender passes for Base
   });
 });
