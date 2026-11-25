@@ -128,12 +128,17 @@ module {
 
   /// 2.22.0: whether an EVM close whose leg failed BEFORE anything was broadcast reopens the
   /// session (#open) — only when no leg of this close moved funds (`nothingMoved`), and either
-  /// the payer asked for the close or the failure is the busy single-flight send lock, which
-  /// clears by itself. A timer-initiated close that fails for another reason stays #closing, so
-  /// the 60 s sweep does not re-drive a persistent failure every tick (S16/C1); before 2.22.0
-  /// that included the busy lock, which parked an expired session with no tx to reconcile.
+  /// the payer asked for the close or the failure was refused before signing and clears without
+  /// the caller (EvmSender.sendCanWait): the busy single-flight send lock, or (2.23.2) a gas stop.
+  /// A timer-initiated close that fails for another reason stays #closing, so the 60 s sweep does
+  /// not re-drive a persistent failure every tick (S16/C1); before 2.22.0 that included the busy
+  /// lock, which parked an expired session with no tx to reconcile. That includes the send that
+  /// set a gas stop: it was signed, and a provider may have accepted it, so it parks for the
+  /// operator to check rather than being sent again unattended. A gas-stopped chain is re-driven
+  /// with no outcall or signature (the stop refuses first), and the session closes by itself once
+  /// the stop ends or is lifted.
   public func reopenAfterUnsentLeg(wasExpired : Bool, nothingMoved : Bool, err : Text) : Bool {
-    nothingMoved and (not wasExpired or EvmSender.isSendBusy(err));
+    nothingMoved and (not wasExpired or EvmSender.sendCanWait(err));
   };
 
   /// 2.22.0: the token an ICP session opened with `intentToken` (resolved to `ledger`) stores: "icp:*"
@@ -1816,7 +1821,8 @@ module {
             // race) would strand it permanently in #closing with no retry path. For a
             // timer-initiated (expired) close, keep #closing to avoid the 60s expiry timer
             // re-driving a persistent failure every tick (S16/C1). 2.22.0: except the busy send
-            // lock, which clears by itself — reopened, the next tick retries (reopenAfterUnsentLeg).
+            // lock, which clears by itself — reopened, the next tick retries (reopenAfterUnsentLeg);
+            // 2.23.2: and a gas stop's refusal (nothing signed), retried until the stop ends.
             if (reopenAfterUnsentLeg(wasExpired, true, msg)) {
               session.status := #open;
               return #settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry): " # msg);
@@ -1854,7 +1860,8 @@ module {
             // M10: refund failed pre-broadcast (nothing broadcast). If settle ran and confirmed
             // (settleTxHash set), we must NOT reopen — a retry would re-settle consumed; park in
             // #closing. If settle was SKIPPED (consumed == 0, nothing moved at all), a
-            // client-initiated close can safely reopen to #open and retry.
+            // client-initiated close can safely reopen to #open and retry (a timer close too, when
+            // the failure clears without it: reopenAfterUnsentLeg).
             if (reopenAfterUnsentLeg(wasExpired, settleTxHash == null, msg)) {
               session.status := #open;
               return #settlementFailed("EVM refund failed — nothing broadcast, session reopened (safe to retry): " # msg);

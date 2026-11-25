@@ -153,6 +153,9 @@ module {
     //                EVM send refused before broadcast).
     //   #busy        the EVM sender's single-flight lock (EvmSender.SEND_BUSY): nothing was tried,
     //                and it clears in seconds — retried, but not counted as a payment failure.
+    //                2.23.2: also a gas stop's refusal (EvmSender.sendCanWait): nothing signed,
+    //                no outcall; it pays out once the stop ends or is lifted. The send that set
+    //                the stop was signed, so it counts as #err.
     //   #unavailable definite, nothing moved, and no retry can succeed until something is set up
     //                (no transfer hook, an unparseable chain, no payout address, no token, a buyer
     //                with no rail, an EVM-rail buyer that is not a 20-byte address).
@@ -175,7 +178,7 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM settle to operator reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { if (EvmSender.isSendBusy(e)) { #busy("EVM settle to operator: " # e) } else { #err("EVM settle to operator: " # e) } };
+                case (#err(e)) { if (EvmSender.sendCanWait(e)) { #busy("EVM settle to operator: " # e) } else { #err("EVM settle to operator: " # e) } };
               };
             };
             case (?_, _, null) { #unavailable("operator has no registered EVM payout address (call setEvmPayout)") };
@@ -216,7 +219,7 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM refund reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { if (EvmSender.isSendBusy(e)) { #busy("EVM refund: " # e) } else { #err("EVM refund: " # e) } };
+                case (#err(e)) { if (EvmSender.sendCanWait(e)) { #busy("EVM refund: " # e) } else { #err("EVM refund: " # e) } };
               };
             };
             case (_, _) { #unavailable("EVM refund unavailable (no transfer hook / unparseable chain)") };

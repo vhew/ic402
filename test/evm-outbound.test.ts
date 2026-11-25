@@ -47,6 +47,8 @@ const exampleIdl = () =>
     // 2.23.1: lift every EVM payer cooldown (controller-only).
     clearEvmPayerCooldowns: IDL.Func([], [IDL.Nat], []),
     liftEvmPayerCooldown: IDL.Func([IDL.Nat, IDL.Text, IDL.Text], [IDL.Bool], []),
+    // 2.23.2: lift a chain's gas stop (controller-only).
+    liftEvmGasStop: IDL.Func([IDL.Nat], [IDL.Bool], []),
     // 2.22.0: controller-only recovery endpoints, also absent from the public client IDL.
     reconcileSession: IDL.Func([IDL.Text], [IDL.Variant({ ok: IDL.Text, err: IDL.Text })], []),
     setGatewayDerivationPath: IDL.Func(
@@ -87,6 +89,7 @@ const SendMode = IDL.Variant({
   nonceTooHigh: IDL.Null,
   nonceTooLow: IDL.Null,
   insufficientFunds: IDL.Null,
+  insufficientFundsInconsistent: IDL.Null,
 });
 const AuthStateMode = IDL.Variant({ unused: IDL.Null, used: IDL.Null, error: IDL.Null });
 const SimulationMode = IDL.Variant({
@@ -203,7 +206,9 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
   // sent transfer that reverts or stays unconfirmed cools that payer down (an hour, or 5 minutes).
   // Several tests do that on purpose, so every test starts with no payer cooling down.
   beforeEach(async () => {
-    if (!skip) await example.clearEvmPayerCooldowns();
+    if (skip) return;
+    await example.clearEvmPayerCooldowns();
+    await example.liftEvmGasStop(CHAIN_ID); // 2.23.2: an InsufficientFunds test stops the chain
   });
 
   const sweep = () => example.sweepEvm(CHAIN_ID, USDC, TO, AMOUNT);
@@ -326,6 +331,8 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setPendingNonce([7n]); // the re-read finds the same nonce: nobody holds the tx
     const res = await sweep();
     expect(res).toHaveProperty('err');
+    // 2.23.2: any send that could not pay gas stops every send on the chain (GasStops).
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
   });
 
   it('2.22.0: InsufficientFunds but the pending nonce moved past the tx → maybe sent (#pending), never a retry', async () => {
@@ -336,6 +343,31 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     const res = await sweep();
     expect(res).toHaveProperty('pending');
     expect(await mock.sentTxCount()).toBe(1n);
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(false); // 2.23.2: it may be sent — no stop
+  });
+
+  it('2.23.2: providers that disagree, one reporting no gas and none accepting, stop the chain too; the send stays maybe-sent', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSendMode({ insufficientFundsInconsistent: null });
+    await mock.setReceiptMode({ pendingThenConfirmed: 99n });
+    const res = await sweep();
+    expect(res).toHaveProperty('pending'); // maybe sent: polled, never re-sent
+    expect(await mock.sentTxCount()).toBe(1n);
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
+  });
+
+  it('2.23.2: only a controller can lift a gas stop', async () => {
+    if (skip) return;
+    const stranger = Actor.createActor(exampleIdl, {
+      agent: await HttpAgent.create({
+        identity: Secp256k1KeyIdentity.generate(),
+        host: 'http://localhost:4944',
+        shouldFetchRootKey: true,
+      }),
+      canisterId: exampleId,
+    });
+    await expect(stranger.liftEvmGasStop(CHAIN_ID)).rejects.toThrow();
   });
 
   // ── Inbound EIP-3009 through the facilitator /settle route (2.22.0) ──
@@ -481,6 +513,62 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     const res = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
     expect(res.err).toContain('simulation before signing reverted');
     expect(await mock.sentTxCount()).toBe(0n);
+  });
+
+  it('2.23.2: a broadcast the canister cannot pay gas for stops payments and sends on the chain, before signing (a payment before its simulation)', async () => {
+    if (skip) return;
+    await mock.reset();
+    await mock.setSendMode({ insufficientFunds: null });
+    await mock.setPendingNonce([7n]); // the re-read finds the same nonce: nothing was sent
+    // The simulation passes (it has no gas price), so the deposit is signed; the broadcast fails.
+    const first = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(first.err).toContain('Insufficient ETH for gas');
+    expect(first.err).toContain('refused for the next 10 minutes');
+    expect(await mock.getSimulations()).toBe(1n);
+    expect(await mock.sentTxCount()).toBe(1n);
+    // Funded or not, the chain stays stopped: refused before the simulation, so no check, no
+    // signature and no send.
+    await mock.setSendMode({ ok: null });
+    await mock.setPendingNonce([]);
+    const body = await settleBody(1000n);
+    const stopped = await postSettle(body);
+    expect(stopped.success).toBe(false);
+    expect(stopped.errorReason).toBe('invalid_transaction_state'); // the operator's to fix: final
+    const open = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(open.err).toContain('cannot pay gas on chain 8453');
+    const swept = await sweep(); // outbound sends too
+    expect(swept.err).toContain('cannot pay gas on chain 8453');
+    expect(await mock.getSimulations()).toBe(1n);
+    expect(await mock.sentTxCount()).toBe(1n);
+    // The operator lifts the stop once the address is funded; the same payment then goes through,
+    // since nothing of it was held.
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(false);
+    expect((await postSettle(body)).success).toBe(true);
+    expect(await mock.sentTxCount()).toBe(2n);
+    expect(await example.clearEvmPayerCooldowns()).toBe(0n); // the payer was never at fault
+  });
+
+  it('2.23.2: a session payer closing again and again on a chain without gas costs one signature, not one per close', async () => {
+    if (skip) return;
+    await mock.reset();
+    const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(opened).toHaveProperty('ok');
+    const sends = await mock.sentTxCount(); // the deposit
+    await mock.setSendMode({ insufficientFunds: null });
+    await mock.setPendingNonce([7n]); // the re-read finds the same nonce: nothing was sent
+    const first = await full.endSession(opened.ok.id);
+    expect(first.settlementFailed).toContain('session reopened');
+    expect(await mock.sentTxCount()).toBe(sends + 1n); // signed; the broadcast was refused
+    const again = await full.endSession(opened.ok.id);
+    expect(again.settlementFailed).toContain('cannot pay gas on chain 8453');
+    expect(again.settlementFailed).toContain('session reopened');
+    expect(await mock.sentTxCount()).toBe(sends + 1n); // refused before signing
+    // Funded, then lifted: the close goes through.
+    await mock.setSendMode({ ok: null });
+    await mock.setPendingNonce([]);
+    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
+    expect(await full.endSession(opened.ok.id)).toHaveProperty('ok');
   });
 
   // Poll until `cond` holds (a held simulation has been reached), or fail.

@@ -5,10 +5,12 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.23.1.**
-> - It fixes the EVM-RPC consensus config that had failed every EVM call on Ethereum, Base,
->   Optimism, Arbitrum and Ethereum Sepolia since 2.1.0.
-> - It no longer signs an inbound EVM payment that cannot succeed: the transfer is simulated first.
+> **Current release: v2.23.2.** It no longer signs again and again on a chain the canister cannot
+> pay gas on: a broadcast that reports the canister short of gas stops every send on that chain,
+> before signing, for 10 minutes. It completes v2.23.1, which:
+> - fixed the EVM-RPC consensus config that had failed every EVM call on Ethereum, Base,
+>   Optimism, Arbitrum and Ethereum Sepolia since 2.1.0;
+> - stopped signing an inbound EVM payment that cannot succeed: the transfer is simulated first.
 >   An expiry margin, one transfer per payer, a cooldown after a revert and a simulation budget
 >   bound what the simulation cannot see.
 >
@@ -38,8 +40,8 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.23.x | ✅ | Current: 2.23.1. 2.23.0 lacks the 2.23.1 fixes. |
-| 2.22.x | ⚠️ | Superseded; upgrade to 2.23.1. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
+| 2.23.x | ✅ | Current: 2.23.2. 2.23.1 signs every inbound EVM payment, and every retried close, on a listed chain the canister cannot pay gas on; 2.23.0 lacks the 2.23.1 fixes. |
+| 2.22.x | ⚠️ | Superseded; upgrade to 2.23.2. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
 | 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |
@@ -159,7 +161,9 @@ composed-system security pass is complete:
   - simulations that lead to no send have their own budget (10 at once, about 10 a minute);
   - a payer whose sent transfer reverts is refused for an hour (5 minutes if another transaction
     executed its authorization), and one whose transfer is unconfirmed after the polls for 5
-    minutes.
+    minutes;
+  - since 2.23.2, every send on a chain where a broadcast reported the canister short of gas is
+    refused before signing for 10 minutes (no send, and not the simulation, checks the gas).
 - **SEC-2 — `getFeeData` hostile-RPC grief-park: FIXED.** Fee data now takes the ROBUST
   (lower-median) base fee across providers, so a single outlier can't make the gas
   reservation unpayable; a confirm-only `reconcileJob` / `reconcileSession` recovery path

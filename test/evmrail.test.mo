@@ -217,6 +217,18 @@ await suite("E5: a timer close blocked only by the busy send lock is retried", f
     assert not Sessions.reopenAfterUnsentLeg(true, true, "EVM fee data unavailable — not broadcasting (retry later)");
     assert Sessions.reopenAfterUnsentLeg(false, true, "anything");
     assert not Sessions.reopenAfterUnsentLeg(false, false, EvmSender.SEND_BUSY); // a leg already moved funds
+    // 2.23.2: a gas stop's refusal (nothing signed) waits too, so an expired session is retried
+    // instead of parked with no tx. The failure that SET the stop was signed and may have been
+    // accepted by a provider, so it parks, as before, for the operator to check.
+    // Mutation: reopenAfterUnsentLeg or sendCanWait drops the stop, or adds the signed failure; a
+    // moved leg still parks; sendCanWait matches a marker inside caller-controlled text.
+    assert Sessions.reopenAfterUnsentLeg(true, true, EvmSender.gasStopText(8453, 600));
+    assert not Sessions.reopenAfterUnsentLeg(true, true, EvmSender.INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas");
+    assert not Sessions.reopenAfterUnsentLeg(true, false, EvmSender.gasStopText(8453, 600));
+    assert EvmSender.sendCanWait(EvmSender.SEND_BUSY) and EvmSender.sendCanWait(EvmSender.gasStopText(1, 2));
+    assert not EvmSender.sendCanWait(EvmSender.FEE_DATA_UNAVAILABLE # " — not broadcasting (retry later)");
+    assert not EvmSender.sendCanWait("Invalid recipient address (expected a 20-byte / 40-hex-char address): 0x" # EvmSender.GAS_STOP_PREFIX);
+    assert not EvmSender.sendCanWait("Invalid recipient address: 0x" # EvmSender.INSUFFICIENT_GAS);
   });
 });
 
@@ -694,5 +706,133 @@ await suite("2.23.1: the EVM-RPC consensus config names a total for default prov
     assert threshold(EvmRpc.consensusConfig(#Custom({ chainId = 43114; services = [] }))) == ?{ total = null; min = 2 };
     assert threshold(EvmRpc.consensusConfig(#BaseMainnet(?[#Ankr]))) == ?{ total = null; min = 2 };
     assert EvmRpc.rpcServices(8453) == ?#BaseMainnet(null); // what the sender passes for Base
+  });
+});
+
+await suite("2.23.2: a chain the canister cannot pay gas on", func() : async () {
+
+  await test("a stop refuses that chain for 10 minutes, then ends by itself; other chains are not stopped", func() : async () {
+    // Mutation: stop does nothing, stops every chain, or never ends; the window is not 10 minutes.
+    assert EvmSender.GAS_STOP_SECONDS == 600;
+    let g = EvmSender.GasStops(EvmSender.GAS_STOP_SECONDS);
+    assert g.stoppedUntil(8453, 1_000) == null;
+    g.stop(8453, 1_000);
+    assert g.stoppedUntil(8453, 1_000) == ?1_600;
+    assert g.stoppedUntil(8453, 1_599) == ?1_600;
+    assert g.stoppedUntil(8453, 1_600) == null;
+    assert g.stoppedUntil(1, 1_000) == null;
+  });
+
+  await test("an operator lifts one chain's stop; the others stay; a stop is never shortened", func() : async () {
+    // Mutation: lift lifts nothing, lifts every chain, or reports an ended stop as lifted; a later
+    // stop overwrites a later end with an earlier one.
+    let g = EvmSender.GasStops(600);
+    g.stop(8453, 1_000);
+    g.stop(1, 1_000);
+    assert g.lift(8453, 1_100);
+    assert g.stoppedUntil(8453, 1_100) == null;
+    assert g.stoppedUntil(1, 1_100) == ?1_600;
+    assert not g.lift(8453, 1_100); // not stopped any more
+    assert not g.lift(1, 1_600); // ended at 1_600
+    g.stop(10, 2_000);
+    g.stop(10, 1_500); // an earlier end does not replace the later one
+    assert g.stoppedUntil(10, 2_500) == ?2_600;
+    g.stop(10, 2_100); // a later one extends it
+    assert g.stoppedUntil(10, 2_650) == ?2_700;
+    assert not Gateway.Gateway(config(null, null), canisterP).liftEvmGasStop(8453); // no sender
+  });
+
+  await test("a broadcast the canister cannot pay gas for is told apart; the stop's refusal is final", func() : async () {
+    // Mutation: isInsufficientGas misses classifySend's text or matches other errors; the stop text
+    // invites a retry (@ic402/client would read it as transient) or drops the chain or the end.
+    switch (EvmSender.classifySend(#Consistent(#Ok(#InsufficientFunds)), "0xab")) {
+      case (#err(e)) {
+        assert EvmSender.isInsufficientGas(e);
+        assert not EvmSender.transientSendError(e);
+        assert Text.contains(e, #text "signed tx 0xab"); // named, to check before any hand re-send
+      };
+      case (_) { assert false };
+    };
+    // A refusal whose nonce then moved may have been accepted: never read as "failed before broadcast".
+    assert not EvmSender.isInsufficientGas(EvmSender.GAS_REFUSAL_NONCE_MOVED);
+    assert not EvmSender.isInsufficientGas(EvmSender.FEE_DATA_UNAVAILABLE # " — not broadcasting (retry later)");
+    assert not EvmSender.isInsufficientGas(EvmSender.LOW_INBOUND_CYCLES);
+    assert not EvmSender.isInsufficientGas("Insufficient cycles to safely broadcast and confirm; top up the canister");
+    assert EvmSender.isInsufficientGas("EIP-3009 execution failed: " # EvmSender.INSUFFICIENT_GAS # " — x"); // a prefixed one too
+    let t = EvmSender.gasStopText(8453, 1_600);
+    assert Text.contains(t, #text "chain 8453") and Text.contains(t, #text "until 1600");
+    assert Text.contains(t, #text "Nothing of this was signed or sent");
+    assert not Text.contains(t, #text "retry this same payment");
+    assert not EvmSender.isInsufficientGas(t);
+    // The stable prefix, for integrators: the text starts with it, and a wrapped one still matches.
+    assert Text.startsWith(t, #text(EvmSender.GAS_STOP_PREFIX));
+    assert EvmSender.isGasStopped("EIP-3009 execution failed: " # t);
+    assert not EvmSender.isGasStopped(EvmSender.SIMULATION_BUSY);
+    assert not EvmSender.isGasStopped(EvmSender.INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas");
+  });
+
+  await test("weaker evidence of a gas shortage stops the chain too: a provider error, or a disagreement where none accepted", func() : async () {
+    // Mutation: gasShortageReported reads only the agreed status, ignores error text, or stops when
+    // a provider accepted the tx (or answered a nonce too low or high, which may mean it is in).
+    let funds = func(m : Text) : EvmRpc.SendRawTransactionResult { #Err(#JsonRpcError({ code = -32000; message = m })) };
+    let other = funds("upstream request timed out");
+    assert EvmSender.gasShortageReported(#Consistent(#Ok(#InsufficientFunds)));
+    assert EvmSender.gasShortageReported(#Consistent(funds("Insufficient funds for gas * price + value")));
+    assert not EvmSender.gasShortageReported(#Consistent(other));
+    assert not EvmSender.gasShortageReported(#Consistent(#Ok(#NonceTooHigh)));
+    assert EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), #Ok(#InsufficientFunds)), (#Provider(2), other)]));
+    assert EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), other), (#Provider(2), funds("insufficient funds for transfer"))]));
+    assert not EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), #Ok(#InsufficientFunds)), (#Provider(2), #Ok(#Ok(?"0xab")))]));
+    assert not EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), #Ok(#InsufficientFunds)), (#Provider(2), #Ok(#NonceTooLow))]));
+    assert not EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), #Ok(#NonceTooHigh)), (#Provider(2), #Ok(#InsufficientFunds))]));
+    assert not EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), other), (#Provider(2), other)]));
+    // Other clients' wording; an HTTP error body is not read.
+    // Mutation: the Nethermind or Besu wording dropped, or every error's text read.
+    assert EvmSender.gasShortageReported(#Consistent(funds("InsufficientFunds, Balance is zero, cannot pay gas")));
+    assert EvmSender.gasShortageReported(#Consistent(funds("Upfront cost exceeds account balance")));
+    assert not EvmSender.gasShortageReported(#Consistent(#Err(#HttpOutcallError(#InvalidHttpJsonRpcResponse({ status = 502; body = "insufficient funds"; parsingError = null })))));
+    assert not EvmSender.gasShortageReported(#Consistent(funds("insufficient fee to replace the transaction")));
+    assert not EvmSender.gasShortageReported(#Consistent(funds("exceeds block gas limit")));
+    assert not EvmSender.gasShortageReported(#Inconsistent([(#Provider(1), #Ok(#InsufficientFunds)), (#Provider(2), #Ok(#Ok(null)))])); // accepted, no hash echoed
+  });
+
+  await test("the sender refuses every send on a stopped chain before signing, and an inbound transfer before its checks' outcalls", func() : async () {
+    // Mutation: sendTransaction or executeTransferWithAuthorization skips the stop or checks it
+    // after the cycle floor (the interpreter traps reading cycles), the sender's window is not 10
+    // minutes, or a second stop adds an entry instead of replacing the chain's.
+    let snd = EvmSender.EvmSender("k", null);
+    snd.gasStops.stop(84532, 0); // the interpreter's clock is 0
+    assert snd.gasStops.stoppedUntil(84532, 0) == ?600;
+    switch (await snd.sendErc20Transfer(84532, tokenA, canisterEvm, 5)) {
+      case (#err(e)) { assert e == EvmSender.gasStopText(84532, 600) };
+      case (_) { assert false };
+    };
+    let nonce = Array.tabulate<Nat8>(32, func(_) = 1);
+    switch (await snd.executeTransferWithAuthorization(84532, tokenA, EvmUtils.hexToBytes(signer), EvmUtils.hexToBytes(canisterEvm), 5000, 0, 9_999_999_999, nonce, 27, Blob.toArray(realR), Blob.toArray(realS))) {
+      case (#err(e)) { assert e == EvmSender.gasStopText(84532, 600) };
+      case (_) { assert false };
+    };
+    snd.gasStops.stop(84532, 0);
+    assert snd.gasStops.size() == 1;
+  });
+
+  await test("an expired EVM session whose close a gas stop refuses reopens for the sweep, at either leg; nothing is signed", func() : async () {
+    // Mutation: either close site (settle leg, refund leg) keeps the busy-lock-only rule inline, or
+    // the stop is not checked first (the interpreter traps reading cycles).
+    for ((consumed, leg) in [(1_000, "settle"), (0, "refund")].vals()) {
+      let snd = EvmSender.EvmSender("k", null);
+      snd.gasStops.stop(84532, 0);
+      let m = mkSessions(?snd);
+      // A recipient other than the canister's own address, so the settle leg is not skipped (E10a).
+      m.loadStable([{ evmSession("sess-1", "0x4444444444444444444444444444444444444444", 5000, consumed) with status = #expired }]);
+      switch (await m.closeSessionInternal("sess-1")) {
+        case (#settlementFailed(t)) {
+          assert Text.contains(t, #text ("EVM " # leg # " failed — nothing broadcast, session reopened"));
+          assert EvmSender.isGasStopped(t);
+        };
+        case (_) { assert false };
+      };
+      switch (m.getSession("sess-1")) { case (?s) { assert s.status == #open }; case (null) { assert false } };
+    };
   });
 });

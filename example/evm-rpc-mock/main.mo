@@ -31,7 +31,8 @@
 ///                                            so the caller's robust-median fee logic runs
 ///   setFeeMode(#unavailable)                 every provider errors → the send refuses
 ///                                            BEFORE broadcasting (2.22.0)
-///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds)
+///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds
+///               | #insufficientFundsInconsistent)
 ///                                            how eth_sendRawTransaction answers
 ///   setPendingNonce(?n)                      pin eth_getTransactionCount(#Pending) at n;
 ///                                            null (default) = advance by one per call
@@ -112,6 +113,9 @@ persistent actor EvmRpcMock {
     // 2.22.0: the agreeing providers say the gas account is unfunded. The library re-reads the
     // pending nonce: moved past the tx → #maybeSent; not moved → #err (nothing broadcast).
     #insufficientFunds;
+    // 2.23.2: the providers disagree — one says the gas account is unfunded, one fails — and none
+    // accepted. The library reports #maybeSent, and stops the chain (gasShortageReported).
+    #insufficientFundsInconsistent;
   };
 
   // ── scriptable state ──
@@ -216,6 +220,9 @@ persistent actor EvmRpcMock {
       case (#nonceTooHigh) { #Consistent(#Ok(#NonceTooHigh)) };
       case (#nonceTooLow) { #Consistent(#Ok(#NonceTooLow)) };
       case (#insufficientFunds) { #Consistent(#Ok(#InsufficientFunds)) };
+      case (#insufficientFundsInconsistent) {
+        #Inconsistent([(#Provider(1 : Nat64), #Ok(#InsufficientFunds)), (#Provider(2 : Nat64), #Err(#JsonRpcError({ code = -32000; message = "upstream request timed out" })))]);
+      };
       case (#ok) { #Consistent(#Ok(#Ok(?mockTxHash(sentTxs.size())))) };
     };
   };
