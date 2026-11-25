@@ -343,7 +343,7 @@ await suite("M10: registerService and settlement time", func() : async () {
 // sent again: the reverted tx is recorded on the job. A #Verified job — left by a failed settle —
 // is now settled by the sweep too (before, only a controller could move it).
 
-type EvmOutcome = { #confirmed; #reverted; #pending; #err; #busy };
+type EvmOutcome = { #confirmed; #reverted; #pending; #err; #busy; #stopped; #noGas };
 var evmScript : [EvmOutcome] = [#confirmed];
 var evmCalls = 0;
 func evmPlay(seq : [EvmOutcome]) { evmScript := seq; evmCalls := 0 };
@@ -356,6 +356,8 @@ func evmHook(_ : Nat, _ : Text, _ : Text, _ : Nat) : async { #confirmed : Text; 
     case (#pending) { #pending("0xwait") };
     case (#err) { #err("rpc down before broadcast") };
     case (#busy) { #err(EvmSender.SEND_BUSY) };
+    case (#stopped) { #err(EvmSender.gasStopText(8453, 600)) };
+    case (#noGas) { #err(EvmSender.INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas for broadcasts.") };
   };
 };
 
@@ -573,6 +575,25 @@ await suite("round 3: the sweep backs off instead of giving up", func() : async 
     let refund = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
     await sweeps(refund, 7);
     assert status(refund) == ?#Refunded;
+  });
+
+  await test("2.23.2: a gas stop's refusal is not counted; the signed failure that set the stop is", func() : async () {
+    // Mutation: the sweep counts a gas-stop refusal as a payment failure (after 5 ticks of a
+    // 10-minute stop the job waits an hour), or treats the signed "Insufficient ETH for gas" failure
+    // as busy (re-sent every tick without the hourly back-off, though a provider may have taken it).
+    evmPlay([#stopped, #stopped, #stopped, #stopped, #stopped, #stopped, #confirmed]);
+    let settle = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    await sweeps(settle, 7);
+    assert status(settle) == ?#Settled;
+    evmPlay([#stopped, #stopped, #stopped, #stopped, #stopped, #stopped, #confirmed]);
+    let refund = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    await sweeps(refund, 7);
+    assert status(refund) == ?#Refunded;
+    evmPlay([#noGas, #noGas, #noGas, #noGas, #noGas, #confirmed]);
+    let counted = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    await sweeps(counted, 7);
+    assert evmCalls == 5; // five counted tries, then it waits for the next hour
+    assert status(counted) != ?#Settled;
   });
 });
 

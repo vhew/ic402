@@ -1358,6 +1358,12 @@ persistent actor KnowledgeBase {
     gate.liftEvmPayerCooldown(chainId, token, from);
   };
 
+  /// 2.23.2: lift the gas stop on a chain (see Gateway.liftEvmGasStop). Controller-only.
+  public shared (msg) func liftEvmGasStop(chainId : Nat) : async Bool {
+    requireController(msg.caller);
+    gate.liftEvmGasStop(chainId);
+  };
+
   /// The address the gateway's OWN outbound sender signs from — the one that must equal the
   /// published recipient. Derived here through the same path the gateway holds.
   public shared (msg) func gatewaySenderAddress() : async { #ok : Text; #err : Text } {

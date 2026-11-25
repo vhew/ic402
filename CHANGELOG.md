@@ -1,5 +1,137 @@
 # Changelog
 
+## v2.23.2 — 2026-11-25
+
+Patch, EVM rail. The canister no longer signs again and again on a chain it cannot pay gas on.
+Upgrade if your canister settles EVM payments, opens EVM sessions or sends EVM payouts. No
+stored-state change (`STABLE_SCHEMA_VERSION` stays 1). `example.did` adds `liftEvmGasStop`.
+Raised by EngramX after 2.23.1; an adversarial pre-release review widened the fix to every send.
+
+### Upgrade notes: read before upgrading
+
+- **Fund gas on every chain you list in `evmChains`, or leave the chain out.** Listing a chain
+  offers it to every payer. A broadcast there that reports the canister's EVM address short of the
+  chain's native token now stops every send on that chain for 10 minutes (see Fixed). That covers
+  inbound payments and session deposits, and also closes, refunds, sweeps and payouts. Once the
+  address is funded and the top-up confirmed, lift the stop early with `liftEvmGasStop(chainId)`:
+  the next send signs.
+- **Sends refused by a stop wait instead of parking.** An expired session whose close the stop
+  refuses (nothing signed) is reopened, and the 60 s sweep retries it, with no outcall or signature
+  while the stop lasts. It closes by itself on the first tick after the stop ends or is lifted.
+  The job sweep likewise no longer counts a stop's refusal as a failed payout. Without this, every
+  expired session would have parked in `#closing` with no transaction recorded, needing a manual
+  recovery each (`forceResolveSession` plus hand-sent transfers).
+- **The send that sets the stop is handled as before.** It was signed, and a provider that already
+  saw a top-up may have accepted it, so it is not re-sent unattended. A timer close parks in
+  `#closing`, and a job counts a failed payout. Its error now names the signed transaction: check
+  that hash on chain before resending by hand (recovery runbook, "no parked tx").
+
+### Fixed
+
+- **On a chain the canister could not pay gas on, it signed every time.** Every send signs before
+  the broadcast can tell whether the canister can pay the gas. The simulation that 2.23.1 runs
+  before an inbound transfer is an `eth_call` without a gas price, so it doesn't check either. The
+  EVM-RPC canister has no typed `eth_getBalance`, and reading the balance would cost one more
+  outcall per payment. On a chain where the canister's EVM address held no native token:
+  - **any wallet holding the payment's amount of the token** passed the simulation. The canister
+    read its nonce and the fees and signed (~26B cycles with `key_1`), then the broadcast failed.
+    Nothing moved, so the wallet could repeat it. No cooldown applied, and the simulation budget's
+    token was not given back, so the budget was the only bound: about 14,400 signatures a day, on
+    the order of 400T cycles, until the 500B inbound floor. Honest EVM payments on every chain were
+    refused meanwhile, with the budget spent.
+  - **a session payer's close failed before broadcast and reopened the session** "safe to retry".
+    The payer could close again at once, each time signing, bounded only by the send lock and the
+    120B broadcast floor.
+
+  Before 2.23.1 the inbound path was open on custom-provider chains (such as 43114) with no budget
+  at all; on the default-provider chains the nonce read failed first.
+
+  Now `sendTransaction` stops a chain for 10 minutes when a broadcast reports the canister short of
+  gas (`EvmSender.GasStops`, `gasShortageReported`). That is any of:
+  - an agreed InsufficientFunds, unless the account's pending nonce is then seen to have moved;
+  - an agreed provider error saying "insufficient funds";
+  - providers that disagree, where at least one says so and none accepted the transaction.
+
+  While a chain is stopped, every send on it is refused before signing, and an inbound transfer
+  also before its simulation and budget. A chain without gas costs one signature per 10 minutes.
+
+### Behaviour changes
+
+- **The refusal while a chain is stopped** reads "This canister cannot pay gas on chain … refused
+  until … (Unix seconds)". Its start is `EvmSender.GAS_STOP_PREFIX`; match on that or on
+  `isGasStopped`, not the rest of the wording. Nothing was signed or sent.
+  - Settle returns it as `#settlementFailed`, freeing the authorization, server nonce and daily
+    reservation. Over the example's HTTP routes it is `errorReason: "invalid_transaction_state"`:
+    final, because the operator has to act. It comes before the busy-lock check, so it is never
+    turned into a "retry".
+  - A session open returns it as `#err`.
+  - A close returns it in `#settlementFailed`. When no leg of the close moved funds, the session
+    reopens, whoever asked for the close (`Sessions.reopenAfterUnsentLeg`,
+    `EvmSender.sendCanWait`).
+  - The job sweep counts it as busy: the payout is put back and retried on the next tick,
+    uncounted, like the busy send lock.
+  - Sweeps and other outbound sends return it as `#err`.
+- **The failed send that sets the stop** keeps its result.
+  - After an agreed InsufficientFunds it is an `#err` whose text starts with `INSUFFICIENT_GAS`
+    ("Insufficient ETH for gas"). The text now names the signed tx ("refused signed tx 0x…").
+  - On an inbound payment it also gains "Payments and sends on chain … are refused for the next
+    10 minutes, or until the operator lifts the stop."
+  - After weaker evidence the send stays maybe-sent (polled, never re-sent) and carries no gas
+    wording.
+  - The maybe-sent reason after a refusal whose nonce then moved no longer contains
+    `INSUFFICIENT_GAS` (`GAS_REFUSAL_NONCE_MOVED`).
+
+### Added
+
+- `Gateway.liftEvmGasStop(chainId) : Bool` lifts a chain's gas stop, returning true when one was in
+  force. It is an operator method: restrict it to controllers. The example exposes it
+  controller-only.
+- `EvmSender.GasStops`, `GAS_STOP_SECONDS` (600), `GAS_STOP_PREFIX`, `gasStopText`,
+  `isGasStopped`, `gasShortageReported`, `sendCanWait`, `INSUFFICIENT_GAS`, `isInsufficientGas` and
+  `GAS_REFUSAL_NONCE_MOVED`. `isGasStopped` and `isInsufficientGas` also match a text a caller
+  prefixed. `sendCanWait` takes a send's raw error and matches only a refusal made before signing.
+- The EVM-RPC mock's `setSendMode(#insufficientFundsInconsistent)`.
+
+### Known residuals
+
+- **One signature per 10 minutes per chain without gas,** plus that send's reads, for as long as
+  the chain stays listed and unfunded. A refused send costs no outcall.
+- **Each waiting session and job still costs a little every tick:** a few self-calls of
+  instructions, with no outcall, on the order of tens of billions of cycles a day each (an
+  estimate). The cost lasts as long as gas is missing and grows with the number waiting.
+- **A waiting session is `#open`.** It holds its payer's concurrency slot (`maxConcurrentSessions`,
+  default 1), so that payer cannot open another session until gas is back. `forceResolveSession`
+  and `reconcileSession` refuse it.
+- **A chain abandoned unfunded drains slowly into manual recovery.** After each stop ends, the
+  first send signs, fails and re-arms the stop. If that send is a timer close, its session parks
+  (above). So the expired sessions park one per 10 minutes, each to be resolved by hand.
+- **The send that sets the stop may have landed.** Under the 2-of-3 threshold a provider that
+  already saw a top-up can accept it while two refuse, and the nonce re-read can miss it. It is not
+  re-sent unattended (a timer close parks, a payout counts and backs off as before); its error names
+  the signed tx. A payer's close still reopens after it, as it did before 2.23.2.
+- **The stop is transient.** An upgrade forgets it, as does `setEvmDerivationPath` replacing the
+  sender; the next failing broadcast sets it again. A sender built separately (such as
+  `EvmSenderAt`) has its own stops.
+- **A false stop is possible.** A fee spike, or several pending transactions each reserving their
+  gas, can make a marginal balance fall short; one provider wrongly reporting "insufficient funds"
+  while the others fail can do the same. Either delays sends on that chain for up to 10 minutes,
+  or until lifted. No funds move because of it. As after any send that fails before broadcast,
+  some cases still need manual recovery:
+  - a close whose settle leg went out and whose refund leg is then refused rests in `#closing` with
+    no transaction to reconcile (recovery runbook, "no parked tx");
+  - an Upto job whose operator payment went out and whose remainder refund is then refused ends
+    `#Settled` with the remainder unsent and a log line;
+  - after weaker evidence, the send that set the stop is maybe-sent, so that close or payout parks
+    with its tx for the usual confirm-only recovery.
+- **The wording match is a list.** A client whose "insufficient funds" error uses other words, and
+  which the EVM-RPC canister does not map to InsufficientFunds, sets no stop. That send stays
+  maybe-sent, bounded by the payer's 5-minute hold.
+- **`/verify` and the 402 challenge still offer a stopped chain,** as they do for a cooling payer.
+- **The simulation budget is still shared** (a 2.23.1 residual). Anyone can hold it at zero with
+  unfunded wallets, at roughly 24T cycles a day, refusing honest EVM payments meanwhile. An
+  operator-set daily ceiling was considered and not added: it caps that cost only by extending the
+  outage to the end of the day.
+
 ## v2.23.1 — 2026-11-25
 
 Patch, EVM rail. Two things:

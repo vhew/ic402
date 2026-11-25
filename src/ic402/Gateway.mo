@@ -315,6 +315,23 @@ module {
       };
     };
 
+    /// 2.23.2: lift the gas stop on `chainId`. When a broadcast on a chain reports that the
+    /// canister's EVM address cannot pay the gas, every send on that chain is refused before signing
+    /// for 10 minutes (EvmSender.GasStops): inbound payments and session deposits (before their
+    /// simulation), and closes, refunds, sweeps and payouts. A timer close refused by the stop
+    /// reopens the session, and the job sweep keeps a refused payout uncounted; both are retried
+    /// each tick with no outcall until the stop ends (EvmSender.sendCanWait). The send that set the
+    /// stop was signed, so it is handled as any failure (a timer close parks, a payout counts); its
+    /// error names the signed tx to check. Lift only once the top-up is confirmed: the next send
+    /// signs. True when a stop was in force. OPERATOR op: a consumer must restrict it to its
+    /// controllers.
+    public func liftEvmGasStop(chainId : Nat) : Bool {
+      switch (evmSenderInst) {
+        case (?s) { s.gasStops.lift(chainId, Int.abs(Time.now() / 1_000_000_000)) };
+        case (null) { false };
+      };
+    };
+
     // 2.22.0 (E3): Sessions reads the sender through a getter, like the recipient, so it always
     // uses the CURRENT one. It was handed the construction-time sender, which setEvmDerivationPath
     // then replaced — so session deposits, closes and reconciles signed from the empty-path address
@@ -823,7 +840,9 @@ module {
     /// payment"); a payer cooling down after its sent transfer reverted (an hour) or did not confirm
     /// within the polls (5 minutes) (#policyDenied, final for now); and as #settlementFailed — the
     /// canister below 500B cycles, a spent check budget, or a simulation that
-    /// reverts (final) or gives no agreed answer ("retry this same payment"). Nothing of any of
+    /// reverts (final) or gives no agreed answer ("retry this same payment"). 2.23.2: also as
+    /// #settlementFailed, final for now, a chain the canister could not pay gas on in the last 10
+    /// minutes (EvmSender.GasStops, "This canister cannot pay gas on chain …"). Nothing of any of
     /// these was sent. See EvmSender's "Simulate before signing".
     ///
     /// Interleaving: this method awaits (EVM broadcast + confirmation poll / ICP ledger call).

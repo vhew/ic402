@@ -61,6 +61,7 @@ type SendRawTransactionResult =
 type SendMode = 
  variant {
    insufficientFunds;
+   insufficientFundsInconsistent;
    nonceTooHigh;
    nonceTooLow;
    ok;
@@ -341,7 +342,8 @@ type AccessListEntry =
 ///                                            so the caller's robust-median fee logic runs
 ///   setFeeMode(#unavailable)                 every provider errors → the send refuses
 ///                                            BEFORE broadcasting (2.22.0)
-///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds)
+///   setSendMode(#ok | #nonceTooHigh | #nonceTooLow | #insufficientFunds
+///               | #insufficientFundsInconsistent)
 ///                                            how eth_sendRawTransaction answers
 ///   setPendingNonce(?n)                      pin eth_getTransactionCount(#Pending) at n;
 ///                                            null (default) = advance by one per call

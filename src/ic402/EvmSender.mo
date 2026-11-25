@@ -29,6 +29,14 @@ module {
   /// re-broadcast. #ok: accepted, with its hash.
   public type SendOutcome = { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } };
 
+  /// 2.23.2: the start of the error a broadcast gets when the canister's EVM address cannot pay
+  /// the gas (classifySend). sendTransaction then stops sends on that chain (GasStops).
+  public let INSUFFICIENT_GAS : Text = "Insufficient ETH for gas";
+
+  /// 2.23.2: true when `err` is, or contains (a caller may prefix it), the error of a broadcast the
+  /// canister could not pay gas for.
+  public func isInsufficientGas(err : Text) : Bool { Text.contains(err, #text INSUFFICIENT_GAS) };
+
   /// 2.21.1: classify an eth_sendRawTransaction result. Only failures raised before anything was
   /// sent are #err. Everything after dispatch is #maybeSent, because a send is not idempotent: a
   /// node whose copy arrives after another node's copy was included answers "nonce too low" for
@@ -53,7 +61,9 @@ module {
       };
       // Queued in the mempool (nonce ahead) — it can still mine.
       case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
-      case (#Consistent(#Ok(#InsufficientFunds))) { #err("Insufficient ETH for gas — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast.") };
+      case (#Consistent(#Ok(#InsufficientFunds))) {
+        #err(INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast. The agreeing providers refused signed tx " # broadcastTxHash # "; one that already saw a top-up could have accepted it, so check that hash is not on chain before sending the same transfer again by hand.");
+      };
       // Raised by the EVM-RPC canister before any provider was called.
       case (#Consistent(#Err(#ProviderError(e)))) { #err("RPC error before sending: " # EvmRpc.rpcErrorToText(#ProviderError(e))) };
       case (#Consistent(#Err(#ValidationError(e)))) { #err("RPC error before sending: " # EvmRpc.rpcErrorToText(#ValidationError(e))) };
@@ -61,6 +71,38 @@ module {
       case (#Consistent(#Err(e))) { #maybeSent({ txHash = broadcastTxHash; reason = "RPC error after dispatch (may have broadcast): " # EvmRpc.rpcErrorToText(e) }) };
       // Providers disagree — one may have accepted the tx into its mempool.
       case (#Inconsistent(_)) { #maybeSent({ txHash = broadcastTxHash; reason = "Inconsistent RPC responses (a provider may have accepted the tx)" }) };
+    };
+  };
+
+  /// 2.23.2: whether a send's result reports the canister short of gas: an InsufficientFunds
+  /// status, or a node's JSON-RPC error worded as one (geth/Erigon "insufficient funds",
+  /// Nethermind "InsufficientFunds", Besu "Upfront cost exceeds account balance"; an HTTP error
+  /// body is not read), agreed, or from at least one provider when the providers disagree and none
+  /// of them accepted the tx (an accepted tx, or a nonce too low or too high, which may mean it is
+  /// in). sendTransaction then stops the chain (GasStops); the send's own outcome is unchanged
+  /// (classifySend). A stop sends nothing, so weak evidence is enough; while it lasts, sends on the
+  /// chain wait (a timer close and the job sweep retry them, see sendCanWait).
+  public func gasShortageReported(r : EvmRpc.MultiSendRawTransactionResult) : Bool {
+    func says(x : EvmRpc.SendRawTransactionResult) : Bool {
+      switch (x) {
+        case (#Ok(#InsufficientFunds)) { true };
+        case (#Err(#JsonRpcError({ message }))) {
+          let m = Text.toLowercase(message);
+          Text.contains(m, #text "insufficient funds") or Text.contains(m, #text "insufficientfunds") or Text.contains(m, #text "upfront cost exceeds");
+        };
+        case (_) { false };
+      };
+    };
+    switch (r) {
+      case (#Consistent(x)) { says(x) };
+      case (#Inconsistent(results)) {
+        var reported = false;
+        for ((_, x) in results.vals()) {
+          switch (x) { case (#Ok(#Ok(_)) or #Ok(#NonceTooLow) or #Ok(#NonceTooHigh)) { return false }; case (_) {} };
+          if (says(x)) { reported := true };
+        };
+        reported;
+      };
     };
   };
 
@@ -358,6 +400,81 @@ module {
   /// 2.23.1: the refusal below MIN_INBOUND_CYCLES.
   public let LOW_INBOUND_CYCLES : Text = "The canister's cycles are below its reserve for new inbound payments (500B), which it keeps for closes and refunds. Nothing was signed or sent; the operator must top up the canister.";
 
+  /// 2.23.2: how long sends on a chain are refused after a broadcast there found the canister
+  /// unable to pay gas (GasStops).
+  public let GAS_STOP_SECONDS : Nat = 600;
+
+  /// 2.23.2: the start of every gas-stop refusal (gasStopText). Stable: match on it, or use
+  /// `isGasStopped`, rather than on the rest of the wording.
+  public let GAS_STOP_PREFIX : Text = "This canister cannot pay gas on chain ";
+
+  /// 2.23.2: the refusal while a chain's gas stop is in force (GasStops). Final for now: the
+  /// operator has to fund the address, so it does not invite a retry.
+  public func gasStopText(chainId : Nat, untilSeconds : Nat) : Text {
+    GAS_STOP_PREFIX # Nat.toText(chainId) # " right now: a transaction it broadcast there failed because its EVM address holds too little of the chain's native token. Payments and sends on this chain are refused until " # Nat.toText(untilSeconds) # " (Unix seconds), or until the operator funds that address and lifts the stop. Nothing of this was signed or sent.";
+  };
+
+  /// 2.23.2: true when `err` is, or contains (a caller may prefix it), a gas-stop refusal.
+  public func isGasStopped(err : Text) : Bool { Text.contains(err, #text GAS_STOP_PREFIX) };
+
+  /// 2.23.2: the reason of a send whose broadcast was refused for lack of gas but whose account
+  /// nonce then moved (it may have been accepted: #maybeSent). Worded without INSUFFICIENT_GAS, so
+  /// nothing reads it as a send that failed before broadcast.
+  public let GAS_REFUSAL_NONCE_MOVED : Text = "The providers reported too little ETH for gas, but the account's pending nonce has since moved past this tx's nonce — a provider may have accepted it; confirming instead of re-sending";
+
+  /// 2.23.2: a send's raw #err (as sendTransaction returned it, unprefixed) that was refused before
+  /// anything was signed and clears without its caller: the busy send lock (seconds), or a gas stop
+  /// (until the operator funds the address, or 10 minutes). A timer close reopens the session for
+  /// the next tick (Sessions.reopenAfterUnsentLeg), and the job sweep retries the payout uncounted,
+  /// instead of parking or counting it. Not the failure that set the stop ("Insufficient ETH for
+  /// gas"): that tx was signed, and a provider that already saw a top-up may have accepted it, so
+  /// it is handled as any other failure (a timer close parks, a payout counts). Matched as a
+  /// prefix, so text a caller controls (an address quoted in an error) cannot pass for it.
+  public func sendCanWait(err : Text) : Bool { isSendBusy(err) or Text.startsWith(err, #text GAS_STOP_PREFIX) };
+
+  /// 2.23.2: the chains where a broadcast recently failed because the canister's EVM address could
+  /// not pay the gas. Every send signs before the broadcast can tell, and the simulation before an
+  /// inbound transfer runs without a gas price, so on a chain the canister holds no native token on:
+  /// - every payment from a wallet holding the token passed the simulation, was signed (~26B cycles
+  ///   with key_1) and failed at the broadcast; nothing moved, so the wallet could repeat it, held
+  ///   back only by the simulation budget;
+  /// - a session payer's close failed before broadcast and reopened the session, so the payer could
+  ///   close again, each time signing.
+  /// sendTransaction sets a stop when a broadcast reports the canister short of gas
+  /// (gasShortageReported; for an agreed InsufficientFunds, unless the account's pending nonce is
+  /// then seen to have moved). While it is in force every send on that chain is refused before
+  /// signing (a pre-broadcast #err, which every caller handles as "nothing sent"), and an inbound
+  /// transfer before its simulation. A chain without gas costs one signature per `seconds`. A stop
+  /// is never shortened by a later one. One entry per chain a broadcast reached. Transient: an
+  /// upgrade forgets it.
+  public class GasStops(seconds : Nat) {
+    var stops : [(Nat, Nat)] = []; // (chainId, until), in Unix seconds
+
+    /// Stop sends on `chainId` from `nowSeconds`; an existing, later end is kept.
+    public func stop(chainId : Nat, nowSeconds : Nat) {
+      var until = nowSeconds + seconds;
+      for ((c, u) in stops.vals()) { if (c == chainId and u > until) { until := u } };
+      stops := Array.append(Array.filter<(Nat, Nat)>(stops, func((c, _) : (Nat, Nat)) : Bool { c != chainId }), [(chainId, until)]);
+    };
+
+    /// The end of `chainId`'s stop when it is in force at `nowSeconds`.
+    public func stoppedUntil(chainId : Nat, nowSeconds : Nat) : ?Nat {
+      for ((c, u) in stops.vals()) { if (c == chainId and nowSeconds < u) { return ?u } };
+      null;
+    };
+
+    /// Lift `chainId`'s stop (an operator's call, once the address is funded). True when one was
+    /// in force.
+    public func lift(chainId : Nat, nowSeconds : Nat) : Bool {
+      let was = stoppedUntil(chainId, nowSeconds) != null;
+      stops := Array.filter<(Nat, Nat)>(stops, func((c, _) : (Nat, Nat)) : Bool { c != chainId });
+      was;
+    };
+
+    /// Number of chains remembered (ended stops included until the chain is stopped or lifted again).
+    public func size() : Nat { stops.size() };
+  };
+
   /// 2.23.1: the payers with an inbound EIP-3009 transfer in flight on this sender — at most one per
   /// (chainId, token, from) — and the payers cooling down.
   ///
@@ -608,6 +725,11 @@ module {
     // 2.23.1: at most 10 refused simulations at once, one more every 6 seconds (SimulationBudget).
     let simulationBudget : SimulationBudget = SimulationBudget(10, 6);
 
+    /// 2.23.2: the chains where a broadcast just failed for lack of gas (see GasStops). Set and
+    /// checked by sendTransaction; also checked by executeTransferWithAuthorization before the
+    /// simulation.
+    public let gasStops : GasStops = GasStops(GAS_STOP_SECONDS);
+
     // 2.22.0 (F1): the account nonce each tx this sender signed was sent with, by lower-case tx
     // hash, so reconcileTransaction can tell a tx whose nonce another tx took from one still pending.
     // Bounded: the oldest of BROADCAST_NONCE_CAP entries is overwritten. Transient — after an
@@ -696,6 +818,12 @@ module {
       calldata : [Nat8],
       gasLimit : Nat,
     ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
+      // 2.23.2: a chain the canister just could not pay gas on (GasStops): refused before signing,
+      // for every send. Pre-broadcast #err: nothing moves, callers roll back as for any other.
+      switch (gasStops.stoppedUntil(chainId, Int.abs(Time.now() / 1_000_000_000))) {
+        case (?until) { return #err(gasStopText(chainId, until)) };
+        case (null) {};
+      };
       // Cycle floor (see MIN_BROADCAST_CYCLES): never broadcast a tx we can't afford to confirm.
       // Pre-broadcast #err => no funds move and callers roll back safely.
       if (Cycles.balance() < MIN_BROADCAST_CYCLES) {
@@ -825,10 +953,18 @@ module {
               };
             } catch (_) { false };
             if (moved) {
-              #maybeSent({ txHash = broadcastTxHash; reason = "Insufficient ETH for gas was reported, but the account's pending nonce has since moved past this tx's nonce — a provider may have accepted it; confirming instead of re-sending" });
-            } else { outcome };
+              #maybeSent({ txHash = broadcastTxHash; reason = GAS_REFUSAL_NONCE_MOVED });
+            } else {
+              gasStops.stop(chainId, Int.abs(Time.now() / 1_000_000_000)); // 2.23.2 (GasStops)
+              outcome;
+            };
           };
-          case (_) { outcome };
+          case (_) {
+            // 2.23.2: weaker evidence of a gas shortage (a provider error, or a disagreement where
+            // none accepted) stops the chain too; the outcome (maybe sent) is unchanged.
+            if (gasShortageReported(sendResult)) { gasStops.stop(chainId, Int.abs(Time.now() / 1_000_000_000)) };
+            outcome;
+          };
         };
       } catch (e) {
         // Exception BEFORE the broadcast (pubkey / nonce / fee / signing) — no tx sent.
@@ -952,13 +1088,19 @@ module {
       );
       // 2.23.1: sign only what the chain says will succeed (see "Simulate before signing"). The
       // cheap refusals come first, so they cost no outcall: an authorization that expires too soon,
-      // a busy send lock (sendTransaction checks it again), cycles below the inbound reserve, and an
-      // exhausted simulation budget. Every refusal here is #err: nothing was signed or broadcast.
+      // a chain the canister just could not pay gas on (2.23.2, GasStops; final, so before the
+      // busy lock's "retry"), a busy send lock (sendTransaction checks both again), cycles below
+      // the inbound reserve, and an exhausted simulation budget. Every refusal here is #err:
+      // nothing was signed or broadcast.
       let nowSeconds = Int.abs(Time.now() / 1_000_000_000);
       if (EvmUtils.hexToBytes(tokenAddress).size() != 20) {
         return #err("Invalid token address (expected 20 bytes): " # tokenAddress # "; nothing was signed or sent");
       };
       if (expiresTooSoon(validBefore, nowSeconds)) { return #err(EXPIRES_TOO_SOON) };
+      switch (gasStops.stoppedUntil(chainId, nowSeconds)) {
+        case (?until) { return #err(gasStopText(chainId, until)) };
+        case (null) {};
+      };
       if (txInProgress) { return #err(INBOUND_SEND_BUSY) };
       if (Cycles.balance() < MIN_INBOUND_CYCLES) { return #err(LOW_INBOUND_CYCLES) };
       if (not simulationBudget.take(nowSeconds)) { return #err(SIMULATION_BUSY) };
@@ -979,6 +1121,9 @@ module {
         case (#err(e)) {
           if (isSendBusy(e)) { #err(INBOUND_SEND_BUSY) } else if (transientSendError(e)) {
             #err(e # " Nothing of this payment was sent — retry this same payment shortly.");
+          } else if (isInsufficientGas(e)) {
+            // 2.23.2: sendTransaction has stopped sends on this chain (GasStops).
+            #err(e # " Payments and sends on chain " # Nat.toText(chainId) # " are refused for the next " # Nat.toText(GAS_STOP_SECONDS / 60) # " minutes, or until the operator lifts the stop.");
           } else { #err(e) };
         };
         case (#maybeSent(m)) { simulationBudget.giveBack(); #maybeSent(m) };
