@@ -24,6 +24,7 @@ import SchnorrSigner "SchnorrSigner";
 import EvmEscrow "EvmEscrow";
 import EvmRpc "EvmRpc";
 import EvmSender "EvmSender";
+import EvmSplits "EvmSplits";
 import EvmUtils "EvmUtils";
 import Eip712 "Eip712";
 import Debug "mo:base/Debug";
@@ -239,6 +240,10 @@ module {
     var receiptCounter : Nat = 0;
     // 2.21.0 (default OFF): see setLedgerDedup. Transient: re-apply at init.
     var ledgerDedup = false;
+    // 2.24.0: the operator's ceiling on a split payee's finder share, in basis points (see
+    // setEvmSplitCeiling); null = settleToSplit refuses every payment. Transient, like
+    // setLedgerDedup: re-apply after an upgrade.
+    var evmSplitCeilingBps : ?Nat = null;
     // Self-derived EVM address (from tECDSA key). Populated by deriveEvmRecipient().
     var evmRecipient : ?Text = null;
     // Live EVM chain set (see setEvmChains). Starts as the constructor config's evmChains;
@@ -851,13 +856,62 @@ module {
     /// it and recorded only with a receipt (I6). EVM settles are metered by the GLOBAL facilitator
     /// token bucket and can return #policyDenied("Rate limited…") under load; ICP settles are not.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
-      await* settleCore(signature, expectedAmount, false);
+      await* settleCore(signature, expectedAmount, false, null);
     };
+
+    /// 2.24.0: settle an EVM charge the payer sent to a split payee instead of to this canister:
+    /// the 0xSplits push split (v2.2, no owner) paying `split.finder` its `split.finderShareBps`
+    /// (basis points of 10,000) and this canister's EVM address the rest (EvmSplits). The canister
+    /// recomputes that split's address and accepts the payment only when the authorization's `to`
+    /// is exactly it. Everything else is `settle`: the signature, the exact amount, the simulation,
+    /// the payer slot, the gas stop, the confirmation. The receipt's `recipient` is the split, and
+    /// its `amount` the full payment; this canister's share arrives when someone distributes the
+    /// split (ic402 does not deploy or distribute splits).
+    ///
+    /// Refused before anything is signed (#policyDenied): split payees off (no ceiling, see
+    /// setEvmSplitCeiling), a chain other than Base and Base Sepolia, a share of 0 or above the
+    /// ceiling, a zero-address finder, or the paid token as finder. A `to` that is not that split:
+    /// #invalidSignature. ICP: #networkNotSupported.
+    ///
+    /// TRUSTED CALLER ONLY: take the finder and share from your own records (the referral codes
+    /// you honour), never from the payment or the request, or any payer can name itself finder and
+    /// take the share as a discount. Do not expose it on a public facilitator route. Not for
+    /// session deposits, which must reach the canister's own address. NOT FOR JOBS: never pass its
+    /// receipt to ServiceRegistry.createJobFromReceipt or submitRequest. The receipt's amount is the
+    /// full payment, but only the seller's share reaches the canister (later), so a job refund or
+    /// payout would pay the difference out of other funds.
+    public func settleToSplit(signature : Types.PaymentSignature, expectedAmount : ?Nat, split : EvmSplits.SplitPayee) : async Types.PaymentResult {
+      if (not isEvmNetwork(signature.network)) {
+        return #networkNotSupported("settleToSplit is for EVM payments only, not " # signature.network);
+      };
+      await* settleCore(signature, expectedAmount, false, ?split);
+    };
+
+    /// 2.24.0: set the ceiling on a split payee's finder share, in basis points (1 to 9,999), or
+    /// null to turn split payees off (the default). settleToSplit refuses a share above it. It also
+    /// bounds the discount a buyer gets by referring itself. Transient: re-apply after an upgrade.
+    /// OPERATOR op: a consumer must restrict it to its controllers.
+    public func setEvmSplitCeiling(bps : ?Nat) : { #ok; #err : Text } {
+      switch (bps) {
+        case (?b) {
+          if (b == 0 or b >= EvmSplits.TOTAL_ALLOCATION) {
+            return #err("The ceiling must be between 1 and 9999 basis points (the seller keeps the rest), or null to turn split payees off");
+          };
+        };
+        case (null) {};
+      };
+      evmSplitCeilingBps := bps;
+      #ok;
+    };
+
+    /// 2.24.0: the ceiling setEvmSplitCeiling set; null while split payees are off.
+    public func evmSplitCeiling() : ?Nat { evmSplitCeilingBps };
 
     // The body of `settle`, shared with settleFrom as `async*` so neither adds a self-send hop.
     // `payerIsCaller`: true only from settleFrom, which has checked that the caller is the named
     // sender. 2.21.0: only then is a pending charge's transfer stored or re-sent (setLedgerDedup).
-    func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat, payerIsCaller : Bool) : async* Types.PaymentResult {
+    // `split`: 2.24.0, settleToSplit's split payee; null = the payment must be to this canister.
+    func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat, payerIsCaller : Bool, split : ?EvmSplits.SplitPayee) : async* Types.PaymentResult {
       // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
       // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
       // bogus payloads on ANY paid path (/content, /search, /settle) cannot run unmetered ecRecover
@@ -977,7 +1031,8 @@ module {
         // control), pass signature verification, have the canister pay gas to
         // broadcast it, and still receive a valid receipt + access grant while the
         // merchant receives nothing. This is the core EVM payment-bypass fix.
-        if (not EvmUtils.addressesEqual(authz.to, canisterEvmAddr)) {
+        // 2.24.0: settleToSplit checks its split instead, below, once the chain and token are known.
+        if (split == null and not EvmUtils.addressesEqual(authz.to, canisterEvmAddr)) {
           nonceManager.unlock(signature.nonce);
           return #invalidSignature("EIP-3009 recipient (to) must be the canister's EVM address (" # canisterEvmAddr # ")");
         };
@@ -1013,6 +1068,25 @@ module {
           case (null) {
             nonceManager.unlock(signature.nonce);
             return #invalidSignature("Unsupported asset " # tokenAddr # " on chain " # Nat.toText(chainId));
+          };
+        };
+        // 2.24.0 (settleToSplit): the recipient must be exactly the split of (finder, this
+        // canister, share), with the payee allowed by the operator's ceiling (EvmSplits.splitPayTo).
+        // `splitRecipient` keeps the computed address (lowercase, 0x) for the receipt.
+        var splitRecipient : ?Text = null;
+        switch (split) {
+          case (null) {};
+          case (?sp) {
+            switch (EvmSplits.splitPayTo(chainId, sp.finder, canisterEvmAddr, sp.finderShareBps, tokenAddr, evmSplitCeilingBps)) {
+              case (#err(e)) { nonceManager.unlock(signature.nonce); return #policyDenied(e) };
+              case (#ok(splitAddr)) {
+                if (not EvmUtils.addressesEqual(authz.to, splitAddr)) {
+                  nonceManager.unlock(signature.nonce);
+                  return #invalidSignature("EIP-3009 recipient (to) must be the split " # splitAddr # " paying finder " # sp.finder # " " # Nat.toText(sp.finderShareBps) # " basis points and this canister (" # canisterEvmAddr # ") the rest");
+                };
+                splitRecipient := ?splitAddr;
+              };
+            };
           };
         };
         let verified = Eip712.verifyAuthorization(
@@ -1135,7 +1209,7 @@ module {
                 amount;
                 token = tokenAddr;
                 sender = authz.from;
-                recipient = canisterEvmAddr;
+                recipient = switch (splitRecipient) { case (null) { canisterEvmAddr }; case (?a) { a } }; // 2.24.0: the split
                 network = signature.network;
                 timestamp = Time.now();
                 txHash = ?txHash;
@@ -1165,12 +1239,12 @@ module {
                 };
                 case (#used) {
                   nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
-                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, but the authorization is already used on chain: another transaction executed it (an earlier attempt, or anyone who copied it — transferWithAuthorization can be submitted by anyone), or the payer cancelled it. Funds may have reached the canister. No receipt is issued. Payments from this payer are refused for 5 minutes. Do NOT re-sign or pay again — check the chain for payer " # authz.from # "'s authorization before taking a new payment.");
+                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, but the authorization is already used on chain: another transaction executed it (an earlier attempt, or anyone who copied it — transferWithAuthorization can be submitted by anyone), or the payer cancelled it. Funds may have arrived. No receipt is issued. Payments from this payer are refused for 5 minutes. Do NOT re-sign or pay again — check the chain for payer " # authz.from # "'s authorization before taking a new payment.");
                 };
                 case (#unknown(e)) {
                   sender.inFlightPayers.coolDown(payerKey, Int.abs(Time.now() / 1_000_000_000), EvmSender.REVERT_COOLDOWN_SECONDS);
                   nonceManager.markOutcomeUnknown(signature.nonce); // no longer in flight
-                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, and whether another transaction executed the authorization could not be checked (" # e # "). Funds may have reached the canister. No receipt is issued. Payments from this payer are refused for an hour. Do NOT re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused.");
+                  return #settlementPending("EIP-3009 transfer tx " # txHash # " reverted, and whether another transaction executed the authorization could not be checked (" # e # "). Funds may have arrived. No receipt is issued. Payments from this payer are refused for an hour. Do NOT re-sign or pay again until the token's authorizationState for payer " # authz.from # " shows the authorization unused.");
                 };
               };
             };
@@ -1395,7 +1469,7 @@ module {
       if (not isEvmNetwork(signature.network) and signature.sender != Principal.toText(caller)) {
         return #policyDenied("Not authorized: this payment names sender " # signature.sender # " but was submitted by " # Principal.toText(caller) # " — on the ICP rail the caller must be the paying principal");
       };
-      await* settleCore(signature, expectedAmount, not isEvmNetwork(signature.network));
+      await* settleCore(signature, expectedAmount, not isEvmNetwork(signature.network), null);
     };
 
     // ── Session (delegates to Sessions module) ──

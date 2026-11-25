@@ -1364,6 +1364,21 @@ persistent actor KnowledgeBase {
     gate.liftEvmGasStop(chainId);
   };
 
+  /// 2.24.0: the split-payee ceiling, in basis points, or null for off (see
+  /// Gateway.setEvmSplitCeiling). Controller-only.
+  public shared (msg) func setEvmSplitCeiling(bps : ?Nat) : async { #ok; #err : Text } {
+    requireController(msg.caller);
+    gate.setEvmSplitCeiling(bps);
+  };
+
+  /// 2.24.0: settle an EVM charge paid to a split payee (see Gateway.settleToSplit). Controller-
+  /// only, because the finder and share must come from the operator's own records, never from the
+  /// payer: a real integrator calls it from its own paid route with the codes it honours.
+  public shared (msg) func settleToSplit(sig : Ic402.PaymentSignature, expectedAmount : ?Nat, finder : Text, finderShareBps : Nat) : async Ic402.PaymentResult {
+    requireController(msg.caller);
+    await gate.settleToSplit(sig, expectedAmount, { finder; finderShareBps });
+  };
+
   /// The address the gateway's OWN outbound sender signs from — the one that must equal the
   /// published recipient. Derived here through the same path the gateway holds.
   public shared (msg) func gatewaySenderAddress() : async { #ok : Text; #err : Text } {

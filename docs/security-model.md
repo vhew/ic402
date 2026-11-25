@@ -16,7 +16,7 @@
 
 The *unprivileged* attack surface is well defended. These were probed adversarially and held:
 
-- **Recipient binding (C‑1).** EVM settlement requires the EIP‑3009 `authorization.to` to equal the canister's own derived EVM address — a payer can't make the canister pay gas for a self‑transfer and still get a receipt.
+- **Recipient binding (C‑1).** EVM settlement requires the EIP‑3009 `authorization.to` to equal the canister's own derived EVM address — a payer can't make the canister pay gas for a self‑transfer and still get a receipt. **2.24.0:** the one exception is `settleToSplit`, off until the operator sets a share ceiling: `to` may be the owner‑less 0xSplits push split of (finder, this canister, share), recomputed by the canister. Its finder and share must come from the integrator's own records — a caller that lets the payer choose them lets any payer name itself finder and take up to the ceiling as a discount.
 - **Exact value.** `authorization.value` must *equal* the required amount (x402 v2 §6.1.2), not merely cover it — overpayment is rejected.
 - **Replay.** Server nonces are single‑use and bound to `(expiry, amount, network, token)`; the EVM rail also relies on the on‑chain single‑use EIP‑3009 nonce and EIP‑155 chain‑id.
 - **Finality before delivery.** `settle()` issues a receipt only on a confirmed (`status == 1`) transaction; a mempool ack is not treated as settlement.
