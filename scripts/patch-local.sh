@@ -5,6 +5,10 @@
 # Shared by: scripts/setup.sh and deploy/deploy.sh
 # Source this file, then call patch_for_local / restore_source.
 #
+# Identity: its icp calls pass --identity "$IC402_LOCAL_IDENTITY" when the sourcing script sets it
+# (setup.sh and setup-evm-outbound.sh do), because icp's default identity is machine-wide. When it
+# is unset (deploy/deploy.sh), they run as before, as the default identity.
+#
 # What it patches:
 #   - ckUSDC ledger principal (mainnet → local)
 #   - EVM chain IDs (mainnet → testnet)
@@ -144,7 +148,7 @@ patch_evm_rpc() {
   if [ -z "$evm_rpc_id" ]; then
     local attempts=0
     while [ $attempts -lt 5 ]; do
-      evm_rpc_id=$(icp canister status evm_rpc -e local --id-only 2>/dev/null || echo "")
+      evm_rpc_id=$(icp canister status evm_rpc -e local ${IC402_LOCAL_IDENTITY:+--identity "$IC402_LOCAL_IDENTITY"} --id-only 2>/dev/null || echo "")
       if [ -n "$evm_rpc_id" ]; then break; fi
       attempts=$((attempts + 1))
       echo "  Waiting for EVM RPC canister... (attempt $attempts/5)"
@@ -164,7 +168,7 @@ patch_evm_rpc() {
 patch_evm_recipient() {
   EVM_ADDR=""
   local raw_output pubkey_hex
-  raw_output=$(icp canister call example getEvmPublicKey '()' -e local 2>/dev/null || echo "")
+  raw_output=$(icp canister call example getEvmPublicKey '()' -e local ${IC402_LOCAL_IDENTITY:+--identity "$IC402_LOCAL_IDENTITY"} 2>/dev/null || echo "")
   pubkey_hex=$(echo "$raw_output" | tr -d '\n (),' | awk -F'"' '{print $2}' | tr -d '\\')
 
   # Validate hex pubkey format (33 bytes compressed = 66 hex, or 65 bytes uncompressed = 130 hex)

@@ -132,8 +132,12 @@ else
   echo "  test-payer: OK"
 fi
 
-icp identity default local-dev >/dev/null 2>&1
-MY_PRINCIPAL=$(icp identity principal)
+# icp's default identity is machine-wide: every project on this machine shares it, and another
+# project's deploy may be relying on it at this moment. So this script never changes it, and every
+# icp call below that acts as an identity names one. patch-local.sh, sourced below, reads
+# IC402_LOCAL_IDENTITY too.
+IC402_LOCAL_IDENTITY=local-dev
+MY_PRINCIPAL=$(icp identity principal --identity "$IC402_LOCAL_IDENTITY")
 PAYER_PRINCIPAL=$(icp identity principal --identity test-payer 2>/dev/null || echo "")
 echo "  Deployer: $MY_PRINCIPAL"
 echo "  Payer:    $PAYER_PRINCIPAL"
@@ -233,11 +237,11 @@ if [ -f "$INIT_CANDID" ] && [ -n "$MY_PRINCIPAL" ] && [ "$MY_PRINCIPAL" != "$PLA
 fi
 
 # Deploy ckUSDC ledger
-if icp canister status ckusdc_ledger -e local >/dev/null 2>&1; then
-  CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --id-only)
+if icp canister status ckusdc_ledger -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
+  CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 else
-  icp deploy ckusdc_ledger -e local >/dev/null 2>&1
-  CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --id-only)
+  icp deploy ckusdc_ledger -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1
+  CKUSDC_ID=$(icp canister status ckusdc_ledger -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 fi
 # M18: the ledger has deployed from the patched init args — restore the pristine candid now so the
 # working tree stays clean (no tracked-file modification for a contributor to accidentally commit).
@@ -245,11 +249,11 @@ restore_ckusdc_candid
 echo "  ckUSDC ledger: $CKUSDC_ID"
 
 # Deploy EVM RPC canister (needed for cross-chain EVM payments)
-if icp canister status evm_rpc -e local >/dev/null 2>&1; then
-  EVM_RPC_ID=$(icp canister status evm_rpc -e local --id-only)
+if icp canister status evm_rpc -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
+  EVM_RPC_ID=$(icp canister status evm_rpc -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 else
-  icp deploy evm_rpc -e local >/dev/null 2>&1
-  EVM_RPC_ID=$(icp canister status evm_rpc -e local --id-only)
+  icp deploy evm_rpc -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1
+  EVM_RPC_ID=$(icp canister status evm_rpc -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 fi
 echo "  EVM RPC:       $EVM_RPC_ID"
 
@@ -268,11 +272,11 @@ if [ ! -f "$ZK_WASM" ] && command -v cargo &>/dev/null; then
   fi
 fi
 if [ -f "$ZK_WASM" ]; then
-  if icp canister status zk_verifier -e local >/dev/null 2>&1; then
-    ZK_ID=$(icp canister status zk_verifier -e local --id-only)
+  if icp canister status zk_verifier -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
+    ZK_ID=$(icp canister status zk_verifier -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
   else
-    icp deploy zk_verifier -e local >/dev/null 2>&1
-    ZK_ID=$(icp canister status zk_verifier -e local --id-only 2>/dev/null || echo "")
+    icp deploy zk_verifier -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1
+    ZK_ID=$(icp canister status zk_verifier -e local --identity "$IC402_LOCAL_IDENTITY" --id-only 2>/dev/null || echo "")
   fi
   if [ -n "$ZK_ID" ]; then
     echo "  ZK verifier:   $ZK_ID"
@@ -296,13 +300,13 @@ patch_for_local "$CKUSDC_ID"
 # moc -> wasm-opt -> a locals-budget check; we then install the optimized module directly.
 deploy_example_optimized() {
   bash "$SCRIPT_DIR/build-example.sh" .icp/example.wasm
-  icp canister create example -e local >/dev/null 2>&1 || true
-  icp canister install example --wasm .icp/example.wasm --mode reinstall -e local
+  icp canister create example -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1 || true
+  icp canister install example --wasm .icp/example.wasm --mode reinstall -e local --identity "$IC402_LOCAL_IDENTITY"
 }
 
 # First pass — need it installed for the tECDSA EVM-address derivation
 deploy_example_optimized
-EXAMPLE_ID=$(icp canister status example -e local --id-only)
+EXAMPLE_ID=$(icp canister status example -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 echo "  Example canister: $EXAMPLE_ID"
 
 # Derive tECDSA EVM address, re-patch main.mo, and re-deploy (re-optimized)
@@ -320,7 +324,7 @@ echo ""
 
 # Add test-payer as controller (so MCP can upload content)
 if [ -n "$PAYER_PRINCIPAL" ]; then
-  if icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local >/dev/null 2>&1; then
+  if icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
     echo "  test-payer: added as controller"
   else
     echo "  test-payer: already a controller"
@@ -332,7 +336,7 @@ fi
 # Mint ckUSDC to test-payer
 if icp canister call ckusdc_ledger icrc1_transfer \
   "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 1_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
-  -e local >/dev/null 2>&1; then
+  -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
   echo "  test-payer: 1 ckUSDC minted"
 else
   echo "  WARNING: Failed to mint ckUSDC to test-payer"

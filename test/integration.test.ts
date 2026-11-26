@@ -421,10 +421,13 @@ describe('ic402 integration', () => {
 
     // 2.21.0: the realistic unknown outcome — a ledger stopped (mid-upgrade) rejects with
     // CANISTER_ERROR, which cannot be told apart from a trap after the transfer committed. The
-    // local ckUSDC ledger is stopped with the icp CLI (the deployer identity controls it) and
+    // local ckUSDC ledger is stopped with the icp CLI as local-dev, the deployer that controls it
+    // (named explicitly: icp's default identity is machine-wide and may be another project's), and
     // always restarted. The example runs with setLedgerDedup(true).
     const ledgerCmd = (verb: 'stop' | 'start') =>
-      execSync(`icp canister ${verb} ckusdc_ledger -e local`, { stdio: 'pipe' });
+      execSync(`icp canister ${verb} ckusdc_ledger -e local --identity local-dev`, {
+        stdio: 'pipe',
+      });
     async function whileLedgerStopped<T>(fn: () => Promise<T>): Promise<T> {
       ledgerCmd('stop');
       try {

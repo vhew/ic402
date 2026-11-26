@@ -66,7 +66,7 @@ export function getCanisterId(name: string): string {
   // Try icp CLI
   try {
     const { execSync } = require('child_process');
-    return execSync(`icp canister status ${name} -e local --id-only`, {
+    return execSync(`icp canister status ${name} -e local --id-only --identity local-dev`, {
       encoding: 'utf-8',
       timeout: 5000,
     }).trim();

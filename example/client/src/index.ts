@@ -74,10 +74,13 @@ async function main(): Promise<void> {
     if (!canisterId) {
       try {
         const { execSync } = await import('node:child_process');
-        canisterId = execSync('icp canister status example -e local --id-only', {
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }).trim();
+        canisterId = execSync(
+          'icp canister status example -e local --id-only --identity local-dev',
+          {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          },
+        ).trim();
       } catch {
         console.error('ERROR: Could not detect local canister ID.');
         console.error('  Run: pnpm setup:local');
@@ -89,7 +92,7 @@ async function main(): Promise<void> {
       try {
         const { execSync } = await import('node:child_process');
         process.env.CKUSDC_LEDGER = execSync(
-          'icp canister status ckusdc_ledger -e local --id-only',
+          'icp canister status ckusdc_ledger -e local --id-only --identity local-dev',
           {
             encoding: 'utf-8',
             stdio: ['pipe', 'pipe', 'pipe'],
