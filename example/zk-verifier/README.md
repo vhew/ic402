@@ -19,7 +19,7 @@ The WASM output is at `target/wasm32-unknown-unknown/release/zk_verifier.wasm`.
 ## Deploy
 
 ```bash
-icp deploy zk_verifier -e local
+icp deploy zk_verifier -e local --identity local-dev
 ```
 
 Or add to your `icp.yaml`:

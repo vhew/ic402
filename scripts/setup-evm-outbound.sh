@@ -38,6 +38,10 @@ cd "$PROJECT_ROOT"
 . "$PROJECT_ROOT/scripts/lib/toolchain-path.sh"
 sanitize_project_path "$PROJECT_ROOT"
 
+# Every icp call names its identity: icp's default identity is machine-wide, shared with other
+# projects on this machine (see setup.sh). patch-local.sh, sourced below, reads it too.
+IC402_LOCAL_IDENTITY=local-dev
+
 echo "--- EVM-outbound test fixture ---"
 
 # ── Preflight: a local deploy must already be up ──
@@ -45,7 +49,7 @@ if ! icp network status >/dev/null 2>&1; then
   echo "  ERROR: no local replica reachable. Run \`pnpm setup:local\` first." >&2
   exit 1
 fi
-if ! EXAMPLE_ID=$(icp canister status example -e local --id-only 2>/dev/null); then
+if ! EXAMPLE_ID=$(icp canister status example -e local --identity "$IC402_LOCAL_IDENTITY" --id-only 2>/dev/null); then
   echo "  ERROR: example canister not deployed. Run \`pnpm setup:local\` first." >&2
   exit 1
 fi
@@ -61,9 +65,9 @@ echo "  moc compile mock -> .icp/evm_rpc_mock.wasm"
 # an un-installable module.
 node scripts/check-wasm-locals.js .icp/evm_rpc_mock.wasm "${IC402_LOCALS_BUDGET:-1900}"
 
-icp canister create evm_rpc_mock -e local >/dev/null 2>&1 || true
-icp canister install evm_rpc_mock --wasm .icp/evm_rpc_mock.wasm --mode reinstall -e local >/dev/null
-MOCK_ID=$(icp canister status evm_rpc_mock -e local --id-only)
+icp canister create evm_rpc_mock -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1 || true
+icp canister install evm_rpc_mock --wasm .icp/evm_rpc_mock.wasm --mode reinstall -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null
+MOCK_ID=$(icp canister status evm_rpc_mock -e local --identity "$IC402_LOCAL_IDENTITY" --id-only)
 echo "  EVM RPC mock: $MOCK_ID"
 
 # ── 2. Re-patch example → mock, then 3. rebuild + reinstall ──
@@ -76,13 +80,13 @@ patch_evm_rpc "$MOCK_ID"
 
 echo "  rebuild + reinstall example (pointed at the mock)..."
 bash "$PROJECT_ROOT/scripts/build-example.sh" .icp/example.wasm >/dev/null
-icp canister install example --wasm .icp/example.wasm --mode reinstall -e local >/dev/null
+icp canister install example --wasm .icp/example.wasm --mode reinstall -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null
 # Headroom (2.23.1): an EVM settle or session open ties up hundreds of billions of cycles while its
 # calls are in flight, far beyond the ~17B it nets (docs/costs-and-rails.md §2). The suite's burst
 # test holds about ten inbound checks in flight at once: from around 5T the canister could no longer
 # make its calls ("could not perform self call"), and from the default creation balance its last
 # session open failed as "EVM fee data unavailable". Local cycles only.
-icp canister top-up --amount 25t example -e local >/dev/null
+icp canister top-up --amount 25t example -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null
 
 # ── 4. restore source (also handled by the trap) ──
 restore_source

@@ -17,11 +17,15 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Every icp call names its identity: icp's default identity is machine-wide, shared with other
+# projects on this machine (see setup.sh).
+IC402_LOCAL_IDENTITY=local-dev
+
 # Source environment if available
 [ -f .env.development ] && . .env.development
 
 # Resolve canister and identity
-EXAMPLE_ID=$(icp canister status example -e local --id-only 2>/dev/null || echo "")
+EXAMPLE_ID=$(icp canister status example -e local --identity "$IC402_LOCAL_IDENTITY" --id-only 2>/dev/null || echo "")
 PAYER_PRINCIPAL=$(icp identity principal --identity test-payer 2>/dev/null || echo "")
 
 if [ -z "$EXAMPLE_ID" ]; then
@@ -39,21 +43,21 @@ icp identity export test-payer > .local/test-payer.pem 2>/dev/null
 echo "  PEM exported: .local/test-payer.pem"
 
 # 2. Ensure controller
-if icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local >/dev/null 2>&1; then
+if icp canister settings update example --add-controller "$PAYER_PRINCIPAL" -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1; then
   echo "  Controller: added test-payer"
 else
   echo "  Controller: test-payer (already set)"
 fi
 
 # 3. Clean up expired sessions
-icp canister call "$EXAMPLE_ID" closeExpiredSessions '()' -e local >/dev/null 2>&1 || true
+icp canister call "$EXAMPLE_ID" closeExpiredSessions '()' -e local --identity "$IC402_LOCAL_IDENTITY" >/dev/null 2>&1 || true
 
 # 4. Mint ckUSDC. Check the RESULT variant, not just the exit code: a non-minter transfer
 # returns `Err` while the CLI still exits 0, so an exit-code-only check would print a false
 # "Funded" and leave the payer at 0 (this is exactly what broke CI before the setup.sh minter fix).
 MINT_OUT=$(icp canister call ckusdc_ledger icrc1_transfer \
   "(record { to = record { owner = principal \"$PAYER_PRINCIPAL\"; subaccount = null }; amount = 100_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" \
-  -e local 2>&1 || true)
+  -e local --identity "$IC402_LOCAL_IDENTITY" 2>&1 || true)
 if echo "$MINT_OUT" | grep -q "Ok ="; then
   echo "  Funded: 100 ckUSDC to test-payer"
 else

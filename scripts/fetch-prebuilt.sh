@@ -137,21 +137,23 @@ fi
 echo ""
 echo "Generating ledger init args..."
 
-# Resolve the minter principal from the current icp identity.
-MINTER=$(icp identity principal 2>/dev/null || true)
-if [ -z "$MINTER" ]; then
-  echo "  WARNING: could not resolve icp identity principal."
-  echo "  Set your identity first:  icp identity default local-dev"
-  echo "  Then re-run this script."
-  exit 1
-fi
-
 INIT_FILE="$ICP_DIR/ckusdc-ledger-init.candid"
 INIT_LABEL="ckusdc-ledger-init.candid"
 
 if [ "$FORCE" = false ] && [ -f "$INIT_FILE" ]; then
   echo "  $INIT_LABEL: already exists (use --force to re-download)"
 else
+  # The minter is local-dev, the identity setup.sh deploys as. It is named explicitly because icp's
+  # default identity is machine-wide and may belong to another project's run. It is resolved only
+  # here, when the file is generated: the file is tracked, and setup.sh may run this script before
+  # it has created local-dev.
+  MINTER=$(icp identity principal --identity local-dev 2>/dev/null || true)
+  if [ -z "$MINTER" ]; then
+    echo "  WARNING: could not resolve the local-dev identity's principal."
+    echo "  Create it first:  icp identity new local-dev --storage plaintext   (pnpm setup:local does this)"
+    echo "  Then re-run this script."
+    exit 1
+  fi
   cat > "$INIT_FILE" <<EOF
 (variant { Init = record {
   token_symbol = "ckUSDC";

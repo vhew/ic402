@@ -1160,10 +1160,13 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
         if (!zkVerifierId) {
           try {
             const { execSync } = await import('node:child_process');
-            zkVerifierId = execSync('icp canister status zk_verifier -e local --id-only', {
-              encoding: 'utf-8',
-              timeout: 5000,
-            }).trim();
+            zkVerifierId = execSync(
+              'icp canister status zk_verifier -e local --id-only --identity local-dev',
+              {
+                encoding: 'utf-8',
+                timeout: 5000,
+              },
+            ).trim();
           } catch {
             /* not deployed */
           }
@@ -1246,7 +1249,7 @@ export function buildSteps(client: Client, canisterId: string, host: string): St
           }
         } else {
           info('ZK verifier canister not deployed — showing the flow description.');
-          info('Deploy with: icp deploy zk_verifier -e local');
+          info('Deploy with: icp deploy zk_verifier -e local --identity local-dev');
           info('');
           state('Flow', 'Register with #ZkGroth16 → submit proof → canister verifies → settles');
           state('Cost', '~$0.005 per Groth16 verification (100-1000x cheaper than Ethereum)');

@@ -15,6 +15,18 @@
   - Intel macOS (`x86_64-apple-darwin`) is no longer a release target: `pnpm install` on an Intel
     Mac warns of an unsupported platform and gets no icp binary.
   - `icp.yaml`'s `$schema` link moves from v1.6.0 to v1.9.0 (the schema is unchanged).
+- **The local scripts no longer change icp's default identity.** `setup:local` used to run
+  `icp identity default local-dev`. That setting is machine-wide, so it changed the identity that
+  every other project on the machine was using, including one in the middle of a mainnet deploy.
+  Every icp call that acts as an identity now names one with `--identity local-dev`. That covers
+  `setup.sh`, `predemo.sh`, `setup-evm-outbound.sh`, `fetch-prebuilt.sh`, the tests' icp calls and
+  the demo client's canister lookups.
+  - `patch-local.sh` names the identity only when the script sourcing it sets
+    `IC402_LOCAL_IDENTITY`, so a script that sources it without setting that variable behaves as
+    before.
+  - After `setup:local`, a bare `icp canister …` runs as whatever your default identity is, not
+    necessarily `local-dev`. Pass `--identity local-dev` for the local canisters.
+  - CONTRIBUTING's mainnet rollback, status and top-up commands now name the identity too.
 
 ## v2.24.0 — 2026-11-25
 
