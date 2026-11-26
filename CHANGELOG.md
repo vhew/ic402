@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Dev tooling
+
+- **icp CLI 1.7.0 → 1.9.0**, as both the devDependency and the CI pin (`ci.yml`, both replica
+  jobs). Dev tooling only: nothing published changes. The reason is RUSTSEC-2026-0387
+  (non-constant-time arithmetic in `crypto-bigint`, which icp uses for identity keys; identity
+  files keep their format). 1.9.0 also refuses some breaking Candid upgrades that 1.7.0 accepted.
+  - The build cache (`.icp/cache/artifacts`) has a new format, and a 1.9.0 `icp canister install`
+    reports a canister built by 1.7.0 as not built until `icp build` runs. `setup:local` already
+    deletes `.icp/cache` and installs `example` and `evm_rpc_mock` with an explicit `--wasm`, so
+    nothing here changes.
+  - Intel macOS (`x86_64-apple-darwin`) is no longer a release target: `pnpm install` on an Intel
+    Mac warns of an unsupported platform and gets no icp binary.
+  - `icp.yaml`'s `$schema` link moves from v1.6.0 to v1.9.0 (the schema is unchanged).
+
 ## v2.24.0 — 2026-11-25
 
 Minor, additive: split payees. `Gateway.settleToSplit` settles an EVM charge the payer sent to a
