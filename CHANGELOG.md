@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v2.24.1 — 2026-11-26
+
+Patch, dev tooling only. The published packages are code-identical to 2.24.0: nothing under
+`src/`, `packages/` or `integrations/` changed, so there is no reason to upgrade beyond keeping
+pins current. No stored-state change (`STABLE_SCHEMA_VERSION` stays 1). Cut at EngramX's request
+so its pins sit on the newest release.
 
 ### Dev tooling
 
@@ -10,15 +15,16 @@
   files keep their format). 1.9.0 also refuses some breaking Candid upgrades that 1.7.0 accepted.
   - The build cache (`.icp/cache/artifacts`) has a new format, and a 1.9.0 `icp canister install`
     reports a canister built by 1.7.0 as not built until `icp build` runs. `setup:local` already
-    deletes `.icp/cache` and installs `example` and `evm_rpc_mock` with an explicit `--wasm`, so
-    nothing here changes.
+    deletes `.icp/cache` and installs `example` with an explicit `--wasm`, and
+    `setup-evm-outbound.sh` does the same for `evm_rpc_mock`, so nothing here changes.
   - Intel macOS (`x86_64-apple-darwin`) is no longer a release target: `pnpm install` on an Intel
     Mac warns of an unsupported platform and gets no icp binary.
   - `icp.yaml`'s `$schema` link moves from v1.6.0 to v1.9.0 (the schema is unchanged).
 - **The local scripts no longer change icp's default identity.** `setup:local` used to run
   `icp identity default local-dev`. That setting is machine-wide, so it changed the identity that
   every other project on the machine was using, including one in the middle of a mainnet deploy.
-  Every icp call that acts as an identity now names one with `--identity local-dev`. That covers
+  Every icp call that acts as an identity now names one: `--identity local-dev`, or
+  `--identity test-payer` for the payer's calls as before. That covers
   `setup.sh`, `predemo.sh`, `setup-evm-outbound.sh`, `fetch-prebuilt.sh`, the tests' icp calls and
   the demo client's canister lookups.
   - `patch-local.sh` names the identity only when the script sourcing it sets
