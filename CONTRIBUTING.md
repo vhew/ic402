@@ -111,6 +111,10 @@ ICP canisters support in-place upgrades with stable memory preservation. If a de
    pnpm install && icp build
    icp canister install example --mode upgrade -e ic --identity <controller>
    ```
+   icp 1.9.0 and later compare the Candid interface you are installing with the deployed one, and
+   stop for confirmation when the change is breaking. A rollback usually is breaking, because it
+   removes the methods the newer release added. Read the reported changes, then confirm, or re-run
+   with `--yes`, which skips that check.
 3. **Verify:** call `getAgentCard()` or hit the HTTP endpoint to confirm rollback.
 4. **If the canister is stuck (trap loop):** use the recovery controller to reinstall:
    ```bash
