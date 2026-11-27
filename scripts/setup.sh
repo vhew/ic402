@@ -65,6 +65,41 @@ fi
 echo "  mops: OK"
 pnpm install --silent 2>/dev/null
 echo "  pnpm: OK"
+echo ""
+
+# ── Identities ──
+# Before the prebuilt fetch below: fetch-prebuilt.sh needs local-dev's principal (the ledger's
+# minter) when it generates the ckUSDC init file.
+
+echo "--- Setting up identities ---"
+echo ""
+EXISTING=$(icp identity list 2>/dev/null | awk '{print ($1 == "*") ? $2 : $1}')
+id_exists() { echo "$EXISTING" | grep -qx "$1"; }
+
+if ! id_exists local-dev; then
+  icp identity new local-dev --storage plaintext
+  echo "  Created: local-dev"
+else
+  echo "  local-dev: OK"
+fi
+
+if ! id_exists test-payer; then
+  icp identity new test-payer --storage plaintext
+  echo "  Created: test-payer"
+else
+  echo "  test-payer: OK"
+fi
+
+# icp's default identity is machine-wide: every project on this machine shares it, and another
+# project's deploy may be relying on it at this moment. So this script never changes it, and every
+# icp call below that acts as an identity names one. patch-local.sh, sourced below, reads
+# IC402_LOCAL_IDENTITY too.
+IC402_LOCAL_IDENTITY=local-dev
+MY_PRINCIPAL=$(icp identity principal --identity "$IC402_LOCAL_IDENTITY")
+PAYER_PRINCIPAL=$(icp identity principal --identity test-payer 2>/dev/null || echo "")
+echo "  Deployer: $MY_PRINCIPAL"
+echo "  Payer:    $PAYER_PRINCIPAL"
+echo ""
 
 # Fetch prebuilt ledger WASM (needed for local ckUSDC)
 PREBUILT_MISSING=false
@@ -109,38 +144,6 @@ if [ -f "$CHECKSUM_FILE" ]; then
 else
   echo "  WARNING: $CHECKSUM_FILE not found — cannot verify prebuilt artifact integrity."
 fi
-echo ""
-
-# ── Identities ──
-
-echo "--- Setting up identities ---"
-echo ""
-EXISTING=$(icp identity list 2>/dev/null | awk '{print ($1 == "*") ? $2 : $1}')
-id_exists() { echo "$EXISTING" | grep -qx "$1"; }
-
-if ! id_exists local-dev; then
-  icp identity new local-dev --storage plaintext
-  echo "  Created: local-dev"
-else
-  echo "  local-dev: OK"
-fi
-
-if ! id_exists test-payer; then
-  icp identity new test-payer --storage plaintext
-  echo "  Created: test-payer"
-else
-  echo "  test-payer: OK"
-fi
-
-# icp's default identity is machine-wide: every project on this machine shares it, and another
-# project's deploy may be relying on it at this moment. So this script never changes it, and every
-# icp call below that acts as an identity names one. patch-local.sh, sourced below, reads
-# IC402_LOCAL_IDENTITY too.
-IC402_LOCAL_IDENTITY=local-dev
-MY_PRINCIPAL=$(icp identity principal --identity "$IC402_LOCAL_IDENTITY")
-PAYER_PRINCIPAL=$(icp identity principal --identity test-payer 2>/dev/null || echo "")
-echo "  Deployer: $MY_PRINCIPAL"
-echo "  Payer:    $PAYER_PRINCIPAL"
 echo ""
 
 # ── Local replica ──

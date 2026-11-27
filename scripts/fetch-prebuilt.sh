@@ -145,13 +145,13 @@ if [ "$FORCE" = false ] && [ -f "$INIT_FILE" ]; then
 else
   # The minter is local-dev, the identity setup.sh deploys as. It is named explicitly because icp's
   # default identity is machine-wide and may belong to another project's run. It is resolved only
-  # here, when the file is generated: the file is tracked, and setup.sh may run this script before
-  # it has created local-dev.
+  # here, when the file is generated (the file is tracked, so most runs never get here). setup.sh
+  # creates local-dev before it calls this script.
   MINTER=$(icp identity principal --identity local-dev 2>/dev/null || true)
   if [ -z "$MINTER" ]; then
-    echo "  WARNING: could not resolve the local-dev identity's principal."
-    echo "  Create it first:  icp identity new local-dev --storage plaintext   (pnpm setup:local does this)"
-    echo "  Then re-run this script."
+    echo "  ERROR: could not resolve the local-dev identity's principal." >&2
+    echo "  Run pnpm setup:local, which creates it, or create it yourself and re-run this script:" >&2
+    echo "    icp identity new local-dev --storage plaintext" >&2
     exit 1
   fi
   cat > "$INIT_FILE" <<EOF

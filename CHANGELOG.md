@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Dev tooling
+
+Three low findings from the 2.24.1 pre-release review. Nothing published changes.
+
+- **`setup:local` creates its identities before it fetches the prebuilt artifacts.**
+  `fetch-prebuilt.sh` needs `local-dev` to generate the ckUSDC ledger's init file. If that file
+  was missing (it is tracked) on a machine without `local-dev`, setup stopped on every run, and
+  the message's advice to run `pnpm setup:local` sent you back into the same failure. The message
+  is now an error on stderr, and that advice now works.
+- **`patch-local.sh` passes the identity as one word, `--identity=<name>`.** The old two-word form
+  came out of its conditional expansion as a single argument under zsh, which icp rejects. The
+  failure was then hidden as "EVM RPC canister not found". The scripts that set the identity
+  today are bash, so nothing had broken yet.
+- **CONTRIBUTING's rollback step says what icp 1.9.0's Candid check does.** A rollback usually
+  removes methods, and icp then stops for confirmation (or `--yes`).
+
 ## v2.24.1 — 2026-11-26
 
 Patch, dev tooling only. The published packages are code-identical to 2.24.0: nothing under
