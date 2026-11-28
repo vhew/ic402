@@ -52,7 +52,7 @@ incident.
 | A charge returned `#policyDenied("A settlement with this payment is already in progress — retry this same payment …")` (2.22.0) | Nothing of this payer's is known to have moved: an attempt naming a **different** payer holds this payment | Not stuck — retry the same payment shortly (preferred), or pay anew |
 | An EVM charge or session open returned `#policyDenied("Another payment from this payer … is still settling … retry this same payment …")`, or a "Could not check this transfer …" / "The canister's budget for checking payments … is spent …" refusal (2.23.1; over HTTP, `errorReason: "settlement_retry"`) | Nothing was signed or sent | Not stuck — retry the same payment shortly |
 | An EVM payer is refused with "This payer's last transfer, sent by this canister, reverted on chain … or has not confirmed yet … refused until …" (2.23.1) | Its sent transfer reverted with the authorization unused (funds moved, a payer with code, or a token paused): an hour. Or the authorization was used — cancelled, or executed first by another transaction, in which case the funds may have arrived — or the transfer had not confirmed within the polls: 5 minutes | Check the chain for the payer's authorization first (§1/§4): if another transaction executed it, the payment arrived without a receipt. Then wait, or once the cause is fixed lift it with `Gateway.liftEvmPayerCooldown(chainId, token, from)`, or every one with `Gateway.clearEvmPayerCooldowns()` (the example's controller-only methods) |
-| An EVM charge, session open, close or sweep failed with "Insufficient ETH for gas …", or is refused with "This canister cannot pay gas on chain … refused until …" (2.23.2) | A stop's refusal sent nothing. The canister's EVM address holds too little of the chain's native token, and every send on that chain is stopped for 10 minutes. The send that failed with "Insufficient ETH for gas" was signed, and a provider may have accepted it | Fund the address (`getEvmAddress()` / the gateway recipient) with the chain's native token, then lift the stop with `Gateway.liftEvmGasStop(chainId)` (the example's controller-only method), or wait 10 minutes; lift only once the top-up is confirmed, since the next send signs. Expired sessions and job payouts the stop refused are retried by their sweeps and go through on the first tick after. The send that failed with "Insufficient ETH for gas" names its signed tx ("refused signed tx 0x…"). Since the release after 2.24.1 a close leg or job payout that failed this way is parked under that tx (the close returns `#settlementPending("EVM … was signed, but the providers refused it for lack of gas …")`): reconcile it with `reconcileSession` (§2) or `reconcileJob` (§6), never by sending it again. Earlier versions reopened a payer's close and retried a payout, and a timer close rested in `#closing` with no parked tx: check that hash on chain first, then §2, "no parked tx". A sweep or other send that failed this way: check the hash on chain before sending the same transfer again. A chain you do not mean to fund belongs out of `evmChains` |
+| An EVM charge, session open, close or sweep failed with "Insufficient ETH for gas …", or is refused with "This canister cannot pay gas on chain … refused until …" (2.23.2) | A stop's refusal sent nothing. The canister's EVM address holds too little of the chain's native token, and every send on that chain is stopped for 10 minutes. The send that failed with "Insufficient ETH for gas" was signed, and a provider may have accepted it | Fund the address (`getEvmAddress()` / the gateway recipient) with the chain's native token, then lift the stop with `Gateway.liftEvmGasStop(chainId)` (the example's controller-only method), or wait 10 minutes; lift only once the top-up is confirmed, since the next send signs. Expired sessions and job payouts the stop refused are retried by their sweeps and go through on the first tick after. The send that failed with "Insufficient ETH for gas" names its signed tx ("refused signed tx 0x…"). Since the release after 2.24.1 a close leg or job payout that failed this way is parked under that tx (the close returns `#settlementPending("EVM … was signed, but the providers refused it for lack of gas …")`): reconcile it with `reconcileSession` (§2) or `reconcileJob` (§6), not by sending it again. Usually it never lands: pay it by hand only once it is shown dead, that is, the hash is not on chain, and the canister's account nonce has moved past it (a transaction the canister sent after it has been mined) or no provider knows the hash (§2, "appears not to have landed"; §6, *A parked tx that never landed*). Earlier versions reopened a payer's close and retried a payout, and a timer close rested in `#closing` with no parked tx: make the same check on that hash first, then §2, "no parked tx". A sweep or other send that failed this way: make the same check before sending the same transfer again. A chain you do not mean to fund belongs out of `evmChains` |
 | ICP `openSession` returned `#err(#settlementPending("Deposit rejected (…) … Session … is parked #closing …"))` (2.21.0) | **Unknown**: the deposit is in that session's escrow subaccount, or never arrived | §7 |
 | ICP close returned `#settlementPending("Settle leg rejected (…)")` (2.20.0), session rests `#closing` | **Unknown**: the escrow is either intact or already settled to the recipient | §7 |
 | ICP close returned `#settlementFailed("Settle: …")` | Nothing moved; session was reverted to `#open` | Not stuck — retry `closeSession` |
@@ -60,6 +60,7 @@ incident.
 | A marketplace job rests in `#Settling` after the expiry sweep's refund or settle (2.22.0) | **Unknown**: the transfer call was rejected, and the transfer may have landed | §6 |
 | Canister log: "ic402 job …: … failed (…); nothing moved. The sweep tries again at most once an hour; a controller can act sooner." (2.22.0) | Nothing moved; the sweep's retries for that job are backing off | §6 |
 | Canister log: "… not sent again — the job is parked #Expired …" (2.22.0) | A refund reverted on-chain: nothing moved, and it is not sent again | §6 |
+| A marketplace job's settle returned `#err("Operator paid but buyer remainder refund failed: …")`, or the canister log shows "ic402 job …: settle to the operator: Operator paid but buyer remainder refund failed: …" | The operator was paid; the buyer's remainder is still in the canister's account (EVM: its EVM address). The job is `#Settled`, nothing records the remainder, and GC deletes the job 24 h after it settled | §6 |
 | EVM close returned `#settlementFailed("EVM settle failed — nothing broadcast, session reopened (safe to retry)")` | Nothing moved; session is `#open` again | Not stuck — retry `closeSession` |
 
 ---
@@ -175,9 +176,11 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      decode the EVM-RPC canister's reply), so nothing tells whether it went out. On a block
      explorer, look for a transfer from the canister's EVM address to the leg's destination sent
      at or after the close (settle: `consumed` to the session's recipient; refund:
-     `deposited − consumed` to the payer's EVM address). Then `forceResolveSession`, and `sweepEvm`
-     only what did not land of the amounts the answer names (after a settle leg, the payer's
-     remainder was never sent).
+     `deposited − consumed` to the payer's EVM address). If none landed, wait until the canister's
+     account nonce has moved past the rejected send (a transaction the canister sent after the
+     close has been mined): until then that transfer can still land. Then `forceResolveSession`,
+     and `sweepEvm` only what did not land of the amounts the answer names (after a settle leg, the
+     payer's remainder was never sent).
    - `#err("Session is #closing but has no parked tx — use forceResolveSession")` → since 2.22.0
      a close still in flight gets the answer above instead, so no close is running. No leg is
      parked, which does **not** prove that nothing was broadcast: the close ended on a path that
@@ -366,13 +369,17 @@ broadcast** (the refund leg) on confirmation. Outcomes:
   the deposit had mined, and the refund's send call was rejected after the refund may have gone
   out. The entry is deliberately not restored. On a block explorer, look for a transfer of the
   deposit's amount from the canister's EVM address to the payer's, sent at or after the call; only
-  if none landed, `sweepEvm` it to the payer.
+  if none landed and the canister's account nonce has moved past the rejected send (a transaction
+  the canister sent after the call has been mined), `sweepEvm` it to the payer. Until then the
+  refund can still land.
 - `#err("refund tx 0x… was signed, but the providers refused it for lack of gas; … the refund may
   have gone out …")` (release after 2.24.1; also in the canister log) → the same branch, with the
   hash: two providers refused the signed refund, but a third may have accepted it. The entry is not
   restored. Fund the canister's EVM address and lift the gas stop (triage), then check that hash on
-  chain; only if it never landed, `sweepEvm` the amount to the payer. Before, this answered
-  "refund failed (nothing broadcast)" and restored the entry, so a retry signed the refund again.
+  chain; only if it never landed and the canister's account nonce has moved past it (a transaction
+  the canister sent after it has been mined) or no provider knows the hash, `sweepEvm` the amount
+  to the payer. Before, this answered "refund failed (nothing broadcast)" and restored the entry,
+  so a retry signed the refund again.
 
 `listPendingEvmDeposits()` enumerates tracked entries (payer, EVM address, chain, token, amount,
 age) for triage; `pendingEvmDepositCount()` is the watch metric.
@@ -472,8 +479,8 @@ the hourly retry. A busy EVM sender is retried at the next tick and not counted,
 is a send refused by a chain's gas stop ("This canister cannot pay gas on chain …"). The signed send
 that failed with "Insufficient ETH for gas" and set the stop is neither counted nor retried: a
 provider may have accepted it, so the job parks under that tx (`#Settling`; an expiry refund
-`#Expired`), for `reconcileJob`. Before the release after 2.24.1 it was counted, and the sweep sent
-it again. Every outcome
+`#Expired`), for `reconcileJob` (usually it never lands: *A parked tx that never landed*, below).
+Before the release after 2.24.1 it was counted, and the sweep sent it again. Every outcome
 other than success is logged; a counted failure reads "ic402 job …: … failed (…); nothing moved.
 The sweep tries again at most once an hour; a controller can act sooner." (or names the next tick
 while under 5). The retry state is in memory: an upgrade, or `resolveDispute` on the job, clears
@@ -517,18 +524,54 @@ the buyer what is left after the operator's cost (`amount − fee − actualCost
 an Upto job, or any job whose `actualCost` is below its price) only after the operator payment
 confirms. A payment that parked (`#Settling` with a parked tx) stopped before that refund, so
 `reconcileJob` does not finalize it when the payment confirms. It answers
-`#err("Settle confirmed on-chain, but the buyer's remainder (N) was never sent. The job stays
-#Settling: refund the buyer by hand, then resolveJob(jobId, #Settled) (tx …)")`, and the job keeps
-its parked tx, so GC keeps it. Send N to the buyer on the job's rail (EVM: `sweepEvm(chainId,
-token, buyer, N)`), then `resolveJob(jobId, #Settled)`. Before the release after 2.24.1
+`#err("Settle confirmed on-chain, but the canister never sent the buyer's remainder (N). The job
+stays #Settling until resolveJob: if you have already refunded it by hand, call resolveJob(jobId,
+#Settled); if not, refund the buyer by hand first (tx …)")`, and the job keeps its parked tx, so GC
+keeps it. The answer repeats on every call until `resolveJob`, so check your own records before
+paying: send N to the buyer on the job's rail (EVM: `sweepEvm(chainId, token, buyer, N)`) once,
+then `resolveJob(jobId, #Settled)`. Before the release after 2.24.1
 `reconcileJob` marked such a job `#Settled` with the remainder unsent, and GC deleted the job 24 h
 later; the remainder stayed in the canister's EVM address.
+
+**An operator payment that went through, then the buyer's remainder refund failed.** After the
+operator is paid, `settleJob` refunds the buyer's remainder in the same call. When that refund fails
+(a ledger `#Err`, an EVM send refused before broadcast or by a gas stop, a refund that reverted
+on-chain, or a buyer with no refundable rail), the refund moved nothing, but the operator is paid,
+so the job is marked `#Settled` and the settle answers `#err("Operator paid but buyer remainder
+refund failed: …")`. The expiry sweep's settle logs the same text after "ic402 job …: settle to the
+operator:". Nothing retries the refund or records it. The remainder stays in the canister's account (EVM: its
+EVM address), and GC deletes the job 24 h after it settled. Within those 24 h:
+1. Find the remainder: `getJob(jobId)` gives `amount`, `actualCost` and `buyer`, and the remainder
+   is `amount − fee − actualCost − fee`, with `fee` the registry's `ledgerFee()`. An EVM job's
+   chain and token are its payment receipt's network and token.
+2. Refund it by hand on the job's rail (EVM: `sweepEvm(chainId, token, buyer, remainder)`; ICP: a
+   transfer from the canister's account to the buyer's).
+3. Record it outside the canister (job id, buyer, amount, your transfer). The job never shows the
+   refund, and GC deletes the record itself a day after the settle.
 
 **A parked tx that reverted.** `reconcileJob` cannot finalize a parked tx that reverted on-chain.
 Since 2.22.0 `resolveJob` accepts any job that carries a parked tx, not only `#Settling`: a refund
 parked on an `#Expired` job, or an Upto remainder parked on a `#Settled` one. Verify the outcome,
 settle what is owed by hand, then `resolveJob`; it clears the parked tx so the job becomes
 GC-eligible.
+
+**A parked tx that never landed (release after 2.24.1).** A job transfer that was signed but
+refused for gas ("Insufficient ETH for gas … refused signed tx 0x…") parks under that tx: an
+operator payment or a controller's refund `#Settling`, an expiry refund `#Expired`, and a remainder
+refund on its `#Settled` job. In the usual case no provider accepted it, and it never lands.
+`reconcileJob` only polls the receipt and has no "not landed" answer (unlike `reconcileSession`),
+so it answers `#err("Parked tx still pending — stay parked (tx …)")` for good. Resolve it by hand:
+1. Check that the hash is not on chain, **and** that the canister's account nonce has moved past
+   it (a transaction the canister sent after it has been mined) or that no provider knows the
+   hash. Until then the parked tx can still land, and paying by hand pays twice.
+2. Pay what it was moving, on the job's rail (EVM: `sweepEvm`, on the chain and token of the job's
+   parked tx). An operator payment: the operator's cost (`actualCost`, or `amount − fee` without
+   one) to its payout address (`getOperatorEvmPayout`), and the buyer's remainder if there is one,
+   since the settle stopped before it. A refund: `amount − fee` to the buyer. A remainder refund:
+   the remainder to the buyer.
+3. `resolveJob(jobId, #Settled)` after an operator payment or a remainder refund,
+   `resolveJob(jobId, #Refunded)` after a refund. It clears the parked tx, so GC can reclaim the
+   job.
 
 **Upgrading to 2.22.0.** On the first sweep after the upgrade, `#Submitted` `#BuyerConfirm` jobs
 whose dispute window (> 0) has already passed are paid to the operator, and `#Verified` jobs an

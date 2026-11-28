@@ -388,7 +388,8 @@ module {
     ///
     /// ecdsaKeyName: "dfx_test_key" for local replica, "key_1" for mainnet IC.
     /// A recipient restored by loadStable that the current path does not derive stops every EVM
-    /// send, as the derive startTimers arms does (see setEvmDerivationPath).
+    /// send, as the derive startTimers arms does (see setEvmDerivationPath), when `ecdsaKeyName`
+    /// is the sender's key (config.ecdsaKeyName); under another key it only logs.
     public func deriveEvmRecipient(ecdsaKeyName : Text) : async () {
       // Derives under the gateway's CURRENT path, which defaults to [] — so a consumer that
       // never calls setEvmDerivationPath gets byte-identical pre-2.16.0 behaviour, and one
@@ -410,10 +411,17 @@ module {
           case (#err(e)) {
             if (pathsEqual(path, evmDerivationPath)) {
               switch (evmRecipient, evmSenderInst) {
+                // Only a check under the key the sender signs with says anything about the sender:
+                // deriveEvmRecipient(otherKey) derives another address by construction, and that
+                // must not stop every send until an upgrade.
                 case (?_, ?sender) {
-                  let reason = e # ". Re-apply the path that derived it with setEvmDerivationPath, after loadStable, and upgrade";
-                  sender.stopSends(reason);
-                  Debug.print("ic402 CRITICAL: EVM sends stopped: " # reason);
+                  if (config.ecdsaKeyName == ?ecdsaKeyName) {
+                    let reason = e # ". Re-apply the path that derived it with setEvmDerivationPath, after loadStable, and upgrade";
+                    sender.stopSends(reason);
+                    Debug.print("ic402 CRITICAL: EVM sends stopped: " # reason);
+                  } else {
+                    Debug.print("ic402 deriveEvmRecipient(" # ecdsaKeyName # "): " # e # " — not the key the sender signs with, so nothing was stopped");
+                  };
                 };
                 case (_) {};
               };
