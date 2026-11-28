@@ -367,6 +367,12 @@ broadcast** (the refund leg) on confirmation. Outcomes:
   out. The entry is deliberately not restored. On a block explorer, look for a transfer of the
   deposit's amount from the canister's EVM address to the payer's, sent at or after the call; only
   if none landed, `sweepEvm` it to the payer.
+- `#err("refund tx 0x… was signed, but the providers refused it for lack of gas; … the refund may
+  have gone out …")` (release after 2.24.1; also in the canister log) → the same branch, with the
+  hash: two providers refused the signed refund, but a third may have accepted it. The entry is not
+  restored. Fund the canister's EVM address and lift the gas stop (triage), then check that hash on
+  chain; only if it never landed, `sweepEvm` the amount to the payer. Before, this answered
+  "refund failed (nothing broadcast)" and restored the entry, so a retry signed the refund again.
 
 `listPendingEvmDeposits()` enumerates tracked entries (payer, EVM address, chain, token, amount,
 age) for triage; `pendingEvmDepositCount()` is the watch metric.

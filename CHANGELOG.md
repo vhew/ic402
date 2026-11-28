@@ -55,7 +55,10 @@
   call with the entry gone: a retry answered `#notFound`, and `pendingEvmDepositCount()` read 0, so
   the drain check before an upgrade passed. Now a rejected read puts the entry back. A rejected
   refund send does not, because the refund may have gone out: the answer (and the canister log)
-  says so and asks for a chain check, and a retry cannot refund twice. `confirmTransaction` also
+  says so and asks for a chain check, and a retry cannot refund twice. Nor does a refund that was
+  signed but refused for gas (`Insufficient ETH for gas … refused signed tx 0x…`): before, it put
+  the entry back as "nothing broadcast", so the next reconcile signed the refund again although a
+  provider may have accepted the first; now the answer and the log name that tx. `confirmTransaction` also
   answers `#err` below a 20B cycle floor instead of attaching cycles to its outcall, which traps
   when the canister cannot spare them.
 - The EVM-RPC mock (`example/evm-rpc-mock`) gains `#undecodable` receipt, send and

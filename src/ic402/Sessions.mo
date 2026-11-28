@@ -1708,8 +1708,8 @@ module {
     /// unused (another tx may have executed it, and the deposit arrived); otherwise leaves it for a
     /// later retry. The entry is claimed synchronously before the first await so two concurrent
     /// reconciles of the same tx can't double-refund. A rejected receipt or authorization read puts
-    /// it back; a rejected refund send does not (the refund may have gone out). Controller-gated by
-    /// the consumer.
+    /// it back; a rejected refund send, or a refund signed but refused for gas, does not (the refund
+    /// may have gone out). Controller-gated by the consumer.
     public func reconcileEvmDeposit(txHash : Text) : async { #refunded : Text; #reverted; #stillPending; #notFound; #err : Text } {
       let dep = switch (pendingEvmDeposits.get(txHash)) { case (?d) { d }; case (null) { return #notFound } };
       let sender = switch (evmSenderSource()) { case (?s) { s }; case (null) { return #err("EVM sender not configured") } };
@@ -1745,7 +1745,18 @@ module {
             // Refund broadcast but unconfirmed — do NOT restore (it may land; restoring risks a
             // double refund on retry). Operator verifies the tx before any manual re-refund.
             case (#pending(h)) { #err("refund broadcast but not confirmed (tx " # h # ") — verify on-chain before retrying to avoid double refund") };
-            case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("refund failed (nothing broadcast): " # e) };
+            case (#err(e)) {
+              // Signed but refused for gas: a provider may have accepted it, so the refund may
+              // have gone out. Not restored, as for a rejected send; the answer and the log say so.
+              switch (EvmSender.gasRefusedTxHash(e)) {
+                case (?h) {
+                  let msg = "refund tx " # h # " was signed, but the providers refused it for lack of gas; one may have accepted it, so the refund may have gone out. The entry for deposit " # txHash # " is not restored, so a retry cannot refund twice. Check that hash on chain; only if it never landed, return " # Nat.toText(dep.amount) # " to " # dep.payerEvmAddress # " with sweepEvm";
+                  Debug.print("ic402 reconcileEvmDeposit: " # msg);
+                  #err(msg);
+                };
+                case (null) { pendingEvmDeposits.put(txHash, dep); #err("refund failed (nothing broadcast): " # e) };
+              };
+            };
           };
         };
         case (#reverted) {

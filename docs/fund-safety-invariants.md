@@ -94,7 +94,7 @@ citation set for every partial.
 | expiry-sweep-rechecks-status-after-awaits | both | Sweep re-fetches + only closes still-`#open` | `Sessions.mo:942-949` | enforced |
 | reconcile-session-confirm-only-golden-rules | EVM | reconcileSession never broadcasts; finalize only on `#confirmed` | `Sessions.mo:58-91,1012-1041` | enforced |
 | reconcile-refetches-session-after-await | EVM | Re-fetch + `#closing` re-check after confirm await | `Sessions.mo:1024-1026` | enforced |
-| reconcile-evm-deposit-single-claim-no-double-refund | EVM | Entry deleted synchronously before RPC; restore only on non-terminal. A rejected receipt or authorization read restores it; a rejected refund send does not (the refund may have gone out) and says so (release after 2.24.1; before, any reject lost the entry). Test: replica (evm-outbound.test.ts) | `Sessions.mo:1069-1092` | enforced |
+| reconcile-evm-deposit-single-claim-no-double-refund | EVM | Entry deleted synchronously before RPC; restore only on non-terminal. A rejected receipt or authorization read restores it; a rejected refund send, or a refund signed but refused for gas, does not (the refund may have gone out) and says so (release after 2.24.1; before, any reject lost the entry). Test: replica (evm-outbound.test.ts) | `Sessions.mo:1069-1092` | enforced |
 | single-flight-outbound-tx | EVM | ≤1 outbound tx per EvmSender; `txInProgress` lock | `EvmSender.mo:183-187` | enforced |
 | err-means-not-broadcast (B2 tri-state) | EVM | `#err` only when definitely not broadcast; ambiguous ⇒ `#maybeSent` | `EvmSender.mo:188-191,267-287` | enforced |
 | fresh-pending-nonce-per-send | EVM | Chain-fresh `#Pending` nonce before every send; no cache | `EvmSender.mo:203-218` | enforced |
