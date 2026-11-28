@@ -748,8 +748,30 @@ await suite("a parked operator payment whose job owes the buyer a remainder", fu
     assert status(reg) == ?#Settling;
     assert parkedHash(reg) == ?"0xwait";
     assert evmCalls == 1; // reconcileJob sent nothing
+    // Two days later the job is still there: GC never reclaims it while it is parked.
+    let s = reg.toStable();
+    reg.loadStable({ s with jobs = Array.map<(Text, Types.Job), (Text, Types.Job)>(s.jobs, func((id, j)) { (id, { j with completedAt = ?(-2 * DAY) }) }) });
     assert reg.gcTerminalJobs() == 0;
+    assert status(reg) == ?#Settling;
     switch (reg.resolveJob("job-1", #Settled)) { case (#ok) {}; case (#err(_)) { assert false } };
+  });
+
+  await test("the remainder answer repeats until resolveJob, and says what to do if the buyer was already refunded", func() : async () {
+    // Mutation: drop the "already refunded" clause — a second operator reading the repeated answer
+    // is told only to refund the buyer, and pays the remainder twice.
+    evmPlay([#pending]);
+    let reg = mkEvm([upto], uptoJob(?100), true, true);
+    reg.setEvmConfirm(confirmed);
+    ignore await reg.expireJobs();
+    var calls = 0;
+    while (calls < 2) {
+      switch (await reg.reconcileJob("job-1")) {
+        case (#err(e)) { assert Text.contains(e, #text "if you have already refunded it by hand, call resolveJob(jobId, #Settled)") };
+        case (#ok(_)) { assert false };
+      };
+      calls += 1;
+    };
+    assert status(reg) == ?#Settling;
   });
 
   await test("with nothing left for the buyer, reconcileJob finalizes the confirmed payment #Settled", func() : async () {

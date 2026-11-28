@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, master]
 
+# Every job only reads the repository. The replica steps' ICP_CLI_GITHUB_TOKEN is this token too,
+# used only to lift api.github.com's anonymous rate limit.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -182,11 +187,6 @@ jobs:
   test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
-    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
-    # own read-only token lifts it.
-    env:
-      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -207,6 +207,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local
+        # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+        # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+        # own read-only token lifts it. Only this step starts the replica, so only it gets the token.
+        env:
+          ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
       # setup:local adds test-payer as a controller + funds it, but does NOT export the PEM the
       # suite loads (test/helpers.ts → .local/test-payer.pem). predemo exports it (and re-confirms
       # controller + funding + ICRC-2 approval). Without it the suite falls back to an ANONYMOUS
@@ -243,11 +248,6 @@ jobs:
   test-evm-outbound:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
-    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
-    # own read-only token lifts it.
-    env:
-      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -268,6 +268,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local
+        # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+        # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+        # own read-only token lifts it. Only this step starts the replica, so only it gets the token.
+        env:
+          ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
       - name: Prepare test identity (export test-payer PEM + funding)
         run: bash scripts/predemo.sh
       - name: Overlay the EVM-RPC mock fixture (re-point example → mock)

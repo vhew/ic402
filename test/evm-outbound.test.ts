@@ -1183,21 +1183,28 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     await mock.setReceiptMode({ confirmed: null }); // the deposit mined
     await mock.setSendMode({ insufficientFunds: null });
     await mock.setPendingNonce([7n]); // the re-read finds the same nonce
-    const sends: bigint = await mock.sentTxCount();
-    // Two providers refused the signed refund, but a third may have accepted it. Before, the entry
-    // was restored ("nothing broadcast"), and the next reconcile signed the refund again.
-    const res = await example.reconcileEvmDeposit(txHash);
-    const [rawRefund] = ((await mock.getSentTxs()) as string[]).slice(-1);
-    const refundHash = '0x' + Buffer.from(keccak_256(hexBytes(rawRefund))).toString('hex');
-    expect(res.err).toContain('may have gone out');
-    expect(res.err).toContain(refundHash);
-    expect(await mock.sentTxCount()).toBe(sends + 1n);
-    expect(await tracked(txHash)).toBe(false);
-    await mock.setSendMode({ ok: null });
-    await mock.setPendingNonce([]);
-    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
-    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('notFound'); // no second refund
-    expect(await mock.sentTxCount()).toBe(sends + 1n);
+    try {
+      const sends: bigint = await mock.sentTxCount();
+      // Two providers refused the signed refund, but a third may have accepted it. Before, the entry
+      // was restored ("nothing broadcast"), and the next reconcile signed the refund again.
+      const res = await example.reconcileEvmDeposit(txHash);
+      const [rawRefund] = ((await mock.getSentTxs()) as string[]).slice(-1);
+      const refundHash = '0x' + Buffer.from(keccak_256(hexBytes(rawRefund))).toString('hex');
+      expect(res.err).toContain('may have gone out');
+      expect(res.err).toContain(refundHash);
+      expect(await mock.sentTxCount()).toBe(sends + 1n);
+      expect(await tracked(txHash)).toBe(false);
+      await mock.setSendMode({ ok: null });
+      await mock.setPendingNonce([]);
+      expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
+      expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('notFound'); // no second refund
+      expect(await mock.sentTxCount()).toBe(sends + 1n);
+    } finally {
+      // Whatever failed above, leave no 10-minute gas stop for the tests after this one.
+      await mock.setSendMode({ ok: null });
+      await mock.setPendingNonce([]);
+      await example.liftEvmGasStop(CHAIN_ID);
+    }
   });
 
   it('reconcileEvmDeposit keeps a reverted deposit whose authorization is used, or unreadable, and reports it', async () => {

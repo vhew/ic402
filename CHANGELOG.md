@@ -30,6 +30,12 @@
   `#Settling` (an expiry refund `#Expired`), and nothing sends it again. `reconcileSession` and
   `reconcileJob` confirm it, read-only. `EvmSender.gasRefusedTxHash` reads the hash from the
   refusal. The 2.23.2 notes said this send was not re-sent unattended; they are corrected below.
+
+  In the usual case no provider accepted that transaction and it never lands, so a close or
+  payout refused for gas now needs a manual resolution. `reconcileSession` reports a leg that
+  appears not to have landed once a later send has used its nonce; then `forceResolveSession` and
+  `sweepEvm` (recovery runbook §2). `reconcileJob` cannot tell and keeps answering "Parked tx still
+  pending": check the chain, pay by hand, then `resolveJob` (runbook §6).
 - **An EVM close whose send call was rejected lost track of a transfer that may have gone out.**
   A close leg's send can be rejected after the transfer was broadcast: for example when the
   canister cannot decode the EVM-RPC canister's receipt or send reply, it traps after its await,
@@ -79,7 +85,9 @@
     `ic402 CRITICAL: EVM sends stopped: …` and refuses every EVM send before signing until an
     upgrade re-applies the right path. The refusal starts with `EvmSender.SENDS_STOPPED_PREFIX`.
     Like a gas stop's, it waits: an expired session's close reopens for the sweep, and a job
-    payout is not counted as failed.
+    payout is not counted as failed. Only a check under the key the sender signs with
+    (`config.ecdsaKeyName`) stops sends: `deriveEvmRecipient` under another key name derives
+    another address by construction, so it only logs.
   - A derive no longer records an address under a path that `setEvmDerivationPath` replaced while
     it waited for the key. The startTimers derive then derives again under the new path, which
     closes a race at first install.
@@ -92,6 +100,10 @@
       it, and EVM sends stop once the derive finds the mismatch.
     - If you use a labelled path and upgraded on an earlier release, the canister may already
       have sent from the `[]` address. Check that address for gas and funds.
+    - Fund the labelled address with gas before you upgrade: once the path is re-applied, every
+      send signs from it at once.
+    - Changing `config.ecdsaKeyName` across an upgrade now stops EVM sends: the recipient
+      `loadStable` restores was derived under the old key, so it no longer matches.
     - No stored-state change (`STABLE_SCHEMA_VERSION` stays 1).
 
 ### Dev tooling
