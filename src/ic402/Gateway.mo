@@ -169,6 +169,10 @@ module {
     // defaults to [], which is what every pre-2.16.0 gateway did, so leaving it alone is
     // byte-identical to the old behaviour.
     var evmDerivationPath : [Blob] = [];
+    // Whether this lifetime has committed to evmDerivationPath: setEvmDerivationPath applied it, or
+    // a derive began under it. Until then the path is only the transient default, and a recipient
+    // restored by loadStable does not pin it (see setEvmDerivationPath). Transient, like the path.
+    var evmPathPinned : Bool = false;
 
     // `var`, not `let`: setEvmDerivationPath rebuilds it so the outbound sender follows the
     // recipient. Before 2.16.0 this was a `let` on the empty path, which made the same-path
@@ -187,8 +191,18 @@ module {
     /// the path afterwards would split funds from the ability to spend them — which is why
     /// this refuses once the recipient is set.
     ///
-    /// NOT PERSISTED. Re-apply after every upgrade, in the same init path that calls
-    /// `loadStable` — the same requirement `setEvmChains` carries.
+    /// NOT PERSISTED: after an upgrade the path is back at `[]`. Re-apply it on every upgrade in
+    /// the init block that calls `loadStable`, AFTER `loadStable` (the order `setEvmChains`
+    /// uses), and call `startTimers` (or `deriveEvmRecipient` after the re-apply):
+    /// ```motoko
+    /// switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
+    /// switch (gate.setEvmDerivationPath(PATH)) { case (#ok) {}; case (#err(e)) { Debug.trap(e) } };
+    /// ```
+    /// The restored recipient does not refuse this first re-apply, because the setter cannot
+    /// tell which path derived it. The derive that `startTimers` arms checks it instead: when
+    /// the restored recipient is not the address the path derives, it stops every EVM send
+    /// (refused before signing) and logs why, until an upgrade re-applies the right path. Once
+    /// a path is applied, or a derive has begun under it, the refusal above applies.
     public func setEvmDerivationPath(derivationPath : [Blob]) : { #ok; #err : Text } {
       switch (SchnorrSigner.validateDerivationPath(derivationPath)) {
         case (#err(e)) { return #err(e) };
@@ -196,7 +210,9 @@ module {
       };
       switch (evmRecipient) {
         case (?addr) {
-          if (not pathsEqual(derivationPath, evmDerivationPath)) {
+          // Unpinned, the path is the transient default after an upgrade and this recipient was
+          // restored by loadStable: accept the deployment's path (deriveCurrent checks it).
+          if (evmPathPinned and not pathsEqual(derivationPath, evmDerivationPath)) {
             return #err(
               "recipient already derived as " # addr
               # " under a different path; a published recipient cannot move"
@@ -205,9 +221,10 @@ module {
         };
         case (null) {};
       };
-      // 2.22.0: re-applying the CURRENT path (as a consumer does after every upgrade) keeps the
-      // sender. Rebuilding it dropped its single-flight send lock mid-send (two sends could then
-      // pick one nonce), its broadcast-authorization guard and its sent-tx nonce memory.
+      evmPathPinned := true;
+      // 2.22.0: re-applying the path the gateway is already on keeps the sender. Rebuilding it
+      // dropped its single-flight send lock mid-send (two sends could then pick one nonce), its
+      // broadcast-authorization guard and its sent-tx nonce memory.
       if (pathsEqual(derivationPath, evmDerivationPath)) {
         switch (evmSenderInst) { case (?_) { return #ok }; case (null) {} };
       };
@@ -369,13 +386,41 @@ module {
     /// and persisted across upgrades via stable state.
     ///
     /// ecdsaKeyName: "dfx_test_key" for local replica, "key_1" for mainnet IC.
+    /// A recipient restored by loadStable that the current path does not derive stops every EVM
+    /// send, as the derive startTimers arms does (see setEvmDerivationPath).
     public func deriveEvmRecipient(ecdsaKeyName : Text) : async () {
       // Derives under the gateway's CURRENT path, which defaults to [] — so a consumer that
       // never calls setEvmDerivationPath gets byte-identical pre-2.16.0 behaviour, and one
       // that does cannot accidentally derive the recipient off the sender's path.
       // 2.18.1: inline (`await*`) — no inner self-call hop (deriveRecipient) before the management
       // call; this function's own `async` hop remains (its signature is public).
-      ignore await* deriveRecipientCore(ecdsaKeyName, evmDerivationPath);
+      await* deriveCurrent(ecdsaKeyName);
+    };
+
+    // The derive under the CURRENT path (startTimers' install timer, deriveEvmRecipient). A path
+    // setEvmDerivationPath moved during the derive is derived again. A recipient the path does not
+    // derive (or whose check failed) stops every EVM send: the sender would sign from an address
+    // the deposits never reach. Only an upgrade clears the stop, since the path is pinned by now.
+    func deriveCurrent(ecdsaKeyName : Text) : async* () {
+      loop {
+        let path = evmDerivationPath;
+        switch (await* deriveRecipientCore(ecdsaKeyName, path)) {
+          case (#ok) { return };
+          case (#err(e)) {
+            if (pathsEqual(path, evmDerivationPath)) {
+              switch (evmRecipient, evmSenderInst) {
+                case (?_, ?sender) {
+                  let reason = e # ". Re-apply the path that derived it with setEvmDerivationPath, after loadStable, and upgrade";
+                  sender.stopSends(reason);
+                  Debug.print("ic402 CRITICAL: EVM sends stopped: " # reason);
+                };
+                case (_) {};
+              };
+              return;
+            };
+          };
+        };
+      };
     };
 
     /// Derive the inbound EVM recipient under an explicit derivation path, validated.
@@ -426,6 +471,8 @@ module {
       #ok;
       #err : Text;
     } {
+      // A derive commits this lifetime to the path: a recipient now pins it (setEvmDerivationPath).
+      evmPathPinned := true;
       switch (evmRecipient) {
         // Already derived. Do NOT report a bare #ok: the slot is persisted, so on any
         // gateway upgraded from <=2.15.0 it already holds the EMPTY-path address, and a
@@ -456,6 +503,11 @@ module {
         canister_id = null;
         derivation_path = derivationPath;
       });
+      // With no recipient, setEvmDerivationPath may have moved the path (and the sender) during the
+      // await. Recording this address would put the recipient on the old path: record nothing.
+      if (not pathsEqual(derivationPath, evmDerivationPath)) {
+        return #err("the gateway's derivation path changed during the derive; nothing was recorded — derive again");
+      };
       // H-2: Surface error instead of silently swallowing — operators can see this in canister logs
       switch (EvmAddress.fromCompressedPublicKey(Blob.toArray(result.public_key))) {
         case (#ok(addr)) { evmRecipient := ?addr; #ok };
@@ -1791,7 +1843,7 @@ module {
           ignore Timer.setTimer<system>(#seconds 0, func() : async () {
             // 2.18.1: inline — was two self-calls (deriveEvmRecipient, deriveRecipient) before the
             // management call, each holding a reply reservation during install/upgrade.
-            ignore await* deriveRecipientCore(keyName, evmDerivationPath);
+            await* deriveCurrent(keyName);
           });
         };
         case (null) {};
