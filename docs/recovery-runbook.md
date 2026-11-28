@@ -193,7 +193,8 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      `forceResolveSession` + `sweepEvm` only the amounts still owed. If the missing leg failed with
      "Insufficient ETH for gas" (before the release after 2.24.1, which parks it under its signed
      tx), check the canister's EVM address for that transfer before sweeping: a provider may have
-     accepted the signed tx the error names while two refused it.
+     accepted the signed tx the error names while two refused it. Sweep only once that tx is not on
+     chain and the account nonce has moved past it (or no provider knows it), as above.
 2. **`forceResolveSession(sessionId)`** — controller-only state assertion: flips `#closing` →
    `#closed` so GC can reclaim the record. It **moves no funds** — every owed amount must be
    returned via `sweepEvm` by hand. Extract `deposited`, `consumed`, `payerEvmAddress`,
