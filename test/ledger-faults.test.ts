@@ -540,8 +540,8 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
 
   // closeIcpSession, the refund leg's catch (Sessions.mo:1218-1245: #closed, the remainder owed),
   // with a reject (code 4, nothing moved); then recoverOwed's transfer, whose reject is uncaught
-  // (Sessions.mo:2116), committing and then trapping, and recoverEscrowCore's `finally`
-  // (Sessions.mo:2080) clearing the in-flight mark on that reject. Fails on: the refund reject not
+  // (Sessions.mo:2119), committing and then trapping, and recoverEscrowCore's `finally`
+  // (Sessions.mo:2083) clearing the in-flight mark on that reject. Fails on: the refund reject not
   // recording the remainder; the in-flight mark left set (every later recovery refused).
   it('close and recovery: a rejected refund leaves the remainder owed; a recovery that lands and then rejects pays once, and the owed entry stays for clearRefundOwed', async () => {
     if (skip) return;
@@ -576,9 +576,9 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
   // ── charges (settleFrom, with ledger deduplication on) ──
 
   // Gateway.settleCore, the transfer catch's unknown-outcome arm for settleFrom with dedup
-  // (Gateway.mo:1425-1449: nonce kept locked, the transfer stored, #settlementPending), with code 5
+  // (Gateway.mo:1433-1457: nonce kept locked, the transfer stored, #settlementPending), with code 5
   // after the transfer committed; the payer's re-submit goes to resolvePendingCharge, whose #Duplicate
-  // arm issues the receipt (Gateway.mo:1499). Fails on: that catch treating the reject as "never
+  // arm issues the receipt (Gateway.mo:1507). Fails on: that catch treating the reject as "never
   // ran" (a fresh 402 invites a second payment); #Duplicate not issuing the receipt.
   it('charge: a transfer that lands and then rejects (code 5) is pending; the same payment re-submitted is #Duplicate — one receipt, one debit', async () => {
     if (skip) return;
@@ -603,7 +603,7 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
   });
 
   // The same catch with a REAL stopped ledger after a good fee query (code 5, nothing moved); the
-  // re-submit's re-send lands, resolvePendingCharge's #Ok arm (Gateway.mo:1498).
+  // re-submit's re-send lands, resolvePendingCharge's #Ok arm (Gateway.mo:1506).
   // Fails on: the catch treating the reject as "never ran"; #Ok not issuing the receipt.
   it('charge: a transfer refused by a ledger stopped after the fee query is pending; the same payment re-submitted settles once', async () => {
     if (skip) return;
@@ -621,7 +621,7 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
     expect((await log('icrc2_transfer_from')).length).toBe(1);
   });
 
-  // resolvePendingCharge's #TooOld arm (Gateway.mo:1500-1503: the stored transfer dropped, still
+  // resolvePendingCharge's #TooOld arm (Gateway.mo:1508-1511: the stored transfer dropped, still
   // pending) — the ledger's 24 h window has passed. Fails on: the transfer kept (every later
   // re-submit sends it again for nothing).
   it('charge: a pending charge re-submitted after the 24 h window is #TooOld; it stays pending and a further re-submit sends nothing', async () => {
@@ -643,7 +643,7 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
     expect(await p.balance()).toBe(MINT - FEE);
   });
 
-  // resolvePendingCharge's #BadFee arm (Gateway.mo:1504-1507: the stored transfer dropped, still
+  // resolvePendingCharge's #BadFee arm (Gateway.mo:1512-1515: the stored transfer dropped, still
   // pending) — the ledger's fee changed. Fails on: the transfer kept.
   it('charge: a pending charge re-submitted after a fee change is #BadFee; it stays pending and a further re-submit sends nothing', async () => {
     if (skip) return;
@@ -661,9 +661,9 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
   });
 
   // The LIBRARY trapping after its transfer landed (an undecodable ledger reply): the charge's
-  // transfer was stored in flight before the await (Gateway.mo:1406), and the trap leaves it so;
+  // transfer was stored in flight before the await (Gateway.mo:1414), and the trap leaves it so;
   // Nonce.takePending refuses an in-flight charge (Nonce.mo:134), so the re-submit is the
-  // in-flight #settlementPending (Gateway.mo:1013) and sends nothing. No receipt can be obtained
+  // in-flight #settlementPending (Gateway.mo:1021) and sends nothing. No receipt can be obtained
   // in-band afterwards. Fails on: takePending handing out an in-flight charge (a second send).
   it('charge: a transfer that lands but whose reply the library cannot decode leaves the nonce in flight; a re-submit sends nothing', async () => {
     if (skip) return;
@@ -719,7 +719,7 @@ describe('ic402 ICP-ledger faults (mock ledger)', () => {
   }
   const jobStatus = async (jobId: string) => Object.keys((await example.getJobStatus(jobId))[0])[0];
 
-  // ServiceRegistry.expireJobsCore, the catch around the expiry refund (ServiceRegistry.mo:1389-1392:
+  // ServiceRegistry.expireJobsCore, the catch around the expiry refund (ServiceRegistry.mo:1390-1393:
   // park the job #Settling), reached by a refund that commits and then rejects. Fails on: the job
   // left #Expired (nothing refunds it, and the GC drops it after 24 h).
   it('jobs: an expiry refund that lands and then rejects parks the job #Settling, and resolveJob closes it', async () => {

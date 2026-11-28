@@ -290,11 +290,6 @@ jobs:
   test-ledger-faults:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
-    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
-    # own read-only token lifts it.
-    env:
-      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -311,6 +306,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Deploy local replica + canisters
         run: pnpm setup:local
+        # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+        # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+        # own read-only token lifts it. Only this step starts the replica, so only it gets the token.
+        env:
+          ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
       - name: Prepare test identity (export test-payer PEM + funding)
         run: bash scripts/predemo.sh
       - name: Overlay the ICP-ledger mock fixture (re-point the example's ckUSDC → mock)
