@@ -772,6 +772,26 @@ await suite("2.23.2: a chain the canister cannot pay gas on", func() : async () 
     assert not EvmSender.isGasStopped(EvmSender.INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas");
   });
 
+  await test("a gas refusal names its signed tx, which a close leg or a payout parks; no other error yields a hash", func() : async () {
+    // Mutation: gasRefusedTxHash misses classifySend's hash (a signed refusal is retried as a
+    // failure), or reads a hash out of another error, a malformed one, or one without the gas text.
+    let h = "0x" # Text.join("", Array.tabulate<Text>(32, func(_) = "ab").vals());
+    switch (EvmSender.classifySend(#Consistent(#Ok(#InsufficientFunds)), h)) {
+      case (#err(e)) {
+        assert EvmSender.gasRefusedTxHash(e) == ?h;
+        assert EvmSender.gasRefusedTxHash("EVM refund: " # e) == ?h; // prefixed by a caller
+      };
+      case (_) { assert false };
+    };
+    switch (EvmSender.classifySend(#Consistent(#Ok(#InsufficientFunds)), "0xab")) {
+      case (#err(e)) { assert EvmSender.gasRefusedTxHash(e) == null }; // not a 32-byte hash
+      case (_) { assert false };
+    };
+    assert EvmSender.gasRefusedTxHash(EvmSender.gasStopText(8453, 600)) == null; // nothing signed
+    assert EvmSender.gasRefusedTxHash(EvmSender.GAS_REFUSAL_NONCE_MOVED) == null;
+    assert EvmSender.gasRefusedTxHash("Invalid recipient address: refused signed tx " # h) == null;
+  });
+
   await test("weaker evidence of a gas shortage stops the chain too: a provider error, or a disagreement where none accepted", func() : async () {
     // Mutation: gasShortageReported reads only the agreed status, ignores error text, or stops when
     // a provider accepted the tx (or answered a nonce too low or high, which may mean it is in).

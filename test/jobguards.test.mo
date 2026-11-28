@@ -344,6 +344,8 @@ await suite("M10: registerService and settlement time", func() : async () {
 // is now settled by the sweep too (before, only a controller could move it).
 
 type EvmOutcome = { #confirmed; #reverted; #pending; #err; #busy; #stopped; #noGas };
+// The signed tx a gas refusal (#noGas) names, as EvmSender.classifySend words it.
+let NO_GAS_TX = "0x" # Text.join("", Array.tabulate<Text>(32, func(_) = "9a").vals());
 var evmScript : [EvmOutcome] = [#confirmed];
 var evmCalls = 0;
 func evmPlay(seq : [EvmOutcome]) { evmScript := seq; evmCalls := 0 };
@@ -357,7 +359,9 @@ func evmHook(_ : Nat, _ : Text, _ : Text, _ : Nat) : async { #confirmed : Text; 
     case (#err) { #err("rpc down before broadcast") };
     case (#busy) { #err(EvmSender.SEND_BUSY) };
     case (#stopped) { #err(EvmSender.gasStopText(8453, 600)) };
-    case (#noGas) { #err(EvmSender.INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas for broadcasts.") };
+    case (#noGas) {
+      switch (EvmSender.classifySend(#Consistent(#Ok(#InsufficientFunds)), NO_GAS_TX)) { case (#err(e)) { #err(e) }; case (_) { #err("unexpected") } };
+    };
   };
 };
 
@@ -577,10 +581,9 @@ await suite("round 3: the sweep backs off instead of giving up", func() : async 
     assert status(refund) == ?#Refunded;
   });
 
-  await test("2.23.2: a gas stop's refusal is not counted; the signed failure that set the stop is", func() : async () {
+  await test("2.23.2: a gas stop's refusal is not counted, for a settle or a refund", func() : async () {
     // Mutation: the sweep counts a gas-stop refusal as a payment failure (after 5 ticks of a
-    // 10-minute stop the job waits an hour), or treats the signed "Insufficient ETH for gas" failure
-    // as busy (re-sent every tick without the hourly back-off, though a provider may have taken it).
+    // 10-minute stop the job waits an hour).
     evmPlay([#stopped, #stopped, #stopped, #stopped, #stopped, #stopped, #confirmed]);
     let settle = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
     await sweeps(settle, 7);
@@ -589,11 +592,29 @@ await suite("round 3: the sweep backs off instead of giving up", func() : async 
     let refund = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
     await sweeps(refund, 7);
     assert status(refund) == ?#Refunded;
-    evmPlay([#noGas, #noGas, #noGas, #noGas, #noGas, #confirmed]);
-    let counted = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
-    await sweeps(counted, 7);
-    assert evmCalls == 5; // five counted tries, then it waits for the next hour
-    assert status(counted) != ?#Settled;
+  });
+
+  await test("an operator payment signed but refused for gas parks #Settling with its tx; the sweep never sends it again", func() : async () {
+    // Mutation: settleToOperator handles the signed "Insufficient ETH for gas" refusal as a failure
+    // again — the job comes back #Verified, counted, and a later tick pays the operator a second
+    // time, though a provider may have accepted the first.
+    evmPlay([#noGas, #confirmed]);
+    let reg = mkEvm([buyerConfirm(1)], [job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR)], true, true);
+    await sweeps(reg, 7);
+    assert evmCalls == 1;
+    assert status(reg) == ?#Settling;
+    assert parkedHash(reg) == ?NO_GAS_TX;
+  });
+
+  await test("an expiry refund signed but refused for gas parks #Expired with its tx; the sweep never sends it again", func() : async () {
+    // Mutation: refundOnRail handles the signed refusal as a failure again — the job is put back,
+    // and the next tick refunds the buyer a second time.
+    evmPlay([#noGas, #confirmed]);
+    let reg = mkEvm([buyerConfirm(0)], [job("job-1", "svc-bc", #Disputed, null, -1)], true, true);
+    await sweeps(reg, 7);
+    assert evmCalls == 1;
+    assert status(reg) == ?#Expired;
+    assert parkedHash(reg) == ?NO_GAS_TX;
   });
 });
 
@@ -694,5 +715,51 @@ await suite("round 3: a principal recorded on the EVM rail", func() : async () {
     assert status(reg) == ?#Settling;
     switch (reg.resolveJob("job-1", #Refunded)) { case (#ok) {}; case (#err(_)) { assert false } };
     assert status(reg) == ?#Refunded;
+  });
+});
+
+// ── A parked operator payment whose job owes the buyer a remainder ──────────────────────────
+//
+// settleJob refunds the buyer's remainder (amount − fee − actualCost − fee) only after the operator
+// payment confirms. A payment that parks (#pending) returns before that, so reconcileJob, which
+// confirms the payment later, must not finalize the job as if the remainder had gone out.
+
+await suite("a parked operator payment whose job owes the buyer a remainder", func() : async () {
+
+  let upto = do { let (id, s) = buyerConfirm(1); (id, { s with pricing = #Upto(990) }) };
+  func uptoJob(actualCost : ?Nat) : [(Text, Types.Job)] {
+    let (id, j) = job("job-1", "svc-bc", #Submitted, ?(-10 * SEC), FAR);
+    [(id, { j with actualCost })];
+  };
+  func confirmed(_ : Nat, _ : Text) : async { #confirmed; #reverted; #pending; #err : Text } { #confirmed };
+
+  await test("reconcileJob confirms the payment, names the remainder, and keeps the job #Settling, out of GC", func() : async () {
+    // Mutation: reconcileJob finalizes a confirmed settle without the remainder check — the job
+    // ends #Settled with the buyer's 880 never sent, and GC deletes the record a day later.
+    evmPlay([#pending]);
+    let reg = mkEvm([upto], uptoJob(?100), true, true);
+    reg.setEvmConfirm(confirmed);
+    ignore await reg.expireJobs(); // the window ended: the operator payment is sent, and parks
+    assert status(reg) == ?#Settling;
+    switch (await reg.reconcileJob("job-1")) {
+      case (#err(e)) { assert Text.contains(e, #text "remainder (880)") };
+      case (#ok(_)) { assert false };
+    };
+    assert status(reg) == ?#Settling;
+    assert parkedHash(reg) == ?"0xwait";
+    assert evmCalls == 1; // reconcileJob sent nothing
+    assert reg.gcTerminalJobs() == 0;
+    switch (reg.resolveJob("job-1", #Settled)) { case (#ok) {}; case (#err(_)) { assert false } };
+  });
+
+  await test("with nothing left for the buyer, reconcileJob finalizes the confirmed payment #Settled", func() : async () {
+    // Mutation: refuse every confirmed settle (`owed >= 0`) — no parked payment could finalize.
+    evmPlay([#pending]);
+    let reg = mkEvm([upto], uptoJob(null), true, true);
+    reg.setEvmConfirm(confirmed);
+    ignore await reg.expireJobs();
+    switch (await reg.reconcileJob("job-1")) { case (#ok(_)) {}; case (#err(_)) { assert false } };
+    assert status(reg) == ?#Settled;
+    assert parkedHash(reg) == null;
   });
 });
