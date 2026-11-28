@@ -35,6 +35,14 @@ module {
 
   /// Service marketplace: register services, manage jobs, verify and settle.
   /// Minimal config for ServiceRegistry — only the fields it uses.
+  ///
+  /// `recipient` must be the account your Gateway settles job payments into, and its `owner` must
+  /// be this canister. ICP payouts and refunds are sent by the canister from
+  /// (canister, recipient.subaccount); `recipient.owner` is not read, so it is not checked. With
+  /// another owner (a treasury, say), payments land there while payouts draw on the canister's
+  /// own account: if that is empty, every payout and refund fails with InsufficientFunds and the
+  /// job sweep keeps retrying it (hourly after five tries); if it holds other funds, those pay
+  /// for the jobs.
   public type ServiceConfig = {
     recipient : Types.Account;
     tokens : [Types.TokenConfig];
@@ -474,6 +482,12 @@ module {
     /// 2.24.0: never pass a Gateway.settleToSplit receipt (its recipient is a split, not your
     /// canister). Its amount is the full payment, but only the seller's share reaches the canister,
     /// after distribution, so this job's refund or payout would pay the difference from other funds.
+    ///
+    /// Pass only the receipt your own `settle`/`settleFrom` returned in the same message, and only
+    /// once. The receipt is not checked against the Gateway and is not consumed: a receipt taken
+    /// from a caller is a job nobody paid for, and the same receipt passed twice is two jobs (two
+    /// payouts or refunds) for one payment. Never expose this, or submitRequest, to a caller-
+    /// supplied receipt.
     public func createJobFromReceipt(buyer : Text, serviceId : Text, params : Blob, receipt : Types.PaymentReceipt, callback : ?Text) : Text {
       let timeout = switch (services.get(serviceId)) { case (?s) { s.timeout }; case (null) { 0 } };
       jobCounter += 1;
@@ -518,6 +532,13 @@ module {
     /// Settle-first callers should instead validateSubmittable BEFORE settling + createJobFromReceipt
     /// after, so a post-settle rejection can never strand funds (Option A). This wrapper keeps one
     /// code path for callers that already hold a receipt (validate with receipt.amount, then create).
+    ///
+    /// NOT RECOMMENDED for settle-first use. It validates only after the funds have moved, so an
+    /// underpayment (a 402 minted for the price instead of price + ledgerFee()) or a service
+    /// disabled while the settle was in flight returns #err with the payment in the recipient
+    /// account, no job and no in-band refund. Use validateSubmittable, then settle, then
+    /// createJobFromReceipt. createJobFromReceipt's receipt rule (your own settle's receipt, in the
+    /// same message, once) applies here too.
     public func submitRequest(
       buyer : Text,
       serviceId : Text,

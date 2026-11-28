@@ -199,7 +199,8 @@ module {
   public let EvmAddress = EvmAddressMod;
   /// EVM ABI encoding, hex conversion, and byte utilities.
   public let EvmUtils = EvmUtilsMod;
-  /// EVM remote signer: canister signs, client broadcasts.
+  /// EVM remote signer: canister signs, client broadcasts. No access control and no policy (no
+  /// caller check, no caps): gate every sign method you expose to the controller.
   public let EvmSigner = EvmSignerMod;
   /// Outbound EVM sender: signs, broadcasts and CONFIRMS via the EVM-RPC canister.
   /// `EvmSenderAt(keyName, rpc, path)` derives under a labelled path — it must match the

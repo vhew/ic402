@@ -1334,7 +1334,8 @@ persistent actor KnowledgeBase {
   /// Move the gateway's EVM keys — outbound sender and inbound recipient — onto one path.
   ///
   /// NOT PERSISTED: a production consumer re-applies this after every upgrade, in the same
-  /// init block that calls loadStable, exactly as it would for setEvmChains.
+  /// init block that calls loadStable and AFTER loadStable, exactly as it would for setEvmChains
+  /// (see Gateway.setEvmDerivationPath).
   public shared (msg) func setGatewayDerivationPath(derivationPath : [Blob]) : async {
     #ok;
     #err : Text;

@@ -443,15 +443,23 @@ module {
   public let GAS_REFUSAL_NONCE_MOVED : Text = "The providers reported too little ETH for gas, but the account's pending nonce has since moved past this tx's nonce — a provider may have accepted it; confirming instead of re-sending";
 
   /// 2.23.2: a send's raw #err (as sendTransaction returned it, unprefixed) that was refused before
-  /// anything was signed and clears without its caller: the busy send lock (seconds), or a gas stop
-  /// (until the operator funds the address, or 10 minutes). A timer close reopens the session for
+  /// anything was signed and clears without its caller: the busy send lock (seconds), a gas stop
+  /// (until the operator funds the address, or 10 minutes), or a stopped sender (SENDS_STOPPED_PREFIX,
+  /// until an upgrade). A timer close reopens the session for
   /// the next tick (Sessions.reopenAfterUnsentLeg), and the job sweep retries the payout uncounted,
   /// instead of parking or counting it. Not the failure that set the stop ("Insufficient ETH for
   /// gas"): that tx was signed, and a provider that already saw a top-up may have accepted it, so
   /// a close leg or a job payout parks it with its hash (`gasRefusedTxHash`) for a confirm-only
   /// reconcile. Matched as a prefix, so text a caller controls (an address quoted in an error)
   /// cannot pass for it.
-  public func sendCanWait(err : Text) : Bool { isSendBusy(err) or Text.startsWith(err, #text GAS_STOP_PREFIX) };
+  public func sendCanWait(err : Text) : Bool {
+    isSendBusy(err) or Text.startsWith(err, #text GAS_STOP_PREFIX) or Text.startsWith(err, #text SENDS_STOPPED_PREFIX);
+  };
+
+  /// The start of every refusal from a sender whose sends are stopped (Sender.stopSends): its
+  /// gateway's recipient is not the address it signs from. Like a gas stop, nothing was signed and
+  /// it clears without the caller (here, by an upgrade), so a timer close and the job sweep wait.
+  public let SENDS_STOPPED_PREFIX : Text = "EVM sends are stopped, nothing was signed or sent: ";
 
   /// 2.23.2: the chains where a broadcast recently failed because the canister's EVM address could
   /// not pay the gas. Every send signs before the broadcast can tell, and the simulation before an
@@ -751,6 +759,14 @@ module {
     /// simulation.
     public let gasStops : GasStops = GasStops(GAS_STOP_SECONDS);
 
+    // Set by stopSends; every send is refused before signing while it is. Transient.
+    var sendsStopped : ?Text = null;
+
+    /// Refuse every send from now on, before signing, with SENDS_STOPPED_PREFIX # `reason`.
+    /// Gateway calls it when its recipient is not the address this sender signs from. There is no
+    /// undo: an upgrade builds a new sender.
+    public func stopSends(reason : Text) { sendsStopped := ?(SENDS_STOPPED_PREFIX # reason) };
+
     // 2.22.0 (F1): the account nonce each tx this sender signed was sent with, by lower-case tx
     // hash, so reconcileTransaction can tell a tx whose nonce another tx took from one still pending.
     // Bounded: the oldest of BROADCAST_NONCE_CAP entries is overwritten. Transient — after an
@@ -839,6 +855,7 @@ module {
       calldata : [Nat8],
       gasLimit : Nat,
     ) : async { #ok : Text; #err : Text; #maybeSent : { txHash : Text; reason : Text } } {
+      switch (sendsStopped) { case (?e) { return #err(e) }; case (null) {} }; // stopSends
       // 2.23.2: a chain the canister just could not pay gas on (GasStops): refused before signing,
       // for every send. Pre-broadcast #err: nothing moves, callers roll back as for any other.
       switch (gasStops.stoppedUntil(chainId, Int.abs(Time.now() / 1_000_000_000))) {
@@ -1118,6 +1135,7 @@ module {
         return #err("Invalid token address (expected 20 bytes): " # tokenAddress # "; nothing was signed or sent");
       };
       if (expiresTooSoon(validBefore, nowSeconds)) { return #err(EXPIRES_TOO_SOON) };
+      switch (sendsStopped) { case (?e) { return #err(e) }; case (null) {} }; // stopSends
       switch (gasStops.stoppedUntil(chainId, nowSeconds)) {
         case (?until) { return #err(gasStopText(chainId, until)) };
         case (null) {};

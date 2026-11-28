@@ -55,6 +55,8 @@ module {
     // ── Policy getters/setters ──
 
     /// Replace the global spending policy (validates invariants first).
+    /// No access control: the consuming canister MUST restrict access
+    /// (e.g., assert(Principal.isController(msg.caller))) before exposing it.
     public func setGlobalPolicy(policy : SpendingPolicy) {
       validatePolicy(policy);
       globalPolicy := policy;
@@ -66,6 +68,7 @@ module {
     };
 
     /// Set a per-caller policy override (validates invariants first).
+    /// No access control: restrict access exactly as for setGlobalPolicy.
     public func setCallerPolicy(caller : Principal, policy : SpendingPolicy) {
       validatePolicy(policy);
       callerPolicies.put(caller, policy);
