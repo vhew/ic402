@@ -429,8 +429,9 @@ await suite("F1: a parked tx that appears not to have landed", func() : async ()
 
   await test("reconcileTransaction without a remembered nonce stays pending (no receipt)", func() : async () {
     // Mutation: report #dropped without a remembered nonce.
+    // No receipt polls: each poll first checks the canister's cycles, which the interpreter cannot read.
     let snd = EvmSender.EvmSender("k", ?rpcText);
-    assert (await snd.reconcileTransaction(84532, "0x01", 1)) == #pending;
+    assert (await snd.reconcileTransaction(84532, "0x01", 0)) == #pending;
   });
 });
 

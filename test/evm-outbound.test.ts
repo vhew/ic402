@@ -137,6 +137,7 @@ const ReceiptMode = IDL.Variant({
   pendingThenConfirmed: IDL.Nat,
   inconsistent: IDL.Null,
   error: IDL.Null,
+  undecodable: IDL.Null,
 });
 const FeeMode = IDL.Variant({
   consistent: IDL.Null,
@@ -149,8 +150,14 @@ const SendMode = IDL.Variant({
   nonceTooLow: IDL.Null,
   insufficientFunds: IDL.Null,
   insufficientFundsInconsistent: IDL.Null,
+  undecodable: IDL.Null,
 });
-const AuthStateMode = IDL.Variant({ unused: IDL.Null, used: IDL.Null, error: IDL.Null });
+const AuthStateMode = IDL.Variant({
+  unused: IDL.Null,
+  used: IDL.Null,
+  error: IDL.Null,
+  undecodable: IDL.Null,
+});
 const SimulationMode = IDL.Variant({
   ok: IDL.Null,
   reverted: IDL.Null,
@@ -1060,6 +1067,133 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     expect(dead.err).toContain('appears not to have landed');
     expect(dead.err).toContain('verify on chain before forcing');
   });
+  // ── A reply the canister cannot decode (the mock's #undecodable modes) ──
+  //
+  // The canister traps decoding the reply after its await, where no `catch` runs; the call that made
+  // the outcall is rejected, and that reject reaches whoever awaited it.
+
+  it('a close whose receipt reply cannot be decoded parks the refund under its tx, and reconcileSession confirms it', async () => {
+    if (skip) return;
+    await mock.reset();
+    const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(opened).toHaveProperty('ok');
+    const sends: bigint = await mock.sentTxCount(); // the deposit
+    await mock.setReceiptMode({ undecodable: null });
+    try {
+      // The refund was broadcast, then its confirm call was rejected. Before, the reject went up
+      // through the close: the session rested #closing with no parked tx, and reconcileSession
+      // answered "no parked tx — use forceResolveSession".
+      const closed = await full.endSession(opened.ok.id);
+      const refundHash = '0x' + (sends + 1n).toString().padStart(64, '0'); // the mock's echo
+      expect(closed.settlementPending).toContain(refundHash);
+      await mock.setReceiptMode({ confirmed: null });
+      const reconciled = await example.reconcileSession(opened.ok.id);
+      expect(reconciled.ok).toContain('Refund confirmed on-chain');
+      expect(reconciled.ok).toContain(refundHash);
+      expect(await mock.sentTxCount()).toBe(sends + 1n); // sent once
+    } finally {
+      await mock.setReceiptMode({ confirmed: null });
+      await full.endSession(opened.ok.id); // refused once parked or closed
+    }
+  });
+
+  it('a close whose send reply cannot be decoded parks the refund as maybe broadcast; the send lock is released', async () => {
+    if (skip) return;
+    await mock.reset();
+    const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
+    expect(opened).toHaveProperty('ok');
+    const sends: bigint = await mock.sentTxCount();
+    await mock.setSendMode({ undecodable: null });
+    try {
+      // The mock had the raw tx before its reply failed: it may be in a mempool, with no hash back.
+      const closed = await full.endSession(opened.ok.id);
+      expect(closed.settlementPending).toContain('may have been broadcast');
+      expect(await mock.sentTxCount()).toBe(sends + 1n);
+      const reconciled = await example.reconcileSession(opened.ok.id);
+      expect(reconciled.err).toContain('no tx hash came back');
+      // The sender trapped after taking its single-flight send lock; its `finally` released it.
+      await mock.setSendMode({ ok: null });
+      expect(await sweep()).toHaveProperty('confirmed');
+    } finally {
+      await mock.setSendMode({ ok: null });
+      await full.endSession(opened.ok.id);
+    }
+  });
+
+  // A pending session deposit: tracked by reconcileEvmDeposit under the first send's hash.
+  async function pendingDeposit(): Promise<string> {
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    expect(await full.openSession(sessionCfg, await evmSessionSig(50_000n))).toHaveProperty('err');
+    expect(await example.clearEvmPayerCooldowns()).toBe(1n); // 2.23.1: the payer is held meanwhile
+    return '0x' + '1'.padStart(64, '0');
+  }
+  const tracked = async (txHash: string) =>
+    ((await example.listPendingEvmDeposits()) as { txHash: string }[]).some(
+      (d) => d.txHash === txHash,
+    );
+
+  it('reconcileEvmDeposit keeps a deposit tracked when its receipt read is rejected', async () => {
+    if (skip) return;
+    await mock.reset();
+    const txHash = await pendingDeposit();
+    await mock.setReceiptMode({ undecodable: null });
+    // Before, the entry was removed before the read, and the reject lost it: a retry answered
+    // #notFound, and pendingEvmDepositCount() read 0 for the drain check before an upgrade.
+    const res = await example.reconcileEvmDeposit(txHash);
+    expect(res.err).toContain('rejected');
+    expect(await tracked(txHash)).toBe(true);
+    await mock.setReceiptMode({ pendingThenConfirmed: 999n });
+    await mock.setLatestNonce(1_000_000n);
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted'); // clean up
+  });
+
+  it('reconcileEvmDeposit keeps a deposit tracked when its authorization read is rejected', async () => {
+    if (skip) return;
+    await mock.reset();
+    const txHash = await pendingDeposit();
+    await mock.setLatestNonce(1_000_000n); // its nonce was taken and no receipt: it appears dropped
+    await mock.setAuthStateMode({ undecodable: null });
+    const res = await example.reconcileEvmDeposit(txHash);
+    expect(res.err).toContain('could not be checked');
+    expect(await tracked(txHash)).toBe(true);
+    await mock.setAuthStateMode({ unused: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted'); // clean up
+  });
+
+  it('reconcileEvmDeposit does not restore a deposit whose refund send was rejected: the refund may have gone out', async () => {
+    if (skip) return;
+    await mock.reset();
+    const txHash = await pendingDeposit();
+    await mock.setReceiptMode({ confirmed: null }); // the deposit mined
+    await mock.setSendMode({ undecodable: null }); // the refund's send reply cannot be decoded
+    const sends: bigint = await mock.sentTxCount();
+    const res = await example.reconcileEvmDeposit(txHash);
+    expect(res.err).toContain('may have been broadcast');
+    expect(await mock.sentTxCount()).toBe(sends + 1n);
+    expect(await tracked(txHash)).toBe(false);
+    await mock.setSendMode({ ok: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('notFound'); // no second refund
+    expect(await mock.sentTxCount()).toBe(sends + 1n);
+  });
+
+  it('reconcileEvmDeposit keeps a reverted deposit whose authorization is used, or unreadable, and reports it', async () => {
+    if (skip) return;
+    await mock.reset();
+    const txHash = await pendingDeposit();
+    await mock.setReceiptMode({ reverted: null });
+    // Anyone can submit the authorization: another tx may have executed it first, and the deposit
+    // arrived. Before, the revert alone dropped the entry, and the runbook said "re-sign".
+    await mock.setAuthStateMode({ used: null });
+    expect((await example.reconcileEvmDeposit(txHash)).err).toContain('used on chain');
+    expect(await tracked(txHash)).toBe(true);
+    await mock.setAuthStateMode({ error: null });
+    expect((await example.reconcileEvmDeposit(txHash)).err).toContain('could not be checked');
+    expect(await tracked(txHash)).toBe(true);
+    await mock.setAuthStateMode({ unused: null });
+    expect(await example.reconcileEvmDeposit(txHash)).toHaveProperty('reverted');
+    expect(await tracked(txHash)).toBe(false);
+  });
+
   // ── Cooldown and the budget of refused checks (2.23.1). Keep these last: the budget test leaves
   // the budget spent for about a minute. ──
 

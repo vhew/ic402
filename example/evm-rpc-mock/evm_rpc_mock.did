@@ -65,6 +65,7 @@ type SendMode =
    nonceTooHigh;
    nonceTooLow;
    ok;
+   undecodable;
  };
 type RpcServices = 
  variant {
@@ -125,6 +126,7 @@ type ReceiptMode =
    inconsistent;
    pendingThenConfirmed: nat;
    reverted;
+   undecodable;
  };
 type ProviderError = 
  variant {
@@ -136,22 +138,6 @@ type ProviderError =
                    expected: nat;
                    received: nat;
                  };
- };
-type MultiSendRawTransactionResult = 
- variant {
-   Consistent: SendRawTransactionResult;
-   Inconsistent: vec record {
-                       RpcService;
-                       SendRawTransactionResult;
-                     };
- };
-type MultiGetTransactionReceiptResult = 
- variant {
-   Consistent: GetTransactionReceiptResult;
-   Inconsistent: vec record {
-                       RpcService;
-                       GetTransactionReceiptResult;
-                     };
  };
 type MultiGetTransactionCountResult = 
  variant {
@@ -169,13 +155,32 @@ type MultiFeeHistoryResult =
                        FeeHistoryResult;
                      };
  };
-type MultiCallResult = 
+type MockSendResult = 
+ variant {
+   Consistent: SendRawTransactionResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       SendRawTransactionResult;
+                     };
+   MockUndecodable;
+ };
+type MockReceiptResult = 
+ variant {
+   Consistent: GetTransactionReceiptResult;
+   Inconsistent: vec record {
+                       RpcService;
+                       GetTransactionReceiptResult;
+                     };
+   MockUndecodable;
+ };
+type MockCallResult = 
  variant {
    Consistent: CallResult;
    Inconsistent: vec record {
                        RpcService;
                        CallResult;
                      };
+   MockUndecodable;
  };
 type LogEntry = 
  record {
@@ -301,6 +306,7 @@ type BlockTag =
 type AuthStateMode = 
  variant {
    error;
+   undecodable;
    unused;
    used;
  };
@@ -359,6 +365,13 @@ type AccessListEntry =
 ///                                            does not answer, so its caller stays in flight
 ///                                            (holding its payer slot) until set false (or
 ///                                            a minute passes)
+///   setReceiptMode(#undecodable), setSendMode(#undecodable), setAuthStateMode(#undecodable)
+///                                            answer with a value outside the EVM-RPC interface
+///                                            (#MockUndecodable). The canister cannot decode it,
+///                                            so it traps after its await, where no `catch` runs,
+///                                            and the call that made the outcall is rejected. A
+///                                            send in this mode is recorded first: it may have
+///                                            reached a mempool
 /// 
 /// 2.23.1: eth_call rejects a `to` or `from` without the 0x prefix, as the real canister's Hex20
 /// decoding does.
@@ -369,15 +382,15 @@ type AccessListEntry =
 /// ============================================================================
 service : {
   eth_call: (services: RpcServices, config: opt RpcConfig, args: CallArgs) ->
-   (MultiCallResult);
+   (MockCallResult);
   eth_feeHistory: (services: RpcServices, config: opt RpcConfig, _args:
    FeeHistoryArgs) -> (MultiFeeHistoryResult);
   eth_getTransactionCount: (services: RpcServices, config: opt RpcConfig,
    args: GetTransactionCountArgs) -> (MultiGetTransactionCountResult);
   eth_getTransactionReceipt: (services: RpcServices, config: opt RpcConfig,
-   txHash: text) -> (MultiGetTransactionReceiptResult);
+   txHash: text) -> (MockReceiptResult);
   eth_sendRawTransaction: (services: RpcServices, config: opt RpcConfig,
-   rawTx: text) -> (MultiSendRawTransactionResult);
+   rawTx: text) -> (MockSendResult);
   getEthCalls: () -> (nat) query;
   getLastSimulation: () ->
    (opt record {
