@@ -122,6 +122,25 @@ Three low findings from the 2.24.1 pre-release review. Nothing published changes
 - **CONTRIBUTING's rollback step says what icp 1.9.0's Candid check does.** A rollback usually
   removes methods, and icp then stops for confirmation (or `--yes`).
 
+### Tests
+
+- **The ICP ledger's failure paths now run in CI.** DFINITY's ICRC-1 ledger never rejects a call,
+  and `mops test` cannot make one that fails with a system reject code, so no test reached a
+  ledger reject whose outcome is unknown, a close leg the ledger refuses or rejects, a transfer that
+  commits and then traps, or a stopped ledger. New, the ICP counterpart of the EVM-RPC mock:
+  - `example/icp-ledger-mock`, a scriptable ICRC-1/ICRC-2 ledger (test fixture only) with real
+    balances and allowances, and deduplication on `created_at_time` + memo as DFINITY's ledgers
+    do it. Each call can be scripted to reply, reply an `#Err`, reject before any effect, commit
+    and then trap, or reply what the caller cannot decode;
+  - `scripts/setup-ledger-faults.sh`, which points the example's ckUSDC ledger at it after
+    `pnpm setup:local`;
+  - `test/ledger-faults.test.ts` (`IC402_REQUIRE_LEDGER_FAULTS=1`, CI job `test-ledger-faults`):
+    16 tests over charges through `settleFrom`, session opens and closes, `reconcileSession`,
+    `recoverEscrow` and job payouts. A stopped ledger is the mock stopped through the management
+    canister, including between the library's fee query and its transfer.
+
+  Nothing published changes.
+
 ### Docs
 
 Access control and marketplace guidance for integrators. Only the README,
