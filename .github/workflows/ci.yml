@@ -182,6 +182,11 @@ jobs:
   test-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+    # own read-only token lifts it.
+    env:
+      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
@@ -238,6 +243,11 @@ jobs:
   test-evm-outbound:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+    # own read-only token lifts it.
+    env:
+      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
