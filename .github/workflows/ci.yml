@@ -275,6 +275,44 @@ jobs:
       - name: EVM-outbound suite (fixture-enforced)
         run: IC402_REQUIRE_EVM_OUTBOUND=1 pnpm exec vitest run test/evm-outbound.test.ts
 
+  # The ICP rail's LEDGER FAILURE paths, hermetically. DFINITY's ICRC-1 ledger (the ckUSDC that
+  # setup:local deploys) never rejects a call, so test-integration cannot reach them.
+  # setup-ledger-faults.sh deploys a SCRIPTABLE ICRC-1/ICRC-2 ledger (example/icp-ledger-mock) and
+  # re-points the example's ckUSDC at it; the suite then makes the ledger refuse, reject, commit and
+  # trap, or stop, under charges, session opens and closes, recoveries and job payouts.
+  # IC402_REQUIRE_LEDGER_FAULTS=1 turns a missing fixture into a HARD failure (its own flag: the
+  # example must be re-pointed first, and the integration suite must not run against the mock).
+  test-ledger-faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # icp start fetches the latest network launcher from api.github.com. Unauthenticated, that
+    # call shares the runner's per-IP limit and fails with "403 rate limit exceeded"; the job's
+    # own read-only token lifts it.
+    env:
+      ICP_CLI_GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: caffeinelabs/setup-mops@v1 # moved from ZenVoich/setup-mops (same commit)
+        with:
+          mops-version: 3.5.1 # PINNED — see the note on ci.yml's first setup-mops step
+      - name: Install icp CLI
+        # PINNED, as in test-integration: keep it equal to package.json's @icp-sdk/icp-cli.
+        run: npm install -g @icp-sdk/icp-cli@1.9.0
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy local replica + canisters
+        run: pnpm setup:local
+      - name: Prepare test identity (export test-payer PEM + funding)
+        run: bash scripts/predemo.sh
+      - name: Overlay the ICP-ledger mock fixture (re-point the example's ckUSDC → mock)
+        run: bash scripts/setup-ledger-faults.sh
+      - name: Ledger-faults suite (fixture-enforced)
+        run: IC402_REQUIRE_LEDGER_FAULTS=1 pnpm exec vitest run test/ledger-faults.test.ts
+
   # Keep example/example.did in sync with example/main.mo — a drifted .did ships a stale Candid
   # interface (and the @ic402/client + MCP IDL are mirrored from it). Regenerate and fail on a diff.
   did-sync:

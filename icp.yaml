@@ -50,6 +50,18 @@ canisters:
         candid: example/evm-rpc-mock/evm_rpc_mock.did
         args: ''
 
+  # TEST FIXTURE ONLY: a scriptable ICRC-1/ICRC-2 ledger. scripts/setup-ledger-faults.sh points the
+  # example's ckUSDC ledger at it so CI can exercise the ICP ledger's failure paths (a transfer
+  # whose outcome is unknown, a close leg the ledger rejects, a stopped ledger) on a local replica.
+  # Local-only; deliberately absent from the `ic` env.
+  - name: icp_ledger_mock
+    recipe:
+      type: '@dfinity/motoko@v4.1.0'
+      configuration:
+        main: example/icp-ledger-mock/main.mo
+        candid: example/icp-ledger-mock/icp_ledger_mock.did
+        args: ''
+
 networks:
   - name: local
     mode: managed
@@ -69,7 +81,7 @@ networks:
 environments:
   - name: local
     network: local
-    canisters: [example, ckusdc_ledger, evm_rpc, zk_verifier, evm_rpc_mock]
+    canisters: [example, ckusdc_ledger, evm_rpc, zk_verifier, evm_rpc_mock, icp_ledger_mock]
 
   - name: ic
     network: mainnet

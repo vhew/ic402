@@ -1,0 +1,178 @@
+type TransferResult = 
+ variant {
+   Err: TransferError;
+   Ok: nat;
+ };
+type TransferFromArg = 
+ record {
+   amount: nat;
+   created_at_time: opt nat64;
+   fee: opt nat;
+   from: Account;
+   memo: opt blob;
+   spender_subaccount: opt blob;
+   to: Account;
+ };
+type TransferError = 
+ variant {
+   BadBurn: record {min_burn_amount: nat;};
+   BadFee: record {expected_fee: nat;};
+   CreatedInFuture: record {ledger_time: nat64;};
+   Duplicate: record {duplicate_of: nat;};
+   GenericError: record {
+                   error_code: nat;
+                   message: text;
+                 };
+   InsufficientAllowance: record {allowance: nat;};
+   InsufficientFunds: record {balance: nat;};
+   MockUndecodable;
+   TemporarilyUnavailable;
+   TooOld;
+ };
+type TransferArg = 
+ record {
+   amount: nat;
+   created_at_time: opt nat64;
+   fee: opt nat;
+   from_subaccount: opt blob;
+   memo: opt blob;
+   to: Account;
+ };
+type Outcome = 
+ variant {
+   commitThenTrap;
+   err: TransferError;
+   holdThenOk: nat;
+   ok;
+   reject: text;
+   undecodable: bool;
+ };
+type Method = 
+ variant {
+   icrc1_balance_of;
+   icrc1_fee;
+   icrc1_transfer;
+   icrc2_transfer_from;
+ };
+type LogEntry = 
+ record {
+   amount: nat;
+   block: opt nat;
+   from: opt Account;
+   method: Method;
+   outcome: text;
+   seq: nat;
+   to: opt Account;
+ };
+type ApproveError = 
+ variant {
+   AllowanceChanged: record {current_allowance: nat;};
+   BadFee: record {expected_fee: nat;};
+   CreatedInFuture: record {ledger_time: nat64;};
+   Duplicate: record {duplicate_of: nat;};
+   Expired: record {ledger_time: nat64;};
+   GenericError: record {
+                   error_code: nat;
+                   message: text;
+                 };
+   InsufficientFunds: record {balance: nat;};
+   TemporarilyUnavailable;
+   TooOld;
+ };
+type ApproveArg = 
+ record {
+   amount: nat;
+   created_at_time: opt nat64;
+   expected_allowance: opt nat;
+   expires_at: opt nat64;
+   fee: opt nat;
+   from_subaccount: opt blob;
+   memo: opt blob;
+   spender: Account;
+ };
+type Account = 
+ record {
+   owner: principal;
+   subaccount: opt blob;
+ };
+/// ============================================================================
+/// icp-ledger-mock — a scriptable ICRC-1/ICRC-2 ledger TEST DOUBLE.
+/// 
+/// ⚠️  TEST FIXTURE ONLY. Never deploy this to mainnet. The scripting and minting hooks are
+///     intentionally unauthenticated so CI can drive them; on a real network anyone could mint.
+/// 
+/// WHY IT EXISTS:
+///   The replica suite runs against DFINITY's ICRC-1 ledger, which never rejects a call, and
+///   `mops test` cannot make an inter-canister call that fails with a system reject code. So the
+///   library's ICP-ledger failure branches (a transfer whose outcome is unknown, a close leg the
+///   ledger rejects, a ledger that commits and then traps, a stopped ledger) ran in no test. This
+///   canister is the ICP counterpart of example/evm-rpc-mock: scripts/setup-ledger-faults.sh points
+///   the example's ckUSDC ledger at it, and test/ledger-faults.test.ts scripts each failure.
+/// 
+/// LEDGER SEMANTICS (every call that is not scripted otherwise):
+///   - real balances, keyed by (owner, subaccount); a null subaccount is the all-zero one;
+///   - icrc1_transfer and icrc2_transfer_from debit amount + fee (the fee is burned) and append a
+///     block; icrc2_approve charges the fee and sets the allowance (expires_at honoured);
+///   - icrc2_transfer_from checks and decrements the allowance by amount + fee, except when the
+///     spender is the `from` account itself (as DFINITY's ledgers do);
+///   - an explicit fee different from the current fee is #BadFee, checked BEFORE deduplication;
+///   - deduplication as DFINITY's ledgers do it: only for a call with created_at_time set, keyed on
+///     the caller and the full argument (so memo and created_at_time included). #TooOld past the
+///     24 h window plus 2 min drift, #CreatedInFuture beyond the drift, #Duplicate { duplicate_of }
+///     for a repeat. Both checks use the mock clock (the replica's, plus advanceClock);
+///   - #InsufficientFunds and #InsufficientAllowance arise from state.
+///   No minting account: mint() credits an account directly.
+/// 
+/// SCRIPTING: a FIFO of outcomes per method (icrc1_fee, icrc1_transfer, icrc2_transfer_from,
+/// icrc1_balance_of). Each call takes the next outcome; an empty queue means #ok.
+///   #ok                  the ledger semantics above
+///   #err e               reply #Err(e), commit nothing (transfer methods only)
+///   #reject t            `throw Error.reject t` before any effect: reject code 4, nothing committed
+///   #commitThenTrap      apply the ledger semantics (commit), then await a self-call and trap, so
+///                        the caller sees reject code 5 for a transfer that landed — what a DFINITY
+///                        ledger trapping after its archive_blocks await would look like. (On
+///                        icrc1_fee / icrc1_balance_of nothing is committed: a plain code-5 reject.)
+///   #undecodable c       reply #Err(#MockUndecodable), committing the transfer first when c is true.
+///                        No ICRC-1 client knows that arm, so the CALLER traps decoding the reply
+///                        after its await (transfer methods only). This is why the mock's .did is not
+///                        the official one: keep it out of scripts/check-candid-mirrors.sh.
+///   #holdThenOk s        wait about s seconds (one raw_rand round per check), then #ok. While a call
+///                        is held, held() counts it. The suite holds a fee query, stops this canister
+///                        through the management canister, and the caller's NEXT call then meets a
+///                        genuinely stopped ledger (the held call still replies: a stopping canister
+///                        finishes its open calls).
+/// 
+/// Control: script, reset, mint, setFee, advanceClock. Queries: log, held, pendingScripts,
+/// balanceOf, allowanceOf, currentFee. icrc1_fee and icrc1_balance_of are update methods here (the
+/// official .did has them as queries) so they can be faulted and held; inter-canister calls are
+/// updates anyway.
+/// 
+/// Regenerate icp_ledger_mock.did after changing the interface:
+///   $(mops toolchain bin moc) $(mops sources) --idl example/icp-ledger-mock/main.mo \
+///     -o example/icp-ledger-mock/icp_ledger_mock.did
+/// ============================================================================
+service : {
+  /// Move the mock clock forward (deduplication windows), in seconds.
+  advanceClock: (seconds: nat) -> ();
+  allowanceOf: (owner: Account, spender: Account) -> (nat) query;
+  balanceOf: (a: Account) -> (nat) query;
+  currentFee: () -> (nat) query;
+  held: () -> (nat) query;
+  icrc1_balance_of: (a: Account) -> (nat);
+  icrc1_fee: () -> (nat);
+  icrc1_transfer: (arg: TransferArg) -> (TransferResult);
+  icrc2_approve: (arg: ApproveArg) -> (variant {
+                                         Err: ApproveError;
+                                         Ok: nat;
+                                       });
+  icrc2_transfer_from: (arg: TransferFromArg) -> (TransferResult);
+  log: () -> (vec LogEntry) query;
+  mint: (to: Account, amount: nat) -> (nat);
+  pendingScripts: (m: Method) -> (nat) query;
+  /// Back to a pristine ledger: no queued outcomes, no balances, allowances, blocks, deduplication
+  /// entries or log, the fee at 10_000 and the clock at the replica's.
+  reset: () -> ();
+  /// Append outcomes to `m`'s queue. #err and #undecodable apply to the transfer methods only.
+  script: (m: Method, outcomes: vec Outcome) -> ();
+  setFee: (f: nat) -> ();
+}
