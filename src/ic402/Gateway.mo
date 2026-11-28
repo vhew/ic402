@@ -1602,6 +1602,9 @@ module {
     ///
     /// DEPRECATED (2.22.0): use `sendErc20TransferConfirmed`. Kept for compatibility; it may be
     /// removed in 3.0.0.
+    ///
+    /// No access control, no policy: it sends any amount from the canister's EVM address to any
+    /// `to`, including funds that back open sessions. Gate it to the controller.
     public func sendErc20Transfer(chainId : Nat, token : Text, to : Text, amount : Nat) : async { #ok : Text; #err : Text } {
       switch (evmSenderInst) {
         case (?sender) {
@@ -1622,6 +1625,11 @@ module {
     /// caller finalizes state ONLY on #confirmed. The marketplace settle/refund + EVM
     /// session-close paths use this so an unconfirmed/reverted transfer is never treated
     /// as settled (B2). See EvmSender.sendErc20TransferConfirmed.
+    ///
+    /// No access control, no policy: it sends any amount from the canister's EVM address to any
+    /// `to`, including funds that back open sessions. Gate it to the controller (the example's
+    /// `sweepEvm` does). Passing it to `ServiceRegistry.setEvmTransfer` does not expose it: the
+    /// registry calls it only for its own payouts and refunds.
     public func sendErc20TransferConfirmed(chainId : Nat, token : Text, to : Text, amount : Nat) : async {
       #confirmed : Text;
       #reverted : Text;
@@ -1864,6 +1872,8 @@ module {
     // ── Policy ──
 
     /// Set spending policy: global (caller=null) or per-caller override.
+    /// No access control: the consuming canister MUST restrict access
+    /// (e.g., assert(Principal.isController(msg.caller))) before exposing it.
     public func setPolicy(caller : ?Principal, p : Types.SpendingPolicy) {
       switch (caller) {
         case (null) { policy.setGlobalPolicy(p) };

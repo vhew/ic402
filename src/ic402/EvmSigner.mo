@@ -4,14 +4,23 @@
 /// but does NOT broadcast them. The client library handles RPC submission.
 ///
 /// This eliminates EVM RPC calls from the canister, reducing cycles cost
-/// by 40-85% for outbound operations while maintaining the same security:
-/// the canister still enforces spending policy before signing.
+/// by 40-85% for outbound operations.
+///
+/// NO ACCESS CONTROL, NO POLICY. The signer checks nothing: no caller, no spend cap, no
+/// recipient or amount limit, no log. Whoever reaches a sign method signs with the
+/// canister's key, so a public wrapper lets any caller sign a transfer of everything the
+/// canister's EVM address holds. Gate every method you expose to the controller
+/// (`assert(Principal.isController(msg.caller))`, as example/main.mo does) and put any
+/// limits in that wrapper.
 ///
 /// Usage:
 /// ```motoko
 /// transient let signer = EvmSigner.EvmSigner("dfx_test_key");
-/// let { rawTx; txHash } = await signer.signErc20Transfer(chainId, token, to, amount, nonce, maxFee, priorityFee);
-/// // Client broadcasts rawTx via their own RPC provider
+/// public shared (msg) func signErc20Transfer(/* … */) : async { #ok : EvmSigner.SignedTransaction; #err : Text } {
+///   assert (Principal.isController(msg.caller)); // the signer itself checks nothing
+///   await signer.signErc20Transfer(chainId, token, to, amount, nonce, maxFee, priorityFee);
+///   // #ok({ rawTx; txHash }): the client broadcasts rawTx via its own RPC provider
+/// };
 /// ```
 
 import EvmUtils "EvmUtils";
@@ -134,6 +143,7 @@ module {
 
     /// Sign a generic EVM transaction. Client provides nonce and gas data.
     /// Returns the signed raw transaction hex for client-side broadcast.
+    /// No access control, no policy: any destination, value and calldata. Gate it to the controller.
     public func signTransaction(
       chainId : Nat,
       toAddress : Text,
@@ -189,6 +199,7 @@ module {
 
     /// Sign an ERC-20 `transfer(address,uint256)` transaction.
     /// Client provides nonce and gas data from their own RPC.
+    /// No access control, no policy: any amount to any recipient. Gate it to the controller.
     public func signErc20Transfer(
       chainId : Nat,
       tokenAddress : Text,
@@ -225,6 +236,7 @@ module {
 
     /// Sign a native ETH transfer transaction.
     /// Client provides nonce and gas data from their own RPC.
+    /// No access control, no policy: any amount to any recipient. Gate it to the controller.
     public func signEthTransfer(
       chainId : Nat,
       recipientAddress : Text,
@@ -240,6 +252,8 @@ module {
     /// Sign an EIP-3009 TransferWithAuthorization for x402 payments.
     /// Returns a base64-encoded x402 v2 payment header that the client
     /// includes as the X-Payment HTTP header.
+    /// No access control, no policy: the authorization lets whoever holds it move `amount` to
+    /// `recipient`, both caller-chosen. Gate it to the controller.
     public func signEip3009Authorization(
       chainId : Nat,
       tokenAddress : Text,
@@ -328,6 +342,7 @@ module {
 
     /// Sign an ERC-8004 agent registration transaction.
     /// Client provides nonce and gas data from their own RPC.
+    /// No access control, no policy: the registry address is caller-chosen. Gate it to the controller.
     public func signRegistration(
       registryAddress : Text,
       chainId : Nat,
@@ -373,6 +388,9 @@ module {
     /// Eip712.domainSeparator for the domain) builds the structHash from a visible,
     /// validated field list — flat atomic types only, fail-closed — so what gets
     /// signed is auditable field-by-field instead of arriving as an opaque hash.
+    ///
+    /// No access control, no policy: it signs any 32-byte digest pair, so a public wrapper is a
+    /// blind signing oracle (permits included). Gate it to the controller.
     public func signTypedData(
       domainSeparator : [Nat8], // 32 bytes: keccak256(EIP712Domain(...))
       structHash : [Nat8],      // 32 bytes: keccak256(typeHash || encodedFields)

@@ -18,6 +18,38 @@ Three low findings from the 2.24.1 pre-release review. Nothing published changes
 - **CONTRIBUTING's rollback step says what icp 1.9.0's Candid check does.** A rollback usually
   removes methods, and icp then stops for confirmation (or `--yes`).
 
+### Docs
+
+Access control and marketplace guidance for integrators. Only the README,
+`docs/security-model.md` and doc comments change; no code does.
+
+- **`EvmSigner` enforces no policy.** Its header said the canister "still enforces spending policy
+  before signing"; nothing does. The header now says it has no access control and no policy, and
+  each `sign*` method, `Gateway.sendErc20Transfer` and `Gateway.sendErc20TransferConfirmed` carries
+  a "no access control, no policy: gate it to the controller" line. The README's EvmSigner section
+  and `lib.mo` say the same.
+- **`docs/security-model.md` lists every controller-only library method,** by module (`Gateway`,
+  `Sessions`, `ServiceRegistry`, `ContentStore`, `Policy` and the signers). It replaces a five-name
+  list that included `sweepEvm`, which exists only in the example. The doc no longer claims that
+  each of these methods warns in its doc comment: most do not, so the list is the reference.
+  `Gateway.setPolicy`, `Policy.setGlobalPolicy` and `Policy.setCallerPolicy` now carry the warning
+  the checklist quotes for them. New guidance on reads to gate or redact: `Gateway.getPolicy`,
+  `Gateway.getSession` and `ServiceRegistry.listJobs`.
+- **ServiceRegistry, in the README and doc comments:**
+  - `ServiceConfig.recipient` must be the account the Gateway settles job payments into, owned by
+    the canister. Payouts and refunds are sent from the canister's own account, and `owner` is not
+    checked, so another owner leaves them failing or paid from other funds.
+  - EVM-paid jobs need `setEvmTransfer`, `setEvmConfirm` and `setOperatorEvmPayout` wired. Without
+    them the registry is ICP-only.
+  - The job flow is `validateSubmittable`, then settle, then `createJobFromReceipt`, with the 402
+    minted for `price + ledgerFee()`. `submitRequest` is marked not recommended for settle-first
+    use: it validates after the funds have moved.
+  - `createJobFromReceipt` takes only the receipt your own settle returned in the same message,
+    and only once. It neither checks nor consumes the receipt.
+- **README quick start:** a `#settlementPending` result is answered with an error that says "do NOT
+  retry payment", as the example does, instead of a fresh 402. Its parameter is renamed from
+  `query`, a reserved word in Motoko, so the snippet compiles.
+
 ## v2.24.1 — 2026-11-26
 
 Patch, dev tooling only. The published packages are code-identical to 2.24.0: nothing under
