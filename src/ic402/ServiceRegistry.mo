@@ -1207,7 +1207,8 @@ module {
           // it stays #Settling with its parked tx (kept from GC), and the answer names the amount.
           let owed = buyerRemainder(j2);
           if (parked.leg == #Settle and owed > 0) {
-            return #err("Settle confirmed on-chain, but the buyer's remainder (" # Nat.toText(owed) # ") was never sent. The job stays #Settling: refund the buyer by hand, then resolveJob(jobId, #Settled) (tx " # parked.txHash # ")");
+            // Repeated on every call until resolveJob, so it also tells an operator who already paid.
+            return #err("Settle confirmed on-chain, but the canister never sent the buyer's remainder (" # Nat.toText(owed) # "). The job stays #Settling until resolveJob: if you have already refunded it by hand, call resolveJob(jobId, #Settled); if not, refund the buyer by hand first (tx " # parked.txHash # ")");
           };
           jobs.put(jobId, { j2 with status; parkedTx = null; completedAt = ?Time.now() });
           #ok(msg # " (tx " # parked.txHash # ")");

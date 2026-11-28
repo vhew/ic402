@@ -1828,6 +1828,8 @@ module {
     func parkGasRefusedLeg(sessionId : Text, leg : { #Settle; #Refund }, hash : Text) : Types.PaymentResult {
       closeParkedTxs.put(sessionId, { leg; txHash = hash });
       let name = switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } };
+      // Logged (here and in parkRejectedLeg) because a timer close discards this result.
+      Debug.print("ic402 session " # sessionId # ": " # name # " leg signed but refused for lack of gas (tx " # hash # "); not sent again — parked #closing for reconcileSession.");
       #settlementPending("EVM " # name # " was signed, but the providers refused it for lack of gas (fund the canister's EVM address); one may have accepted it, so it is not sent again (session parked — reconcileSession; tx " # hash # ")");
     };
 
@@ -1837,6 +1839,7 @@ module {
     func parkRejectedLeg(sessionId : Text, leg : { #Settle; #Refund }, why : Text) : Types.PaymentResult {
       closeParkedTxs.put(sessionId, { leg; txHash = HASH_UNKNOWN });
       let name = switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } };
+      Debug.print("ic402 session " # sessionId # ": " # name # " leg send rejected (" # why # "), no hash; it may have been broadcast — parked #closing: check the chain (reconcileSession).");
       #settlementPending("EVM " # name # " send was rejected (" # why # "); it may have been broadcast, and no tx hash came back. Session parked — check the chain before any recovery (reconcileSession explains)");
     };
 
