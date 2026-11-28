@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## v2.25.0 — 2026-11-28
+
+Minor — **security release, with a breaking default.** `settle`, the path HTTP requests use, now
+refuses ICP payments unless the operator opts in with `Gateway.setIcpOverHttp(true)`. Until now
+an HTTP ICP payment could spend an ICRC‑2 approval another principal had given the canister (high;
+advisory GHSA-wp5r-hc95-q6mf). Read the upgrade notes under Security, and the derivation-path
+notes under Fixed, before upgrading. Also:
+- `consumeVoucherFromAtLeast` enforces a per‑call session price in the library.
+- EVM recovery and close paths keep the record of a transfer that may have gone out, so it is no
+  longer sent again.
+- A job whose payout parked no longer loses the buyer's remainder.
+- A labelled EVM derivation path can be re-applied after an upgrade; a mismatch stops EVM sends
+  instead of splitting the canister across two addresses.
+- A new CI job runs the ICP ledger's failure paths against a scriptable mock ledger.
+
+All were found by an internal whole-module review of the money paths. No stored-state change
+(`STABLE_SCHEMA_VERSION` stays 1). `example.did` adds the controller‑only `setIcpOverHttp`.
 
 ### Security
 
@@ -345,7 +361,7 @@ Raised by EngramX after 2.23.1; an adversarial pre-release review widened the fi
   payout. Its error now names the signed transaction: check that hash on chain before resending by
   hand (recovery runbook, "no parked tx"). **Correction:** this note also said the send "is not
   re-sent unattended". That was wrong: a payer's close reopened the session for a later close to
-  sign again, and the job sweep retried a counted payout. Fixed in the release after 2.24.1, which
+  sign again, and the job sweep retried a counted payout. Fixed in 2.25.0, which
   parks every such leg and payout under its signed transaction.
 
 ### Fixed
@@ -432,7 +448,7 @@ Raised by EngramX after 2.23.1; an adversarial pre-release review widened the fi
   names the signed tx. A payer's close still reopens after it, as it did before 2.23.2.
   **Correction:** this note first said the send was not re-sent unattended. It was: the reopened
   session was closed again later (by the payer, or by the sweep after the stop), and the job sweep
-  retried a counted payout. Fixed in the release after 2.24.1.
+  retried a counted payout. Fixed in 2.25.0.
 - **The stop is transient.** An upgrade forgets it, as does `setEvmDerivationPath` replacing the
   sender; the next failing broadcast sets it again. A sender built separately (such as
   `EvmSenderAt`) has its own stops.
