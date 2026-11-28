@@ -973,7 +973,7 @@ module {
     /// Deprecated (2.17.0): prefer consumeVoucherFrom; this path always runs the signature check
     /// while the fallback is on, and refuses every voucher once setSignedVoucherFallback(false).
     public func consumeVoucher(voucher : Types.Voucher) : Types.VoucherResult {
-      consumeWith(null, voucher);
+      consumeWith(null, voucher, 0);
     };
 
     /// 2.17.0: consumeVoucher with the submitting principal (pass msg.caller). When `caller` is the
@@ -983,10 +983,18 @@ module {
     /// can sign as). Other callers take the signed path while setSignedVoucherFallback is on
     /// (default); off, they get #invalidSignature right after the session lookup.
     public func consumeVoucherFrom(caller : Principal, voucher : Types.Voucher) : Types.VoucherResult {
-      consumeWith(?caller, voucher);
+      consumeWith(?caller, voucher, 0);
     };
 
-    func consumeWith(caller : ?Principal, voucher : Types.Voucher) : Types.VoucherResult {
+    /// consumeVoucherFrom with the per-call price enforced: a voucher that raises cumulativeAmount
+    /// by less than `minDelta` is refused with #policyDenied and consumes nothing. consumeVoucher
+    /// and consumeVoucherFrom accept any increase, so without this (or your own check on the
+    /// returned delta, made before anything is delivered) a payer can pay 1 unit per call.
+    public func consumeVoucherFromAtLeast(caller : Principal, voucher : Types.Voucher, minDelta : Nat) : Types.VoucherResult {
+      consumeWith(?caller, voucher, minDelta);
+    };
+
+    func consumeWith(caller : ?Principal, voucher : Types.Voucher, minDelta : Nat) : Types.VoucherResult {
       let session = switch (sessions.get(voucher.sessionId)) {
         case (null) { return #sessionNotOpen };
         case (?s) { s };
@@ -1029,6 +1037,11 @@ module {
 
       // Compute delta (safe: cumulativeAmount >= lastCumulativeAmount checked above)
       let delta : Nat = voucher.cumulativeAmount - session.lastCumulativeAmount;
+
+      // The per-call price (consumeVoucherFromAtLeast), before anything is written.
+      if (delta < minDelta) {
+        return #policyDenied("Voucher pays " # Nat.toText(delta) # ", below the per-call price of " # Nat.toText(minDelta) # ": raise cumulativeAmount by at least that much. The voucher was not consumed.");
+      };
 
       // Check policy
       switch (policy.checkVoucher(session.payer, delta)) {

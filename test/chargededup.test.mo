@@ -89,6 +89,7 @@ let config : Types.Config = {
 /// A fresh gateway (switch as given) and a payment for 5_000 against a nonce it just issued.
 func setup(dedup : Bool) : (Gateway.Gateway, Types.PaymentSignature) {
   let gate = Gateway.Gateway(config, canisterP);
+  gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
   gate.setLedgerDedup(dedup);
   let req = gate.require({ token = ledgerP; amount = 5_000; network = "icp:1" });
   (gate, {

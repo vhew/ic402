@@ -95,6 +95,7 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     // with this payment may have moved funds, while all that moved is a stranger's junk request.
     await ledger.script(NO_ALLOWANCE, 3);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     let junk = gate.settle({ sig with sender = stranger }, ?5_000); // HTTP, names any sender
     await untilLedgerCalled();
@@ -111,6 +112,7 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     // after a timeout pays anew while its first attempt is pulling the funds.
     await ledger.script(OK, 3);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     let first = gate.settle(sig, ?5_000); // HTTP, names the payer
     await untilLedgerCalled();
@@ -126,6 +128,7 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     // is cleaned up 24 h past expiry, although nothing is in flight any more.
     await ledger.setMode(REJECT);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     assert isPending(await gate.settle({ sig with sender = stranger }, ?5_000)); // HTTP, unknown outcome
     let r = await gate.settleFrom(payerP, sig, ?5_000);
@@ -154,6 +157,7 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     assert Gateway.chargePayerKey(evm("52908400098527886e0f7030069857d2e4169ee7")) == k;
     assert Gateway.chargePayerKey(evm("0x52908400098527886e0f7030069857d2e4169ee8")) != k;
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     assert Gateway.chargePayerKey(sig) == Gateway.chargePayerKey({ sig with sender = payer });
     assert Gateway.chargePayerKey(sig) != Gateway.chargePayerKey({ sig with sender = stranger });
@@ -164,6 +168,7 @@ await suite("2.22.0: a settle in flight answers 'busy', not 'outcome unknown'", 
     // unknown before the upgrade answers "retry in a few seconds" forever after it.
     await ledger.script(REJECT, 0);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     assert isPending(await gate.settle(sig, ?5_000));
     let upgraded = Gateway.Gateway(config, canisterP);
@@ -181,6 +186,7 @@ await suite("2.22.0: an HTTP charge that ends pending holds no daily reservation
     // rest of the UTC day and the payer's own payment is refused as over the daily limit.
     await ledger.script(REJECT, 0);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     gate.setPolicy(null, {
       maxPerTransaction = null; maxPerDay = ?5_000; rateLimitPerMinute = null; maxSessionDeposit = null;
       maxConcurrentSessions = null; maxSessionDuration = null; sessionIdleTimeout = null;
@@ -200,6 +206,7 @@ await suite("2.22.0: a malformed sender is refused, not a trap", func() : async 
     // HTTP) instead of answering.
     await ledger.script(OK, 0);
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate);
     for (bad in ["rrkah-fqaaa-aaaaa-aaaab-cai", "RRKAH-FQAAA-AAAAA-AAAAQ-CAI", "not-a-principal"].vals()) {
       switch (await gate.settle({ sig with sender = bad }, ?5_000)) { case (#invalidSignature(_)) {}; case (_) { assert false } };
@@ -232,5 +239,42 @@ await suite("2.22.0: a malformed sender is refused, not a trap", func() : async 
     ].vals()) {
       assert Utils.principalFromText(t) == null;
     };
+  });
+});
+
+await suite("ICP through settle (the caller-less HTTP path) is opt-in", func() : async () {
+
+  await test("off by default: settle naming a payer is refused before anything is locked, reserved or pulled", func() : async () {
+    // Mutation: drop the icpOverHttp check at the top of settleCore — anyone holding a nonce can
+    // name a principal that has approved this canister and spend its allowance (here: #ok, and
+    // the ledger is called).
+    await ledger.script(OK, 0);
+    let gate = Gateway.Gateway(config, canisterP);
+    assert not gate.icpOverHttpEnabled();
+    let sig = payment(gate);
+    switch (await gate.settle({ sig with sender = payer }, ?5_000)) {
+      case (#networkNotSupported(_)) {};
+      case (_) { assert false };
+    };
+    assert (await ledger.pullCalls()) == 0;
+    assert dailyHeld(gate) == 0;
+    // The nonce was not locked: the payer's own Candid payment with it still settles.
+    switch (await gate.settleFrom(payerP, sig, ?5_000)) { case (#ok(r)) { assert r.sender == payer }; case (_) { assert false } };
+  });
+
+  await test("requireForHttp / describeForHttp advertise ICP only while setIcpOverHttp is on", func() : async () {
+    // Mutation: either helper returning the full list regardless — an HTTP 402 or discovery
+    // listing offers a rail that settle refuses.
+    let gate = Gateway.Gateway(config, canisterP);
+    func hasIcp(rs : [Types.PaymentRequirement]) : Bool {
+      for (r in rs.vals()) { if (r.network == "icp:1") return true };
+      false;
+    };
+    assert hasIcp(gate.requireAll(5_000)) and hasIcp(gate.describeAll(5_000));
+    assert not hasIcp(gate.requireForHttp(5_000));
+    assert not hasIcp(gate.describeForHttp(5_000));
+    gate.setIcpOverHttp(true);
+    assert hasIcp(gate.requireForHttp(5_000));
+    assert hasIcp(gate.describeForHttp(5_000));
   });
 });

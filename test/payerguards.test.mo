@@ -59,6 +59,7 @@ await suite("2.21.1: the canister is never the payer of its own pull", func() : 
     // the canister pays for the caller's resource.
     await ledger.reset();
     let gate = Gateway.Gateway(config, canisterP);
+    gate.setIcpOverHttp(true); // drives ICP through settle (the HTTP path), which is opt-in
     let sig = payment(gate, Principal.toText(canisterP));
     switch (await gate.settle(sig, ?5_000)) { case (#invalidSignature(_)) {}; case (_) { assert false } };
     assert (await ledger.pullCalls()) == 0;

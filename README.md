@@ -97,7 +97,7 @@ See [`example/main.mo`](example/main.mo) for the full working example with all f
 
 **x402 charge over HTTP:**
 ```
-Client → GET /content/x → 402 (ICP + EVM payment options)
+Client → GET /content/x → 402 (EVM payment options; ICP too if setIcpOverHttp is on)
 Client → pay USDC (any chain)
 Client → GET + X-PAYMENT header → 200 + content
 ```
@@ -166,9 +166,10 @@ Per‑call EVM settle is **underwater below ~$0.05–0.10** — use the ICP rail
 
 ## Security
 
-The money paths are sound — recipient binding, exact `value == amount`, single‑use nonces, confirm‑before‑deliver. But two things you must know before deploying with real funds:
+The money paths are sound — recipient binding, exact `value == amount`, single‑use nonces, confirm‑before‑deliver. But three things you must know before deploying with real funds:
 
-- **The library is not secure‑by‑default.** Four access‑control checks (policy‑mutation auth, roster redaction, cross‑resource underpayment, content gating) live only in [`example/main.mo`](example/main.mo) — copy them or inherit a price‑bypass / roster‑leak / content‑leak.
+- **The library is not secure‑by‑default.** Five checks (policy‑mutation auth, roster redaction, cross‑resource underpayment, content gating, the per‑call session price) live only in [`example/main.mo`](example/main.mo) — copy them or inherit a price‑bypass / roster‑leak / content‑leak.
+- **ICP payments over HTTP are off by default.** HTTP requests have no authenticated caller, so `settle` refuses the ICP rail unless you call `setIcpOverHttp(true)`; with it on, anyone can spend any ICRC‑2 approval given to your canister by naming the approver. ICP payers use your Candid methods (`settleFrom`).
 - **One trust root.** Every admin/signer/recovery power is `Principal.isController`, so a single stolen controller key = total EVM drain + arbitrary signing.
 
 Read **[docs/security-model.md](docs/security-model.md)** (integration checklist + key‑custody guidance) before going to mainnet.
@@ -216,10 +217,12 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | Method | Description |
 |--------|-------------|
 | `requireAll(amount)` | Generate ICP + all EVM payment requirements |
+| `requireForHttp(amount)` / `describeForHttp(amount)` | `requireAll` / `describeAll` for an HTTP 402 or discovery listing: the ICP entry only while `setIcpOverHttp` is on |
 | `settle(signature, expectedAmount?)` | Settle via ICRC-2 (ICP) or HTTPS outcall (EVM); `expectedAmount` binds the on-chain amount on the facilitator path. Candid endpoints: use `settleFrom(msg.caller, …)`, which refuses an ICP payment the caller does not make |
 | `verifyPayment(signature, expectedAmount, payTo, asset)` | Off-chain x402 verify verdict (`{isValid, invalidReason?, payer?}`) — no nonce, no broadcast, EVM only |
 | `offerSession(intent)` | Create session offer |
 | `openSession(...)` | Deposit escrow, create session |
+| `consumeVoucherFromAtLeast(msg.caller, voucher, minDelta)` | `consumeVoucherFrom` with the per‑call price enforced: a voucher raising `cumulativeAmount` by less than `minDelta` is refused (`#policyDenied`) and consumes nothing |
 | `consumeVoucher(voucher)` | Verify + consume session voucher (deprecated: prefer `consumeVoucherFrom(msg.caller, voucher)`; refuses every voucher once `setSignedVoucherFallback(false)`) |
 | `closeSession(caller, id)` | Settle consumed, refund remainder |
 | `setPolicy(caller?, policy)` | Set spending policy |
@@ -229,6 +232,7 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `startTimers<system>()` | Start background timers (session expiry is **self-arming**: it runs only while a session is not yet `#closed` and disarms itself, so an idle canister burns no per-tick cycles — see [costs §5](docs/costs-and-rails.md#5-fixed-idle-cost-recurring-timers)) |
 | `startTimersWith<system>({ hourlyGc })` | 2.19.0: `startTimers` with the hourly policy/grant clean-up optional. With `hourlyGc = false` the host **must** call `runMaintenance()` at least daily |
 | `runMaintenance()` | 2.19.0: the hourly clean-up, run by the host — synchronous, at most 10,000 removals per map per call, `more = true` to call again |
+| `setIcpOverHttp(on)` | Default off. On: `settle` (the caller‑less path HTTP handlers use) accepts ICP payments, authenticated only by the payer's allowance, so anyone can spend any approval to this canister by naming the approver. Off: ICP is refused there with `#networkNotSupported`; `settleFrom` is unaffected. Controller‑only. Transient: set it at init |
 | `setLedgerDedup(on)` | 2.21.0, default off: each ICP charge queries the ledger fee first (a stopped ledger refuses it cleanly), and a pending charge made through `settleFrom` is resolved by the payer's `settleFrom` with the same payment, through the ledger's deduplication. Turn on **only** if every configured ledger deduplicates on `created_at_time` + `memo` (DFINITY's ICP and ICRC-1 ledgers do); on any other, the re-send charges twice. Transient: set it at init |
 | `liftEvmPayerCooldown(chainId, token, from)` / `clearEvmPayerCooldowns()` | 2.23.1, operator: lift one EVM payer's cooldown, or every one. A payer whose sent inbound transfer reverted is refused for an hour, and one whose transfer had not confirmed within the polls for 5 minutes; lift it early once the cause is fixed. Restrict to controllers |
 | `liftEvmGasStop(chainId)` | 2.23.2, operator: lift a chain's gas stop. After a broadcast on a chain reports the canister's EVM address short of gas, every send there (inbound payments, closes, refunds, sweeps, payouts) is refused before signing for 10 minutes; lift it once the address is funded. Expired-session closes and job payouts the stop refused wait, and go through on the first tick after it ends or is lifted; lift only once the top-up is confirmed. Fund gas on every chain in `evmChains`. Restrict to controllers |

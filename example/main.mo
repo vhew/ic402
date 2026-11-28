@@ -145,6 +145,10 @@ persistent actor KnowledgeBase {
     // Turn this on ONLY for ledgers that deduplicate — on any other, the re-send charges twice.
     // Transient — re-applied here on upgrade.
     gate.setLedgerDedup(true);
+    // ICP payments over HTTP stay OFF (the library default): settle has no caller, so with them on
+    // anyone could spend any approval given to this canister by naming the approver. ICP payers use
+    // the Candid methods (settleFrom). setIcpOverHttp below turns them on for tests only; being
+    // transient, an upgrade turns them off again.
   };
 
   // Start background timers (session expiry, EVM address derivation)
@@ -262,8 +266,8 @@ persistent actor KnowledgeBase {
       case (null) { #paymentRequired(gate.requireAll(amount)) };
       case (?sig) {
         // 2.17.0: settleFrom — on the ICP rail the caller must BE sig.sender, so a stranger cannot
-        // spend another principal's allowance on THIS route. The HTTP routes below share the nonce
-        // pool and stay allowance-authenticated (see http_request_update). No Candid change.
+        // spend another principal's allowance on THIS route. The HTTP routes below refuse ICP
+        // payments unless setIcpOverHttp is on (see http_request_update). No Candid change.
         switch (await gate.settleFrom(msg.caller, sig, ?amount)) {
           // settle(sig, ?amount) enforces the cross-resource amount internally (it rejects a nonce
           // whose bound amount != this resource's price), so #ok guarantees receipt.amount == amount.
@@ -363,19 +367,19 @@ persistent actor KnowledgeBase {
     };
 
     // x402 discovery (Bazaar): list the paid resources with their v2 accepts[] (non-minting —
-    // describeAll advertises price/asset without burning a server nonce; clients hit the
+    // describeForHttp advertises price/asset without burning a server nonce; clients hit the
     // resource for a live challenge).
     if (path == "/discovery/resources") {
       var items = Http.discoveryItemJson(
         Http.buildResourceUrl(request.headers, "/search"),
         "http",
-        Http.acceptsArrayJson(gate.describeAll(1_000)),
+        Http.acceptsArrayJson(gate.describeForHttp(1_000)),
       );
       for (entry in store.list().values()) {
         items #= "," # Http.discoveryItemJson(
           Http.buildResourceUrl(request.headers, "/content/" # entry.id),
           "http",
-          Http.acceptsArrayJson(gate.describeAll(5_000)),
+          Http.acceptsArrayJson(gate.describeForHttp(5_000)),
         );
       };
       for (svc in registry.listServices(true).values()) {
@@ -388,7 +392,7 @@ persistent actor KnowledgeBase {
           items #= "," # Http.discoveryItemJson(
             Http.buildResourceUrl(request.headers, "/service/" # svc.id),
             "http",
-            Http.acceptsArrayJson(gate.describeAll(amt)),
+            Http.acceptsArrayJson(gate.describeForHttp(amt)),
           );
         };
       };
@@ -444,9 +448,10 @@ persistent actor KnowledgeBase {
     };
   };
 
-  // 2.17.0: the HTTP settle paths below keep gate.settle — http_request_update has no caller (its
-  // msg.caller is anonymous), so ICP payment here stays allowance-authenticated; that is why the
-  // SDK approves exactly amount + fee with an expiry. Candid endpoints use gate.settleFrom.
+  // The HTTP settle paths below use gate.settle — http_request_update has no caller (its
+  // msg.caller is anonymous). settle refuses ICP payments unless setIcpOverHttp is on (it is off
+  // here): with it on, an ICP payment is authenticated only by the payer's allowance, which anyone
+  // naming the payer could spend. EVM payments are payer-signed. Candid endpoints use settleFrom.
   public shared func http_request_update(request : Ic402.HttpRequest) : async Ic402.HttpResponse {
     let path = Http.getPath(request.url);
     if (request.method == "OPTIONS") { return Http.httpOptions() };
@@ -483,7 +488,7 @@ persistent actor KnowledgeBase {
 
     // v2: a stock client sends the payment in PAYMENT-SIGNATURE; accept the legacy x-payment as a
     // fallback. H-9: with no payment yet, issue the 402 challenge HERE (update context) so
-    // gate.requireAll persists the server nonce that the ICP/legacy rail binds to.
+    // gate.requireForHttp persists the server nonce that the legacy rail binds to.
     let paymentHeader = switch (Http.getHeader(request.headers, "payment-signature")) {
       case (?p) { p };
       case (null) {
@@ -498,9 +503,9 @@ persistent actor KnowledgeBase {
                 case (?refusal) { return refusal };
                 case (null) {};
               };
-              return Http.http402(gate.requireAll(5_000), resourceUrl);
+              return Http.http402(gate.requireForHttp(5_000), resourceUrl);
             };
-            if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireAll(1_000), resourceUrl) };
+            if (Text.startsWith(path, #text "/search")) { return Http.http402(gate.requireForHttp(1_000), resourceUrl) };
             if (Text.startsWith(path, #text "/service/")) {
               let serviceId = switch (Text.stripStart(path, #text "/service/")) {
                 case (?id) { id };
@@ -515,7 +520,7 @@ persistent actor KnowledgeBase {
                     // per-request 402 charge — requireAll(0) would trap.
                     case (null) { return Http.httpError(400, "Service uses session billing — open a session instead") };
                     // A1: charge price + ledger fee so the canister can cover the outbound settle.
-                    case (?charge) { return Http.http402(gate.requireAll(charge), resourceUrl) };
+                    case (?charge) { return Http.http402(gate.requireForHttp(charge), resourceUrl) };
                   };
                 };
               };
@@ -662,8 +667,8 @@ persistent actor KnowledgeBase {
   // ═══════════════════════════════════════════════════════════════════════
 
   // The price of one sessionQuery. The intents advertise it as costPerCall, and sessionQuery
-  // enforces it: the library only requires each voucher's cumulative amount to rise. Transient:
-  // a constant, re-set on every install and upgrade.
+  // enforces it through gate.consumeVoucherFromAtLeast (consumeVoucherFrom alone only requires each
+  // voucher's cumulative amount to rise). Transient: a constant, re-set on every install and upgrade.
   transient let SESSION_COST_PER_CALL : Nat = 500;
 
   public shared func requestSession() : async Ic402.SessionIntent {
@@ -730,19 +735,12 @@ persistent actor KnowledgeBase {
   public shared(msg) func sessionQuery(voucher : Ic402.Voucher, question : Text) : async { #ok : Text; #error : Text } {
     // Surface the SPECIFIC voucher-rejection reason (the old catch-all "Invalid voucher" hid which
     // of signature / sequence / session-state / overflow failed, making the demo undiagnosable).
-    switch (gate.consumeVoucherFrom(msg.caller, voucher)) {
-      case (#ok(delta)) {
-        // S2: the library accepts any increase, so a hand-rolled client could pay 1 per query.
-        // Refuse a voucher that pays less than the advertised price, and leave it unconsumed: a
-        // trap discards the state changes made since the message's last await, and there is no
-        // await between consumeVoucherFrom and here, so the consumption is undone. Keep it so.
-        // (Checking before consuming instead would tell a stranger, whom consumeVoucherFrom
-        // refuses #invalidSignature before it looks at any amount, the session's consumed total.)
-        if (delta < SESSION_COST_PER_CALL) {
-          Debug.trap("Voucher below the per-call price: each sessionQuery must raise cumulativeAmount by at least " # Nat.toText(SESSION_COST_PER_CALL) # " (the intent's costPerCall). The voucher was not consumed.");
-        };
-        #ok(doQuery(question));
-      };
+    // S2: consumeVoucherFrom accepts any increase, so a hand-rolled client could pay 1 per query.
+    // consumeVoucherFromAtLeast refuses a voucher below the advertised per-call price (#policyDenied)
+    // and leaves it unconsumed. It checks the amount only after the caller check, so a stranger
+    // still learns nothing about the session's consumed total.
+    switch (gate.consumeVoucherFromAtLeast(msg.caller, voucher, SESSION_COST_PER_CALL)) {
+      case (#ok(_)) { #ok(doQuery(question)) };
       case (#insufficientDeposit) { #error("Budget exhausted: cumulative amount exceeds the deposit") };
       case (#policyDenied(r)) { #error("Policy: " # r) };
       case (#invalidSequence) { #error("Invalid voucher: sequence/cumulativeAmount not strictly increasing (each must exceed the previous voucher's)") };
@@ -1370,6 +1368,14 @@ persistent actor KnowledgeBase {
   public shared (msg) func setEvmSplitCeiling(bps : ?Nat) : async { #ok; #err : Text } {
     requireController(msg.caller);
     gate.setEvmSplitCeiling(bps);
+  };
+
+  /// ICP payments over HTTP (see Gateway.setIcpOverHttp): off by default, and an upgrade turns them
+  /// off again. While on, anyone can spend any approval given to this canister by naming the
+  /// approver. Controller-only; the integration tests use it to cover both settings.
+  public shared (msg) func setIcpOverHttp(on : Bool) : async () {
+    requireController(msg.caller);
+    gate.setIcpOverHttp(on);
   };
 
   /// 2.24.0: settle an EVM charge paid to a split payee (see Gateway.settleToSplit). Controller-

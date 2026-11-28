@@ -173,8 +173,10 @@ export class Ic402Client {
 
   /**
    * 2.17.0: approve exactly `amount` + the ledger fee (what `icrc2_transfer_from` deducts on top),
-   * expiring in 5 minutes (the canister's default nonce expiry), so no allowance stands afterwards
-   * — ICP settlement over HTTP is allowance-authenticated. Approvals REPLACE the allowance, so two
+   * expiring in 5 minutes (the canister's default nonce expiry), to keep what stands small and
+   * short-lived. It does not make the allowance safe while it stands: on a canister that has turned
+   * on ICP payments over HTTP (Gateway.setIcpOverHttp, off by default), anyone can spend it by
+   * naming this principal until it is used or expires. Approvals REPLACE the allowance, so two
    * overlapping payments from one identity may fail with InsufficientAllowance (never double-pay).
    */
   private async approvalFor(

@@ -654,6 +654,10 @@ service : {
       err: text;
       ok;
     });
+  /// ICP payments over HTTP (see Gateway.setIcpOverHttp): off by default, and an upgrade turns them
+  /// off again. While on, anyone can spend any approval given to this canister by naming the
+  /// approver. Controller-only; the integration tests use it to cover both settings.
+  setIcpOverHttp: (on: bool) -> ();
   setPolicy: (p: SpendingPolicy) -> ();
   /// 2.24.0: settle an EVM charge paid to a split payee (see Gateway.settleToSplit). Controller-
   /// only, because the finder and share must come from the operator's own records, never from the

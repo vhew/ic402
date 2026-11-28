@@ -257,6 +257,8 @@ module {
     var receiptCounter : Nat = 0;
     // 2.21.0 (default OFF): see setLedgerDedup. Transient: re-apply at init.
     var ledgerDedup = false;
+    // Default OFF: see setIcpOverHttp. Transient: re-apply at init.
+    var icpOverHttp = false;
     // 2.24.0: the operator's ceiling on a split payee's finder share, in basis points (see
     // setEvmSplitCeiling); null = settleToSplit refuses every payment. Transient, like
     // setLedgerDedup: re-apply after an upgrade.
@@ -591,6 +593,13 @@ module {
       };
     };
 
+    /// requireAll for an HTTP 402: the ICP entry is included only while setIcpOverHttp is on,
+    /// because `settle` (the path HTTP handlers use) refuses ICP payments while it is off. Use
+    /// this, not requireAll, wherever the challenge goes to an HTTP client.
+    public func requireForHttp(amount : Nat) : [Types.PaymentRequirement] {
+      if (icpOverHttp) { requireAll(amount) } else { requireEvm(amount) };
+    };
+
     /// Check whether the self-derived EVM address is available.
     /// Returns false until startTimers() completes the tECDSA derivation.
     public func isEvmReady() : Bool {
@@ -708,6 +717,13 @@ module {
         };
       };
       Buffer.toArray(buf);
+    };
+
+    /// describeAll for an HTTP discovery listing: the ICP entry only while setIcpOverHttp is on
+    /// (see requireForHttp).
+    public func describeForHttp(amount : Nat) : [Types.PaymentRequirement] {
+      let all = describeAll(amount);
+      if (icpOverHttp) { all } else { Array.filter<Types.PaymentRequirement>(all, func(r) { isEvmNetwork(r.network) }) };
     };
 
     /// Resolve the (token, recipient) for opening an EVM session on `network` ("eip155:<chainId>"):
@@ -916,6 +932,11 @@ module {
     /// await and are rolled back on failure; the per-caller rate hit is checked read-only before
     /// it and recorded only with a receipt (I6). EVM settles are metered by the GLOBAL facilitator
     /// token bucket and can return #policyDenied("Rate limited…") under load; ICP settles are not.
+    ///
+    /// ICP: refused with #networkNotSupported unless setIcpOverHttp is on. `settle` has no caller,
+    /// so on the ICP rail `signature.sender` is only a claim, and while it is on anyone can spend
+    /// any ICRC-2 approval to this canister by naming the approver. Candid methods call
+    /// settleFrom with msg.caller instead, which ICP payments always go through.
     public func settle(signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       await* settleCore(signature, expectedAmount, false, null);
     };
@@ -973,6 +994,11 @@ module {
     // sender. 2.21.0: only then is a pending charge's transfer stored or re-sent (setLedgerDedup).
     // `split`: 2.24.0, settleToSplit's split payee; null = the payment must be to this canister.
     func settleCore(signature : Types.PaymentSignature, expectedAmount : ?Nat, payerIsCaller : Bool, split : ?EvmSplits.SplitPayee) : async* Types.PaymentResult {
+      // ICP through a caller-less settle only when the operator has opted in (setIcpOverHttp).
+      // Checked first, so a refused call locks no nonce and reserves nothing.
+      if (not payerIsCaller and not isEvmNetwork(signature.network) and not icpOverHttp) {
+        return #networkNotSupported("ICP payments are not accepted through settle (the path HTTP requests use, which has no authenticated caller). Pay through the canister's Candid method, which settles with your authenticated principal.");
+      };
       // SEC-0: rate-limit the EXPENSIVE EVM verify path (pure-Motoko ecRecover over attacker-
       // controlled EIP-3009 input) behind the GLOBAL token bucket, so an unauthenticated flood of
       // bogus payloads on ANY paid path (/content, /search, /settle) cannot run unmetered ecRecover
@@ -1524,8 +1550,8 @@ module {
     /// is only a claim — the payer's ICRC-2 allowance is the sole authentication — so the caller
     /// must BE the named sender (canonical text), checked before the nonce lock or any ledger call
     /// (#policyDenied otherwise). EVM: exactly `settle` (the EIP-3009 authorization is payer-signed).
-    /// HTTP endpoints have no caller and keep `settle` (allowance-authenticated; 2.21.1: the
-    /// canister itself is refused as the payer on both paths).
+    /// HTTP endpoints have no caller and use `settle`, which refuses ICP payments unless
+    /// setIcpOverHttp is on (2.21.1: the canister itself is refused as the payer on both paths).
     public func settleFrom(caller : Principal, signature : Types.PaymentSignature, expectedAmount : ?Nat) : async Types.PaymentResult {
       if (not isEvmNetwork(signature.network) and signature.sender != Principal.toText(caller)) {
         return #policyDenied("Not authorized: this payment names sender " # signature.sender # " but was submitted by " # Principal.toText(caller) # " — on the ICP rail the caller must be the paying principal");
@@ -1578,6 +1604,12 @@ module {
     /// 2.17.0: pass msg.caller; the session key's own principal skips the signature check (see Sessions).
     public func consumeVoucherFrom(caller : Principal, voucher : Types.Voucher) : Types.VoucherResult {
       sessionsMgr.consumeVoucherFrom(caller, voucher);
+    };
+
+    /// consumeVoucherFrom with the per-call price enforced (see Sessions.consumeVoucherFromAtLeast):
+    /// a voucher paying less than `minDelta` is refused with #policyDenied and consumes nothing.
+    public func consumeVoucherFromAtLeast(caller : Principal, voucher : Types.Voucher, minDelta : Nat) : Types.VoucherResult {
+      sessionsMgr.consumeVoucherFromAtLeast(caller, voucher, minDelta);
     };
 
     /// Get a session's public state.
@@ -2033,6 +2065,21 @@ module {
 
     /// 2.21.0: whether setLedgerDedup is on.
     public func ledgerDedupEnabled() : Bool { ledgerDedup };
+
+    /// Default OFF. When on, `settle` (the caller-less path HTTP handlers use) accepts ICP
+    /// payments: an ICRC-2 transfer_from from the principal the payment header names. Nothing
+    /// authenticates that name except the ledger's allowance check, so while this is on anyone can
+    /// spend ANY approval a principal has given this canister, for as long as it stands, by
+    /// naming that principal; that includes approvals meant for a Candid payment or a session
+    /// deposit. Turn it on only if you accept that every approval to this canister is spendable by
+    /// anyone. ICP payments through settleFrom (Candid, authenticated caller) are unaffected. With
+    /// it off, build HTTP challenges and discovery listings with requireForHttp / describeForHttp
+    /// so they do not advertise a rail settle refuses. OPERATOR op: restrict to controllers.
+    /// Transient: re-apply at init.
+    public func setIcpOverHttp(on : Bool) { icpOverHttp := on };
+
+    /// Whether setIcpOverHttp is on.
+    public func icpOverHttpEnabled() : Bool { icpOverHttp };
 
     /// Whether a session's voucher key is the payer's own IC identity key (derived, works for
     /// pre-existing sessions). null = unknown session; false = "not identity-bound", never

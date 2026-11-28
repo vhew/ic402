@@ -5,9 +5,16 @@ chains via tECDSA) on behalf of canisters and AI agents. Security is the product
 file states the current remediation posture, what is and is not yet production-ready, the
 threat models we design against, and how to report a vulnerability.
 
-> **Current release: v2.24.0** (additive: `settleToSplit`, split payees, off by default). The
-> latest security fix is **v2.23.2**: it no longer signs again and again on a chain the canister
-> cannot pay gas on: a broadcast that reports the canister short of gas stops every send on that
+> **Current release: v2.25.0, a security release.** An HTTP ICP payment could spend an ICRC‑2
+> approval another principal had given the canister, by naming that principal as `sender`
+> (high; advisory GHSA-wp5r-hc95-q6mf). `settle`, the path HTTP requests use, now refuses ICP
+> payments unless the operator opts in with `Gateway.setIcpOverHttp(true)`. This changes a
+> default: read the upgrade notes in [`CHANGELOG.md`](CHANGELOG.md) first. 2.25.0 also fixes EVM
+> recovery and close paths that could lose the record of a transfer that may have gone out, so
+> that it could be sent again, and a job whose payout parked losing the buyer's remainder.
+>
+> Before it, **v2.23.2** stopped signing again and again on a chain the canister cannot pay gas
+> on: a broadcast that reports the canister short of gas stops every send on that
 > chain, before signing, for 10 minutes. It completes v2.23.1, which:
 > - fixed the EVM-RPC consensus config that had failed every EVM call on Ethereum, Base,
 >   Optimism, Arbitrum and Ethereum Sepolia since 2.1.0;
@@ -41,9 +48,10 @@ threat models we design against, and how to report a vulnerability.
 
 | Version | Supported | Notes |
 |---|:--:|---|
-| 2.24.x | ✅ | Current. |
-| 2.23.x | ✅ | Supported at 2.23.2, which has every security fix; 2.24.0 only adds `settleToSplit`. 2.23.1 signs every inbound EVM payment, and every retried close, on a listed chain the canister cannot pay gas on; 2.23.0 lacks the 2.23.1 fixes. |
-| 2.22.x | ⚠️ | Superseded; upgrade to 2.23.2. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
+| 2.25.x | ✅ | Current. |
+| 2.24.x | ⚠️ | Superseded; upgrade to 2.25.0. An HTTP ICP payment can spend another principal's approval to the canister (high, GHSA-wp5r-hc95-q6mf), and EVM recovery and close paths can lose the record of a transfer that may have gone out, so that it is sent again. |
+| 2.23.x | ⚠️ | Superseded; upgrade to 2.25.0. As 2.24.x. 2.23.1 also signs every inbound EVM payment, and every retried close, on a listed chain the canister cannot pay gas on; 2.23.0 lacks the 2.23.1 fixes. |
+| 2.22.x | ⚠️ | Superseded; upgrade to 2.25.0. Has the 2.22.0 security fixes but not 2.23.1's. EVM calls fail on the default-provider chains, and on the other chains an EVM payment that cannot succeed is signed and sent at the canister's cost. |
 | 2.21.x | ⚠️ | Superseded; upgrade. Lacks the 2.22.0 security fixes, three of them high severity. |
 | 2.20.x | ⚠️ | Superseded; upgrade. A pending ICP charge can only be resolved by checking the ledger, and a session-open deposit rejected with an unknown outcome is left without a session record. |
 | 2.0.x – 2.19.x | ⚠️ | Superseded; upgrade. An ICP ledger reject with an unknown outcome is treated as "not paid", which can charge a payer twice (fixed in 2.20.0). |

@@ -212,6 +212,21 @@ suite("Sessions.consumeVoucher", func() {
       };
       assert asKey(pubOf(Array.tabulate<Nat8>(32, func(_) = 2))) == #ok(1_000); // x odd: sign bit set
     });
+
+    // The per-call price. Fails on: the minDelta check dropped (first assert: #ok(1_000)); the
+    // check consuming the voucher before refusing it (the follow-up consumeVoucherFrom answers
+    // #invalidSequence); the check moved ahead of the caller check (a stranger hears #policyDenied,
+    // which tells it the session's consumed total).
+    test("consumeVoucherFromAtLeast: below the price -> #policyDenied, nothing consumed; at the price -> #ok", func() {
+      let m = freshMgr(); // last cumulative 1_000
+      switch (m.consumeVoucherFromAtLeast(keyCaller, zeroSig(2_000, 2), 1_500)) {
+        case (#policyDenied(_)) {};
+        case (_) { assert false };
+      };
+      assert m.consumeVoucherFrom(keyCaller, zeroSig(2_000, 2)) == #ok(1_000); // still unconsumed
+      assert freshMgr().consumeVoucherFromAtLeast(keyCaller, zeroSig(2_500, 2), 1_500) == #ok(1_500);
+      assert fallbackOff(Policy.Engine()).consumeVoucherFromAtLeast(stranger, zeroSig(2_000, 2), 1_500) == #invalidSignature;
+    });
   });
 });
 

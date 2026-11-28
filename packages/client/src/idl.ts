@@ -393,6 +393,7 @@ export const exampleIdlFactory = () =>
     // Admin
     verifyGrant: IDL.Func([AccessGrant], [AccessGrantResult], ['query']),
     setPolicy: IDL.Func([SpendingPolicy], [], []),
+    setIcpOverHttp: IDL.Func([IDL.Bool], [], []),
     getPolicyConfig: IDL.Func([], [SpendingPolicy], ['query']),
     forceCloseSession: IDL.Func([IDL.Text], [PaymentResult], []),
     // Operator health (controller-only). `timers` explains the canister's FIXED cycle burn: a

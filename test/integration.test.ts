@@ -263,8 +263,8 @@ describe('ic402 integration', () => {
 
     // S2 (2.22.0). Fails on: sessionQuery serving any increase again (the delta-1 voucher answers
     // ok, so a client pays 1 per query against an advertised costPerCall of 500); refusing the
-    // short voucher WITHOUT the trap, i.e. after it is consumed (the same sequence at the full
-    // price is then #invalidSequence).
+    // short voucher only after consuming it (the same sequence at the full price is then
+    // #invalidSequence).
     it('S2: a voucher paying less than costPerCall is refused and left unconsumed', async () => {
       if (skip) return;
       const cost: bigint = (await actor.requestSession()).costPerCall[0];
@@ -289,9 +289,11 @@ describe('ic402 integration', () => {
       });
       const asKey = await actorAs(key);
       try {
-        await expect(asKey.sessionQuery(v(1n, 1n), 'q')).rejects.toThrow(/per-call price/);
+        // consumeVoucherFromAtLeast refuses with #policyDenied and consumes nothing, so the same
+        // sequence number is still usable with the right amount.
+        expect(String((await asKey.sessionQuery(v(1n, 1n), 'q')).error)).toMatch(/per-call price/);
         expect(await asKey.sessionQuery(v(cost, 1n), 'q')).toHaveProperty('ok');
-        await expect(asKey.sessionQuery(v(2n * cost - 1n, 2n), 'q')).rejects.toThrow(
+        expect(String((await asKey.sessionQuery(v(2n * cost - 1n, 2n), 'q')).error)).toMatch(
           /per-call price/,
         );
         expect(await asKey.sessionQuery(v(2n * cost, 2n), 'q')).toHaveProperty('ok');
@@ -321,6 +323,7 @@ describe('ic402 integration', () => {
       const pText = p.getPrincipal().toText();
       const policy = await actor.getPolicyConfig(); // restored below
       await actor.setPolicy({ ...policy, rateLimitPerMinute: [2n] });
+      await actor.setIcpOverHttp(true); // the junk settles go over HTTP, which is opt-in for ICP
       try {
         for (let i = 0; i < 3; i++) {
           const nonce = Buffer.from((await icpReqFor(`junk-${i}`)).nonce).toString('hex');
@@ -335,11 +338,14 @@ describe('ic402 integration', () => {
             headers: { 'x-payment': header },
           });
           expect(res.status).toBe(402); // no allowance: the ledger refuses; no hit recorded
+          // ...and it was the ledger: with ICP over HTTP off, settle would refuse first.
+          expect((await res.json()).errorReason).not.toBe('invalid_network');
         }
         const asP = await actorAs(p);
         const own = await asP.search('mine', [icpSig(await icpReqFor('mine'), pText)]);
         expect(own).toHaveProperty('paymentRequired'); // the ledger's refusal, not "Rate limit exceeded"
       } finally {
+        await actor.setIcpOverHttp(false);
         await actor.setPolicy(policy);
       }
     });
@@ -1373,6 +1379,7 @@ describe('ic402 integration', () => {
 
     // A paid HTTP /search on the ICP rail (allowance-authenticated): mint a nonce, approve it, and
     // send the legacy X-PAYMENT JSON that `header` builds from the nonce (hex) and the payer.
+    // ICP over HTTP is off by default, so callers turn it on (actor.setIcpOverHttp) around this.
     async function paidHttpSearch(q: string, header: (nonce: string, payer: string) => string) {
       const req = (await actor.search('i10', [])).paymentRequired.find(
         (r: { network: string }) => r.network === 'icp:1',
@@ -1397,13 +1404,18 @@ describe('ic402 integration', () => {
     // (Python's json.dumps writes `"key": "value"`, and every paid route answered it 400).
     it('I10a: an X-PAYMENT header spaced like Python json.dumps settles', async () => {
       if (skip) return;
-      const res = await paidHttpSearch(
-        'spaced',
-        (nonce, payer) =>
-          `{"scheme": "exact", "network": "icp:1", "signature": "00", "sender": "${payer}", "nonce": "${nonce}"}`,
-      );
-      expect(res.status).toBe(200);
-      expect((await res.json()).results).toContain('Query: spaced');
+      await actor.setIcpOverHttp(true);
+      try {
+        const res = await paidHttpSearch(
+          'spaced',
+          (nonce, payer) =>
+            `{"scheme": "exact", "network": "icp:1", "signature": "00", "sender": "${payer}", "nonce": "${nonce}"}`,
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).results).toContain('Query: spaced');
+      } finally {
+        await actor.setIcpOverHttp(false);
+      }
     });
 
     // I10b (2.22.0). Fails on: /search interpolating `q` into its JSON unescaped (the body
@@ -1411,13 +1423,68 @@ describe('ic402 integration', () => {
     // and the canister does not percent-decode `q`.
     it('I10b: /search escapes the caller-supplied q in its JSON body', async () => {
       if (skip) return;
-      const res = await paidHttpSearch(
-        'x\\y',
-        (nonce, payer) =>
-          `{"scheme":"exact","network":"icp:1","signature":"00","sender":"${payer}","nonce":"${nonce}"}`,
+      await actor.setIcpOverHttp(true);
+      try {
+        const res = await paidHttpSearch(
+          'x\\y',
+          (nonce, payer) =>
+            `{"scheme":"exact","network":"icp:1","signature":"00","sender":"${payer}","nonce":"${nonce}"}`,
+        );
+        expect(res.status).toBe(200);
+        expect(JSON.parse(await res.text()).results).toContain('Query: x\\y');
+      } finally {
+        await actor.setIcpOverHttp(false);
+      }
+    });
+
+    // I11. Fails on: settle accepting ICP again with setIcpOverHttp off (the anonymous request is
+    // served and the payer's approval is spent by a stranger); the HTTP challenge or discovery
+    // listing advertising icp:1 while it is off.
+    it('I11: with ICP over HTTP off (the default), naming an approver over HTTP spends nothing', async () => {
+      if (skip) return;
+      const challenge = await (await fetch(`${raw()}/search?q=probe`)).json();
+      expect(challenge.accepts.some((a: { network: string }) => a.network === 'icp:1')).toBe(false);
+      const listing = await (await fetch(`${raw()}/discovery/resources`)).json();
+      expect(JSON.stringify(listing)).not.toContain('"icp:1"');
+
+      // The payer approves for its own Candid payment; a stranger replays it over HTTP first.
+      const req = (await actor.search('i11', [])).paymentRequired.find(
+        (r: { network: string }) => r.network === 'icp:1',
       );
-      expect(res.status).toBe(200);
-      expect(JSON.parse(await res.text()).results).toContain('Query: x\\y');
+      const approved = await ledger.icrc2_approve({
+        spender: { owner: Principal.fromText(exampleId), subaccount: [] },
+        amount: BigInt(req.amount) + 10_000n,
+        fee: [],
+        memo: [],
+        from_subaccount: [],
+        created_at_time: [],
+        expected_allowance: [],
+        expires_at: [],
+      });
+      expect(approved).toHaveProperty('Ok');
+      const payer = (await agent.getPrincipal()).toText();
+      const account = { owner: Principal.fromText(payer), subaccount: [] };
+      const before: bigint = await ledger.icrc1_balance_of(account);
+      const nonce = Buffer.from(req.nonce).toString('hex');
+      const res = await fetch(`${raw()}/search?q=stolen`, {
+        headers: {
+          'x-payment': `{"scheme":"exact","network":"icp:1","signature":"00","sender":"${payer}","nonce":"${nonce}"}`,
+        },
+      });
+      expect(res.status).not.toBe(200);
+      expect(await ledger.icrc1_balance_of(account)).toBe(before);
+      // The approval and the nonce are intact: the payer's own Candid payment still goes through.
+      const own = {
+        scheme: 'exact',
+        network: 'icp:1',
+        signature: new Uint8Array(0),
+        publicKey: [],
+        asset: [],
+        sender: payer,
+        nonce: req.nonce,
+        authorization: [],
+      };
+      expect(await actor.search('i11', [own])).toHaveProperty('ok');
     });
 
     it('GET /supported advertises the v2 EVM kinds + signer', async () => {

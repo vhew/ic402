@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+### Security
+
+- **ICP payments through `settle` (the HTTP path) are off by default.** `settle` has no caller,
+  so on the ICP rail `signature.sender` was authenticated only by the ledger's allowance check:
+  anyone holding a live nonce could spend any ICRC‑2 approval a principal had given the
+  canister, for as long as it stood, by naming that principal in an HTTP payment header, and get
+  the paid resource. That includes an approval made for a Candid payment, or the deposit + fee
+  approval for a session open; the SDK's exact, 5‑minute approval narrowed the window but did not
+  close it, and a payer whose own call failed or was abandoned after approving left it open
+  until expiry. High severity; advisory GHSA-wp5r-hc95-q6mf. 2.22.0 refused the canister itself
+  as `sender` (GHSA-jxw7-5x89-grxh); any other principal with a standing approval could still be
+  named.
+  - `settle` now refuses an ICP payment with `#networkNotSupported` before it locks a nonce or
+    reserves anything, unless the operator calls **`Gateway.setIcpOverHttp(true)`** (default off,
+    transient; set it at init). Turn it on only if you accept that every approval to your
+    canister can be spent by anyone. `settleFrom` (Candid, authenticated caller) is unaffected.
+  - **`Gateway.requireForHttp(amount)`** and **`describeForHttp(amount)`**: `requireAll` /
+    `describeAll` for HTTP 402s and discovery listings, with the ICP entry only while
+    `setIcpOverHttp` is on. The example uses them, and keeps ICP over HTTP off (its
+    controller‑only `setIcpOverHttp` exists for the tests).
+  - **Upgrade notes (breaking default):**
+    - `settle` refuses ICP whatever calls it, including a **Candid** method that still calls
+      `gate.settle(sig, …)` for ICP (the pre‑2.17.0 pattern): it now gets `#networkNotSupported`.
+      Switch every such call to `gate.settleFrom(msg.caller, sig, …)`.
+    - HTTP clients that pay you on the ICP rail now get `#networkNotSupported` (over HTTP, a 402).
+      Move them to your Candid methods, or call `setIcpOverHttp(true)` at init knowing the
+      exposure above.
+    - Replace `requireAll` / `describeAll` with `requireForHttp` / `describeForHttp` wherever the
+      result goes to an HTTP client. On a canister with no EVM chains configured, their HTTP 402s
+      then offer no payment option at all until `setIcpOverHttp` is on: ICP payers use Candid.
+    - `@ic402/client` and `@ic402/mcp` already pay ICP through Candid only. The SDK's example IDL
+      (`packages/client/src/idl.ts`) gains the example's controller‑only `setIcpOverHttp`.
+- **The per‑call session price can be enforced by the library.** `consumeVoucher` and
+  `consumeVoucherFrom` accept any increase in `cumulativeAmount`, so an integrator that matched
+  `#ok(_)` without checking the delta let a payer pay 1 unit per call. The example has refused
+  that since 2.22.0, but the integration checklist did not list it.
+  **`Gateway.consumeVoucherFromAtLeast(caller, voucher, minDelta)`** (and the Sessions method of
+  the same name) refuses a voucher below `minDelta` with `#policyDenied`, before the rate check
+  and before anything is written, so it consumes nothing. With `setSignedVoucherFallback(false)`
+  (recommended) a stranger is refused before any amount is looked at; with the fallback on, the
+  existing sequence and deposit checks already answer strangers ahead of the signature check, as
+  this one does. The example's `sessionQuery` now uses it: an underpaying voucher answers
+  `#error("Policy: Voucher pays …")` instead of trapping. The checklist in
+  docs/security-model.md now has five rows.
+
 ### Fixed
 
 - **A job whose operator payment parked could lose the buyer's remainder.** `settleJob` refunds

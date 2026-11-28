@@ -129,9 +129,14 @@ error reason maps to the v2 vocabulary (`invalid_exact_evm_payload_authorization
 
 ## The ICP rail & sessions (non‑standard by design)
 
-- The ckUSDC / ICRC‑2 rail emits a clearly non‑standard scheme and **is gated behind a
-  non‑strict mode** so a strict v2 client only sees the `eip155:*` `exact` option it can pay.
-  It is documented as an ic402 extension, never claimed as x402‑conformant.
+- The ckUSDC / ICRC‑2 rail emits a clearly non‑standard scheme and **is off over HTTP by
+  default**: `settle` (the HTTP path) refuses it unless the operator calls
+  `setIcpOverHttp(true)`, and `requireForHttp` / `describeForHttp` leave it out of 402s and
+  discovery listings until then, so a v2 client only sees the `eip155:*` `exact` option it can
+  pay. HTTP has no authenticated caller, so with it on, an ICP payment is authenticated only by
+  the payer's ICRC‑2 allowance, which anyone holding a nonce can spend by naming the payer. ICP
+  payments go through the canister's Candid methods (`settleFrom`). The rail is documented as an
+  ic402 extension, never claimed as x402‑conformant.
 - **`payTo` / `recipient` on `icp:*` networks is the ICRC‑1 textual account encoding** (since
   2.12.0): the bare owner principal for the default subaccount, otherwise
   `<owner>-<crc32‑base32>.<subaccount‑hex, leading zeros stripped>` — the standard "one string"

@@ -661,8 +661,9 @@ transfer it committed. Then:
   - the ledger answers `#TooOld` (its 24-hour window has passed) or `#BadFee` (its fee changed): a
     re-send can no longer decide it. Use the manual steps below;
   - the canister was upgraded since (the kept transfer is not persisted): manual steps below.
-- **Made through `settle`** (HTTP): nothing is kept, because over HTTP `sender` is only a claim and the
-  nonce is not a secret. Use the manual steps below.
+- **Made through `settle`** (HTTP, only with `setIcpOverHttp` on; off, `settle` refuses ICP): nothing is
+  kept, because over HTTP `sender` is only a claim and the nonce is not a secret. Use the manual steps
+  below.
 
 *Manual steps* (setting off, HTTP charges, or past the cases above):
 1. Do not deliver, and tell the payer not to pay again yet.
