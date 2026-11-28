@@ -326,8 +326,9 @@ module {
     /// simulation), and closes, refunds, sweeps and payouts. A timer close refused by the stop
     /// reopens the session, and the job sweep keeps a refused payout uncounted; both are retried
     /// each tick with no outcall until the stop ends (EvmSender.sendCanWait). The send that set the
-    /// stop was signed, so it is handled as any failure (a timer close parks, a payout counts); its
-    /// error names the signed tx to check. Lift only once the top-up is confirmed: the next send
+    /// stop was signed and may have been accepted by a provider, so a close leg or a job payout
+    /// parks it with its signed tx for reconcileSession / reconcileJob, and nothing sends it again
+    /// (EvmSender.gasRefusedTxHash). Lift only once the top-up is confirmed: the next send
     /// signs. True when a stop was in force. OPERATOR op: a consumer must restrict it to its
     /// controllers.
     public func liftEvmGasStop(chainId : Nat) : Bool {

@@ -155,7 +155,8 @@ module {
     //                and it clears in seconds — retried, but not counted as a payment failure.
     //                2.23.2: also a gas stop's refusal (EvmSender.sendCanWait): nothing signed,
     //                no outcall; it pays out once the stop ends or is lifted. The send that set
-    //                the stop was signed, so it counts as #err.
+    //                the stop was signed and a provider may have accepted it, so it is #pending
+    //                with its signed tx (EvmSender.gasRefusedTxHash).
     //   #unavailable definite, nothing moved, and no retry can succeed until something is set up
     //                (no transfer hook, an unparseable chain, no payout address, no token, a buyer
     //                with no rail, an EVM-rail buyer that is not a 20-byte address).
@@ -178,7 +179,13 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM settle to operator reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { if (EvmSender.sendCanWait(e)) { #busy("EVM settle to operator: " # e) } else { #err("EVM settle to operator: " # e) } };
+                case (#err(e)) {
+                  // Signed but refused for gas: a provider may have accepted it — maybe sent.
+                  switch (EvmSender.gasRefusedTxHash(e)) {
+                    case (?h) { #pending({ txHash = h; chainId; token = rail.token }) };
+                    case (null) { if (EvmSender.sendCanWait(e)) { #busy("EVM settle to operator: " # e) } else { #err("EVM settle to operator: " # e) } };
+                  };
+                };
               };
             };
             case (?_, _, null) { #unavailable("operator has no registered EVM payout address (call setEvmPayout)") };
@@ -219,7 +226,13 @@ module {
                 case (#confirmed(_)) { #ok };
                 case (#reverted(h)) { #reverted("EVM refund reverted on-chain (tx " # h # ")", { txHash = h; chainId; token = rail.token }) };
                 case (#pending(h)) { #pending({ txHash = h; chainId; token = rail.token }) };
-                case (#err(e)) { if (EvmSender.sendCanWait(e)) { #busy("EVM refund: " # e) } else { #err("EVM refund: " # e) } };
+                case (#err(e)) {
+                  // Signed but refused for gas: a provider may have accepted it — maybe sent.
+                  switch (EvmSender.gasRefusedTxHash(e)) {
+                    case (?h) { #pending({ txHash = h; chainId; token = rail.token }) };
+                    case (null) { if (EvmSender.sendCanWait(e)) { #busy("EVM refund: " # e) } else { #err("EVM refund: " # e) } };
+                  };
+                };
               };
             };
             case (_, _) { #unavailable("EVM refund unavailable (no transfer hook / unparseable chain)") };
@@ -867,6 +880,8 @@ module {
     /// 2.17.6: also a #Verified job — where a failed operator payment leaves it ("Settlement
     /// failed: …"), with nothing else able to move it. No funds have moved for a #Verified job
     /// (settleJob reserves #Settling before any await), so retrying the settle or refunding is safe.
+    /// An EVM payment that was signed but refused for gas may still land, so it never comes back
+    /// #Verified: it parks #Settling with its tx, for reconcileJob.
     /// 2.22.0: that includes a #Verified job whose operator payment reverted on-chain (it carries
     /// the reverted tx, and the expiry sweep does not retry it): this call is the controller's
     /// decision to send again, so the record of the reverted tx is dropped.
@@ -1142,9 +1157,21 @@ module {
       };
     };
 
+    // What settleJob refunds the buyer after paying the operator: the service amount less the
+    // operator's cost and the refund's own fee (an Upto job's remainder; any job whose actualCost
+    // is below its price).
+    func buyerRemainder(job : Types.Job) : Nat {
+      let serviceAmount = Utils.satSub(job.amount, config.ledgerFee);
+      let cost = switch (job.actualCost) { case (?c) { c }; case (null) { serviceAmount } };
+      Utils.satSub(serviceAmount, cost + config.ledgerFee);
+    };
+
     /// v2.1.1 recovery (controller-only via the consumer): CONFIRM-ONLY finalize a job whose
     /// outbound settle/refund parked (#pending). Re-polls the STORED parked tx via the read-only
     /// confirm hook and applies reconcileDecision. NEVER re-broadcasts (that risks double-pay).
+    /// A confirmed operator payment whose job still owes the buyer a remainder (settleJob sends it
+    /// only after a confirmed payment) is not finalized: the job stays #Settling, and the #err
+    /// names the amount to refund by hand before resolveJob(jobId, #Settled).
     public func reconcileJob(jobId : Text) : async { #ok : Text; #err : Text } {
       let job = switch (jobs.get(jobId)) { case (null) { return #err("Job not found") }; case (?j) { j } };
       let parked = switch (job.parkedTx) { case (null) { return #err("Job has no parked tx to reconcile") }; case (?p) { p } };
@@ -1154,6 +1181,13 @@ module {
       let j2 = switch (jobs.get(jobId)) { case (null) { return #err("Job vanished during reconcile") }; case (?j) { j } };
       switch (reconcileDecision(outcome, parked.leg, j2.status)) {
         case (#finalize({ status; msg })) {
+          // A settle that parked returned before settleJob's buyer remainder refund, so a confirmed
+          // operator payment can still owe the buyer that remainder. Then the job is not finalized:
+          // it stays #Settling with its parked tx (kept from GC), and the answer names the amount.
+          let owed = buyerRemainder(j2);
+          if (parked.leg == #Settle and owed > 0) {
+            return #err("Settle confirmed on-chain, but the buyer's remainder (" # Nat.toText(owed) # ") was never sent. The job stays #Settling: refund the buyer by hand, then resolveJob(jobId, #Settled) (tx " # parked.txHash # ")");
+          };
           jobs.put(jobId, { j2 with status; parkedTx = null; completedAt = ?Time.now() });
           #ok(msg # " (tx " # parked.txHash # ")");
         };

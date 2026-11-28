@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A job whose operator payment parked could lose the buyer's remainder.** `settleJob` refunds
+  the buyer what is left after the operator's cost (an Upto job's remainder, or any job whose
+  `actualCost` is below its price), but only after the operator payment confirms. When that EVM
+  payment was broadcast and not yet confirmed, the job parked `#Settling` and the refund was
+  skipped. `reconcileJob` then confirmed the payment and marked the job `#Settled`, with the
+  remainder never sent and nothing recording it; the tokens stayed in the canister's EVM address,
+  and GC deleted the job 24 h later. Now `reconcileJob` does not finalize such a job. It answers
+  `#err` naming the remainder, and the job stays `#Settling` with its parked transaction, so GC
+  keeps it: refund the buyer by hand, then `resolveJob(jobId, #Settled)` (recovery runbook §6).
+  The remainder is recomputed from the job's `amount` and `actualCost`; nothing stored changes.
+- **An EVM send signed but refused for gas could be sent again with nobody acting.** When the
+  canister's EVM address is short of gas, the providers can split: two answer "insufficient funds"
+  while a third, which already saw a top-up, accepts the signed transaction. That send came back as
+  "nothing was broadcast" (`Insufficient ETH for gas … refused signed tx 0x…`), and:
+  - a payer's close reopened the session "safe to retry", so the next close (the payer's, or the
+    expiry sweep's once the gas stop ended) signed the refund or settle again;
+  - a timer close stayed `#closing` without recording the transaction, so `reconcileSession`
+    pointed the operator to `forceResolveSession` and a hand-sent transfer;
+  - a job payout or expiry refund counted as a failed payment, and the sweep retried it.
+
+  Each could pay the same transfer twice. Now a close leg, a job payout and an expiry refund that
+  fail this way are parked under the signed transaction, as for any send that may have gone out:
+  the session stays `#closing` whoever asked for the close (`#settlementPending`), the job
+  `#Settling` (an expiry refund `#Expired`), and nothing sends it again. `reconcileSession` and
+  `reconcileJob` confirm it, read-only. `EvmSender.gasRefusedTxHash` reads the hash from the
+  refusal. The 2.23.2 notes said this send was not re-sent unattended; they are corrected below.
+
 ### Dev tooling
 
 Three low findings from the 2.24.1 pre-release review. Nothing published changes.
@@ -141,9 +170,12 @@ Raised by EngramX after 2.23.1; an adversarial pre-release review widened the fi
   expired session would have parked in `#closing` with no transaction recorded, needing a manual
   recovery each (`forceResolveSession` plus hand-sent transfers).
 - **The send that sets the stop is handled as before.** It was signed, and a provider that already
-  saw a top-up may have accepted it, so it is not re-sent unattended. A timer close parks in
-  `#closing`, and a job counts a failed payout. Its error now names the signed transaction: check
-  that hash on chain before resending by hand (recovery runbook, "no parked tx").
+  saw a top-up may have accepted it. A timer close parks in `#closing`, and a job counts a failed
+  payout. Its error now names the signed transaction: check that hash on chain before resending by
+  hand (recovery runbook, "no parked tx"). **Correction:** this note also said the send "is not
+  re-sent unattended". That was wrong: a payer's close reopened the session for a later close to
+  sign again, and the job sweep retried a counted payout. Fixed in the release after 2.24.1, which
+  parks every such leg and payout under its signed transaction.
 
 ### Fixed
 
@@ -225,9 +257,11 @@ Raised by EngramX after 2.23.1; an adversarial pre-release review widened the fi
   first send signs, fails and re-arms the stop. If that send is a timer close, its session parks
   (above). So the expired sessions park one per 10 minutes, each to be resolved by hand.
 - **The send that sets the stop may have landed.** Under the 2-of-3 threshold a provider that
-  already saw a top-up can accept it while two refuse, and the nonce re-read can miss it. It is not
-  re-sent unattended (a timer close parks, a payout counts and backs off as before); its error names
-  the signed tx. A payer's close still reopens after it, as it did before 2.23.2.
+  already saw a top-up can accept it while two refuse, and the nonce re-read can miss it. Its error
+  names the signed tx. A payer's close still reopens after it, as it did before 2.23.2.
+  **Correction:** this note first said the send was not re-sent unattended. It was: the reopened
+  session was closed again later (by the payer, or by the sweep after the stop), and the job sweep
+  retried a counted payout. Fixed in the release after 2.24.1.
 - **The stop is transient.** An upgrade forgets it, as does `setEvmDerivationPath` replacing the
   sender; the next failing broadcast sets it again. A sender built separately (such as
   `EvmSenderAt`) has its own stops.

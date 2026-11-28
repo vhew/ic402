@@ -608,26 +608,41 @@ describe('ic402 EVM outbound (hermetic, mock EVM-RPC)', () => {
     expect(await example.clearEvmPayerCooldowns()).toBe(0n); // the payer was never at fault
   });
 
-  it('2.23.2: a session payer closing again and again on a chain without gas costs one signature, not one per close', async () => {
+  it('a payer close whose refund is signed but refused for gas parks it with its tx; nothing is sent again until the operator reconciles', async () => {
     if (skip) return;
     await mock.reset();
     const opened = await full.openSession(sessionCfg, await evmSessionSig(50_000n));
     expect(opened).toHaveProperty('ok');
     const sends = await mock.sentTxCount(); // the deposit
     await mock.setSendMode({ insufficientFunds: null });
-    await mock.setPendingNonce([7n]); // the re-read finds the same nonce: nothing was sent
-    const first = await full.endSession(opened.ok.id);
-    expect(first.settlementFailed).toContain('session reopened');
-    expect(await mock.sentTxCount()).toBe(sends + 1n); // signed; the broadcast was refused
-    const again = await full.endSession(opened.ok.id);
-    expect(again.settlementFailed).toContain('cannot pay gas on chain 8453');
-    expect(again.settlementFailed).toContain('session reopened');
-    expect(await mock.sentTxCount()).toBe(sends + 1n); // refused before signing
-    // Funded, then lifted: the close goes through.
-    await mock.setSendMode({ ok: null });
-    await mock.setPendingNonce([]);
-    expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
-    expect(await full.endSession(opened.ok.id)).toHaveProperty('ok');
+    await mock.setPendingNonce([7n]); // the re-read finds the same nonce
+    try {
+      const first = await full.endSession(opened.ok.id);
+      // Two providers refused the signed refund, but a third may have accepted it: maybe sent, so
+      // the session is parked under that tx. Before, it reopened "safe to retry", and the next close
+      // (the payer's, or the sweep's once the session idled out and the stop ended) signed it again.
+      const [rawRefund] = ((await mock.getSentTxs()) as string[]).slice(-1);
+      const refundHash = '0x' + Buffer.from(keccak_256(hexBytes(rawRefund))).toString('hex');
+      expect(first.settlementPending).toContain('refused it for lack of gas');
+      expect(first.settlementPending).toContain(refundHash);
+      expect(await mock.sentTxCount()).toBe(sends + 1n);
+      const again = await full.endSession(opened.ok.id);
+      expect(again.settlementFailed).toContain('a close is in progress (#closing)');
+      // Funded and lifted: still nothing is sent; the operator's confirm-only reconcile finds it mined.
+      await mock.setSendMode({ ok: null });
+      await mock.setPendingNonce([]);
+      expect(await example.liftEvmGasStop(CHAIN_ID)).toBe(true);
+      const reconciled = await example.reconcileSession(opened.ok.id);
+      expect(reconciled.ok).toContain('Refund confirmed on-chain');
+      expect(reconciled.ok).toContain(refundHash);
+      expect(await mock.sentTxCount()).toBe(sends + 1n);
+    } finally {
+      // Whatever failed above, free the payer's one session slot for the tests after this one.
+      await mock.setSendMode({ ok: null });
+      await mock.setPendingNonce([]);
+      await example.liftEvmGasStop(CHAIN_ID);
+      await full.endSession(opened.ok.id); // refused once parked or closed
+    }
   });
 
   // ── Split payees (2.24.0) ──

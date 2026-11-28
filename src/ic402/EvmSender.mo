@@ -37,6 +37,26 @@ module {
   /// canister could not pay gas for.
   public func isInsufficientGas(err : Text) : Bool { Text.contains(err, #text INSUFFICIENT_GAS) };
 
+  // The words before the signed tx's hash in classifySend's INSUFFICIENT_GAS text.
+  let SIGNED_TX_MARKER : Text = "refused signed tx ";
+
+  /// The hash of the signed tx a gas refusal names (classifySend's INSUFFICIENT_GAS text, which a
+  /// caller may prefix), or null for any other text. Two providers refused that tx, but under the
+  /// 2-of-3 threshold a third may have accepted it, so an outbound caller treats it as maybe sent:
+  /// parked with this hash for a confirm-only reconcile, never retried.
+  public func gasRefusedTxHash(err : Text) : ?Text {
+    if (not isInsufficientGas(err)) return null;
+    let parts = Text.split(err, #text SIGNED_TX_MARKER);
+    ignore parts.next();
+    let rest = switch (parts.next()) { case (?r) { r }; case (null) { return null } };
+    var hash = "";
+    label scan for (c in rest.chars()) {
+      if (hash.size() == 66) break scan;
+      hash #= Text.fromChar(c);
+    };
+    if (Text.startsWith(hash, #text "0x") and EvmUtils.hexToBytes(hash).size() == 32) { ?hash } else { null };
+  };
+
   /// 2.21.1: classify an eth_sendRawTransaction result. Only failures raised before anything was
   /// sent are #err. Everything after dispatch is #maybeSent, because a send is not idempotent: a
   /// node whose copy arrives after another node's copy was included answers "nonce too low" for
@@ -62,7 +82,7 @@ module {
       // Queued in the mempool (nonce ahead) — it can still mine.
       case (#Consistent(#Ok(#NonceTooHigh))) { #maybeSent({ txHash = broadcastTxHash; reason = "Nonce too high (tx may be queued in mempool)" }) };
       case (#Consistent(#Ok(#InsufficientFunds))) {
-        #err(INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast. The agreeing providers refused signed tx " # broadcastTxHash # "; one that already saw a top-up could have accepted it, so check that hash is not on chain before sending the same transfer again by hand.");
+        #err(INSUFFICIENT_GAS # " — the canister's derived EVM address pays gas for broadcasts. Fund it with the chain's native token (getEvmAddress()/getEvmRecipient() shows the address) and retry; nothing was broadcast. The agreeing providers " # SIGNED_TX_MARKER # broadcastTxHash # "; one that already saw a top-up could have accepted it, so check that hash is not on chain before sending the same transfer again by hand.");
       };
       // Raised by the EVM-RPC canister before any provider was called.
       case (#Consistent(#Err(#ProviderError(e)))) { #err("RPC error before sending: " # EvmRpc.rpcErrorToText(#ProviderError(e))) };
@@ -428,8 +448,9 @@ module {
   /// the next tick (Sessions.reopenAfterUnsentLeg), and the job sweep retries the payout uncounted,
   /// instead of parking or counting it. Not the failure that set the stop ("Insufficient ETH for
   /// gas"): that tx was signed, and a provider that already saw a top-up may have accepted it, so
-  /// it is handled as any other failure (a timer close parks, a payout counts). Matched as a
-  /// prefix, so text a caller controls (an address quoted in an error) cannot pass for it.
+  /// a close leg or a job payout parks it with its hash (`gasRefusedTxHash`) for a confirm-only
+  /// reconcile. Matched as a prefix, so text a caller controls (an address quoted in an error)
+  /// cannot pass for it.
   public func sendCanWait(err : Text) : Bool { isSendBusy(err) or Text.startsWith(err, #text GAS_STOP_PREFIX) };
 
   /// 2.23.2: the chains where a broadcast recently failed because the canister's EVM address could

@@ -132,9 +132,9 @@ module {
   /// the caller (EvmSender.sendCanWait): the busy single-flight send lock, or (2.23.2) a gas stop.
   /// A timer-initiated close that fails for another reason stays #closing, so the 60 s sweep does
   /// not re-drive a persistent failure every tick (S16/C1); before 2.22.0 that included the busy
-  /// lock, which parked an expired session with no tx to reconcile. That includes the send that
-  /// set a gas stop: it was signed, and a provider may have accepted it, so it parks for the
-  /// operator to check rather than being sent again unattended. A gas-stopped chain is re-driven
+  /// lock, which parked an expired session with no tx to reconcile. The send that set a gas stop
+  /// never reaches this rule: it was signed, and a provider may have accepted it, so the close
+  /// parks that leg with its hash (EvmSender.gasRefusedTxHash). A gas-stopped chain is re-driven
   /// with no outcall or signature (the stop refuses first), and the session closes by itself once
   /// the stop ends or is lifted.
   public func reopenAfterUnsentLeg(wasExpired : Bool, nothingMoved : Bool, err : Text) : Bool {
@@ -1761,6 +1761,15 @@ module {
 
     // ── EVM session close ──
 
+    // A close leg that was signed but refused for lack of gas (EvmSender.gasRefusedTxHash): two
+    // providers refused it, but a third may have accepted it, so it is maybe sent. The session stays
+    // #closing with the leg parked under its signed hash, for reconcileSession (confirm-only).
+    func parkGasRefusedLeg(sessionId : Text, leg : { #Settle; #Refund }, hash : Text) : Types.PaymentResult {
+      closeParkedTxs.put(sessionId, { leg; txHash = hash });
+      let name = switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } };
+      #settlementPending("EVM " # name # " was signed, but the providers refused it for lack of gas (fund the canister's EVM address); one may have accepted it, so it is not sent again (session parked — reconcileSession; tx " # hash # ")");
+    };
+
     /// Close an EVM session: settle consumed to recipient, refund remainder to payer.
     /// Both operations use tECDSA-signed ERC-20 transfer transactions.
     func closeEvmSessionInternal(session : Types.InternalSessionState) : async* Types.PaymentResult {
@@ -1814,6 +1823,12 @@ module {
             return #settlementPending("EVM settle broadcast but not confirmed (session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
+            // Signed but refused for gas: a provider may have accepted it. Park it with its hash for
+            // reconcileSession, whoever asked for the close; never reopen (a later close re-sends).
+            switch (EvmSender.gasRefusedTxHash(msg)) {
+              case (?hash) { return parkGasRefusedLeg(session.id, #Settle, hash) };
+              case (null) {};
+            };
             // M10: pre-broadcast #err means NOTHING was broadcast for this session (safe to roll
             // back — no funds moved, consumed unsettled). For a CLIENT-initiated close, restore
             // #open so the session stays usable and the client can retry; otherwise a transient
@@ -1857,6 +1872,11 @@ module {
             return #settlementPending("EVM refund broadcast but not confirmed (settle succeeded, session parked — reconcileSession; tx " # hash # ")");
           };
           case (#err(msg)) {
+            // Signed but refused for gas: parked with its hash, as on the settle leg.
+            switch (EvmSender.gasRefusedTxHash(msg)) {
+              case (?hash) { return parkGasRefusedLeg(session.id, #Refund, hash) };
+              case (null) {};
+            };
             // M10: refund failed pre-broadcast (nothing broadcast). If settle ran and confirmed
             // (settleTxHash set), we must NOT reopen — a retry would re-settle consumed; park in
             // #closing. If settle was SKIPPED (consumed == 0, nothing moved at all), a
