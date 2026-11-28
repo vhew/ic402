@@ -48,6 +48,13 @@
 ///                                            does not answer, so its caller stays in flight
 ///                                            (holding its payer slot) until set false (or
 ///                                            a minute passes)
+///   setReceiptMode(#undecodable), setSendMode(#undecodable), setAuthStateMode(#undecodable)
+///                                            answer with a value outside the EVM-RPC interface
+///                                            (#MockUndecodable). The canister cannot decode it,
+///                                            so it traps after its await, where no `catch` runs,
+///                                            and the call that made the outcall is rejected. A
+///                                            send in this mode is recorded first: it may have
+///                                            reached a mempool
 ///
 /// 2.23.1: eth_call rejects a `to` or `from` without the 0x prefix, as the real canister's Hex20
 /// decoding does.
@@ -74,6 +81,27 @@ persistent actor EvmRpcMock {
     // an outage looks like this, and must never be reported as "not landed".
     #inconsistent;
     #error;
+    // A reply the canister cannot decode (see the header).
+    #undecodable;
+  };
+
+  // The replies of the methods with an #undecodable mode: the EVM-RPC result types plus one case the
+  // library's mirrors (src/ic402/EvmRpc.mo) do not have. Candid decodes a variant by its case, so
+  // every other answer still decodes at the mirror type.
+  public type MockReceiptResult = {
+    #Consistent : EvmRpc.GetTransactionReceiptResult;
+    #Inconsistent : [(EvmRpc.RpcService, EvmRpc.GetTransactionReceiptResult)];
+    #MockUndecodable;
+  };
+  public type MockSendResult = {
+    #Consistent : EvmRpc.SendRawTransactionResult;
+    #Inconsistent : [(EvmRpc.RpcService, EvmRpc.SendRawTransactionResult)];
+    #MockUndecodable;
+  };
+  public type MockCallResult = {
+    #Consistent : EvmRpc.CallResult;
+    #Inconsistent : [(EvmRpc.RpcService, EvmRpc.CallResult)];
+    #MockUndecodable;
   };
 
   public type FeeMode = {
@@ -88,6 +116,7 @@ persistent actor EvmRpcMock {
     #unused;
     #used;
     #error;
+    #undecodable; // a reply the canister cannot decode (see the header)
   };
 
   // 2.23.1: what the simulation (eth_call of transferWithAuthorization) answers. #reverted: every
@@ -116,6 +145,8 @@ persistent actor EvmRpcMock {
     // 2.23.2: the providers disagree — one says the gas account is unfunded, one fails — and none
     // accepted. The library reports #maybeSent, and stops the chain (gasShortageReported).
     #insufficientFundsInconsistent;
+    // The raw tx is recorded, then the reply cannot be decoded (see the header).
+    #undecodable;
   };
 
   // ── scriptable state ──
@@ -210,10 +241,11 @@ persistent actor EvmRpcMock {
     services : EvmRpc.RpcServices,
     config : ?EvmRpc.RpcConfig,
     rawTx : Text,
-  ) : async EvmRpc.MultiSendRawTransactionResult {
+  ) : async MockSendResult {
     switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     sentTxs := Array.append(sentTxs, [rawTx]);
     switch (sendMode) {
+      case (#undecodable) { #MockUndecodable };
       // G5/G6: ambiguous broadcast — the raw tx was recorded (it may have reached a mempool), but
       // the RPC reports NonceTooHigh, which the library maps to #maybeSent(txHash). The caller must
       // preserve the hash (poll/track) rather than treat it as a clean, safe-to-retry failure.
@@ -248,10 +280,11 @@ persistent actor EvmRpcMock {
     services : EvmRpc.RpcServices,
     config : ?EvmRpc.RpcConfig,
     txHash : Text,
-  ) : async EvmRpc.MultiGetTransactionReceiptResult {
+  ) : async MockReceiptResult {
     switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     receiptPolls += 1;
     switch (receiptMode) {
+      case (#undecodable) { #MockUndecodable };
       case (#confirmed) { #Consistent(#Ok(?receipt(txHash, 1))) };
       case (#reverted) { #Consistent(#Ok(?receipt(txHash, 0))) };
       case (#pendingThenConfirmed(n)) {
@@ -300,7 +333,7 @@ persistent actor EvmRpcMock {
     services : EvmRpc.RpcServices,
     config : ?EvmRpc.RpcConfig,
     args : EvmRpc.CallArgs,
-  ) : async EvmRpc.MultiCallResult {
+  ) : async MockCallResult {
     switch (configError(services, config)) { case (?e) { return #Consistent(#Err(e)) }; case (null) {} };
     // 2.23.1: the real canister decodes `to` and `from` as Hex20, which needs the 0x prefix; a
     // value without it fails the call itself (a reject here, as there).
@@ -337,6 +370,7 @@ persistent actor EvmRpcMock {
       case (#unused) { #Consistent(#Ok("0x0000000000000000000000000000000000000000000000000000000000000000")) };
       case (#used) { #Consistent(#Ok("0x0000000000000000000000000000000000000000000000000000000000000001")) };
       case (#error) { #Consistent(#Err(#ProviderError(#NoPermission))) };
+      case (#undecodable) { #MockUndecodable };
     };
   };
 

@@ -813,6 +813,11 @@ module {
     // 2.23.1: new inbound transfers (and their simulation, an outcall anyone can trigger) stop here,
     // above MIN_BROADCAST_CYCLES, so a flood of them cannot spend the reserve closes and refunds need.
     let MIN_INBOUND_CYCLES : Nat = 500_000_000_000;
+    // A receipt poll attaches RPC_CYCLES to its outcall, and attaching more than the canister can
+    // spare traps (no catch runs, and the caller gets a reject). Below this floor confirmTransaction
+    // answers #err before the outcall instead: "status unknown", which no caller reads as not sent.
+    // Well under MIN_BROADCAST_CYCLES, so a send that passed its floor can still confirm.
+    let MIN_CONFIRM_CYCLES : Nat = 20_000_000_000;
 
     /// Get or cache the canister's compressed secp256k1 public key.
     public func getPublicKey() : async [Nat8] {
@@ -1054,11 +1059,14 @@ module {
     ///   #confirmed(hash) — mined, status==1: safe to finalize.
     ///   #reverted(hash)  — mined, status==0: no funds moved; safe to roll back.
     ///   #pending(hash)   — broadcast but not confirmed (incl. confirmation RPC
-    ///                      unavailable): it MAY have landed, so callers MUST NOT
+    ///                      unavailable, or a confirm call that was rejected): it MAY
+    ///                      have landed, so callers MUST NOT
     ///                      finalize AND MUST NOT auto-retry by re-calling this (a
     ///                      re-broadcast signs a fresh nonce and double-pays) — re-poll
     ///                      confirmTransaction on the hash, or recover manually.
     ///   #err(msg)        — failed BEFORE broadcast (no tx sent): safe to roll back.
+    /// A reject of the send itself (a reply it cannot decode, say) still propagates, with no hash:
+    /// the tx may have gone out, so a caller treats it as maybe sent, never as #err.
     public func sendErc20TransferConfirmed(
       chainId : Nat,
       tokenAddress : Text,
@@ -1072,14 +1080,18 @@ module {
         // the same budget before parking, so a tx that did land (a NonceTooLow for this very tx,
         // say) finalizes now instead of waiting for a manual reconcile.
         case (#maybeSent(m)) {
-          switch (await confirmTransaction(chainId, m.txHash, maxPolls)) {
+          // A confirm call that is rejected (a reply it cannot decode traps it) decides nothing:
+          // the tx is out, so it is pending, never a throw that loses its hash.
+          let c : { #confirmed; #reverted; #pending; #err : Text } = try { await confirmTransaction(chainId, m.txHash, maxPolls) } catch (_) { #pending };
+          switch (c) {
             case (#confirmed) { #confirmed(m.txHash) };
             case (#reverted) { #reverted(m.txHash) };
             case (_) { #pending(m.txHash) };
           };
         };
         case (#ok(txHash)) {
-          switch (await confirmTransaction(chainId, txHash, maxPolls)) {
+          let c : { #confirmed; #reverted; #pending; #err : Text } = try { await confirmTransaction(chainId, txHash, maxPolls) } catch (_) { #pending };
+          switch (c) {
             case (#confirmed) { #confirmed(txHash) };
             case (#reverted) { #reverted(txHash) };
             case (#pending) { #pending(txHash) };
@@ -1249,6 +1261,9 @@ module {
       var attempts = 0;
       label poll while (attempts < maxPolls) {
         attempts += 1;
+        if (Cycles.balance() < MIN_CONFIRM_CYCLES) {
+          return #err("Insufficient cycles to poll the receipt — transaction status unknown (it may still mine). Top up the canister, then re-poll with the same tx hash; never re-broadcast on this outcome.");
+        };
         let result = try {
           await (with cycles = EvmRpc.RPC_CYCLES) evmRpc.eth_getTransactionReceipt(services, rpcConfig(services), txHash);
         } catch (_) { return #err("Receipt query failed — transaction status unknown (it may still mine). Transient RPC failure: re-poll confirmTransaction with the same tx hash; never re-broadcast on this outcome.") };

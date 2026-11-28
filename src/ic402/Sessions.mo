@@ -174,6 +174,9 @@ module {
     // + tx hash here so reconcileSession can re-poll it confirm-only. Transient (not in
     // StableSession; a parked session mid-upgrade falls under the B1 fresh-deploy waiver).
     let closeParkedTxs = HashMap.HashMap<Text, { leg : { #Settle; #Refund }; txHash : Text }>(8, Text.equal, Text.hash);
+    // The txHash of a parked leg whose send call was rejected without reporting a hash: it may have
+    // been broadcast (parkRejectedLeg). reconcileSession never polls it.
+    let HASH_UNKNOWN : Text = "";
     // 2.20.0: ICP closes currently between their awaits. reconcileSession reads the escrow balance
     // of a session left #closing by an unknown settle reject, and must never do so while a close is
     // still moving that escrow. Transient on purpose: Motoko refuses an upgrade while callbacks are
@@ -1565,6 +1568,8 @@ module {
     /// — NEVER broadcasts. A confirmed refund (or a confirmed settle with no remainder) → #closed;
     /// a confirmed settle WITH a remainder still owed can't be auto-completed confirm-only (the
     /// refund is unsent) → forceResolveSession + sweepEvm. #pending/#reverted/#err → stay parked.
+    /// A leg parked because its send call was rejected has no hash to poll: the answer says it may
+    /// have been broadcast, for the operator to check on chain before forcing.
     ///
     /// 2.20.0, ICP: a session left #closing because its settle was rejected with an unknown outcome
     /// (closeSessionInternal returned #settlementPending). Reads the session's escrow subaccount
@@ -1590,6 +1595,13 @@ module {
       if (not isEvmNetwork(session.network)) return await* reconcileIcpClose(session);
       if (evmClosesInFlight.get(sessionId) != null) return #err("A close of this session is still in flight — call again once it returns");
       let parked = switch (closeParkedTxs.get(sessionId)) { case (null) { return #err("Session is #closing but has no parked tx — use forceResolveSession") }; case (?p) { p } };
+      if (parked.txHash == HASH_UNKNOWN) {
+        let (name, owed) = switch (parked.leg) {
+          case (#Settle) { ("settle", "the consumed amount to the recipient and the remainder to the payer") };
+          case (#Refund) { ("refund", "the remainder to the payer") };
+        };
+        return #err("Session is #closing with its " # name # " leg parked, but that leg's send was rejected and no tx hash came back: it may have been broadcast. Check the canister's EVM address on a block explorer for that transfer before forcing, then forceResolveSession and sweepEvm only what did not land of: " # owed);
+      };
       let deposit = switch (session.evmDeposit) { case (null) { return #err("Session has no EVM deposit data") }; case (?d) { d } };
       let sender = switch (evmSenderSource()) { case (null) { return #err("EVM sender not configured") }; case (?s) { s } };
       // 2.22.0 (F1): reconcileTransaction also reports a parked tx that appears not to have landed (#dropped).
@@ -1692,28 +1704,77 @@ module {
 
     /// M8: reconcile a tracked pending inbound deposit. Polls the deposit tx receipt; on a mined
     /// status==1 (the deposit landed in the shared pool) it REFUNDS the amount to the payer's EVM
-    /// address; on a mined revert it drops the entry (nothing landed); otherwise leaves it for a
+    /// address; on a mined revert it drops the entry only while the deposit's authorization reads
+    /// unused (another tx may have executed it, and the deposit arrived); otherwise leaves it for a
     /// later retry. The entry is claimed synchronously before the first await so two concurrent
-    /// reconciles of the same tx can't double-refund. Controller-gated by the consumer.
+    /// reconciles of the same tx can't double-refund. A rejected receipt or authorization read puts
+    /// it back; a rejected refund send, or a refund signed but refused for gas, does not (the refund
+    /// may have gone out). Controller-gated by the consumer.
     public func reconcileEvmDeposit(txHash : Text) : async { #refunded : Text; #reverted; #stillPending; #notFound; #err : Text } {
       let dep = switch (pendingEvmDeposits.get(txHash)) { case (?d) { d }; case (null) { return #notFound } };
       let sender = switch (evmSenderSource()) { case (?s) { s }; case (null) { return #err("EVM sender not configured") } };
       // Claim synchronously (no await between get and delete) so a concurrent reconcile of the same
-      // tx sees #notFound and cannot double-refund. Restore on any non-terminal outcome.
+      // tx sees #notFound and cannot double-refund. Restore on any non-terminal outcome, a rejected
+      // read included (an uncaught reject would keep the delete and lose the entry).
       pendingEvmDeposits.delete(txHash);
-      switch (await sender.reconcileTransaction(dep.chainId, txHash, 4)) {
+      // The deposit authorization's state; a rejected call reads as unknown.
+      func authState() : async* EvmSender.AuthorizationState {
+        try { await sender.authorizationState(dep.chainId, dep.token, EvmUtils.hexToBytes(dep.payerEvmAddress), Blob.toArray(dep.authNonce)) } catch (e) {
+          #unknown("authorizationState call rejected: " # Error.message(e));
+        };
+      };
+      let receipt = try { await sender.reconcileTransaction(dep.chainId, txHash, 4) } catch (e) {
+        pendingEvmDeposits.put(txHash, dep);
+        return #err("receipt poll rejected: " # Error.message(e) # " — the entry is kept; retry reconcile");
+      };
+      switch (receipt) {
         case (#confirmed) {
-          // Deposit mined into the shared pool — refund it to the payer's EVM address.
-          switch (await sender.sendErc20TransferConfirmed(dep.chainId, dep.token, dep.payerEvmAddress, dep.amount, 4)) {
+          // Deposit mined into the shared pool — refund it to the payer's EVM address. A rejected
+          // send may have broadcast the refund, so the entry is not restored (a retry could refund
+          // twice); the answer and the canister log say so.
+          let refund = try {
+            await sender.sendErc20TransferConfirmed(dep.chainId, dep.token, dep.payerEvmAddress, dep.amount, 4);
+          } catch (e) {
+            let msg = "refund send was rejected (" # Error.message(e) # ") and may have been broadcast; no tx hash came back. The entry for deposit " # txHash # " is not restored, so a retry cannot refund twice. Check the canister's EVM address on chain for a transfer of " # Nat.toText(dep.amount) # " to " # dep.payerEvmAddress # "; only if none landed, return it with sweepEvm";
+            Debug.print("ic402 reconcileEvmDeposit: " # msg);
+            return #err(msg);
+          };
+          switch (refund) {
             case (#confirmed(h)) { #refunded(h) }; // stays deleted — done
             case (#reverted(h)) { pendingEvmDeposits.put(txHash, dep); #err("refund reverted on-chain (tx " # h # ") — retry reconcile") };
             // Refund broadcast but unconfirmed — do NOT restore (it may land; restoring risks a
             // double refund on retry). Operator verifies the tx before any manual re-refund.
             case (#pending(h)) { #err("refund broadcast but not confirmed (tx " # h # ") — verify on-chain before retrying to avoid double refund") };
-            case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("refund failed (nothing broadcast): " # e) };
+            case (#err(e)) {
+              // Signed but refused for gas: a provider may have accepted it, so the refund may
+              // have gone out. Not restored, as for a rejected send; the answer and the log say so.
+              switch (EvmSender.gasRefusedTxHash(e)) {
+                case (?h) {
+                  let msg = "refund tx " # h # " was signed, but the providers refused it for lack of gas; one may have accepted it, so the refund may have gone out. The entry for deposit " # txHash # " is not restored, so a retry cannot refund twice. Check that hash on chain; only if it never landed, return " # Nat.toText(dep.amount) # " to " # dep.payerEvmAddress # " with sweepEvm";
+                  Debug.print("ic402 reconcileEvmDeposit: " # msg);
+                  #err(msg);
+                };
+                case (null) { pendingEvmDeposits.put(txHash, dep); #err("refund failed (nothing broadcast): " # e) };
+              };
+            };
           };
         };
-        case (#reverted) { #reverted }; // deposit never landed — nothing to refund; stays dropped
+        case (#reverted) {
+          // THIS tx reverting does not mean the deposit did not arrive: anyone can submit the
+          // authorization, so another tx may have executed it first (as at open). Drop the entry
+          // only when the token says the authorization is unused.
+          switch (await* authState()) {
+            case (#unused) { #reverted }; // nothing landed; stays dropped
+            case (#used) {
+              pendingEvmDeposits.put(txHash, dep);
+              #err("deposit tx reverted, but its authorization is used on chain: another transaction executed it (the deposit may have arrived) or the payer cancelled it — verify on chain and, if the deposit arrived, return it with sweepEvm");
+            };
+            case (#unknown(e)) {
+              pendingEvmDeposits.put(txHash, dep);
+              #err("deposit tx reverted; whether its authorization was executed by another transaction could not be checked (" # e # ") — retry reconcile");
+            };
+          };
+        };
         case (#pending) { pendingEvmDeposits.put(txHash, dep); #stillPending };
         case (#err(e)) { pendingEvmDeposits.put(txHash, dep); #err("receipt poll failed: " # e) };
         // 2.22.0 (F1): an agreed "no receipt" after another tx took this tx's nonce — it appears
@@ -1721,7 +1782,7 @@ module {
         // submitted by anyone until validBefore — so drop the entry (as #reverted) only when the
         // token says the authorization is unused; otherwise keep it and report.
         case (#dropped(why)) {
-          switch (await sender.authorizationState(dep.chainId, dep.token, EvmUtils.hexToBytes(dep.payerEvmAddress), Blob.toArray(dep.authNonce))) {
+          switch (await* authState()) {
             case (#unused) { #reverted };
             case (#used) {
               pendingEvmDeposits.put(txHash, dep);
@@ -1770,6 +1831,15 @@ module {
       #settlementPending("EVM " # name # " was signed, but the providers refused it for lack of gas (fund the canister's EVM address); one may have accepted it, so it is not sent again (session parked — reconcileSession; tx " # hash # ")");
     };
 
+    // A close leg whose send call was rejected (the sender trapped after broadcasting, say): the
+    // transfer may have gone out, and no hash came back. The leg is parked with HASH_UNKNOWN, so
+    // reconcileSession tells the operator to check the chain instead of answering "no parked tx".
+    func parkRejectedLeg(sessionId : Text, leg : { #Settle; #Refund }, why : Text) : Types.PaymentResult {
+      closeParkedTxs.put(sessionId, { leg; txHash = HASH_UNKNOWN });
+      let name = switch (leg) { case (#Settle) { "settle" }; case (#Refund) { "refund" } };
+      #settlementPending("EVM " # name # " send was rejected (" # why # "); it may have been broadcast, and no tx hash came back. Session parked — check the chain before any recovery (reconcileSession explains)");
+    };
+
     /// Close an EVM session: settle consumed to recipient, refund remainder to payer.
     /// Both operations use tECDSA-signed ERC-20 transfer transactions.
     func closeEvmSessionInternal(session : Types.InternalSessionState) : async* Types.PaymentResult {
@@ -1807,11 +1877,13 @@ module {
         case (null) { false };
       };
       if (session.consumed > 0 and not settlesToSelf) {
-        switch (
+        // A rejected send call is not "nothing sent": the sender may have broadcast before it.
+        let settled = try {
           await sender.sendErc20TransferConfirmed(
             deposit.chainId, deposit.tokenAddress, session.recipient, session.consumed, 4,
-          )
-        ) {
+          );
+        } catch (e) { return parkRejectedLeg(session.id, #Settle, Error.message(e)) };
+        switch (settled) {
           case (#confirmed(hash)) { settleTxHash := ?hash };
           case (#reverted(hash)) {
             // Mined but reverted — no funds moved. Park in #closing; do NOT mark #closed.
@@ -1852,11 +1924,12 @@ module {
       let refunded = Utils.satSub(session.deposited, session.consumed);
 
       if (refunded > 0) {
-        switch (
+        let refundResult = try {
           await sender.sendErc20TransferConfirmed(
             deposit.chainId, deposit.tokenAddress, deposit.payerEvmAddress, refunded, 4,
-          )
-        ) {
+          );
+        } catch (e) { return parkRejectedLeg(session.id, #Refund, Error.message(e)) };
+        switch (refundResult) {
           case (#confirmed(hash)) { refundTxHash := ?hash };
           case (#reverted(hash)) {
             // C-1: settle confirmed but refund reverted — leave #closing so the unconsumed

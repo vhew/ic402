@@ -128,7 +128,8 @@ challenge to the same payer for the same purchase while the original tx can stil
 
 **What happened:** an EVM session close is two legs — settle `consumed` → recipient, then refund
 the remainder → payer — and one leg broadcast without confirming (parked, tx hash recorded
-in-heap), reverted, or failed pre-broadcast on a path that couldn't safely reopen. The session is
+in-heap), had its send call rejected after it may have broadcast (parked with no hash, since the
+release after 2.24.1), reverted, or failed pre-broadcast on a path that couldn't safely reopen. The session is
 deliberately parked in `#closing`: `closeSession`/`forceCloseSession` reject it (re-closing risks
 a double-pay from the shared pool), and `#closing` sessions are never GC'd.
 
@@ -168,13 +169,25 @@ a double-pay from the shared pool), and `#closing` sessions are never GC'd.
      both still owed; refund leg reverted ⇒ only the remainder → payer is owed — the settle leg
      had already confirmed), then `forceResolveSession` + `sweepEvm` each owed amount.
    - `#err("Confirm RPC failed …")` → transient; retry later.
+   - `#err("Session is #closing with its settle leg parked, but that leg's send was rejected and no
+     tx hash came back …")` (or "refund leg"; release after 2.24.1) → the close's send call was
+     rejected after the transfer may have been broadcast (for example, the canister could not
+     decode the EVM-RPC canister's reply), so nothing tells whether it went out. On a block
+     explorer, look for a transfer from the canister's EVM address to the leg's destination sent
+     at or after the close (settle: `consumed` to the session's recipient; refund:
+     `deposited − consumed` to the payer's EVM address). Then `forceResolveSession`, and `sweepEvm`
+     only what did not land of the amounts the answer names (after a settle leg, the payer's
+     remainder was never sent).
    - `#err("Session is #closing but has no parked tx — use forceResolveSession")` → since 2.22.0
-     a close still in flight gets the answer above instead, so no close is running. The close
-     failed **pre-broadcast** on a park-without-tx path (e.g. settle reverted, refund
-     pre-broadcast failure after a confirmed settle, or the parked hash was lost across an upgrade
-     — see §5). Nothing new was broadcast for the missing leg. Determine on-chain what DID happen
-     (the deposit tx and any confirmed settle tx are in the session record / prior receipts), then
-     `forceResolveSession` + `sweepEvm` the owed amounts. If the missing leg failed with
+     a close still in flight gets the answer above instead, so no close is running. No leg is
+     parked, which does **not** prove that nothing was broadcast: the close ended on a path that
+     records no tx (a settle that reverted, a refund that failed before broadcast after a
+     confirmed settle, a timer close whose leg failed before broadcast), or the parked hash was
+     lost across an upgrade (§5), or, before the release after 2.24.1, a leg's send call was
+     rejected after it may have broadcast. Determine on-chain what DID happen (the deposit tx and
+     any confirmed settle tx are in the session record / prior receipts; look for transfers from
+     the canister's EVM address to the recipient and to the payer since the close), then
+     `forceResolveSession` + `sweepEvm` only the amounts still owed. If the missing leg failed with
      "Insufficient ETH for gas" (before the release after 2.24.1, which parks it under its signed
      tx), check the canister's EVM address for that transfer before sweeping: a provider may have
      accepted the signed tx the error names while two refused it.
@@ -314,17 +327,27 @@ broadcast** (the refund leg) on confirmation. Outcomes:
 - `#refunded(refundTxHash)` → the deposit had mined; the full amount was refunded (confirmed
   on-chain) to the payer's EVM address. Done — the payer can open a fresh session.
 - `#reverted` → the deposit never landed; nothing to refund. The tracker entry is dropped. The
-  payer can simply re-sign and open a new session. Since 2.22.0 this also covers a deposit tx that
-  appears not to have landed (its account nonce was used by another tx, and the providers agree
-  there is no receipt), but only while the token reports the deposit's authorization unused.
-- `#err("deposit tx appears not to have landed (…), but its authorization is used on chain …")`
-  (2.22.0) → the canister's deposit tx appears to have moved nothing, but another tx executed the
+  payer can simply re-sign and open a new session. It covers a deposit tx that reverted and, since
+  2.22.0, one that appears not to have landed (its account nonce was used by another tx, and the
+  providers agree there is no receipt); either way only while the token reports the deposit's
+  authorization unused. (Before the release after 2.24.1 a revert alone dropped the entry, even
+  when another tx had executed the authorization and the deposit had arrived.)
+- `#err("deposit tx reverted, but its authorization is used on chain …")` (release after 2.24.1)
+  or `#err("deposit tx appears not to have landed (…), but its authorization is used on chain …")`
+  (2.22.0) → the canister's deposit tx moved nothing, but another tx executed the
   authorization (anyone can submit it) or the payer cancelled it. The entry is kept. Check the authorization (§1, *Checking
   an authorization on chain*): if the deposit arrived, return it with `sweepEvm` to the payer's
   EVM address. The tracker has no delete, so the entry keeps answering this way and counting in
   `pendingEvmDepositCount()` until an upgrade wipes the tracker: note the tx hash as handled.
-  `#err("deposit tx appears not to have landed (…); whether its authorization was executed by
-  another transaction could not be checked …")` → retry later.
+  `#err("deposit tx reverted; whether its authorization was executed by another transaction could
+  not be checked …")` or `#err("deposit tx appears not to have landed (…); whether its
+  authorization was executed by another transaction could not be checked …")` → the entry is
+  kept; retry later.
+- `#err("receipt poll rejected: … — the entry is kept; retry reconcile")` (release after 2.24.1) →
+  the receipt read was itself rejected (for example, a reply the canister could not decode). The
+  entry is kept; retry later. Before, such a reject lost the entry: a retry answered `#notFound`
+  and `pendingEvmDepositCount()` dropped, so check the deposits listed before an upgrade against
+  what you reconciled.
 - `#stillPending` → deposit tx not yet mined; entry retained — retry later.
 - `#notFound` → not tracked: wrong hash, already reconciled by a concurrent call (the entry is
   claimed synchronously exactly so two reconciles can't double-refund), or the tracker was wiped
@@ -338,6 +361,18 @@ broadcast** (the refund leg) on confirmation. Outcomes:
   tracker entry is deliberately **not** restored (a retry returning `#notFound` is intentional —
   restoring would risk a double refund). Poll the *refund* tx hash on-chain: if it landed, done;
   only if it is terminally dead may you `sweepEvm` the amount to the payer manually.
+- `#err("refund send was rejected (…) and may have been broadcast; no tx hash came back …")`
+  (release after 2.24.1; also in the canister log) → the same **fund-safety branch** with no hash:
+  the deposit had mined, and the refund's send call was rejected after the refund may have gone
+  out. The entry is deliberately not restored. On a block explorer, look for a transfer of the
+  deposit's amount from the canister's EVM address to the payer's, sent at or after the call; only
+  if none landed, `sweepEvm` it to the payer.
+- `#err("refund tx 0x… was signed, but the providers refused it for lack of gas; … the refund may
+  have gone out …")` (release after 2.24.1; also in the canister log) → the same branch, with the
+  hash: two providers refused the signed refund, but a third may have accepted it. The entry is not
+  restored. Fund the canister's EVM address and lift the gas stop (triage), then check that hash on
+  chain; only if it never landed, `sweepEvm` the amount to the payer. Before, this answered
+  "refund failed (nothing broadcast)" and restored the entry, so a retry signed the refund again.
 
 `listPendingEvmDeposits()` enumerates tracked entries (payer, EVM address, chain, token, amount,
 age) for triage; `pendingEvmDepositCount()` is the watch metric.

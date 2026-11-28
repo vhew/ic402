@@ -30,6 +30,40 @@
   `#Settling` (an expiry refund `#Expired`), and nothing sends it again. `reconcileSession` and
   `reconcileJob` confirm it, read-only. `EvmSender.gasRefusedTxHash` reads the hash from the
   refusal. The 2.23.2 notes said this send was not re-sent unattended; they are corrected below.
+- **An EVM close whose send call was rejected lost track of a transfer that may have gone out.**
+  A close leg's send can be rejected after the transfer was broadcast: for example when the
+  canister cannot decode the EVM-RPC canister's receipt or send reply, it traps after its await,
+  where no `catch` runs. The reject passed straight through the close. The session rested
+  `#closing` with no parked transaction, and `reconcileSession` answered "no parked tx — use
+  forceResolveSession", which the recovery runbook read as "nothing was broadcast": following it
+  could pay the refund twice. Now:
+  - `EvmSender.sendErc20TransferConfirmed` answers `#pending(hash)` when its confirmation call is
+    rejected after the broadcast, so the leg parks under its hash like any unconfirmed send;
+  - a close leg whose send call is itself rejected parks as maybe broadcast, without a hash
+    (`#settlementPending`), and `reconcileSession` then says so and asks for a chain check
+    before any `forceResolveSession`;
+  - the runbook no longer says a `#closing` session with no parked transaction broadcast nothing.
+- **`reconcileEvmDeposit` dropped a reverted deposit without asking the token.** Anyone can submit
+  an EIP-3009 authorization, so another transaction may execute it before the canister's deposit
+  transaction, which then reverts while the deposit arrives in the shared pool. A reverted deposit
+  was answered `#reverted` and dropped from the tracker, and the runbook told the payer to re-sign,
+  paying again. Now it is dropped only while the authorization reads unused, as for a deposit that
+  appears not to have landed. Used: the entry is kept and the answer names the used
+  authorization. Unreadable: the entry is kept.
+- **`reconcileEvmDeposit` could lose a tracked deposit.** It removes the entry before its awaits,
+  so two reconciles cannot both refund. A rejected receipt or authorization read then ended the
+  call with the entry gone: a retry answered `#notFound`, and `pendingEvmDepositCount()` read 0, so
+  the drain check before an upgrade passed. Now a rejected read puts the entry back. A rejected
+  refund send does not, because the refund may have gone out: the answer (and the canister log)
+  says so and asks for a chain check, and a retry cannot refund twice. Nor does a refund that was
+  signed but refused for gas (`Insufficient ETH for gas … refused signed tx 0x…`): before, it put
+  the entry back as "nothing broadcast", so the next reconcile signed the refund again although a
+  provider may have accepted the first; now the answer and the log name that tx. `confirmTransaction` also
+  answers `#err` below a 20B cycle floor instead of attaching cycles to its outcall, which traps
+  when the canister cannot spare them.
+- The EVM-RPC mock (`example/evm-rpc-mock`) gains `#undecodable` receipt, send and
+  authorization-state modes: a reply outside the EVM-RPC interface, which the canister cannot
+  decode. The hermetic suite uses them for the three fixes above.
 - **A labelled EVM derivation path can be re-applied after an upgrade.** The gateway's path is
   not persisted, so after an upgrade it is back on `[]`, while `loadStable` restores the
   recipient derived under your path. `setEvmDerivationPath` then refused your path because a
