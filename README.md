@@ -35,15 +35,19 @@ persistent actor MyService {
   );
 
   // Charge for a service call
-  public shared(msg) func search(query : Text, sig : ?Ic402.PaymentSignature) : async {
+  public shared(msg) func search(searchQuery : Text, sig : ?Ic402.PaymentSignature) : async {
     #paymentRequired : [Ic402.PaymentRequirement];
     #ok : Text;
+    #error : Text;
   } {
     switch (sig) {
       case (null) { #paymentRequired(gate.requireAll(1_000)) };
       case (?s) {
         switch (await gate.settleFrom(msg.caller, s, ?1_000)) { // the caller must be the payer (ICP)
-          case (#ok(_)) { #ok("Results for: " # query) };
+          case (#ok(_)) { #ok("Results for: " # searchQuery) };
+          // Funds may have moved. Never answer this with a fresh 402: a new nonce invites a second
+          // payment. @ic402/client reads "do NOT retry payment" as "do not pay again".
+          case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment with a new nonce: " # r) };
           case (_) { #paymentRequired(gate.requireAll(1_000)) };
         };
       };
@@ -244,7 +248,13 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `registerService(caller, def)` | Register a paid service |
 | `enableService(caller, id)` | Activate for purchases |
 | `listServices(enabledOnly)` | Service discovery |
-| `submitRequest(buyer, serviceId, params, receipt, callback?)` | Create a paid job (`buyer : Text` — principal for ICP, 0x address for EVM) |
+| `ledgerFee()` | The ledger fee every job payment must cover on top of the price (the registry's `config.ledgerFee`) |
+| `validateSubmittable(buyer, serviceId, expectedAmount)` | **Before settling:** every check job creation can fail on (buyer form, service exists and is enabled, amount). `expectedAmount` is what the settle will charge: `price + ledgerFee()`. A rejection moves nothing |
+| `createJobFromReceipt(buyer, serviceId, params, receipt, callback?)` | **After a `#ok` settle:** create the job. Infallible, so money moved ⇒ job exists. Pass only the receipt your own settle returned in the same message, and only once (`buyer : Text` — principal for ICP, the payer's 0x address, `receipt.sender`, for EVM) |
+| `submitRequest(buyer, serviceId, params, receipt, callback?)` | **Not recommended** for settle-first use: it validates only after the funds have moved, so an underpayment or a service disabled during the settle leaves the payment with no job and no in-band refund. Use `validateSubmittable` → settle → `createJobFromReceipt` |
+| `setEvmTransfer(fn)` | Wire the confirmed on-chain ERC-20 transfer that pays out and refunds EVM-paid jobs (the example passes `gate.sendErc20TransferConfirmed`). Call once at init |
+| `setEvmConfirm(fn)` | Wire the read-only receipt check `reconcileJob` uses on a parked EVM transfer (the example passes `gate.confirmEvmTransaction`). Call once at init |
+| `setOperatorEvmPayout(caller, address)` | Record an operator's 0x payout address for EVM-paid jobs (pass `msg.caller`; require a registered operator) |
 | `claimJob(caller, jobId)` | Operator claims work |
 | `submitResult(caller, jobId, result, proof?, actualCost?)` | Submit + auto-verify |
 | `confirmJob(buyer, jobId)` | Buyer confirms (BuyerConfirm) |
@@ -256,7 +266,31 @@ The replica-backed suites return early (green) when their fixture isn't reachabl
 | `setExpiryIntervalSeconds<system>(n)` / `setExpiryIdlePollSeconds<system>(n)` | Working cadence (default 60s) and idle cadence (default 3600s; `0` disarms when there are no unfinished jobs — only if every call site arms it) |
 | `toStable()` / `loadStable(data)` | Upgrade persistence |
 
-Funds are custodied at the platform recipient account; `settleJob` pays the operator and refunds the buyer from there.
+Funds are custodied at the platform recipient account; the registry pays the operator and refunds the buyer from there.
+
+**`recipient` must be the canister's own account.** Construct the registry with the same `recipient` your Gateway settles into, with `owner = Principal.fromActor(self)`, as the example does. The registry sends ICP payouts and refunds from (canister, `recipient.subaccount`) and never reads `owner`, so nothing catches a wrong one. With another owner (a treasury, say), job payments land at the treasury while payouts draw on the canister's own account: if that is empty, every payout and refund fails with `InsufficientFunds` and the job sweep keeps retrying it; if it holds other funds, those pay for the jobs.
+
+**EVM-paid jobs need `setEvmTransfer`, `setEvmConfirm` and `setOperatorEvmPayout` wired.** A job goes on the EVM rail whenever its receipt's network is `eip155:…`. Without the transfer hook, its refund and its operator payout fail as `#unavailable` and are retried hourly: neither moves until the hook is wired (an upgrade) or a controller refunds the buyer by hand ([recovery runbook §6](docs/recovery-runbook.md)). Without an operator payout address the operator cannot be paid on-chain, and without the confirm hook `reconcileJob` cannot check a parked transfer. A registry without them is ICP-only: offer ICP requirements for jobs, and refuse a payment whose `network` starts with `eip155:` before settling.
+
+**Creating a paid job: validate, then settle, then create.** Mint the 402 for `price + registry.ledgerFee()`, not the price. `#Session`-priced services are billed through a session; `validateSubmittable` accepts them, so refuse them yourself first, as the example does.
+
+```motoko
+// Candid route; `charge` = price + registry.ledgerFee(), the amount the 402 asked for.
+switch (registry.validateSubmittable(Principal.toText(msg.caller), serviceId, charge)) {
+  case (#err(e)) { return #error(e) }; // nothing has moved
+  case (#ok) {};
+};
+registry.armExpiryTimer<system>();
+switch (await gate.settleFrom(msg.caller, sig, ?charge)) {
+  case (#ok(receipt)) {
+    // An EVM payer is receipt.sender (its 0x address), not msg.caller.
+    let buyer = if (Text.startsWith(receipt.network, #text "eip155:")) { receipt.sender } else { Principal.toText(msg.caller) };
+    #ok(registry.createJobFromReceipt(buyer, serviceId, params, receipt, null)); // this receipt, once
+  };
+  case (#settlementPending(r)) { #error("Settlement pending — do NOT retry payment with a new nonce: " # r) };
+  case (_) { #error("Payment not settled") };
+};
+```
 
 **Verification methods:** `#AutoSettle`, `#HashMatch`, `#BuyerConfirm`, `#ZkGroth16` (external Rust verifier canister).
 
@@ -286,6 +320,12 @@ Funds are custodied at the platform recipient account; `settleJob` pays the oper
 | `signRegistration(...)` | Sign ERC-8004 registration tx |
 | `getEvmAddress()` | Canister's tECDSA-derived EVM address |
 
+**No access control, no policy.** The signer checks no caller and enforces no cap, recipient or
+amount limit: a public wrapper lets anyone sign a transfer of everything the canister's EVM
+address holds. Gate every sign method you expose to the controller, as the example does, and
+put any limits in that wrapper. The same holds for the Gateway's `sendErc20Transfer` and
+`sendErc20TransferConfirmed`.
+
 Construct it one of two ways:
 
 ```motoko
@@ -311,10 +351,24 @@ gate.setEvmDerivationPath(path)                  // the gateway's sender AND rec
 await gate.deriveEvmRecipientAt("key_1", path)   // the inbound recipient payers are told
 ```
 
-`setEvmDerivationPath` is **not persisted** — re-apply it after every upgrade, in the same
-init block that calls `loadStable`, exactly as `setEvmChains` requires. It refuses once the
-recipient exists, and `deriveEvmRecipientAt` refuses a path the sender is not already on, so
-the two can never drift apart.
+`setEvmDerivationPath` is **not persisted**: after an upgrade the gateway is back on `[]`.
+Re-apply it on every upgrade in the init block that calls `loadStable`, **after**
+`loadStable` (the order `setEvmChains` uses), and call `startTimers`:
+
+```motoko
+switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
+switch (gate.setEvmDerivationPath(path)) { case (#ok) {}; case (#err(e)) { Debug.trap(e) } };
+gate.startTimers<system>();  // may also come earlier in the init body
+```
+
+The restored recipient does not refuse that first re-apply, since the setter cannot tell which
+path derived it. The derive that `startTimers` arms checks it instead (call `deriveEvmRecipient`
+yourself if you do not use `startTimers`). If the restored recipient is not the address the path
+derives, every EVM send is refused before signing and the reason is logged (`ic402 CRITICAL`),
+until an upgrade re-applies the path that derived it. Once a path is applied, or a derive has
+begun, the setter refuses to move a gateway whose recipient exists. `deriveEvmRecipientAt`
+refuses a path the sender is not already on. Together these keep the recipient and the sender
+on one path.
 
 Derive the recipient under one path and sign under another and the canister signs from an
 address nothing funds, while deposits pile up at an address it never spends from. A CI gate

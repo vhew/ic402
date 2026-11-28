@@ -61,6 +61,35 @@
 - The EVM-RPC mock (`example/evm-rpc-mock`) gains `#undecodable` receipt, send and
   authorization-state modes: a reply outside the EVM-RPC interface, which the canister cannot
   decode. The hermetic suite uses them for the three fixes above.
+- **A labelled EVM derivation path can be re-applied after an upgrade.** The gateway's path is
+  not persisted, so after an upgrade it is back on `[]`, while `loadStable` restores the
+  recipient derived under your path. `setEvmDerivationPath` then refused your path because a
+  recipient existed. The result was a split: 402s and settles still named the labelled
+  recipient, but every send (closes, refunds, payouts, gas for inbound transfers) signed from the
+  `[]` address. Only an upgrade that called the setter *before* `loadStable` repaired it, and no
+  document said so. No funds were lost: both addresses derive from the canister's key.
+  - The setter now accepts the first path applied after an upgrade, while the path is still the
+    transient default. Once a path is applied, or a derive has begun, it refuses to move a
+    gateway whose recipient exists, as before.
+  - The derive that `startTimers` arms (and `deriveEvmRecipient`) checks the restored recipient
+    against the path. On a mismatch it no longer drops the error. It logs
+    `ic402 CRITICAL: EVM sends stopped: …` and refuses every EVM send before signing until an
+    upgrade re-applies the right path. The refusal starts with `EvmSender.SENDS_STOPPED_PREFIX`.
+    Like a gas stop's, it waits: an expired session's close reopens for the sweep, and a job
+    payout is not counted as failed.
+  - A derive no longer records an address under a path that `setEvmDerivationPath` replaced while
+    it waited for the key. The startTimers derive then derives again under the new path, which
+    closes a race at first install.
+  - **Upgrade notes:**
+    - Re-apply the path in the init block that calls `loadStable`, *after* `loadStable`, and call
+      `startTimers` (see the README and `setEvmDerivationPath`).
+    - Re-apply only the path that derived your recipient. Suppose the recipient was derived under
+      another path, for example `[]` before you chose a label. Until now the setter refused your
+      path, and a gateway that ignored the `#err` stayed on its old path. Now the setter accepts
+      it, and EVM sends stop once the derive finds the mismatch.
+    - If you use a labelled path and upgraded on an earlier release, the canister may already
+      have sent from the `[]` address. Check that address for gas and funds.
+    - No stored-state change (`STABLE_SCHEMA_VERSION` stays 1).
 
 ### Dev tooling
 
@@ -77,6 +106,38 @@ Three low findings from the 2.24.1 pre-release review. Nothing published changes
   today are bash, so nothing had broken yet.
 - **CONTRIBUTING's rollback step says what icp 1.9.0's Candid check does.** A rollback usually
   removes methods, and icp then stops for confirmation (or `--yes`).
+
+### Docs
+
+Access control and marketplace guidance for integrators. Only the README,
+`docs/security-model.md` and doc comments change; no code does.
+
+- **`EvmSigner` enforces no policy.** Its header said the canister "still enforces spending policy
+  before signing"; nothing does. The header now says it has no access control and no policy, and
+  each `sign*` method, `Gateway.sendErc20Transfer` and `Gateway.sendErc20TransferConfirmed` carries
+  a "no access control, no policy: gate it to the controller" line. The README's EvmSigner section
+  and `lib.mo` say the same.
+- **`docs/security-model.md` lists every controller-only library method,** by module (`Gateway`,
+  `Sessions`, `ServiceRegistry`, `ContentStore`, `Policy` and the signers). It replaces a five-name
+  list that included `sweepEvm`, which exists only in the example. The doc no longer claims that
+  each of these methods warns in its doc comment: most do not, so the list is the reference.
+  `Gateway.setPolicy`, `Policy.setGlobalPolicy` and `Policy.setCallerPolicy` now carry the warning
+  the checklist quotes for them. New guidance on reads to gate or redact: `Gateway.getPolicy`,
+  `Gateway.getSession` and `ServiceRegistry.listJobs`.
+- **ServiceRegistry, in the README and doc comments:**
+  - `ServiceConfig.recipient` must be the account the Gateway settles job payments into, owned by
+    the canister. Payouts and refunds are sent from the canister's own account, and `owner` is not
+    checked, so another owner leaves them failing or paid from other funds.
+  - EVM-paid jobs need `setEvmTransfer`, `setEvmConfirm` and `setOperatorEvmPayout` wired. Without
+    them the registry is ICP-only.
+  - The job flow is `validateSubmittable`, then settle, then `createJobFromReceipt`, with the 402
+    minted for `price + ledgerFee()`. `submitRequest` is marked not recommended for settle-first
+    use: it validates after the funds have moved.
+  - `createJobFromReceipt` takes only the receipt your own settle returned in the same message,
+    and only once. It neither checks nor consumes the receipt.
+- **README quick start:** a `#settlementPending` result is answered with an error that says "do NOT
+  retry payment", as the example does, instead of a fresh 402. Its parameter is renamed from
+  `query`, a reserved word in Motoko, so the snippet compiles.
 
 ## v2.24.1 — 2026-11-26
 
