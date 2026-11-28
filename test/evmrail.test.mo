@@ -838,6 +838,39 @@ await suite("2.23.2: a chain the canister cannot pay gas on", func() : async () 
   });
 });
 
+await suite("a sender stopped because the recipient is not its address", func() : async () {
+  // The gateway's derive stops its sender when the recipient (restored by loadStable) is not the
+  // address the current derivation path gives. Wiring the stop to that derive needs
+  // ecdsa_public_key, which the interpreter lacks; the sender's side is here.
+
+  await test("every send is refused before signing, and an inbound transfer before its simulation", func() : async () {
+    // Mutation: sendTransaction or executeTransferWithAuthorization skips the stop, or checks it
+    // after the cycle floor (the interpreter traps reading cycles).
+    let snd = EvmSender.EvmSender("k", null);
+    snd.stopSends("why");
+    let stopped = EvmSender.SENDS_STOPPED_PREFIX # "why";
+    switch (await snd.sendErc20Transfer(84532, tokenA, canisterEvm, 5)) {
+      case (#err(e)) { assert e == stopped };
+      case (_) { assert false };
+    };
+    let nonce = Array.tabulate<Nat8>(32, func(_) = 1);
+    switch (await snd.executeTransferWithAuthorization(84532, tokenA, EvmUtils.hexToBytes(signer), EvmUtils.hexToBytes(canisterEvm), 5000, 0, 9_999_999_999, nonce, 27, Blob.toArray(realR), Blob.toArray(realS))) {
+      case (#err(e)) { assert e == stopped };
+      case (_) { assert false };
+    };
+  });
+
+  await test("the refusal waits: an expired close reopens and a payout is not counted", func() : async () {
+    // Nothing was signed and an upgrade clears the stop, so the close is retried, not parked.
+    // Mutation: sendCanWait drops SENDS_STOPPED_PREFIX, or matches it inside caller text.
+    let stopped = EvmSender.SENDS_STOPPED_PREFIX # "why";
+    assert EvmSender.sendCanWait(stopped);
+    assert Sessions.reopenAfterUnsentLeg(true, true, stopped);
+    assert not Sessions.reopenAfterUnsentLeg(true, false, stopped); // a leg already moved funds
+    assert not EvmSender.sendCanWait("Invalid recipient address: 0x" # EvmSender.SENDS_STOPPED_PREFIX);
+  });
+});
+
 await suite("2.24.0: settleToSplit", func() : async () {
 
   let finder = "0x9f8e7d6c5b4a39281706fedcba9876543210fedc";

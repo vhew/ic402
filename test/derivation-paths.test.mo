@@ -8,14 +8,19 @@
 /// What is locked in: every `…At` form refuses an invalid path with `#err` rather than
 /// trapping, and all of them refuse at EXACTLY the bound `SchnorrSigner` defines. The bound
 /// is reused, never restated; if any site grows a private copy, the drift tests below fail.
+/// Also: the Gateway setter re-applying the deployment's path after loadStable (no derive).
 import EvmSigner "../src/ic402/EvmSigner";
 import EvmSender "../src/ic402/EvmSender";
+import Gateway "../src/ic402/Gateway";
+import Types "../src/ic402/Types";
 import SchnorrSigner "../src/ic402/SchnorrSigner";
 import Utils "../src/ic402/Utils";
 import Blob "mo:base/Blob";
 import Array "mo:base/Array";
 import Nat8 "mo:base/Nat8";
 import Text "mo:base/Text";
+import Principal "mo:base/Principal";
+import Debug "mo:base/Debug";
 import { test; suite } "mo:test";
 
 // A labelled path of the shape downstream uses: ["engramx", <purpose>, <curve>, <version>].
@@ -149,5 +154,58 @@ suite("Utils.derivationCacheKey", func() {
     // prefix "a" + path ["b"] must not equal prefix "a/62" + empty path.
     assert Utils.derivationCacheKey("a", [Blob.fromArray([0x62])])
         != Utils.derivationCacheKey("a/62", []);
+  });
+});
+
+suite("Gateway.setEvmDerivationPath across an upgrade", func() {
+
+  // The path is transient: after an upgrade the gateway is rebuilt on [] and loadStable restores
+  // the recipient a labelled deployment persisted. The interpreter cannot derive a recipient, so
+  // the persisted state is the first gateway's toStable() with the address its derive recorded.
+  // The derive's own check (and the stop on a mismatch) needs ecdsa_public_key: replica only.
+  let self = Principal.fromText("aaaaa-aa");
+  let cfg : Types.Config = {
+    recipient = { owner = self; subaccount = null };
+    tokens = [];
+    evmChains = [];
+    evmRpcCanister = null;
+    ecdsaKeyName = ?"dfx_test_key";
+    nonceExpirySeconds = null;
+  };
+  let recipient = "0x1111111111111111111111111111111111111111";
+  let OTHER : [Blob] = [Text.encodeUtf8("engramx"), Text.encodeUtf8("identity")];
+
+  func persisted() : Types.StableGatewayState {
+    let before = Gateway.Gateway(cfg, self);
+    switch (before.setEvmDerivationPath(LABELLED)) { case (#ok) {}; case (#err(_)) { assert false } };
+    { before.toStable() with evmRecipient = ?recipient };
+  };
+
+  test("re-applying the deployment's path after loadStable is accepted", func() {
+    // Mutation: the setter refuses any other path once a recipient exists, as before (a restored
+    // recipient then left the sender on [] while 402s advertised the labelled address).
+    let after = Gateway.Gateway(cfg, self);
+    after.loadStable(persisted());
+    assert after.getEvmDerivationPath() == [];
+    switch (after.setEvmDerivationPath(LABELLED)) {
+      case (#ok) {};
+      case (#err(e)) { Debug.print(e); assert false };
+    };
+    assert after.getEvmDerivationPath() == LABELLED;
+    assert after.getEvmRecipient() == ?recipient;
+  });
+
+  test("an applied path is pinned: the restored recipient then refuses a different one", func() {
+    // Mutation: the setter does not pin the path it applies, so a later call could move the
+    // sender off the restored recipient with nothing left to check it.
+    let after = Gateway.Gateway(cfg, self);
+    switch (after.setEvmDerivationPath(LABELLED)) { case (#ok) {}; case (#err(_)) { assert false } };
+    after.loadStable(persisted());
+    switch (after.setEvmDerivationPath(OTHER)) {
+      case (#err(e)) { assert Text.contains(e, #text "cannot move") };
+      case (#ok) { assert false };
+    };
+    assert after.getEvmDerivationPath() == LABELLED;
+    switch (after.setEvmDerivationPath(LABELLED)) { case (#ok) {}; case (#err(_)) { assert false } };
   });
 });

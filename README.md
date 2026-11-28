@@ -351,10 +351,24 @@ gate.setEvmDerivationPath(path)                  // the gateway's sender AND rec
 await gate.deriveEvmRecipientAt("key_1", path)   // the inbound recipient payers are told
 ```
 
-`setEvmDerivationPath` is **not persisted** — re-apply it after every upgrade, in the same
-init block that calls `loadStable`, exactly as `setEvmChains` requires. It refuses once the
-recipient exists, and `deriveEvmRecipientAt` refuses a path the sender is not already on, so
-the two can never drift apart.
+`setEvmDerivationPath` is **not persisted**: after an upgrade the gateway is back on `[]`.
+Re-apply it on every upgrade in the init block that calls `loadStable`, **after**
+`loadStable` (the order `setEvmChains` uses), and call `startTimers`:
+
+```motoko
+switch (stableGateway) { case (?d) { gate.loadStable(d) }; case (null) {} };
+switch (gate.setEvmDerivationPath(path)) { case (#ok) {}; case (#err(e)) { Debug.trap(e) } };
+gate.startTimers<system>();  // may also come earlier in the init body
+```
+
+The restored recipient does not refuse that first re-apply, since the setter cannot tell which
+path derived it. The derive that `startTimers` arms checks it instead (call `deriveEvmRecipient`
+yourself if you do not use `startTimers`). If the restored recipient is not the address the path
+derives, every EVM send is refused before signing and the reason is logged (`ic402 CRITICAL`),
+until an upgrade re-applies the path that derived it. Once a path is applied, or a derive has
+begun, the setter refuses to move a gateway whose recipient exists. `deriveEvmRecipientAt`
+refuses a path the sender is not already on. Together these keep the recipient and the sender
+on one path.
 
 Derive the recipient under one path and sign under another and the canister signs from an
 address nothing funds, while deposits pile up at an address it never spends from. A CI gate

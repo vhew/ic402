@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A labelled EVM derivation path can be re-applied after an upgrade.** The gateway's path is
+  not persisted, so after an upgrade it is back on `[]`, while `loadStable` restores the
+  recipient derived under your path. `setEvmDerivationPath` then refused your path because a
+  recipient existed. The result was a split: 402s and settles still named the labelled
+  recipient, but every send (closes, refunds, payouts, gas for inbound transfers) signed from the
+  `[]` address. Only an upgrade that called the setter *before* `loadStable` repaired it, and no
+  document said so. No funds were lost: both addresses derive from the canister's key.
+  - The setter now accepts the first path applied after an upgrade, while the path is still the
+    transient default. Once a path is applied, or a derive has begun, it refuses to move a
+    gateway whose recipient exists, as before.
+  - The derive that `startTimers` arms (and `deriveEvmRecipient`) checks the restored recipient
+    against the path. On a mismatch it no longer drops the error. It logs
+    `ic402 CRITICAL: EVM sends stopped: …` and refuses every EVM send before signing until an
+    upgrade re-applies the right path. The refusal starts with `EvmSender.SENDS_STOPPED_PREFIX`.
+    Like a gas stop's, it waits: an expired session's close reopens for the sweep, and a job
+    payout is not counted as failed.
+  - A derive no longer records an address under a path that `setEvmDerivationPath` replaced while
+    it waited for the key. The startTimers derive then derives again under the new path, which
+    closes a race at first install.
+  - **Upgrade notes:**
+    - Re-apply the path in the init block that calls `loadStable`, *after* `loadStable`, and call
+      `startTimers` (see the README and `setEvmDerivationPath`).
+    - Re-apply only the path that derived your recipient. Suppose the recipient was derived under
+      another path, for example `[]` before you chose a label. Until now the setter refused your
+      path, and a gateway that ignored the `#err` stayed on its old path. Now the setter accepts
+      it, and EVM sends stop once the derive finds the mismatch.
+    - If you use a labelled path and upgraded on an earlier release, the canister may already
+      have sent from the `[]` address. Check that address for gas and funds.
+    - No stored-state change (`STABLE_SCHEMA_VERSION` stays 1).
+
 ### Dev tooling
 
 Three low findings from the 2.24.1 pre-release review. Nothing published changes.
